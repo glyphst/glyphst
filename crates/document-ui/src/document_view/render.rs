@@ -720,6 +720,25 @@ impl Render for DocumentView {
                                                         false,
                                                     );
                                                 }
+                                                if let Some(texture) = page.gpu_texture
+                                                    && let Err(error) =
+                                                        window.paint_external_texture(
+                                                            page.bounds,
+                                                            Bounds::new(
+                                                                point(0.0, 0.0),
+                                                                size(1.0, 1.0),
+                                                            ),
+                                                            texture.handle().clone(),
+                                                            1.0,
+                                                            ExternalTextureFilter::Linear,
+                                                            ExternalTextureColorSpace::LinearSrgb,
+                                                            ExternalTextureAlphaMode::Opaque,
+                                                        )
+                                                {
+                                                    eprintln!(
+                                                        "failed to present native PDF GPU page: {error:#}"
+                                                    );
+                                                }
                                             }
 
                                             for overlay in paint_data.diff_flash_overlays {

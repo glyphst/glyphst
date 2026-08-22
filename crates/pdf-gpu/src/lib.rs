@@ -1,0 +1,703 @@
+//! Glyphst application adapter for the standalone retained GPU PDF engine.
+//!
+//! This crate is intentionally outside `glyphst-pdf-engine`: it is the narrow
+//! boundary where GPUI's same-device WGPU handle is translated into the
+//! engine-owned renderer and an ordered external-texture primitive.
+
+#![forbid(unsafe_code)]
+
+use anyhow::{Context as _, Result, anyhow, bail};
+use glyphst_core::DocumentRotation;
+use glyphst_pdf::DocumentSnapshot;
+pub use glyphst_pdf_engine::CancellationToken;
+use glyphst_pdf_engine::{
+    CompileOptions, CompiledPage, DiagnosticSeverity, Document, DocumentSource, Engine, FeatureId,
+    LayerConfiguration, OpenOptions, PageIndex, Password, SupportDiagnostic, Transform,
+};
+use glyphst_pdf_render_wgpu::{
+    DeviceToken, GpuPage, GpuRenderer, PrepareError, RenderConfig, RenderError, RenderRequest,
+    RenderSupportIssue, RendererInitError,
+};
+pub use glyphst_pdf_render_wgpu::{
+    PreparationStats as GpuPreparationStats, RenderStats as GpuRenderStats,
+};
+use gpui::{ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle};
+use gpui_wgpu::{WgpuExternalContext, wgpu};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex},
+};
+
+const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
+
+/// Parser/interpreter or WGPU capability that requires whole-page fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuFallbackDiagnostic {
+    pub feature: FeatureId,
+    pub code: String,
+    pub message: String,
+    pub source: GpuFallbackSource,
+}
+
+/// Stage that rejected a complete page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuFallbackSource {
+    Frontend,
+    Renderer,
+}
+
+impl From<&SupportDiagnostic> for GpuFallbackDiagnostic {
+    fn from(diagnostic: &SupportDiagnostic) -> Self {
+        Self {
+            feature: diagnostic.feature,
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+            source: GpuFallbackSource::Frontend,
+        }
+    }
+}
+
+impl From<&RenderSupportIssue> for GpuFallbackDiagnostic {
+    fn from(issue: &RenderSupportIssue) -> Self {
+        Self {
+            feature: issue.feature,
+            code: issue.code.clone(),
+            message: issue.message.clone(),
+            source: GpuFallbackSource::Renderer,
+        }
+    }
+}
+
+/// Result of attempting to route a page to the native GPU engine.
+#[derive(Clone)]
+pub enum GpuPageRoute {
+    Ready(Arc<PreparedGpuPage>),
+    Fallback(Arc<[GpuFallbackDiagnostic]>),
+}
+
+impl fmt::Debug for GpuPageRoute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready(page) => formatter.debug_tuple("Ready").field(page).finish(),
+            Self::Fallback(diagnostics) => formatter
+                .debug_tuple("Fallback")
+                .field(diagnostics)
+                .finish(),
+        }
+    }
+}
+
+/// Open standalone PDF document plus a shared owned-page compilation cache.
+#[derive(Clone)]
+pub struct GpuPdfDocument {
+    inner: Arc<GpuPdfDocumentInner>,
+}
+
+struct GpuPdfDocumentInner {
+    document: Document,
+    compiled: Mutex<CompiledPageCache>,
+}
+
+#[derive(Default)]
+struct CompiledPageCache {
+    entries: HashMap<PageIndex, CachedCompiledPage>,
+    clock: u64,
+}
+
+struct CachedCompiledPage {
+    page: Arc<CompiledPage>,
+    last_used: u64,
+}
+
+impl CompiledPageCache {
+    fn get(&mut self, index: PageIndex) -> Option<Arc<CompiledPage>> {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        let entry = self.entries.get_mut(&index)?;
+        entry.last_used = self.clock;
+        Some(Arc::clone(&entry.page))
+    }
+
+    fn insert(&mut self, index: PageIndex, page: Arc<CompiledPage>) -> Arc<CompiledPage> {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        if let Some(entry) = self.entries.get_mut(&index) {
+            entry.last_used = self.clock;
+            return Arc::clone(&entry.page);
+        }
+        if self.entries.len() >= MAX_COMPILED_PAGE_CACHE_ENTRIES
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| *index)
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(
+            index,
+            CachedCompiledPage {
+                page: Arc::clone(&page),
+                last_used: self.clock,
+            },
+        );
+        page
+    }
+}
+
+impl fmt::Debug for GpuPdfDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuPdfDocument")
+            .field("document", &self.inner.document)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GpuPdfDocument {
+    /// Open the immutable snapshot without duplicating its source allocation.
+    pub fn open(snapshot: &DocumentSnapshot) -> Result<Self> {
+        let options = OpenOptions {
+            password: snapshot
+                .password()
+                .map(|password| Password::new(password.expose_secret())),
+            ..OpenOptions::default()
+        };
+        let document = Engine::open(DocumentSource::from_bytes(snapshot.shared_bytes()), options)
+            .context("failed to open PDF with the native GPU engine")?;
+        Ok(Self {
+            inner: Arc::new(GpuPdfDocumentInner {
+                document,
+                compiled: Mutex::new(CompiledPageCache::default()),
+            }),
+        })
+    }
+
+    /// Number of checked pages in the native engine.
+    pub fn page_count(&self) -> u32 {
+        self.inner.document.page_count().get()
+    }
+
+    /// Current bounded CPU semantic-scene cache occupancy.
+    pub fn compiled_cache_entries(&self) -> usize {
+        self.inner
+            .compiled
+            .lock()
+            .map(|cache| cache.entries.len())
+            .unwrap_or_default()
+    }
+
+    pub const fn compiled_cache_limit() -> usize {
+        MAX_COMPILED_PAGE_CACHE_ENTRIES
+    }
+
+    /// Conservative frontend-only preflight, suitable before a GPU context exists.
+    pub fn frontend_diagnostics(&self, page: u32) -> Result<Vec<GpuFallbackDiagnostic>> {
+        let page = self.checked_page(page)?;
+        Ok(self
+            .inner
+            .document
+            .preflight_page(page, &LayerConfiguration::default())
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Unsupported)
+            .map(GpuFallbackDiagnostic::from)
+            .collect())
+    }
+
+    /// Compile one complete page into the engine-owned semantic graph.
+    pub fn compile_page(
+        &self,
+        page: u32,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<CompiledPage>> {
+        let page = self.checked_page(page)?;
+        if let Some(compiled) = self
+            .inner
+            .compiled
+            .lock()
+            .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
+            .get(page)
+        {
+            return Ok(compiled);
+        }
+
+        let compiled = self
+            .inner
+            .document
+            .compile_page(page, CompileOptions::default(), cancellation)
+            .with_context(|| format!("failed to compile native PDF page {}", page.get() + 1))?;
+        let compiled = self
+            .inner
+            .compiled
+            .lock()
+            .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
+            .insert(page, compiled);
+        Ok(compiled)
+    }
+
+    fn checked_page(&self, page: u32) -> Result<PageIndex> {
+        let page = PageIndex::new(page);
+        if !self.inner.document.page_count().contains(page) {
+            bail!("native PDF page index {} is out of bounds", page.get());
+        }
+        Ok(page)
+    }
+}
+
+/// One complete page retained on a specific GPUI device generation.
+pub struct PreparedGpuPage {
+    compiled: Arc<CompiledPage>,
+    gpu: Arc<GpuPage>,
+}
+
+impl fmt::Debug for PreparedGpuPage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedGpuPage")
+            .field("compiled", &self.compiled)
+            .field("gpu", &self.gpu)
+            .finish()
+    }
+}
+
+impl PreparedGpuPage {
+    pub fn compiled(&self) -> &Arc<CompiledPage> {
+        &self.compiled
+    }
+
+    pub fn device_token(&self) -> ExternalGpuDeviceToken {
+        let token = self.gpu.device_token();
+        ExternalGpuDeviceToken::new(token.identity, token.generation)
+    }
+
+    pub fn preparation_stats(&self) -> GpuPreparationStats {
+        self.gpu.preparation_stats()
+    }
+}
+
+/// Same-device PDF renderer tied to one GPUI recovery generation.
+pub struct GpuPdfRenderer {
+    context: WgpuExternalContext,
+    renderer: Arc<GpuRenderer>,
+    output_format: wgpu::TextureFormat,
+}
+
+impl fmt::Debug for GpuPdfRenderer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuPdfRenderer")
+            .field("token", &self.context.token())
+            .field("output_format", &self.output_format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GpuPdfRenderer {
+    /// Downcast GPUI's runtime-neutral context and initialize the retained renderer.
+    pub fn from_gpui(context: &ExternalGpuContext) -> Result<Self> {
+        let context = WgpuExternalContext::from_gpui(context)
+            .context("the active GPUI window is not backed by WGPU")?
+            .clone();
+        if context.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        let mut config = RenderConfig::default();
+        config.max_render_dimension = config
+            .max_render_dimension
+            .min(context.device().limits().max_texture_dimension_2d);
+        let output_format = config.output_format;
+        let token = context.token();
+        let renderer = GpuRenderer::new(
+            Arc::clone(context.device()),
+            Arc::clone(context.queue()),
+            DeviceToken {
+                identity: token.identity(),
+                generation: token.generation(),
+            },
+            config,
+        )
+        .map_err(renderer_init_error)?;
+        Ok(Self {
+            context,
+            renderer: Arc::new(renderer),
+            output_format,
+        })
+    }
+
+    pub fn token(&self) -> ExternalGpuDeviceToken {
+        self.context.token()
+    }
+
+    pub fn is_device_lost(&self) -> bool {
+        self.context.is_device_lost()
+    }
+
+    /// Complete whole-page routing. No GPU resource is returned when either
+    /// the frontend or renderer reports an unsupported semantic.
+    pub fn prepare_page(
+        &self,
+        document: &GpuPdfDocument,
+        page: u32,
+        cancellation: &CancellationToken,
+    ) -> Result<GpuPageRoute> {
+        let frontend = document.frontend_diagnostics(page)?;
+        if !frontend.is_empty() {
+            return Ok(GpuPageRoute::Fallback(frontend.into()));
+        }
+
+        let compiled = document.compile_page(page, cancellation)?;
+        let compiled_diagnostics = compiled
+            .support()
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Unsupported)
+            .map(GpuFallbackDiagnostic::from)
+            .collect::<Vec<_>>();
+        if !compiled_diagnostics.is_empty() {
+            return Ok(GpuPageRoute::Fallback(compiled_diagnostics.into()));
+        }
+
+        let renderer_support = self
+            .renderer
+            .preflight(compiled.scene())
+            .context("failed to plan native PDF page")?;
+        if !renderer_support.is_supported() {
+            let diagnostics = renderer_support
+                .issues()
+                .iter()
+                .map(GpuFallbackDiagnostic::from)
+                .collect::<Vec<_>>();
+            return Ok(GpuPageRoute::Fallback(diagnostics.into()));
+        }
+
+        let gpu = match self.renderer.prepare(compiled.scene()) {
+            Ok(page) => page,
+            Err(PrepareError::Unsupported(report)) => {
+                let diagnostics = report
+                    .issues()
+                    .iter()
+                    .map(GpuFallbackDiagnostic::from)
+                    .collect::<Vec<_>>();
+                return Ok(GpuPageRoute::Fallback(diagnostics.into()));
+            }
+            Err(error) => return Err(error).context("failed to prepare native PDF GPU page"),
+        };
+        Ok(GpuPageRoute::Ready(Arc::new(PreparedGpuPage {
+            compiled,
+            gpu: Arc::new(gpu),
+        })))
+    }
+
+    /// Render a prepared complete page into a reusable same-device texture.
+    pub fn render_page(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+        reusable: Option<GpuPageTexture>,
+    ) -> Result<(GpuPageTexture, GpuRenderStats)> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        let [width, height] = request.target_size;
+        if width == 0 || height == 0 {
+            bail!("native PDF render target must be non-empty");
+        }
+        let limit = self.context.device().limits().max_texture_dimension_2d;
+        if width > limit || height > limit {
+            bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
+        }
+
+        let texture = match reusable {
+            Some(texture)
+                if texture.size == request.target_size && texture.token == self.token() =>
+            {
+                texture
+            }
+            _ => self.create_texture(request.target_size),
+        };
+        let root_transform = page_transform(
+            page.gpu.page_bounds(),
+            request.rotation,
+            request.target_size,
+        )?;
+        let stats = self
+            .renderer
+            .render(
+                &page.gpu,
+                RenderRequest {
+                    root_transform,
+                    viewport: page.gpu.page_bounds(),
+                    target_size: request.target_size,
+                    background: request.background,
+                    settled: request.settled,
+                    generation: request.generation,
+                },
+                &texture.view,
+            )
+            .map_err(render_error)?;
+        Ok((texture, stats))
+    }
+
+    fn create_texture(&self, size: [u32; 2]) -> GpuPageTexture {
+        let texture = Arc::new(
+            self.context
+                .device()
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("glyphst native PDF page"),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.output_format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }),
+        );
+        let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let handle = self.context.texture_handle(Arc::clone(&view));
+        GpuPageTexture {
+            _texture: texture,
+            view,
+            handle,
+            size,
+            token: self.token(),
+        }
+    }
+}
+
+fn renderer_init_error(error: RendererInitError) -> anyhow::Error {
+    anyhow!(error).context("failed to initialize native PDF GPU renderer")
+}
+
+fn render_error(error: RenderError) -> anyhow::Error {
+    anyhow!(error).context("failed to execute native PDF GPU render")
+}
+
+/// Parameters for one full-page render.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuPaintRequest {
+    pub target_size: [u32; 2],
+    pub rotation: DocumentRotation,
+    pub background: [f64; 4],
+    pub settled: bool,
+    pub generation: u64,
+}
+
+/// Reusable render target and GPUI presentation handle.
+#[derive(Clone)]
+pub struct GpuPageTexture {
+    _texture: Arc<wgpu::Texture>,
+    view: Arc<wgpu::TextureView>,
+    handle: ExternalTextureHandle,
+    size: [u32; 2],
+    token: ExternalGpuDeviceToken,
+}
+
+impl fmt::Debug for GpuPageTexture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuPageTexture")
+            .field("handle", &self.handle)
+            .field("size", &self.size)
+            .field("token", &self.token)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GpuPageTexture {
+    pub fn handle(&self) -> &ExternalTextureHandle {
+        &self.handle
+    }
+
+    pub const fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
+    pub const fn token(&self) -> ExternalGpuDeviceToken {
+        self.token
+    }
+}
+
+fn page_transform(
+    bounds: glyphst_pdf_engine::Rect,
+    rotation: DocumentRotation,
+    target_size: [u32; 2],
+) -> Result<Transform> {
+    let width = bounds.width();
+    let height = bounds.height();
+    if width <= 0.0 || height <= 0.0 {
+        bail!("native PDF page has invalid bounds {bounds:?}");
+    }
+    let (rotated_width, rotated_height) = if rotation.swaps_width_and_height() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let scale_x = f64::from(target_size[0]) / rotated_width;
+    let scale_y = f64::from(target_size[1]) / rotated_height;
+    let (a, b, c, d, tx, ty) = match rotation.quarter_turns() {
+        0 => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        1 => (0.0, 1.0, -1.0, 0.0, height, 0.0),
+        2 => (-1.0, 0.0, 0.0, -1.0, width, height),
+        3 => (0.0, -1.0, 1.0, 0.0, 0.0, width),
+        _ => unreachable!("document rotation is normalized"),
+    };
+    Transform::new([
+        a * scale_x,
+        b * scale_y,
+        c * scale_x,
+        d * scale_y,
+        (tx - a * bounds.x0 - c * bounds.y0) * scale_x,
+        (ty - b * bounds.x0 - d * bounds.y0) * scale_y,
+    ])
+    .context("failed to construct native PDF page transform")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glyphst_core::DocumentFormat;
+
+    fn minimal_pdf() -> Arc<[u8]> {
+        Arc::from(
+            &b"%PDF-1.4\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 200]/Contents 4 0 R>> endobj\n\
+4 0 obj <</Length 0>> stream\nendstream endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF"[..],
+        )
+    }
+
+    fn overprint_pdf() -> Arc<[u8]> {
+        Arc::from(
+            &b"%PDF-1.4\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 200]/Resources<</ExtGState<</GS1 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+4 0 obj <</Length 7>> stream\n/GS1 gs\nendstream endobj\n\
+5 0 obj <</Type/ExtGState/OP true>> endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF"[..],
+        )
+    }
+
+    fn multipage_pdf(page_count: usize) -> Arc<[u8]> {
+        let kids = (0..page_count)
+            .map(|index| format!("{} 0 R", index + 3))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut pdf = format!(
+            "%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[{kids}]/Count {page_count}>> endobj\n"
+        );
+        for index in 0..page_count {
+            pdf.push_str(&format!(
+                "{} 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 200]>> endobj\n",
+                index + 3
+            ));
+        }
+        pdf.push_str("trailer <</Root 1 0 R>>\n%%EOF");
+        Arc::from(pdf.into_bytes())
+    }
+
+    #[test]
+    fn document_open_reuses_snapshot_bytes_and_compiles_owned_page() {
+        let bytes = minimal_pdf();
+        let snapshot =
+            DocumentSnapshot::from_bytes("native.pdf", DocumentFormat::Pdf, Arc::clone(&bytes));
+        assert!(Arc::ptr_eq(&bytes, &snapshot.shared_bytes()));
+
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        assert_eq!(document.page_count(), 1);
+        let cancellation = CancellationToken::new();
+        let first = document
+            .compile_page(0, &cancellation)
+            .expect("compile page");
+        let second = document.compile_page(0, &cancellation).expect("reuse page");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn frontend_preflight_preserves_exact_whole_page_fallback_reason() {
+        let snapshot =
+            DocumentSnapshot::from_bytes("overprint.pdf", DocumentFormat::Pdf, overprint_pdf());
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let diagnostics = document
+            .frontend_diagnostics(0)
+            .expect("preflight native page");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.feature == FeatureId::Overprint
+                && diagnostic.code == "overprint-not-simulated"
+                && diagnostic.source == GpuFallbackSource::Frontend
+        }));
+    }
+
+    #[test]
+    fn application_boundary_types_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<GpuPdfDocument>();
+        assert_send_sync::<PreparedGpuPage>();
+        assert_send_sync::<GpuPdfRenderer>();
+        assert_send_sync::<GpuPageTexture>();
+    }
+
+    #[test]
+    fn compiled_scene_cache_evicts_least_recently_used_pages() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "many-pages.pdf",
+            DocumentFormat::Pdf,
+            multipage_pdf(MAX_COMPILED_PAGE_CACHE_ENTRIES + 1),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let cancellation = CancellationToken::new();
+        let first = document
+            .compile_page(0, &cancellation)
+            .expect("compile first page");
+        for page in 1..=MAX_COMPILED_PAGE_CACHE_ENTRIES {
+            document
+                .compile_page(page as u32, &cancellation)
+                .expect("compile subsequent page");
+        }
+
+        assert_eq!(
+            document.compiled_cache_entries(),
+            MAX_COMPILED_PAGE_CACHE_ENTRIES
+        );
+        let recompiled = document
+            .compile_page(0, &cancellation)
+            .expect("recompile evicted page");
+        assert!(!Arc::ptr_eq(&first, &recompiled));
+    }
+
+    #[test]
+    fn quarter_turns_map_page_bounds_to_the_render_target() {
+        let bounds = glyphst_pdf_engine::Rect::from_corners(
+            glyphst_pdf_engine::Point::new(10.0, 20.0).unwrap(),
+            glyphst_pdf_engine::Point::new(110.0, 220.0).unwrap(),
+        )
+        .unwrap();
+        for rotation in [
+            DocumentRotation::Degrees0,
+            DocumentRotation::Degrees90,
+            DocumentRotation::Degrees180,
+            DocumentRotation::Degrees270,
+        ] {
+            let transform = page_transform(bounds, rotation, [600, 300]).unwrap();
+            let mapped = transform.map_rect(bounds);
+            assert!((mapped.x0 - 0.0).abs() < 1e-8);
+            assert!((mapped.y0 - 0.0).abs() < 1e-8);
+            assert!((mapped.x1 - 600.0).abs() < 1e-8);
+            assert!((mapped.y1 - 300.0).abs() < 1e-8);
+        }
+    }
+}

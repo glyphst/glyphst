@@ -1,6 +1,6 @@
 use glyphst_document_ui::document_view::{
-    DocumentRenderDebugSnapshot, PageRenderDebugSnapshot, PageRenderDebugStatus,
-    TextIndexDebugState, render_cache_debug_snapshot,
+    DocumentRenderDebugSnapshot, PageRenderBackendDebug, PageRenderDebugSnapshot,
+    PageRenderDebugStatus, TextIndexDebugState, render_cache_debug_snapshot,
 };
 use gpui::{
     AnyElement, App, Div, Hsla, IntoElement as _, ParentElement as _, Styled as _, WeakEntity,
@@ -98,6 +98,22 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             } else {
                 FOREGROUND
             },
+        ))
+        .child(reading(
+            "GPU SCENES",
+            format!(
+                "{} / {} compiled · {} / {} prepared",
+                document.gpu_cache.compiled_pages,
+                document.gpu_cache.compiled_page_limit,
+                document.gpu_cache.prepared_pages,
+                document.gpu_cache.prepared_page_limit
+            ),
+            FOREGROUND,
+        ))
+        .child(reading(
+            "GPU RESIDENT",
+            format_bytes(document.gpu_cache.resident_bytes),
+            FOREGROUND,
         ));
 
     for page in document.pages {
@@ -128,6 +144,14 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
         .flex_col()
         .child(section_label(format!("PAGE {}", page.page_number)))
         .child(reading("STATE", status.to_string(), status_color));
+
+    let (engine, engine_color) = match page.backend {
+        PageRenderBackendDebug::MuPdf => ("MuPDF", FOREGROUND),
+        PageRenderBackendDebug::GlyphstGpu => ("Glyphst GPU", GOOD),
+        PageRenderBackendDebug::MuPdfWhileGpuPending => ("MuPDF · GPU pending", WARN),
+        PageRenderBackendDebug::MuPdfFallback => ("MuPDF · GPU fallback", WARN),
+    };
+    section = section.child(reading("ENGINE", engine.to_string(), engine_color));
 
     if let Some(displayed) = page.displayed_raster {
         section = section
@@ -200,6 +224,161 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             let value = format_draw_duration(mupdf_draw, timing.raster_bands);
             section = section.child(reading("DRAW", value, FOREGROUND));
         }
+    }
+
+    if let Some(preparation) = page.gpu_preparation {
+        section = section
+            .child(reading(
+                "PREPARE",
+                format_duration(preparation.elapsed),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "PREP H2D",
+                format_bytes(preparation.host_to_device_bytes),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "RESIDENT",
+                format_bytes(preparation.resident_bytes),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "RETAINED",
+                format!(
+                    "{} op · {} vec batch · {} LOD · {} clip",
+                    preparation.retained_operations,
+                    preparation.vector_batches,
+                    preparation.vector_lod_levels,
+                    preparation.unique_clip_paths
+                ),
+                FOREGROUND,
+            ));
+        if preparation.analytic_bytes > 0 {
+            section = section.child(reading(
+                "ANALYTIC",
+                format!(
+                    "{} · {} path · {} seg · {} draw · {} BVH",
+                    format_bytes(preparation.analytic_bytes),
+                    preparation.analytic_paths,
+                    preparation.analytic_segments,
+                    preparation.analytic_draws,
+                    preparation.analytic_bvh_nodes
+                ),
+                FOREGROUND,
+            ));
+        } else if preparation.vector_bytes > 0 {
+            section = section.child(reading(
+                "TRIANGLES",
+                format!(
+                    "{} · {} vertex · {} ref · {} instance",
+                    format_bytes(preparation.vector_bytes),
+                    preparation.vector_vertices,
+                    preparation.vector_triangle_references,
+                    preparation.vector_instances
+                ),
+                FOREGROUND,
+            ));
+        }
+        if preparation.image_textures > 0
+            || preparation.alpha_textures > 0
+            || preparation.gradient_tables > 0
+        {
+            section = section.child(reading(
+                "RESOURCES",
+                format!(
+                    "{} image · {} alpha · {} gradient",
+                    preparation.image_textures,
+                    preparation.alpha_textures,
+                    preparation.gradient_tables
+                ),
+                FOREGROUND,
+            ));
+        }
+        if let Some(fallback) = preparation.analytic_fallback {
+            section = section.child(reading("VECTOR PLAN", fallback, WARN));
+        }
+    }
+
+    if let Some(gpu) = page.gpu {
+        section = section
+            .child(reading(
+                "GPU CPU",
+                format_duration(gpu.cpu_time),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "GPU TIME",
+                gpu.gpu_time
+                    .map(format_duration)
+                    .unwrap_or_else(|| "timestamps unavailable".to_string()),
+                if gpu.gpu_time.is_some() {
+                    FOREGROUND
+                } else {
+                    MUTED
+                },
+            ))
+            .child(reading(
+                "H2D",
+                format_bytes(gpu.host_to_device_bytes),
+                if gpu.host_to_device_bytes == 0 {
+                    GOOD
+                } else {
+                    FOREGROUND
+                },
+            ))
+            .child(reading(
+                "GPU WORK",
+                format!(
+                    "{} pass · {} cb · {} vec · {} grad · {} img",
+                    gpu.passes_executed,
+                    gpu.command_buffers,
+                    gpu.vector_batches,
+                    gpu.gradient_draws,
+                    gpu.image_draws
+                ),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "COVERAGE",
+                format!(
+                    "{} · LOD {} · {} compute · {} stencil",
+                    gpu.coverage_strategy,
+                    gpu.selected_vector_lod,
+                    gpu.compute_dispatches,
+                    gpu.stencil_draws
+                ),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "REUSE",
+                format!(
+                    "{} tiles · frame pool {} · {} clip changes · gen {}",
+                    gpu.reused_tiles,
+                    if gpu.frame_pool_reused { "yes" } else { "no" },
+                    gpu.clip_state_changes,
+                    gpu.generation
+                ),
+                if gpu.frame_pool_reused || gpu.reused_tiles > 0 {
+                    GOOD
+                } else {
+                    FOREGROUND
+                },
+            ));
+    }
+
+    for fallback in page.gpu_fallbacks {
+        section = section.child(reading(
+            "FALLBACK",
+            format!(
+                "[{}:{}] {} · {}",
+                fallback.feature, fallback.code, fallback.source, fallback.message
+            ),
+            WARN,
+        ));
+    }
+    if let Some(failure) = page.gpu_failure {
+        section = section.child(reading("GPU ERROR", failure, BAD));
     }
 
     let text = match page.text_index_state {

@@ -107,6 +107,11 @@ impl DocumentSnapshot {
         &self.bytes
     }
 
+    /// Clone the immutable source allocation without copying its bytes.
+    pub fn shared_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
     pub fn format(&self) -> DocumentFormat {
         self.format
     }

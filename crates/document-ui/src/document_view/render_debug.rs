@@ -17,12 +17,17 @@ impl DocumentView {
         let page_range = self.current_page_range();
         let page_label = Self::page_counter_label(page_range.clone(), self.pages.len());
         let cache = cx.try_global::<RenderCache>();
+        let configured_engine = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .pdf_render_engine;
         let pages = if self.grid_overview_open {
             Vec::new()
         } else {
             page_range
                 .filter(|page_idx| *page_idx < self.pages.len())
-                .map(|page_idx| self.page_render_debug_snapshot(page_idx, cache))
+                .map(|page_idx| self.page_render_debug_snapshot(page_idx, cache, configured_engine))
                 .collect()
         };
 
@@ -31,6 +36,7 @@ impl DocumentView {
             pages,
             pending_render_count: self.pending_renders.len(),
             pending_render_limit: MAX_PENDING_PAGE_RENDERS,
+            gpu_cache: self.native_gpu_cache_debug(),
         }
     }
 
@@ -38,6 +44,7 @@ impl DocumentView {
         &self,
         page_idx: usize,
         cache: Option<&RenderCache>,
+        configured_engine: PdfRenderEngine,
     ) -> PageRenderDebugSnapshot {
         let viewport = self
             .reload_task
@@ -45,12 +52,18 @@ impl DocumentView {
             .then(|| self.viewport_render_debug.get(&page_idx).copied())
             .flatten();
         let requested = viewport.map(|viewport| viewport.requested);
-        let displayed = viewport.and_then(|viewport| viewport.displayed);
+        let mupdf_displayed = viewport.and_then(|viewport| viewport.displayed);
+        let native_gpu_requested =
+            requested.is_some_and(|key| self.native_gpu_key_enabled(key, configured_engine));
+        let native_gpu_render = self
+            .native_gpu_render(page_idx)
+            .filter(|(key, _)| requested.is_some_and(|requested| requested == *key));
+        let displayed = native_gpu_render.map(|(key, _)| key).or(mupdf_displayed);
         let exact_pending = requested.is_some_and(|requested| {
             self.pending_renders
                 .iter()
                 .any(|pending| pending.key == requested)
-        });
+        }) || (native_gpu_requested && self.native_gpu_pending(page_idx));
         let latest_attempt = self
             .reload_task
             .is_none()
@@ -69,6 +82,74 @@ impl DocumentView {
                 PageRenderDebugStatus::Failed
             }
             _ => PageRenderDebugStatus::Unavailable,
+        };
+
+        let gpu = native_gpu_render.map(|(_, stats)| GpuPageRenderDebugSnapshot {
+            cpu_time: stats.cpu_time,
+            gpu_time: stats.gpu_time,
+            host_to_device_bytes: stats.host_to_device_bytes,
+            passes_executed: stats.passes_executed,
+            command_buffers: stats.command_buffers,
+            vector_batches: stats.vector_batches,
+            gradient_draws: stats.gradient_draws,
+            image_draws: stats.image_draws,
+            reused_tiles: stats.reused_tiles,
+            selected_vector_lod: stats.selected_vector_lod,
+            frame_pool_reused: stats.frame_pool_reused,
+            clip_state_changes: stats.clip_state_changes,
+            stencil_draws: stats.stencil_draws,
+            compute_dispatches: stats.compute_dispatches,
+            generation: stats.generation,
+            coverage_strategy: format!("{:?}", stats.coverage_strategy),
+        });
+        let gpu_preparation = self.native_gpu_preparation_stats(page_idx).map(|stats| {
+            GpuPagePreparationDebugSnapshot {
+                elapsed: stats.elapsed,
+                host_to_device_bytes: stats.host_to_device_bytes,
+                resident_bytes: stats.resident_bytes,
+                image_textures: stats.image_textures,
+                alpha_textures: stats.alpha_textures,
+                gradient_tables: stats.gradient_tables,
+                vector_batches: stats.vector_batches,
+                vector_lod_levels: stats.vector_lod_levels,
+                vector_vertices: stats.vector_vertices,
+                vector_triangle_references: stats.vector_triangle_references,
+                vector_instances: stats.vector_instances,
+                vector_bytes: stats.vector_bytes,
+                retained_operations: stats.retained_operations,
+                unique_clip_paths: stats.unique_clip_paths,
+                analytic_paths: stats.analytic_paths,
+                analytic_segments: stats.analytic_segments,
+                analytic_draws: stats.analytic_draws,
+                analytic_groups: stats.analytic_groups,
+                analytic_bvh_nodes: stats.analytic_bvh_nodes,
+                analytic_bytes: stats.analytic_bytes,
+                analytic_fallback: stats.analytic_fallback.map(str::to_owned),
+            }
+        });
+        let gpu_fallbacks = self
+            .native_gpu_fallback_diagnostics(page_idx)
+            .unwrap_or_default()
+            .iter()
+            .map(|diagnostic| GpuFallbackDebugSnapshot {
+                feature: diagnostic.feature.to_string(),
+                code: diagnostic.code.clone(),
+                message: diagnostic.message.clone(),
+                source: match diagnostic.source {
+                    GpuFallbackSource::Frontend => "frontend",
+                    GpuFallbackSource::Renderer => "renderer",
+                },
+            })
+            .collect::<Vec<_>>();
+        let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
+        let backend = if gpu.is_some() {
+            PageRenderBackendDebug::GlyphstGpu
+        } else if !gpu_fallbacks.is_empty() || gpu_failure.is_some() {
+            PageRenderBackendDebug::MuPdfFallback
+        } else if native_gpu_requested {
+            PageRenderBackendDebug::MuPdfWhileGpuPending
+        } else {
+            PageRenderBackendDebug::MuPdf
         };
 
         let source_revision = self
@@ -105,6 +186,11 @@ impl DocumentView {
         PageRenderDebugSnapshot {
             page_number: page_idx + 1,
             status,
+            backend,
+            gpu,
+            gpu_preparation,
+            gpu_fallbacks,
+            gpu_failure,
             requested_raster: requested.map(|key| self.raster_debug_snapshot(key)),
             displayed_raster: displayed.map(|key| self.raster_debug_snapshot(key)),
             cached_raster_bytes,

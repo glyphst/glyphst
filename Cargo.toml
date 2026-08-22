@@ -8,6 +8,7 @@ members = [
     "crates/library",
     "crates/mermaid-render",
     "crates/pdf",
+    "crates/pdf-gpu",
     "crates/pdf-translation",
     "crates/pdf-translation-service",
     "crates/document-ui",
@@ -37,19 +38,22 @@ base64 = "0.22"
 chrono = "0.4"
 dirs = "6"
 futures = "0.3"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "4bd1993783703e92affb781503916d1f152f599f", package = "gpui", default-features = false, features = [
+gpui = { git = "https://github.com/glyphst/zed", rev = "a5a775e68fe563357aed1d7f5b8655f5911d9b95", package = "gpui", default-features = false, features = [
     "wayland",
     "x11",
 ] }
 gpui_component = { path = "dependencies/gpui-component/crates/ui", package = "gpui-component" }
 gpui_component_assets = { path = "dependencies/gpui-component/crates/assets", package = "gpui-component-assets" }
 gpui_fps = { path = "dependencies/gpui-component/crates/fps", package = "gpui-fps" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "4bd1993783703e92affb781503916d1f152f599f", package = "gpui_platform", default-features = false, features = [
+gpui_platform = { git = "https://github.com/glyphst/zed", rev = "a5a775e68fe563357aed1d7f5b8655f5911d9b95", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
     "x11",
 ] }
+gpui_wgpu = { git = "https://github.com/glyphst/zed", rev = "a5a775e68fe563357aed1d7f5b8655f5911d9b95", package = "gpui_wgpu" }
 glyphst-mermaid-render = { path = "crates/mermaid-render" }
+glyphst-pdf-engine = { git = "https://github.com/glyphst/glyphst-pdf", rev = "8d98f312ff43efe89451d4d553839cf1b9eefb6b", package = "glyphst-pdf-engine" }
+glyphst-pdf-render-wgpu = { git = "https://github.com/glyphst/glyphst-pdf", rev = "8d98f312ff43efe89451d4d553839cf1b9eefb6b", package = "glyphst-pdf-render-wgpu" }
 httpdate = "1"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
@@ -87,7 +91,7 @@ unicode-properties = { version = "0.1", default-features = false, features = ["g
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
-ztracing = { git = "https://github.com/zed-industries/zed", rev = "4bd1993783703e92affb781503916d1f152f599f" }
+ztracing = { git = "https://github.com/glyphst/zed", rev = "a5a775e68fe563357aed1d7f5b8655f5911d9b95" }
 
 [profile.dev.package.tikv-jemalloc-sys]
 opt-level = 2

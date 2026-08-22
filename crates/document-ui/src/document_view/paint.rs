@@ -215,7 +215,13 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        let (image, displayed) = self.cached_or_request_viewport_render(key, true, cx);
+        self.prune_native_gpu_pages(&[page_idx]);
+        let gpu_texture = self.native_gpu_texture(key, window, cx);
+        let (image, displayed) = if gpu_texture.is_some() {
+            (None, None)
+        } else {
+            self.cached_or_request_viewport_render(key, true, cx)
+        };
         self.viewport_render_debug.insert(
             page_idx,
             ViewportPageRenderDebug {
@@ -227,6 +233,7 @@ impl DocumentView {
             vec![PaintPage {
                 bounds: image_bounds,
                 image,
+                gpu_texture,
             }],
             cx.global::<SettingsStore>().settings.behavior.reduce_motion,
             window,
@@ -314,7 +321,7 @@ impl DocumentView {
         }
 
         let mut visible_page_renders = Vec::with_capacity(visible_pages.len());
-        for page_idx in visible_pages {
+        for &page_idx in &visible_pages {
             let (image_bounds, key) =
                 self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
             visible_page_renders.push((page_idx, image_bounds, key));
@@ -344,14 +351,20 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
+        self.prune_native_gpu_pages(&visible_pages);
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         for (page_idx, image_bounds, key) in visible_page_renders {
-            let (image, fallback_key) = self.cached_or_request_viewport_render(
-                key,
-                !self.dock_snapshot.layout_motion_active,
-                cx,
-            );
+            let gpu_texture = self.native_gpu_texture(key, window, cx);
+            let (image, fallback_key) = if gpu_texture.is_some() {
+                (None, None)
+            } else {
+                self.cached_or_request_viewport_render(
+                    key,
+                    !self.dock_snapshot.layout_motion_active,
+                    cx,
+                )
+            };
             self.viewport_render_debug.insert(
                 page_idx,
                 ViewportPageRenderDebug {
@@ -364,10 +377,11 @@ impl DocumentView {
             {
                 self.viewport_render_keys.insert(fallback_key);
             }
-            has_rendered_page |= image.is_some();
+            has_rendered_page |= image.is_some() || gpu_texture.is_some();
             pages.push(PaintPage {
                 bounds: image_bounds,
                 image,
+                gpu_texture,
             });
         }
         // Desired keys were protected before resolution so a final render can

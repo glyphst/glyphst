@@ -31,7 +31,7 @@ use crate::scrollbar::{ManualScrollHandle, ScrollbarHandle, WithScrollbar as _};
 use crate::search::{SearchBar, SearchBarSnapshot, SearchEvent};
 use crate::settings::{
     BehaviorSettings, CopyFormat, DocumentProgressDisplay, PageImageQuality, PageTextFormat,
-    SettingsStore, TranslationBoxCorner, ui_rems,
+    PdfRenderEngine, SettingsStore, TranslationBoxCorner, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -59,6 +59,11 @@ use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,
 };
+use glyphst_pdf_gpu::{
+    CancellationToken as GpuCancellationToken, GpuFallbackDiagnostic, GpuFallbackSource,
+    GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
+    GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
+};
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
     source_text_regions,
@@ -81,13 +86,14 @@ use glyphst_ui::{
 };
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
-    DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
-    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
-    deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
-    rgb, rgba, size, transparent_black, uniform_list,
+    DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, ExternalGpuDeviceToken,
+    ExternalTextureAlphaMode, ExternalTextureColorSpace, ExternalTextureFilter, FocusHandle,
+    Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton,
+    PromptLevel, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Size, StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle,
+    Window, anchored, canvas, deferred, div, fill, hsla, linear_color_stop, linear_gradient,
+    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName as ComponentIconName, IndexPath,
@@ -489,11 +495,91 @@ pub struct PageRenderTimingDebugSnapshot {
     pub succeeded: bool,
 }
 
+/// Complete-page renderer currently presented for an active PDF page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRenderBackendDebug {
+    MuPdf,
+    GlyphstGpu,
+    MuPdfWhileGpuPending,
+    MuPdfFallback,
+}
+
+/// Metrics emitted by the retained native GPU renderer for its latest frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuPageRenderDebugSnapshot {
+    pub cpu_time: Duration,
+    pub gpu_time: Option<Duration>,
+    pub host_to_device_bytes: u64,
+    pub passes_executed: u64,
+    pub command_buffers: u64,
+    pub vector_batches: u64,
+    pub gradient_draws: u64,
+    pub image_draws: u64,
+    pub reused_tiles: u64,
+    pub selected_vector_lod: u32,
+    pub frame_pool_reused: bool,
+    pub clip_state_changes: u64,
+    pub stencil_draws: u64,
+    pub compute_dispatches: u64,
+    pub generation: u64,
+    pub coverage_strategy: String,
+}
+
+/// One page's retained preparation and residency accounting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuPagePreparationDebugSnapshot {
+    pub elapsed: Duration,
+    pub host_to_device_bytes: u64,
+    pub resident_bytes: u64,
+    pub image_textures: u64,
+    pub alpha_textures: u64,
+    pub gradient_tables: u64,
+    pub vector_batches: u64,
+    pub vector_lod_levels: u64,
+    pub vector_vertices: u64,
+    pub vector_triangle_references: u64,
+    pub vector_instances: u64,
+    pub vector_bytes: u64,
+    pub retained_operations: u64,
+    pub unique_clip_paths: u64,
+    pub analytic_paths: u64,
+    pub analytic_segments: u64,
+    pub analytic_draws: u64,
+    pub analytic_groups: u64,
+    pub analytic_bvh_nodes: u64,
+    pub analytic_bytes: u64,
+    pub analytic_fallback: Option<String>,
+}
+
+/// Bounded native reader/GPU cache occupancy for the current document.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuCacheDebugSnapshot {
+    pub compiled_pages: usize,
+    pub compiled_page_limit: usize,
+    pub prepared_pages: usize,
+    pub prepared_page_limit: usize,
+    pub resident_bytes: u64,
+}
+
+/// One exact semantic or capability reason for routing the whole page to MuPDF.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuFallbackDebugSnapshot {
+    pub feature: String,
+    pub code: String,
+    pub message: String,
+    pub source: &'static str,
+}
+
 /// Rendering and content diagnostics for one active page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageRenderDebugSnapshot {
     pub page_number: usize,
     pub status: PageRenderDebugStatus,
+    pub backend: PageRenderBackendDebug,
+    pub gpu: Option<GpuPageRenderDebugSnapshot>,
+    pub gpu_preparation: Option<GpuPagePreparationDebugSnapshot>,
+    pub gpu_fallbacks: Vec<GpuFallbackDebugSnapshot>,
+    pub gpu_failure: Option<String>,
     pub requested_raster: Option<RasterDebugSnapshot>,
     pub displayed_raster: Option<RasterDebugSnapshot>,
     pub cached_raster_bytes: u64,
@@ -513,6 +599,7 @@ pub struct DocumentRenderDebugSnapshot {
     pub pages: Vec<PageRenderDebugSnapshot>,
     pub pending_render_count: usize,
     pub pending_render_limit: usize,
+    pub gpu_cache: GpuCacheDebugSnapshot,
 }
 
 #[derive(Clone, Copy)]
@@ -901,6 +988,7 @@ impl mupdf::NativeDevice for ImageCollector {
 struct PaintPage {
     bounds: Bounds<Pixels>,
     image: Option<Arc<RenderImage>>,
+    gpu_texture: Option<GpuPageTexture>,
 }
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
@@ -1802,6 +1890,7 @@ pub struct DocumentView {
     epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
+    gpu_pdf: gpu_render::GpuPdfState,
     page_render_sources: HashMap<usize, RevisionedPageRenderSource>,
     pages: Vec<DocumentPage>,
     page_count: usize,
@@ -2157,6 +2246,7 @@ mod document;
 mod epub;
 mod export;
 mod geometry;
+mod gpu_render;
 mod highlights;
 mod history;
 mod hit_test;

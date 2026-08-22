@@ -169,6 +169,7 @@ impl DocumentView {
             epub_style_panel_position: None,
             document_snapshot,
             render_session,
+            gpu_pdf: gpu_render::GpuPdfState::default(),
             page_render_sources: HashMap::new(),
             pages,
             page_count,
@@ -607,6 +608,7 @@ impl DocumentView {
 
         self.evict_previous_document(cx);
         self.text_indexing_task = None;
+        self.gpu_pdf.reset();
         self.pending_renders.clear();
         self.viewport_render_debug.clear();
         self.page_render_debug.clear();
