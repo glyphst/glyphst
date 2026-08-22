@@ -12,7 +12,8 @@ use glyphst_pdf::DocumentSnapshot;
 pub use glyphst_pdf_engine::CancellationToken;
 use glyphst_pdf_engine::{
     CompileOptions, CompiledPage, DiagnosticSeverity, Document, DocumentSource, Engine, FeatureId,
-    LayerConfiguration, OpenOptions, PageIndex, Password, Rect, SupportDiagnostic, Transform,
+    LayerConfiguration, LinkHighlightMode, OpenOptions, PageIndex, Password, Rect,
+    SupportDiagnostic, Transform,
 };
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
@@ -45,6 +46,36 @@ pub struct GpuFallbackDiagnostic {
 pub enum GpuFallbackSource {
     Frontend,
     Renderer,
+    Application,
+}
+
+impl GpuFallbackDiagnostic {
+    /// The reader cannot prove that its Link hit regions match the native
+    /// engine's canonical interaction geometry.
+    pub fn application_link_geometry_mismatch() -> Self {
+        Self {
+            feature: FeatureId::Links,
+            code: "application-link-geometry-mismatch".into(),
+            message:
+                "native Link interaction regions do not map one-for-one to the reader hit regions"
+                    .into(),
+            source: GpuFallbackSource::Application,
+        }
+    }
+}
+
+/// Link press effects implemented by the same-device presentation adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuLinkHighlightMode {
+    None,
+    Invert,
+}
+
+/// Engine-owned Link interaction geometry in canonical page coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuLinkInteraction {
+    pub regions: Arc<[[f64; 4]]>,
+    pub highlight_mode: GpuLinkHighlightMode,
 }
 
 impl From<&SupportDiagnostic> for GpuFallbackDiagnostic {
@@ -248,6 +279,7 @@ impl GpuPdfDocument {
 pub struct PreparedGpuPage {
     compiled: Arc<CompiledPage>,
     gpu: Arc<GpuPage>,
+    link_interactions: Arc<[GpuLinkInteraction]>,
 }
 
 impl fmt::Debug for PreparedGpuPage {
@@ -273,6 +305,48 @@ impl PreparedGpuPage {
     pub fn preparation_stats(&self) -> GpuPreparationStats {
         self.gpu.preparation_stats()
     }
+
+    /// Exact Link press regions that must be honored by the presentation UI.
+    pub fn link_interactions(&self) -> &[GpuLinkInteraction] {
+        &self.link_interactions
+    }
+}
+
+fn compiled_link_interactions(
+    page: &CompiledPage,
+) -> std::result::Result<Arc<[GpuLinkInteraction]>, GpuFallbackDiagnostic> {
+    page.links()
+        .iter()
+        .map(|link| {
+            let highlight_mode = match link.highlight_mode.as_ref() {
+                Some(LinkHighlightMode::None) => GpuLinkHighlightMode::None,
+                Some(LinkHighlightMode::Invert) => GpuLinkHighlightMode::Invert,
+                Some(LinkHighlightMode::Outline | LinkHighlightMode::Push)
+                | Some(LinkHighlightMode::Other(_))
+                | None => {
+                    return Err(GpuFallbackDiagnostic {
+                        feature: FeatureId::Links,
+                        code: "application-link-highlight-unavailable".into(),
+                        message: "the native page contains a Link press effect that the presentation adapter cannot execute exactly".into(),
+                        source: GpuFallbackSource::Application,
+                    });
+                }
+            };
+            let regions = link
+                .quads
+                .iter()
+                .map(|quad| {
+                    let bounds = quad.bounds();
+                    [bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+                })
+                .collect::<Vec<_>>();
+            Ok(GpuLinkInteraction {
+                regions: regions.into(),
+                highlight_mode,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Arc::from)
 }
 
 /// Same-device PDF renderer tied to one GPUI recovery generation.
@@ -370,6 +444,10 @@ impl GpuPdfRenderer {
             return Ok(GpuPageRoute::Fallback(diagnostics.into()));
         }
 
+        let link_interactions = match compiled_link_interactions(&compiled) {
+            Ok(interactions) => interactions,
+            Err(diagnostic) => return Ok(GpuPageRoute::Fallback(Arc::from([diagnostic]))),
+        };
         let gpu = match self.renderer.prepare(compiled.scene()) {
             Ok(page) => page,
             Err(PrepareError::Unsupported(report)) => {
@@ -385,6 +463,7 @@ impl GpuPdfRenderer {
         Ok(GpuPageRoute::Ready(Arc::new(PreparedGpuPage {
             compiled,
             gpu: Arc::new(gpu),
+            link_interactions,
         })))
     }
 
@@ -702,6 +781,21 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
         )
     }
 
+    fn link_pdf(highlight: &str) -> Arc<[u8]> {
+        Arc::from(
+            format!(
+                "%PDF-1.4\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
+4 0 obj <</Length 0>> stream\nendstream endobj\n\
+5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]{highlight}/A<</S/URI/URI(https://example.com)>>>> endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF"
+            )
+            .into_bytes(),
+        )
+    }
+
     fn multipage_pdf(page_count: usize) -> Arc<[u8]> {
         let kids = (0..page_count)
             .map(|index| format!("{} 0 R", index + 3))
@@ -755,6 +849,39 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
     }
 
     #[test]
+    fn application_link_mapping_failure_is_structured() {
+        let diagnostic = GpuFallbackDiagnostic::application_link_geometry_mismatch();
+        assert_eq!(diagnostic.feature, FeatureId::Links);
+        assert_eq!(diagnostic.code, "application-link-geometry-mismatch");
+        assert_eq!(diagnostic.source, GpuFallbackSource::Application);
+    }
+
+    #[test]
+    fn compiled_link_interactions_retain_supported_modes_and_canonical_geometry() {
+        for (highlight, expected_mode) in [
+            ("", GpuLinkHighlightMode::Invert),
+            ("/H/I", GpuLinkHighlightMode::Invert),
+            ("/H/N", GpuLinkHighlightMode::None),
+        ] {
+            let snapshot =
+                DocumentSnapshot::from_bytes("link.pdf", DocumentFormat::Pdf, link_pdf(highlight));
+            let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+            let page = document
+                .compile_page(0, &CancellationToken::new())
+                .expect("compile page");
+            let interactions = compiled_link_interactions(&page).expect("retain interactions");
+
+            assert_eq!(
+                interactions.as_ref(),
+                &[GpuLinkInteraction {
+                    regions: Arc::from([[10.0, 70.0, 50.0, 90.0]]),
+                    highlight_mode: expected_mode,
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn application_boundary_types_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
 
@@ -763,6 +890,7 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
         assert_send_sync::<GpuPdfRenderer>();
         assert_send_sync::<GpuPageTexture>();
         assert_send_sync::<GpuPageRegion>();
+        assert_send_sync::<GpuLinkInteraction>();
     }
 
     #[test]

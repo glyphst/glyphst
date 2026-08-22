@@ -38,6 +38,7 @@ impl DocumentView {
         reduce_motion: bool,
         window: &mut Window,
     ) -> PaintData {
+        let link_invert_overlays = self.link_invert_overlays(&pages);
         let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
         let note_underlines = self.note_underlines();
         let selection_highlights = self.selection_highlights();
@@ -67,6 +68,7 @@ impl DocumentView {
 
         PaintData {
             pages,
+            link_invert_overlays,
             diff_flash_overlays,
             highlight_overlays,
             selected_highlight_borders,
@@ -231,6 +233,7 @@ impl DocumentView {
         );
         self.assemble_paint_data(
             vec![PaintPage {
+                page_idx,
                 bounds: image_bounds,
                 image,
                 gpu_texture,
@@ -380,6 +383,7 @@ impl DocumentView {
             }
             has_rendered_page |= image.is_some() || gpu_texture.is_some();
             pages.push(PaintPage {
+                page_idx,
                 bounds: image_bounds,
                 image,
                 gpu_texture,

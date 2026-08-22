@@ -18,6 +18,7 @@ pub(super) struct GpuPdfState {
     rendered: HashMap<u32, RenderedGpuPage>,
     presented_pages: HashSet<u32>,
     visible_pages: HashSet<u32>,
+    application_fallbacks: HashMap<u32, Arc<[GpuFallbackDiagnostic]>>,
     surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
@@ -59,6 +60,7 @@ impl GpuPdfState {
         self.rendered.clear();
         self.presented_pages.clear();
         self.visible_pages.clear();
+        self.application_fallbacks.clear();
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
@@ -78,6 +80,7 @@ impl GpuPdfState {
         self.rendered.clear();
         self.presented_pages.clear();
         self.visible_pages.clear();
+        self.application_fallbacks.clear();
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
@@ -130,6 +133,7 @@ impl GpuPdfState {
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
             self.presented_pages.remove(&page);
+            self.application_fallbacks.remove(&page);
             self.surface_failures.remove(&page);
         }
 
@@ -147,6 +151,8 @@ impl GpuPdfState {
         self.rendered
             .retain(|page, _| self.pages.contains_key(page));
         self.page_last_used
+            .retain(|page, _| self.pages.contains_key(page));
+        self.application_fallbacks
             .retain(|page, _| self.pages.contains_key(page));
         self.surface_failures
             .retain(|page, _| self.pages.contains_key(page));
@@ -180,6 +186,7 @@ impl GpuPdfState {
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
             self.presented_pages.remove(&page);
+            self.application_fallbacks.remove(&page);
             self.surface_failures.remove(&page);
         }
     }
@@ -459,6 +466,21 @@ impl DocumentView {
             }
         }?;
 
+        if Self::native_link_mapping(key.page_idx, &self.links, prepared.link_interactions())
+            .is_none()
+        {
+            if !self.text_index_state.is_pending_or_indexing() {
+                self.gpu_pdf.application_fallbacks.insert(
+                    page,
+                    Arc::from([GpuFallbackDiagnostic::application_link_geometry_mismatch()]),
+                );
+            } else {
+                self.gpu_pdf.application_fallbacks.remove(&page);
+            }
+            return None;
+        }
+        self.gpu_pdf.application_fallbacks.remove(&page);
+
         let settled = !self.dock_snapshot.layout_motion_active
             && self.panning.is_none()
             && !self.gpu_pdf.motion_active
@@ -693,8 +715,25 @@ impl DocumentView {
         page: usize,
     ) -> Option<&[GpuFallbackDiagnostic]> {
         let page = u32::try_from(page).ok()?;
+        if let Some(diagnostics) = self.gpu_pdf.application_fallbacks.get(&page) {
+            return Some(diagnostics);
+        }
         match self.gpu_pdf.pages.get(&page)? {
             GpuPageState::Fallback(diagnostics) => Some(diagnostics),
+            _ => None,
+        }
+    }
+
+    pub(super) fn native_gpu_link_interactions(
+        &self,
+        page: usize,
+    ) -> Option<&[GpuLinkInteraction]> {
+        let page = u32::try_from(page).ok()?;
+        if !self.gpu_pdf.presented_pages.contains(&page) {
+            return None;
+        }
+        match self.gpu_pdf.pages.get(&page)? {
+            GpuPageState::Ready(prepared) => Some(prepared.link_interactions()),
             _ => None,
         }
     }

@@ -163,6 +163,7 @@ impl DocumentView {
                 source: match diagnostic.source {
                     GpuFallbackSource::Frontend => "frontend",
                     GpuFallbackSource::Renderer => "renderer",
+                    GpuFallbackSource::Application => "application",
                 },
             })
             .collect::<Vec<_>>();

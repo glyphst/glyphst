@@ -61,8 +61,9 @@ use glyphst_pdf::{
 };
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, GpuFallbackDiagnostic, GpuFallbackSource,
-    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
-    GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
+    GpuLinkHighlightMode, GpuLinkInteraction, GpuPageRegion, GpuPageRoute, GpuPageTexture,
+    GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats,
+    PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -87,13 +88,14 @@ use glyphst_ui::{
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, ExternalGpuDeviceToken,
-    ExternalTextureAlphaMode, ExternalTextureColorSpace, ExternalTextureFilter, FocusHandle,
-    Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton,
-    PromptLevel, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Size, StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle,
-    Window, anchored, canvas, deferred, div, fill, hsla, linear_color_stop, linear_gradient,
-    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
+    ExternalTextureAlphaMode, ExternalTextureColorEffect, ExternalTextureColorSpace,
+    ExternalTextureFilter, ExternalTextureHandle, FocusHandle, Focusable, FontWeight, Hsla,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
+    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
+    deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
+    rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName as ComponentIconName, IndexPath,
@@ -1014,6 +1016,7 @@ impl mupdf::NativeDevice for ImageCollector {
 }
 
 struct PaintPage {
+    page_idx: usize,
     bounds: Bounds<Pixels>,
     image: Option<Arc<RenderImage>>,
     gpu_texture: Option<GpuPaintTexture>,
@@ -1026,6 +1029,12 @@ struct GpuPaintTexture {
 }
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
+
+struct LinkInvertOverlay {
+    bounds: Bounds<Pixels>,
+    source_bounds: Bounds<f32>,
+    texture: ExternalTextureHandle,
+}
 
 #[derive(Clone, Copy)]
 struct DiffFlash {
@@ -1050,6 +1059,7 @@ struct DiffFlashOverlay {
 
 struct PaintData {
     pages: Vec<PaintPage>,
+    link_invert_overlays: Vec<LinkInvertOverlay>,
     diff_flash_overlays: Vec<DiffFlashOverlay>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
@@ -1672,6 +1682,7 @@ struct DocumentLink {
     page_idx: usize,
     rects: Vec<Rect>,
     target: LinkTarget,
+    pdf_annotation: bool,
 }
 
 #[derive(Clone)]

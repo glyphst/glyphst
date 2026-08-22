@@ -597,7 +597,7 @@ mod tests {
         ReaderPaneSession, ReaderPaneTree, ReaderSplitAxis, ReaderTabKind, ReaderTabSession,
         ReaderTranslationSession,
     };
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext};
 
     fn temporary_pdf_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -735,9 +735,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn final_window_title_bar_close_flushes_live_translation_before_debounce(
-        cx: &mut TestAppContext,
-    ) {
+    fn final_window_close_flushes_live_translation_before_debounce(cx: &mut TestAppContext) {
         let document_path = temporary_pdf_path("close-live-translation");
         write_minimal_pdf(&document_path);
         cx.update(|cx| {
@@ -788,13 +786,12 @@ mod tests {
             .unwrap();
         assert!(cx.read(|cx| cx.global::<LibraryStore>().reader_session().is_none()));
 
+        // The headless platform represents a server-decorated Linux window,
+        // where the compositor owns the title-bar close button. Simulate that
+        // platform close request and exercise the same production pre-close
+        // hook that a real compositor invokes.
         let mut visual = VisualTestContext::from_window(root.into(), cx);
-        let close = visual.update(|window, cx| {
-            _ = window.draw(cx);
-            let size = window.window_bounds().get_bounds().size;
-            point(size.width - px(17.0), px(17.0))
-        });
-        visual.simulate_click(close, Modifiers::default());
+        assert!(visual.simulate_close());
 
         cx.read(|cx| {
             let snapshot = cx

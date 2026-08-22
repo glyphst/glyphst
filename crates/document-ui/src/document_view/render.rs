@@ -443,6 +443,7 @@ impl Render for DocumentView {
                         this.pending_link = Some(link_ix);
                         this.set_hovered_link(Some(link_ix), cx);
                         cx.stop_propagation();
+                        cx.notify();
                         return;
                     }
 
@@ -665,6 +666,9 @@ impl Render for DocumentView {
                     if this.finish_translation_panel_drag(event.position, cx) {
                         cx.stop_propagation();
                     }
+                    if this.pending_link.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_up(
@@ -737,6 +741,25 @@ impl Render for DocumentView {
                                                 {
                                                     eprintln!(
                                                         "failed to present native PDF GPU page: {error:#}"
+                                                    );
+                                                }
+                                            }
+
+                                            for overlay in paint_data.link_invert_overlays {
+                                                if let Err(error) = window
+                                                    .paint_external_texture_with_effect(
+                                                        overlay.bounds,
+                                                        overlay.source_bounds,
+                                                        overlay.texture,
+                                                        1.0,
+                                                        ExternalTextureFilter::Linear,
+                                                        ExternalTextureColorSpace::LinearSrgb,
+                                                        ExternalTextureAlphaMode::Opaque,
+                                                        ExternalTextureColorEffect::InvertRgb,
+                                                    )
+                                                {
+                                                    eprintln!(
+                                                        "failed to paint native PDF Link press effect: {error:#}"
                                                     );
                                                 }
                                             }

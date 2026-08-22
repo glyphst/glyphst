@@ -96,6 +96,7 @@ impl DocumentView {
                 page_idx,
                 rects: vec![bounds],
                 target,
+                pdf_annotation: true,
             });
         }
 
@@ -158,6 +159,7 @@ impl DocumentView {
                     page_idx,
                     rects,
                     target: LinkTarget::External(url),
+                    pdf_annotation: false,
                 });
             }
 
@@ -319,6 +321,87 @@ impl DocumentView {
             })
     }
 
+    pub(super) fn native_link_mapping(
+        page_idx: usize,
+        links: &[DocumentLink],
+        interactions: &[GpuLinkInteraction],
+    ) -> Option<Vec<(usize, usize)>> {
+        let explicit_links = links
+            .iter()
+            .enumerate()
+            .filter(|(_, link)| link.page_idx == page_idx && link.pdf_annotation)
+            .collect::<Vec<_>>();
+        if explicit_links.len() != interactions.len() {
+            return None;
+        }
+
+        let mut claimed = vec![false; explicit_links.len()];
+        let mut mapping = Vec::with_capacity(interactions.len());
+        for (interaction_ix, interaction) in interactions.iter().enumerate() {
+            let explicit_ix =
+                explicit_links
+                    .iter()
+                    .enumerate()
+                    .find_map(|(explicit_ix, (_, link))| {
+                        (!claimed[explicit_ix]
+                            && Self::native_link_regions_match(&interaction.regions, &link.rects))
+                        .then_some(explicit_ix)
+                    })?;
+            claimed[explicit_ix] = true;
+            mapping.push((explicit_links[explicit_ix].0, interaction_ix));
+        }
+        Some(mapping)
+    }
+
+    fn native_link_regions_match(regions: &[[f64; 4]], rects: &[Rect]) -> bool {
+        if regions.len() != rects.len() {
+            return false;
+        }
+
+        let mut claimed = vec![false; rects.len()];
+        regions.iter().all(|region| {
+            let Some(rect_ix) = rects.iter().enumerate().find_map(|(rect_ix, rect)| {
+                (!claimed[rect_ix] && Self::native_link_region_matches_rect(*region, *rect))
+                    .then_some(rect_ix)
+            }) else {
+                return false;
+            };
+            claimed[rect_ix] = true;
+            true
+        })
+    }
+
+    fn native_link_region_matches_rect(region: [f64; 4], rect: Rect) -> bool {
+        const EPSILON: f64 = 0.01;
+        let expected = [
+            f64::from(rect.x0),
+            f64::from(rect.y0),
+            f64::from(rect.x1),
+            f64::from(rect.y1),
+        ];
+        region
+            .into_iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.is_finite() && (actual - expected).abs() <= EPSILON)
+    }
+
+    pub(super) fn native_link_interaction_for_link(
+        &self,
+        link_ix: usize,
+    ) -> Option<&GpuLinkInteraction> {
+        let link = self.links.get(link_ix)?;
+        if !link.pdf_annotation {
+            return None;
+        }
+        let interactions = self.native_gpu_link_interactions(link.page_idx)?;
+        let interaction_ix = Self::native_link_mapping(link.page_idx, &self.links, interactions)?
+            .into_iter()
+            .find_map(|(candidate_link_ix, interaction_ix)| {
+                (candidate_link_ix == link_ix).then_some(interaction_ix)
+            })?;
+        interactions.get(interaction_ix)
+    }
+
     #[ztracing::instrument(skip_all, fields(page_idx))]
     pub(super) fn extract_glyphs(
         display_list: &DisplayList,
@@ -385,6 +468,33 @@ impl DocumentView {
 mod tests {
     use super::*;
 
+    fn document_link(page_idx: usize, rects: Vec<Rect>, pdf_annotation: bool) -> DocumentLink {
+        DocumentLink {
+            page_idx,
+            rects,
+            target: LinkTarget::External("https://example.com".into()),
+            pdf_annotation,
+        }
+    }
+
+    fn interaction(regions: Vec<[f64; 4]>) -> GpuLinkInteraction {
+        GpuLinkInteraction {
+            regions: regions.into(),
+            highlight_mode: GpuLinkHighlightMode::Invert,
+        }
+    }
+
+    fn link_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
+4 0 obj <</Length 0>> stream\nendstream endobj\n\
+5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]/A<</S/URI/URI(https://example.com)>>>> endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF"
+            .to_vec()
+    }
+
     fn outline(title: &str, down: Vec<mupdf::Outline>) -> mupdf::Outline {
         mupdf::Outline {
             title: title.to_string(),
@@ -415,5 +525,69 @@ mod tests {
         assert!(toc[0].has_children);
         assert!(toc[1].has_children);
         assert!(!toc[2].has_children);
+    }
+
+    #[test]
+    fn native_link_mapping_ignores_detected_urls() {
+        let links = vec![
+            document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
+            document_link(0, vec![Rect::new(50.0, 60.0, 70.0, 80.0)], false),
+        ];
+        let interactions = [interaction(vec![[10.0, 20.0, 30.0, 40.0]])];
+
+        assert_eq!(
+            DocumentView::native_link_mapping(0, &links, &interactions),
+            Some(vec![(0, 0)])
+        );
+    }
+
+    #[test]
+    fn native_link_mapping_matches_mupdf_and_engine_canonical_coordinates() {
+        let document = mupdf::Document::from_bytes(&link_pdf(), "application/pdf").unwrap();
+        let page = document.load_page(0).unwrap();
+        let links = DocumentView::extract_explicit_links(&page, 0, 1).unwrap();
+        let interactions = [interaction(vec![[10.0, 70.0, 50.0, 90.0]])];
+
+        assert_eq!(links[0].rects, vec![Rect::new(10.0, 70.0, 50.0, 90.0)]);
+        assert_eq!(
+            DocumentView::native_link_mapping(0, &links, &interactions),
+            Some(vec![(0, 0)])
+        );
+    }
+
+    #[test]
+    fn native_link_mapping_requires_a_geometry_bijection() {
+        let links = vec![
+            document_link(0, vec![Rect::new(50.0, 60.0, 70.0, 80.0)], true),
+            document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
+        ];
+        let interactions = [
+            interaction(vec![[10.0, 20.0, 30.0, 40.0]]),
+            interaction(vec![[50.0, 60.0, 70.0, 80.0]]),
+        ];
+
+        assert_eq!(
+            DocumentView::native_link_mapping(0, &links, &interactions),
+            Some(vec![(1, 0), (0, 1)])
+        );
+        assert!(
+            DocumentView::native_link_mapping(
+                0,
+                &links,
+                &[interaction(vec![[10.0, 20.0, 31.0, 40.0]])]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn native_link_mapping_requires_all_explicit_annotations() {
+        let links = [document_link(
+            0,
+            vec![Rect::new(10.0, 20.0, 30.0, 40.0)],
+            true,
+        )];
+
+        assert!(DocumentView::native_link_mapping(0, &links, &[]).is_none());
     }
 }
