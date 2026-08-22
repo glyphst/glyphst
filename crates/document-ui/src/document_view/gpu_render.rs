@@ -109,7 +109,12 @@ impl GpuPdfState {
             self.rendered.remove(&page);
         }
 
-        self.prune_states(visible, MAX_RETAINED_GPU_PAGES, |state| {
+        let incoming_visible = visible
+            .iter()
+            .filter(|page| !self.pages.contains_key(page))
+            .count();
+        let retained_limit = MAX_RETAINED_GPU_PAGES.saturating_sub(incoming_visible);
+        self.prune_states(visible, retained_limit, |state| {
             matches!(state, GpuPageState::Ready(_))
         });
         self.prune_states(visible, MAX_RETAINED_GPU_DIAGNOSTICS, |state| {
@@ -148,6 +153,19 @@ impl GpuPdfState {
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
         }
+    }
+
+    fn has_preparation_capacity(&self) -> bool {
+        self.pages
+            .values()
+            .filter(|state| {
+                matches!(
+                    state,
+                    GpuPageState::Preparing { .. } | GpuPageState::Ready(_)
+                )
+            })
+            .count()
+            < MAX_RETAINED_GPU_PAGES
     }
 }
 
@@ -250,6 +268,9 @@ impl DocumentView {
             | Some(GpuPageState::Fallback(_))
             | Some(GpuPageState::Failed(_)) => None,
             None => {
+                if !self.gpu_pdf.has_preparation_capacity() {
+                    return None;
+                }
                 self.start_native_gpu_page_prepare(
                     page,
                     Arc::clone(&document),
