@@ -264,6 +264,19 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ));
+        if preparation.retained_form_resources > 0 {
+            section = section.child(reading(
+                "FORMS",
+                format!(
+                    "{} resource · {} instance · {} stored node · {} expanded node",
+                    preparation.retained_form_resources,
+                    preparation.retained_form_instances,
+                    preparation.retained_subscene_nodes,
+                    preparation.expanded_scene_nodes
+                ),
+                FOREGROUND,
+            ));
+        }
         if preparation.analytic_bytes > 0 {
             section = section.child(reading(
                 "ANALYTIC",
