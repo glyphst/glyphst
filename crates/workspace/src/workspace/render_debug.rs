@@ -277,6 +277,21 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 FOREGROUND,
             ));
         }
+        if preparation.retained_transparency_groups > 0
+            || preparation.retained_soft_mask_resources > 0
+            || preparation.retained_soft_mask_instances > 0
+        {
+            section = section.child(reading(
+                "GROUPS",
+                format!(
+                    "{} group · {} mask resource · {} mask instance",
+                    preparation.retained_transparency_groups,
+                    preparation.retained_soft_mask_resources,
+                    preparation.retained_soft_mask_instances
+                ),
+                FOREGROUND,
+            ));
+        }
         if preparation.analytic_bytes > 0 {
             section = section.child(reading(
                 "ANALYTIC",
@@ -372,6 +387,28 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                     gpu.stencil_draws
                 ),
                 FOREGROUND,
+            ))
+            .child(reading(
+                "COMPOSITOR",
+                format!(
+                    "{} offscreen · {} mask · {} composite",
+                    gpu.offscreen_passes, gpu.mask_passes, gpu.composite_passes
+                ),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "TRANSIENT",
+                format!(
+                    "{} peak · {} resident · {} reuse",
+                    format_bytes(gpu.transient_peak_bytes),
+                    format_bytes(gpu.transient_resident_bytes),
+                    gpu.transient_pool_reuses
+                ),
+                if gpu.transient_pool_reuses > 0 {
+                    GOOD
+                } else {
+                    FOREGROUND
+                },
             ))
             .child(reading(
                 "REUSE",
