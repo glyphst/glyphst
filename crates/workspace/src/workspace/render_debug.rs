@@ -264,6 +264,16 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ));
+        if preparation.render_bundle_runs > 0 {
+            section = section.child(reading(
+                "BUNDLES",
+                format!(
+                    "{} run · {} ordered op",
+                    preparation.render_bundle_runs, preparation.render_bundle_operations
+                ),
+                GOOD,
+            ));
+        }
         if preparation.retained_form_resources > 0 {
             section = section.child(reading(
                 "FORMS",
@@ -318,6 +328,20 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 FOREGROUND,
             ));
         }
+        if preparation.hairline_bytes > 0 {
+            section = section.child(reading(
+                "HAIRLINES",
+                format!(
+                    "{} · {} batch · {} LOD · {} primitive · {} draw",
+                    format_bytes(preparation.hairline_bytes),
+                    preparation.hairline_batches,
+                    preparation.hairline_lod_levels,
+                    preparation.hairline_primitives,
+                    preparation.hairline_draws
+                ),
+                FOREGROUND,
+            ));
+        }
         if preparation.image_textures > 0
             || preparation.alpha_textures > 0
             || preparation.gradient_tables > 0
@@ -368,10 +392,12 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "GPU WORK",
                 format!(
-                    "{} pass · {} cb · {} vec · {} grad · {} img",
+                    "{} pass · {} cb · {} vec · {} hair · {} bundle · {} grad · {} img",
                     gpu.passes_executed,
                     gpu.command_buffers,
                     gpu.vector_batches,
+                    gpu.hairline_batches,
+                    gpu.render_bundle_runs,
                     gpu.gradient_draws,
                     gpu.image_draws
                 ),
