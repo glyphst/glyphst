@@ -60,10 +60,10 @@ use glyphst_pdf::{
     ReloadDisposition, RetainedDisplayList,
 };
 use glyphst_pdf_gpu::{
-    CancellationToken as GpuCancellationToken, GpuFallbackDiagnostic, GpuFallbackSource,
-    GpuLinkHighlightMode, GpuLinkInteraction, GpuPageRegion, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats,
-    PreparedGpuPage,
+    CancellationToken as GpuCancellationToken, GpuDestinationView, GpuFallbackDiagnostic,
+    GpuFallbackSource, GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction,
+    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
+    GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,

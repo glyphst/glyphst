@@ -881,6 +881,41 @@ fn rotation_point_and_rect_transforms_round_trip() {
 }
 
 #[test]
+fn native_destination_partial_axes_follow_reader_rotation_without_filling_nulls() {
+    let bounds = Rect::new(0.0, 0.0, 100.0, 200.0);
+    let cases = [
+        (DocumentRotation::Degrees0, (Some(12.0), Some(34.0))),
+        (DocumentRotation::Degrees90, (Some(166.0), Some(12.0))),
+        (DocumentRotation::Degrees180, (Some(88.0), Some(166.0))),
+        (DocumentRotation::Degrees270, (Some(34.0), Some(88.0))),
+    ];
+    for (rotation, expected) in cases {
+        assert_eq!(
+            DocumentView::transformed_destination_axes(bounds, rotation, Some(12.0), Some(34.0)),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        DocumentView::transformed_destination_axes(
+            bounds,
+            DocumentRotation::Degrees90,
+            Some(12.0),
+            None
+        ),
+        Some((None, Some(12.0)))
+    );
+    assert_eq!(
+        DocumentView::transformed_destination_axes(
+            bounds,
+            DocumentRotation::Degrees90,
+            None,
+            Some(34.0)
+        ),
+        Some((Some(166.0), None))
+    );
+}
+
+#[test]
 fn rotation_render_matrix_matches_view_transform() {
     let page_bounds = Rect::new(10.0, 20.0, 110.0, 220.0);
     let point = mupdf::Point { x: 35.0, y: 70.0 };

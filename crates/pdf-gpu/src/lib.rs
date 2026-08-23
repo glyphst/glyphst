@@ -11,8 +11,9 @@ use glyphst_core::DocumentRotation;
 use glyphst_pdf::DocumentSnapshot;
 pub use glyphst_pdf_engine::CancellationToken;
 use glyphst_pdf_engine::{
-    CompileOptions, CompiledPage, DiagnosticSeverity, Document, DocumentSource, Engine, FeatureId,
-    LayerConfiguration, LinkHighlightMode, OpenOptions, PageIndex, Password, Rect,
+    Action as EngineAction, CompileOptions, CompiledPage, Destination as EngineDestination,
+    DestinationView as EngineDestinationView, DiagnosticSeverity, Document, DocumentSource, Engine,
+    FeatureId, LayerConfiguration, LinkHighlightMode, OpenOptions, PageIndex, Password, Rect,
     SupportDiagnostic, Transform,
 };
 use glyphst_pdf_render_wgpu::{
@@ -70,6 +71,42 @@ pub enum GpuLinkHighlightMode {
     Invert,
 }
 
+/// Safe action executed for a Link on a native page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GpuLinkAction {
+    GoTo { page: u32, view: GpuDestinationView },
+    Uri(Arc<str>),
+    Named(GpuNamedAction),
+    Sequence(Arc<[Self]>),
+}
+
+/// Canonical viewport operation for an explicit native-page destination.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GpuDestinationView {
+    Xyz {
+        x: Option<f64>,
+        y: Option<f64>,
+        zoom: Option<f32>,
+    },
+    FitWidth {
+        top: Option<f64>,
+    },
+    FitHeight {
+        left: Option<f64>,
+    },
+    FitPage,
+    FitRectangle([f64; 4]),
+}
+
+/// Standard safe `/Named` actions defined for document navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuNamedAction {
+    NextPage,
+    PreviousPage,
+    FirstPage,
+    LastPage,
+}
+
 /// Engine-owned Link interaction geometry in canonical page coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GpuLinkInteraction {
@@ -78,6 +115,7 @@ pub struct GpuLinkInteraction {
     /// Exact ordered quadrilaterals `[x0, y0, ... x3, y3]` for hit testing.
     pub regions: Arc<[[f64; 8]]>,
     pub highlight_mode: GpuLinkHighlightMode,
+    pub action: GpuLinkAction,
 }
 
 impl GpuLinkInteraction {
@@ -404,14 +442,125 @@ fn compiled_link_interactions(
                     ]
                 })
                 .collect::<Vec<_>>();
+            let action = compiled_link_action(&link.action)?;
             Ok(GpuLinkInteraction {
                 annotation_bounds,
                 regions: regions.into(),
                 highlight_mode,
+                action,
             })
         })
         .collect::<std::result::Result<Vec<_>, _>>()
         .map(Arc::from)
+}
+
+fn compiled_link_action(
+    action: &EngineAction,
+) -> std::result::Result<GpuLinkAction, GpuFallbackDiagnostic> {
+    match action {
+        EngineAction::GoTo(EngineDestination::Page { page, view }) => Ok(GpuLinkAction::GoTo {
+            page: page.get(),
+            view: compiled_destination_view(view)?,
+        }),
+        EngineAction::GoTo(EngineDestination::Named(_)) => Err(application_link_action_fallback(
+            "application-named-destination-unresolved",
+            "a native Link refers to a named destination that the engine has not resolved to an explicit page view",
+        )),
+        EngineAction::Uri(uri) => Ok(GpuLinkAction::Uri(Arc::from(uri.as_str()))),
+        EngineAction::Named(name) => {
+            let action = match name.as_str() {
+                "NextPage" => GpuNamedAction::NextPage,
+                "PrevPage" => GpuNamedAction::PreviousPage,
+                "FirstPage" => GpuNamedAction::FirstPage,
+                "LastPage" => GpuNamedAction::LastPage,
+                _ => {
+                    return Err(application_link_action_fallback(
+                        "application-named-action-unsupported",
+                        "a native Link uses a Named action outside the standard page-navigation set",
+                    ));
+                }
+            };
+            Ok(GpuLinkAction::Named(action))
+        }
+        EngineAction::Sequence(actions) if actions.is_empty() => {
+            Err(application_link_action_fallback(
+                "application-link-action-sequence-empty",
+                "a native Link contains an empty action sequence",
+            ))
+        }
+        EngineAction::Sequence(actions) => actions
+            .iter()
+            .map(compiled_link_action)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(Arc::from)
+            .map(GpuLinkAction::Sequence),
+        EngineAction::Unsupported { .. } => Err(application_link_action_fallback(
+            "application-link-action-unsupported",
+            "a native Link action is not safe and executable by the presentation adapter",
+        )),
+    }
+}
+
+fn compiled_destination_view(
+    view: &EngineDestinationView,
+) -> std::result::Result<GpuDestinationView, GpuFallbackDiagnostic> {
+    match view {
+        EngineDestinationView::Xyz { x, y, zoom } => Ok(GpuDestinationView::Xyz {
+            x: application_destination_coordinate(*x)?,
+            y: application_destination_coordinate(*y)?,
+            zoom: *zoom,
+        }),
+        EngineDestinationView::FitWidth { top } => Ok(GpuDestinationView::FitWidth {
+            top: application_destination_coordinate(*top)?,
+        }),
+        EngineDestinationView::FitHeight { left } => Ok(GpuDestinationView::FitHeight {
+            left: application_destination_coordinate(*left)?,
+        }),
+        EngineDestinationView::FitPage => Ok(GpuDestinationView::FitPage),
+        EngineDestinationView::FitRectangle(rect) => Ok(GpuDestinationView::FitRectangle([
+            required_application_destination_coordinate(rect.x0)?,
+            required_application_destination_coordinate(rect.y0)?,
+            required_application_destination_coordinate(rect.x1)?,
+            required_application_destination_coordinate(rect.y1)?,
+        ])),
+        EngineDestinationView::FitBoundingBox
+        | EngineDestinationView::FitBoundingBoxWidth { .. }
+        | EngineDestinationView::FitBoundingBoxHeight { .. } => {
+            Err(application_link_action_fallback(
+                "application-destination-content-bounds-unavailable",
+                "a native Link destination requires the target page's exact content bounding box",
+            ))
+        }
+    }
+}
+
+fn application_destination_coordinate(
+    coordinate: Option<f64>,
+) -> std::result::Result<Option<f64>, GpuFallbackDiagnostic> {
+    coordinate
+        .map(required_application_destination_coordinate)
+        .transpose()
+}
+
+fn required_application_destination_coordinate(
+    coordinate: f64,
+) -> std::result::Result<f64, GpuFallbackDiagnostic> {
+    if !(coordinate as f32).is_finite() {
+        return Err(application_link_action_fallback(
+            "application-destination-coordinate-out-of-range",
+            "a native Link destination coordinate exceeds the reader's finite f32 page space",
+        ));
+    }
+    Ok(coordinate)
+}
+
+fn application_link_action_fallback(code: &str, message: &str) -> GpuFallbackDiagnostic {
+    GpuFallbackDiagnostic {
+        feature: FeatureId::Links,
+        code: code.into(),
+        message: message.into(),
+        source: GpuFallbackSource::Application,
+    }
 }
 
 /// Same-device PDF renderer tied to one GPUI recovery generation.
@@ -865,6 +1014,23 @@ trailer <</Root 1 0 R>>\n%%EOF"
         )
     }
 
+    fn link_pdf_with_action(action: &str) -> Arc<[u8]> {
+        Arc::from(
+            format!(
+                "%PDF-1.4\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
+4 0 obj <</Length 0>> stream\nendstream endobj\n\
+5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]/H/N{action}>> endobj\n\
+6 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 7 0 R>> endobj\n\
+7 0 obj <</Length 0>> stream\nendstream endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF"
+            )
+            .into_bytes(),
+        )
+    }
+
     fn multipage_pdf(page_count: usize) -> Arc<[u8]> {
         let kids = (0..page_count)
             .map(|index| format!("{} 0 R", index + 3))
@@ -946,9 +1112,115 @@ trailer <</Root 1 0 R>>\n%%EOF"
                     annotation_bounds: [10.0, 70.0, 50.0, 90.0],
                     regions: Arc::from([[10.0, 70.0, 50.0, 70.0, 50.0, 90.0, 10.0, 90.0]]),
                     highlight_mode: expected_mode,
+                    action: GpuLinkAction::Uri(Arc::from("https://example.com")),
                 }]
             );
         }
+    }
+
+    #[test]
+    fn compiled_link_interactions_own_partial_destinations_and_ordered_actions() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "partial-destination.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action("/Dest[6 0 R/XYZ 12 null 2]"),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "unexpected diagnostics: {:#?}",
+            page.support().diagnostics()
+        );
+        let interactions = compiled_link_interactions(&page).expect("retain interactions");
+        assert_eq!(
+            interactions[0].action,
+            GpuLinkAction::GoTo {
+                page: 1,
+                view: GpuDestinationView::Xyz {
+                    x: Some(12.0),
+                    y: None,
+                    zoom: Some(2.0),
+                },
+            }
+        );
+
+        let snapshot = DocumentSnapshot::from_bytes(
+            "action-chain.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action(
+                "/A<</S/Named/N/FirstPage/Next[<</S/Named/N/NextPage>><</S/Named/N/LastPage>>]>>",
+            ),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "unexpected diagnostics: {:#?}",
+            page.support().diagnostics()
+        );
+        let interactions = compiled_link_interactions(&page).expect("retain interactions");
+        assert_eq!(
+            interactions[0].action,
+            GpuLinkAction::Sequence(Arc::from([
+                GpuLinkAction::Named(GpuNamedAction::FirstPage),
+                GpuLinkAction::Named(GpuNamedAction::NextPage),
+                GpuLinkAction::Named(GpuNamedAction::LastPage),
+            ]))
+        );
+    }
+
+    #[test]
+    fn content_bounding_box_destinations_have_a_structured_application_fallback() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "fit-bounding-box.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action("/Dest[6 0 R/FitB]"),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "unexpected diagnostics: {:#?}",
+            page.support().diagnostics()
+        );
+        let diagnostic = compiled_link_interactions(&page)
+            .expect_err("FitB requires an exact target content bound");
+        assert_eq!(diagnostic.feature, FeatureId::Links);
+        assert_eq!(
+            diagnostic.code,
+            "application-destination-content-bounds-unavailable"
+        );
+        assert_eq!(diagnostic.source, GpuFallbackSource::Application);
+
+        let snapshot = DocumentSnapshot::from_bytes(
+            "large-destination.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action(
+                "/Dest[6 0 R/XYZ 9999999999999999999999999999999999999999 null null]",
+            ),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "unexpected diagnostics: {:#?}",
+            page.support().diagnostics()
+        );
+        let diagnostic = compiled_link_interactions(&page)
+            .expect_err("the f32 reader boundary must reject an oversized coordinate");
+        assert_eq!(
+            diagnostic.code,
+            "application-destination-coordinate-out-of-range"
+        );
     }
 
     #[test]

@@ -475,6 +475,7 @@ mod tests {
             annotation_bounds,
             regions: Arc::from([[x0, y0, x1, y0, x1, y1, x0, y1]]),
             highlight_mode: GpuLinkHighlightMode::Invert,
+            action: GpuLinkAction::Uri(Arc::from("https://example.com")),
         }
     }
 
@@ -563,6 +564,7 @@ trailer <</Root 1 0 R>>\n%%EOF"
                 [50.0, 55.0, 88.0, 55.0, 86.0, 76.0, 52.0, 76.0],
             ]),
             highlight_mode: GpuLinkHighlightMode::Invert,
+            action: GpuLinkAction::Uri(Arc::from("https://example.com")),
         }];
 
         assert_eq!(

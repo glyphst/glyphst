@@ -123,7 +123,7 @@ impl DocumentView {
         Self::page_dimensions_for(&self.pages[page_idx], self.rotation)
     }
 
-    fn page_to_view_matrix(page_bounds: Rect, rotation: DocumentRotation) -> Matrix {
+    pub(super) fn page_to_view_matrix(page_bounds: Rect, rotation: DocumentRotation) -> Matrix {
         Self::render_matrix(
             page_bounds,
             rotation,
