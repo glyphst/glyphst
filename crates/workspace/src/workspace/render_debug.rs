@@ -269,10 +269,15 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "RETAINED",
                 format!(
-                    "{} op · {} vec batch · {} LOD · {} clip",
+                    "{} op · {} vec batch · {} LOD{} · {} clip",
                     preparation.retained_operations,
                     preparation.vector_batches,
                     preparation.vector_lod_levels,
+                    if preparation.vector_lod_compacted {
+                        " strict-only"
+                    } else {
+                        ""
+                    },
                     preparation.unique_clip_paths
                 ),
                 FOREGROUND,
@@ -337,6 +342,16 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                     preparation.vector_vertices,
                     preparation.vector_triangle_references,
                     preparation.vector_instances
+                ),
+                FOREGROUND,
+            ));
+        }
+        if preparation.hairline_geometry_records > 0 {
+            section = section.child(reading(
+                "STROKE GEOM",
+                format!(
+                    "{} geometry · {} chunk",
+                    preparation.hairline_geometry_records, preparation.hairline_chunks
                 ),
                 FOREGROUND,
             ));
