@@ -3,6 +3,10 @@ use super::*;
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
+
+fn surface_reservation_bytes(output_bytes: u64, retained_source_bytes: u64, settled: bool) -> u64 {
+    output_bytes.saturating_add(if settled { 0 } else { retained_source_bytes })
+}
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
@@ -538,10 +542,17 @@ impl DocumentView {
             return Some(gpu_paint_texture(key, image_bounds, texture));
         }
 
-        if let Err(required) = self
-            .gpu_pdf
-            .reserve_surface(page, surface_region.byte_len())
-        {
+        let retained_source_bytes = if settled {
+            0
+        } else {
+            self.gpu_pdf
+                .rendered
+                .get(&page)
+                .map_or(0, |rendered| rendered.texture.retained_source_byte_len())
+        };
+        let requested_surface_bytes =
+            surface_reservation_bytes(surface_region.byte_len(), retained_source_bytes, settled);
+        if let Err(required) = self.gpu_pdf.reserve_surface(page, requested_surface_bytes) {
             self.gpu_pdf.surface_failures.insert(
                 page,
                 format!(
@@ -979,5 +990,12 @@ mod tests {
         );
         assert_eq!(bounds.origin, point(px(200.0), px(300.0)));
         assert_eq!(bounds.size, size(px(300.0), px(400.0)));
+    }
+
+    #[test]
+    fn motion_surface_reservation_counts_the_exact_reprojection_source() {
+        assert_eq!(surface_reservation_bytes(4_096, 8_192, false), 12_288);
+        assert_eq!(surface_reservation_bytes(4_096, 8_192, true), 4_096);
+        assert_eq!(surface_reservation_bytes(u64::MAX, 1, false), u64::MAX);
     }
 }

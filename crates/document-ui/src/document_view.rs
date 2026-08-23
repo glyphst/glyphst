@@ -528,6 +528,7 @@ pub struct GpuPageRenderDebugSnapshot {
     pub vector_batches: u64,
     pub procedural_stroke_batches: u64,
     pub render_bundle_runs: u64,
+    pub reprojected_frame: bool,
     pub gradient_draws: u64,
     pub image_draws: u64,
     pub reused_tiles: u64,

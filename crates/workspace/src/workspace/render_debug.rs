@@ -488,10 +488,15 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "REUSE",
                 format!(
-                    "{} reused · {} rendered · {} dirty · refine {} · pool {} · {} clip · gen {}",
+                    "{} reused · {} rendered · {} dirty · source {} · refine {} · pool {} · {} clip · gen {}",
                     gpu.reused_tiles,
                     gpu.rendered_tiles,
                     gpu.dirty_tiles,
+                    if gpu.reprojected_frame {
+                        "reprojected"
+                    } else {
+                        "live"
+                    },
                     if gpu.refinement_pending {
                         "pending"
                     } else {

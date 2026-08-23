@@ -112,6 +112,7 @@ impl DocumentView {
             vector_batches: stats.vector_batches,
             procedural_stroke_batches: stats.hairline_batches,
             render_bundle_runs: stats.render_bundle_runs,
+            reprojected_frame: stats.reprojected_frame,
             gradient_draws: stats.gradient_draws,
             image_draws: stats.image_draws,
             reused_tiles: stats.reused_tiles,

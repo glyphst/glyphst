@@ -1361,7 +1361,15 @@ impl GpuPageTexture {
     }
 
     pub fn byte_len(&self) -> u64 {
-        self.region.byte_len()
+        self.region.byte_len().saturating_add(
+            self.incremental
+                .additional_retained_texture_bytes(self.view.as_ref()),
+        )
+    }
+
+    /// Exact presentation-source bytes retained for future motion frames.
+    pub fn retained_source_byte_len(&self) -> u64 {
+        self.incremental.retained_texture_bytes()
     }
 
     pub fn refinement_pending(&self) -> bool {
