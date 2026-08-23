@@ -102,10 +102,8 @@ impl DocumentView {
             return Vec::new();
         };
 
-        interaction
-            .regions
-            .iter()
-            .filter_map(|region| Self::native_link_region_rect(*region))
+        Self::native_link_region_rect(interaction.annotation_bounds)
+            .into_iter()
             .map(|rect| self.pdf_rect_to_screen(link.page_idx, rect, page.bounds))
             .filter_map(|bounds| Self::external_texture_subrect(texture.bounds, bounds))
             .map(|(bounds, source_bounds)| LinkInvertOverlay {

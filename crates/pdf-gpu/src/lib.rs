@@ -56,9 +56,8 @@ impl GpuFallbackDiagnostic {
         Self {
             feature: FeatureId::Links,
             code: "application-link-geometry-mismatch".into(),
-            message:
-                "native Link interaction regions do not map one-for-one to the reader hit regions"
-                    .into(),
+            message: "native Link annotation rectangles do not map one-for-one to the reader Links"
+                .into(),
             source: GpuFallbackSource::Application,
         }
     }
@@ -74,8 +73,65 @@ pub enum GpuLinkHighlightMode {
 /// Engine-owned Link interaction geometry in canonical page coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GpuLinkInteraction {
-    pub regions: Arc<[[f64; 4]]>,
+    /// Canonical annotation `/Rect`; PDF invert highlighting applies here.
+    pub annotation_bounds: [f64; 4],
+    /// Exact ordered quadrilaterals `[x0, y0, ... x3, y3]` for hit testing.
+    pub regions: Arc<[[f64; 8]]>,
     pub highlight_mode: GpuLinkHighlightMode,
+}
+
+impl GpuLinkInteraction {
+    /// Whether canonical page coordinates lie in any exact activation quad.
+    #[must_use]
+    pub fn contains_point(&self, x: f64, y: f64) -> bool {
+        x.is_finite()
+            && y.is_finite()
+            && self
+                .regions
+                .iter()
+                .any(|region| point_in_quad(*region, x, y))
+    }
+}
+
+fn point_in_quad(region: [f64; 8], x: f64, y: f64) -> bool {
+    let points = [
+        [region[0], region[1]],
+        [region[2], region[3]],
+        [region[4], region[5]],
+        [region[6], region[7]],
+    ];
+    if !points.iter().flatten().all(|value| value.is_finite()) {
+        return false;
+    }
+    let scale = points
+        .iter()
+        .flatten()
+        .copied()
+        .chain([x, y])
+        .map(f64::abs)
+        .fold(1.0_f64, f64::max);
+    let points = points.map(|point| [point[0] / scale, point[1] / scale]);
+    let x = x / scale;
+    let y = y / scale;
+    let epsilon = f64::EPSILON * 64.0;
+    let mut inside = false;
+    for index in 0..4 {
+        let first = points[index];
+        let second = points[(index + 1) % 4];
+        let cross =
+            (second[0] - first[0]) * (y - first[1]) - (second[1] - first[1]) * (x - first[0]);
+        let dot = (x - first[0]) * (x - second[0]) + (y - first[1]) * (y - second[1]);
+        if cross.abs() <= epsilon && dot <= epsilon {
+            return true;
+        }
+        let crosses = (first[1] > y) != (second[1] > y);
+        if crosses {
+            let crossing_x =
+                (second[0] - first[0]) * (y - first[1]) / (second[1] - first[1]) + first[0];
+            inside ^= x < crossing_x;
+        }
+    }
+    inside
 }
 
 impl From<&SupportDiagnostic> for GpuFallbackDiagnostic {
@@ -332,15 +388,24 @@ fn compiled_link_interactions(
                     });
                 }
             };
+            let annotation_bounds = [
+                link.bounds.x0,
+                link.bounds.y0,
+                link.bounds.x1,
+                link.bounds.y1,
+            ];
             let regions = link
                 .quads
                 .iter()
                 .map(|quad| {
-                    let bounds = quad.bounds();
-                    [bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+                    [
+                        quad.p0.x, quad.p0.y, quad.p1.x, quad.p1.y, quad.p2.x, quad.p2.y,
+                        quad.p3.x, quad.p3.y,
+                    ]
                 })
                 .collect::<Vec<_>>();
             Ok(GpuLinkInteraction {
+                annotation_bounds,
                 regions: regions.into(),
                 highlight_mode,
             })
@@ -782,6 +847,10 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
     }
 
     fn link_pdf(highlight: &str) -> Arc<[u8]> {
+        link_pdf_with_geometry(highlight, "[10 10 50 30]", "")
+    }
+
+    fn link_pdf_with_geometry(highlight: &str, rect: &str, quad_points: &str) -> Arc<[u8]> {
         Arc::from(
             format!(
                 "%PDF-1.4\n\
@@ -789,7 +858,7 @@ trailer <</Root 1 0 R>>\n%%EOF"[..],
 2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
 3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
 4 0 obj <</Length 0>> stream\nendstream endobj\n\
-5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]{highlight}/A<</S/URI/URI(https://example.com)>>>> endobj\n\
+5 0 obj <</Type/Annot/Subtype/Link/Rect{rect}{quad_points}/Border[0 0 0]{highlight}/A<</S/URI/URI(https://example.com)>>>> endobj\n\
 trailer <</Root 1 0 R>>\n%%EOF"
             )
             .into_bytes(),
@@ -874,11 +943,40 @@ trailer <</Root 1 0 R>>\n%%EOF"
             assert_eq!(
                 interactions.as_ref(),
                 &[GpuLinkInteraction {
-                    regions: Arc::from([[10.0, 70.0, 50.0, 90.0]]),
+                    annotation_bounds: [10.0, 70.0, 50.0, 90.0],
+                    regions: Arc::from([[10.0, 70.0, 50.0, 70.0, 50.0, 90.0, 10.0, 90.0]]),
                     highlight_mode: expected_mode,
                 }]
             );
         }
+    }
+
+    #[test]
+    fn compiled_link_interactions_hit_test_exact_multi_quads() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "link-quads.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_geometry(
+                "/H/N",
+                "[10 10 90 50]",
+                "/QuadPoints[10 10 40 10 38 20 12 20 50 30 90 30 88 50 52 50]",
+            ),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        let interactions = compiled_link_interactions(&page).expect("retain interactions");
+        let interaction = &interactions[0];
+
+        assert_eq!(interaction.annotation_bounds, [10.0, 50.0, 90.0, 90.0]);
+        assert_eq!(interaction.regions.len(), 2);
+        assert!(interaction.contains_point(20.0, 85.0));
+        assert!(interaction.contains_point(70.0, 60.0));
+        assert!(interaction.contains_point(12.0, 80.0));
+        assert!(!interaction.contains_point(10.5, 80.5));
+        assert!(!interaction.contains_point(45.0, 75.0));
+        assert!(!interaction.contains_point(f64::NAN, 85.0));
     }
 
     #[test]

@@ -50,14 +50,35 @@ impl DocumentView {
     pub(super) fn link_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
+        let native_interactions = self.native_gpu_link_interactions(page_idx);
+        let native_mapping = native_interactions.and_then(|interactions| {
+            Self::native_link_mapping(page_idx, &self.links, interactions)
+        });
 
         self.links.iter().enumerate().find_map(|(link_ix, link)| {
-            (link.page_idx == page_idx
-                && link
-                    .rects
-                    .iter()
-                    .any(|rect| rect.contains(pdf_point.x, pdf_point.y)))
-            .then_some(link_ix)
+            if link.page_idx != page_idx {
+                return None;
+            }
+            let native_hit = native_mapping.as_ref().and_then(|mapping| {
+                let interaction_ix =
+                    mapping
+                        .iter()
+                        .find_map(|(candidate_link_ix, interaction_ix)| {
+                            (*candidate_link_ix == link_ix).then_some(*interaction_ix)
+                        })?;
+                native_interactions
+                    .and_then(|interactions| interactions.get(interaction_ix))
+                    .map(|interaction| {
+                        interaction.contains_point(f64::from(pdf_point.x), f64::from(pdf_point.y))
+                    })
+            });
+            native_hit
+                .unwrap_or_else(|| {
+                    link.rects
+                        .iter()
+                        .any(|rect| rect.contains(pdf_point.x, pdf_point.y))
+                })
+                .then_some(link_ix)
         })
     }
 

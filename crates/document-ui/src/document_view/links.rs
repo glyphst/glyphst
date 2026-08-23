@@ -344,7 +344,10 @@ impl DocumentView {
                     .enumerate()
                     .find_map(|(explicit_ix, (_, link))| {
                         (!claimed[explicit_ix]
-                            && Self::native_link_regions_match(&interaction.regions, &link.rects))
+                            && Self::native_link_annotation_matches_reader(
+                                interaction.annotation_bounds,
+                                &link.rects,
+                            ))
                         .then_some(explicit_ix)
                     })?;
             claimed[explicit_ix] = true;
@@ -353,22 +356,11 @@ impl DocumentView {
         Some(mapping)
     }
 
-    fn native_link_regions_match(regions: &[[f64; 4]], rects: &[Rect]) -> bool {
-        if regions.len() != rects.len() {
+    fn native_link_annotation_matches_reader(annotation_bounds: [f64; 4], rects: &[Rect]) -> bool {
+        let [rect] = rects else {
             return false;
-        }
-
-        let mut claimed = vec![false; rects.len()];
-        regions.iter().all(|region| {
-            let Some(rect_ix) = rects.iter().enumerate().find_map(|(rect_ix, rect)| {
-                (!claimed[rect_ix] && Self::native_link_region_matches_rect(*region, *rect))
-                    .then_some(rect_ix)
-            }) else {
-                return false;
-            };
-            claimed[rect_ix] = true;
-            true
-        })
+        };
+        Self::native_link_region_matches_rect(annotation_bounds, *rect)
     }
 
     fn native_link_region_matches_rect(region: [f64; 4], rect: Rect) -> bool {
@@ -477,9 +469,11 @@ mod tests {
         }
     }
 
-    fn interaction(regions: Vec<[f64; 4]>) -> GpuLinkInteraction {
+    fn interaction(annotation_bounds: [f64; 4]) -> GpuLinkInteraction {
+        let [x0, y0, x1, y1] = annotation_bounds;
         GpuLinkInteraction {
-            regions: regions.into(),
+            annotation_bounds,
+            regions: Arc::from([[x0, y0, x1, y0, x1, y1, x0, y1]]),
             highlight_mode: GpuLinkHighlightMode::Invert,
         }
     }
@@ -533,7 +527,7 @@ trailer <</Root 1 0 R>>\n%%EOF"
             document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
             document_link(0, vec![Rect::new(50.0, 60.0, 70.0, 80.0)], false),
         ];
-        let interactions = [interaction(vec![[10.0, 20.0, 30.0, 40.0]])];
+        let interactions = [interaction([10.0, 20.0, 30.0, 40.0])];
 
         assert_eq!(
             DocumentView::native_link_mapping(0, &links, &interactions),
@@ -546,9 +540,31 @@ trailer <</Root 1 0 R>>\n%%EOF"
         let document = mupdf::Document::from_bytes(&link_pdf(), "application/pdf").unwrap();
         let page = document.load_page(0).unwrap();
         let links = DocumentView::extract_explicit_links(&page, 0, 1).unwrap();
-        let interactions = [interaction(vec![[10.0, 70.0, 50.0, 90.0]])];
+        let interactions = [interaction([10.0, 70.0, 50.0, 90.0])];
 
         assert_eq!(links[0].rects, vec![Rect::new(10.0, 70.0, 50.0, 90.0)]);
+        assert_eq!(
+            DocumentView::native_link_mapping(0, &links, &interactions),
+            Some(vec![(0, 0)])
+        );
+    }
+
+    #[test]
+    fn native_link_mapping_reconciles_annotation_rect_not_quad_count() {
+        let links = [document_link(
+            0,
+            vec![Rect::new(10.0, 20.0, 90.0, 80.0)],
+            true,
+        )];
+        let interactions = [GpuLinkInteraction {
+            annotation_bounds: [10.0, 20.0, 90.0, 80.0],
+            regions: Arc::from([
+                [12.0, 22.0, 42.0, 22.0, 40.0, 35.0, 14.0, 35.0],
+                [50.0, 55.0, 88.0, 55.0, 86.0, 76.0, 52.0, 76.0],
+            ]),
+            highlight_mode: GpuLinkHighlightMode::Invert,
+        }];
+
         assert_eq!(
             DocumentView::native_link_mapping(0, &links, &interactions),
             Some(vec![(0, 0)])
@@ -562,8 +578,8 @@ trailer <</Root 1 0 R>>\n%%EOF"
             document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
         ];
         let interactions = [
-            interaction(vec![[10.0, 20.0, 30.0, 40.0]]),
-            interaction(vec![[50.0, 60.0, 70.0, 80.0]]),
+            interaction([10.0, 20.0, 30.0, 40.0]),
+            interaction([50.0, 60.0, 70.0, 80.0]),
         ];
 
         assert_eq!(
@@ -571,12 +587,8 @@ trailer <</Root 1 0 R>>\n%%EOF"
             Some(vec![(1, 0), (0, 1)])
         );
         assert!(
-            DocumentView::native_link_mapping(
-                0,
-                &links,
-                &[interaction(vec![[10.0, 20.0, 31.0, 40.0]])]
-            )
-            .is_none()
+            DocumentView::native_link_mapping(0, &links, &[interaction([10.0, 20.0, 31.0, 40.0])])
+                .is_none()
         );
     }
 
