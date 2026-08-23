@@ -916,6 +916,36 @@ fn native_destination_partial_axes_follow_reader_rotation_without_filling_nulls(
 }
 
 #[test]
+fn native_content_bound_destinations_follow_reader_rotation() {
+    let page_bounds = Rect::new(0.0, 0.0, 100.0, 200.0);
+    let bounds = [10.0, 20.0, 40.0, 80.0];
+    let cases = [
+        (
+            DocumentRotation::Degrees0,
+            Rect::new(10.0, 20.0, 40.0, 80.0),
+        ),
+        (
+            DocumentRotation::Degrees90,
+            Rect::new(120.0, 10.0, 180.0, 40.0),
+        ),
+        (
+            DocumentRotation::Degrees180,
+            Rect::new(60.0, 120.0, 90.0, 180.0),
+        ),
+        (
+            DocumentRotation::Degrees270,
+            Rect::new(20.0, 60.0, 80.0, 90.0),
+        ),
+    ];
+    for (rotation, expected) in cases {
+        assert_eq!(
+            DocumentView::gpu_destination_rect(page_bounds, rotation, bounds),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn rotation_render_matrix_matches_view_transform() {
     let page_bounds = Rect::new(10.0, 20.0, 110.0, 220.0);
     let point = mupdf::Point { x: 35.0, y: 70.0 };

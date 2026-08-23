@@ -102,9 +102,11 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU SCENES",
             format!(
-                "{} / {} compiled · {} / {} prepared",
+                "{} / {} compiled · {} / {} bounds · {} / {} prepared",
                 document.gpu_cache.compiled_pages,
                 document.gpu_cache.compiled_page_limit,
+                document.gpu_cache.content_bound_pages,
+                document.gpu_cache.content_bound_page_limit,
                 document.gpu_cache.prepared_pages,
                 document.gpu_cache.prepared_page_limit
             ),

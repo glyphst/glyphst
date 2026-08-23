@@ -60,11 +60,11 @@ use glyphst_pdf::{
     ReloadDisposition, RetainedDisplayList,
 };
 use glyphst_pdf_gpu::{
-    CancellationToken as GpuCancellationToken, GpuDestinationView, GpuFallbackDiagnostic,
-    GpuFallbackSource, GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction,
-    GpuNavigationRoute, GpuOutlineItem, GpuPageRegion, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats,
-    PreparedGpuPage,
+    CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
+    GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
+    GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute, GpuOutlineItem,
+    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
+    GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -594,6 +594,8 @@ pub struct GpuPagePreparationDebugSnapshot {
 pub struct GpuCacheDebugSnapshot {
     pub compiled_pages: usize,
     pub compiled_page_limit: usize,
+    pub content_bound_pages: usize,
+    pub content_bound_page_limit: usize,
     pub prepared_pages: usize,
     pub prepared_page_limit: usize,
     pub resident_bytes: u64,

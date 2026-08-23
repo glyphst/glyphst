@@ -9,13 +9,13 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use glyphst_core::DocumentRotation;
 use glyphst_pdf::DocumentSnapshot;
-pub use glyphst_pdf_engine::CancellationToken;
 use glyphst_pdf_engine::{
-    Action as EngineAction, CompileOptions, CompiledPage, Destination as EngineDestination,
-    DestinationView as EngineDestinationView, DiagnosticSeverity, Document, DocumentSource, Engine,
-    FeatureId, LayerConfiguration, LinkHighlightMode, OpenOptions,
+    Action as EngineAction, CompileError, CompileOptions, CompiledPage,
+    Destination as EngineDestination, DestinationView as EngineDestinationView, DiagnosticSeverity,
+    Document, DocumentSource, Engine, LayerConfiguration, LinkHighlightMode, OpenOptions,
     OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, SupportDiagnostic, Transform,
 };
+pub use glyphst_pdf_engine::{CancellationToken, FeatureId};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
     RenderConfig, RenderError, RenderRequest, RenderSupportIssue, RendererInitError,
@@ -32,6 +32,7 @@ use std::{
 };
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
+const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +82,25 @@ pub enum GpuLinkAction {
     Sequence(Arc<[Self]>),
 }
 
+impl GpuLinkAction {
+    /// Whether exact execution first needs a lazy target-page content query.
+    #[must_use]
+    pub fn requires_content_bounds(&self) -> bool {
+        match self {
+            Self::GoTo { view, .. } => view.requires_content_bounds(),
+            Self::Sequence(actions) => actions.iter().any(Self::requires_content_bounds),
+            Self::Uri(_) | Self::UriMap(_) | Self::Named(_) => false,
+        }
+    }
+}
+
+/// Failure while resolving a lazy native destination action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuActionResolutionError {
+    Cancelled,
+    Fallback(GpuFallbackDiagnostic),
+}
+
 /// A URI action resolved with the canonical click position of its Link.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GpuUriMapAction {
@@ -118,7 +138,35 @@ pub enum GpuDestinationView {
         left: Option<f64>,
     },
     FitPage,
+    FitBoundingBox {
+        content_bounds: Option<[f64; 4]>,
+    },
+    FitBoundingBoxWidth {
+        top: Option<f64>,
+        content_bounds: Option<[f64; 4]>,
+    },
+    FitBoundingBoxHeight {
+        left: Option<f64>,
+        content_bounds: Option<[f64; 4]>,
+    },
     FitRectangle([f64; 4]),
+}
+
+impl GpuDestinationView {
+    fn requires_content_bounds(&self) -> bool {
+        matches!(
+            self,
+            Self::FitBoundingBox {
+                content_bounds: None
+            } | Self::FitBoundingBoxWidth {
+                content_bounds: None,
+                ..
+            } | Self::FitBoundingBoxHeight {
+                content_bounds: None,
+                ..
+            }
+        )
+    }
 }
 
 /// Standard safe `/Named` actions defined for document navigation.
@@ -267,6 +315,7 @@ struct GpuPdfDocumentInner {
     document: Document,
     navigation: GpuNavigationRoute,
     compiled: Mutex<CompiledPageCache>,
+    content_bounds: Mutex<ContentBoundsCache>,
 }
 
 #[derive(Default)]
@@ -278,6 +327,58 @@ struct CompiledPageCache {
 struct CachedCompiledPage {
     page: Arc<CompiledPage>,
     last_used: u64,
+}
+
+#[derive(Default)]
+struct ContentBoundsCache {
+    entries: HashMap<PageIndex, CachedContentBounds>,
+    clock: u64,
+}
+
+struct CachedContentBounds {
+    result: std::result::Result<[f64; 4], GpuFallbackDiagnostic>,
+    last_used: u64,
+}
+
+impl ContentBoundsCache {
+    fn get(
+        &mut self,
+        index: PageIndex,
+    ) -> Option<std::result::Result<[f64; 4], GpuFallbackDiagnostic>> {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        let entry = self.entries.get_mut(&index)?;
+        entry.last_used = self.clock;
+        Some(entry.result.clone())
+    }
+
+    fn insert(
+        &mut self,
+        index: PageIndex,
+        result: std::result::Result<[f64; 4], GpuFallbackDiagnostic>,
+    ) -> std::result::Result<[f64; 4], GpuFallbackDiagnostic> {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        if let Some(entry) = self.entries.get_mut(&index) {
+            entry.last_used = self.clock;
+            return entry.result.clone();
+        }
+        if self.entries.len() >= MAX_CONTENT_BOUNDS_CACHE_ENTRIES
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| *index)
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(
+            index,
+            CachedContentBounds {
+                result: result.clone(),
+                last_used: self.clock,
+            },
+        );
+        result
+    }
 }
 
 impl CompiledPageCache {
@@ -340,6 +441,7 @@ impl GpuPdfDocument {
                 document,
                 navigation,
                 compiled: Mutex::new(CompiledPageCache::default()),
+                content_bounds: Mutex::new(ContentBoundsCache::default()),
             }),
         })
     }
@@ -360,6 +462,19 @@ impl GpuPdfDocument {
 
     pub const fn compiled_cache_limit() -> usize {
         MAX_COMPILED_PAGE_CACHE_ENTRIES
+    }
+
+    /// Current bounded lazy destination-bound cache occupancy.
+    pub fn content_bounds_cache_entries(&self) -> usize {
+        self.inner
+            .content_bounds
+            .lock()
+            .map(|cache| cache.entries.len())
+            .unwrap_or_default()
+    }
+
+    pub const fn content_bounds_cache_limit() -> usize {
+        MAX_CONTENT_BOUNDS_CACHE_ENTRIES
     }
 
     /// Native outline route for this document. A navigation fallback does not
@@ -411,6 +526,159 @@ impl GpuPdfDocument {
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
             .insert(page, compiled);
         Ok(compiled)
+    }
+
+    /// Resolves every FitB-family destination in an action tree while
+    /// preserving exact execution order. Only referenced target pages are
+    /// interpreted, and their results enter a bounded document cache.
+    pub fn resolve_link_action(
+        &self,
+        action: &GpuLinkAction,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<GpuLinkAction, GpuActionResolutionError> {
+        if cancellation.is_cancelled() {
+            return Err(GpuActionResolutionError::Cancelled);
+        }
+        match action {
+            GpuLinkAction::GoTo { page, view } => Ok(GpuLinkAction::GoTo {
+                page: *page,
+                view: self.resolve_destination_view(*page, view, cancellation)?,
+            }),
+            GpuLinkAction::Sequence(actions) => actions
+                .iter()
+                .map(|action| self.resolve_link_action(action, cancellation))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map(Arc::from)
+                .map(GpuLinkAction::Sequence),
+            GpuLinkAction::Uri(uri) => Ok(GpuLinkAction::Uri(Arc::clone(uri))),
+            GpuLinkAction::UriMap(action) => Ok(GpuLinkAction::UriMap(action.clone())),
+            GpuLinkAction::Named(action) => Ok(GpuLinkAction::Named(*action)),
+        }
+    }
+
+    fn resolve_destination_view(
+        &self,
+        page: u32,
+        view: &GpuDestinationView,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<GpuDestinationView, GpuActionResolutionError> {
+        let content_bounds = match view {
+            GpuDestinationView::FitBoundingBox {
+                content_bounds: None,
+            }
+            | GpuDestinationView::FitBoundingBoxWidth {
+                content_bounds: None,
+                ..
+            }
+            | GpuDestinationView::FitBoundingBoxHeight {
+                content_bounds: None,
+                ..
+            } => Some(self.resolve_content_bounds(page, cancellation)?),
+            _ => None,
+        };
+        Ok(match view {
+            GpuDestinationView::FitBoundingBox {
+                content_bounds: None,
+            } => {
+                let Some(bounds) = content_bounds else {
+                    return Err(missing_content_bounds_resolution());
+                };
+                require_content_extent(bounds, true, true)?;
+                GpuDestinationView::FitBoundingBox {
+                    content_bounds: Some(bounds),
+                }
+            }
+            GpuDestinationView::FitBoundingBoxWidth {
+                top,
+                content_bounds: None,
+            } => {
+                let Some(bounds) = content_bounds else {
+                    return Err(missing_content_bounds_resolution());
+                };
+                require_content_extent(bounds, true, false)?;
+                GpuDestinationView::FitBoundingBoxWidth {
+                    top: *top,
+                    content_bounds: Some(bounds),
+                }
+            }
+            GpuDestinationView::FitBoundingBoxHeight {
+                left,
+                content_bounds: None,
+            } => {
+                let Some(bounds) = content_bounds else {
+                    return Err(missing_content_bounds_resolution());
+                };
+                require_content_extent(bounds, false, true)?;
+                GpuDestinationView::FitBoundingBoxHeight {
+                    left: *left,
+                    content_bounds: Some(bounds),
+                }
+            }
+            _ => view.clone(),
+        })
+    }
+
+    fn resolve_content_bounds(
+        &self,
+        page: u32,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<[f64; 4], GpuActionResolutionError> {
+        let page = self.checked_page(page).map_err(|error| {
+            GpuActionResolutionError::Fallback(application_link_action_fallback(
+                "application-destination-page-out-of-bounds",
+                &error.to_string(),
+            ))
+        })?;
+        if let Some(result) = self
+            .inner
+            .content_bounds
+            .lock()
+            .map_err(|_| {
+                GpuActionResolutionError::Fallback(application_link_action_fallback(
+                    "application-content-bounds-cache-poisoned",
+                    "the native destination content-bound cache is poisoned",
+                ))
+            })?
+            .get(page)
+        {
+            return result.map_err(GpuActionResolutionError::Fallback);
+        }
+
+        let result = match self.inner.document.content_bounds(
+            page,
+            &LayerConfiguration::default(),
+            cancellation,
+        ) {
+            Ok(Some(bounds)) => application_content_bounds(bounds),
+            Ok(None) => Err(application_link_action_fallback(
+                "application-destination-content-bounds-empty",
+                "a FitB-family destination targets a page without paintable content",
+            )),
+            Err(CompileError::Cancelled) => return Err(GpuActionResolutionError::Cancelled),
+            Err(CompileError::Unsupported { feature, message }) => Err(GpuFallbackDiagnostic {
+                feature,
+                code: "application-destination-content-bounds-unsupported".into(),
+                message,
+                source: GpuFallbackSource::Frontend,
+            }),
+            Err(error) => Err(GpuFallbackDiagnostic {
+                feature: FeatureId::Links,
+                code: "application-destination-content-bounds-failed".into(),
+                message: error.to_string(),
+                source: GpuFallbackSource::Frontend,
+            }),
+        };
+        self.inner
+            .content_bounds
+            .lock()
+            .map_err(|_| {
+                GpuActionResolutionError::Fallback(application_link_action_fallback(
+                    "application-content-bounds-cache-poisoned",
+                    "the native destination content-bound cache is poisoned",
+                ))
+            })?
+            .insert(page, result)
+            .map_err(GpuActionResolutionError::Fallback)
     }
 
     fn checked_page(&self, page: u32) -> Result<PageIndex> {
@@ -644,15 +912,58 @@ fn compiled_destination_view(
             required_application_destination_coordinate(rect.x1)?,
             required_application_destination_coordinate(rect.y1)?,
         ])),
-        EngineDestinationView::FitBoundingBox
-        | EngineDestinationView::FitBoundingBoxWidth { .. }
-        | EngineDestinationView::FitBoundingBoxHeight { .. } => {
-            Err(application_link_action_fallback(
-                "application-destination-content-bounds-unavailable",
-                "a native Link destination requires the target page's exact content bounding box",
-            ))
+        EngineDestinationView::FitBoundingBox => Ok(GpuDestinationView::FitBoundingBox {
+            content_bounds: None,
+        }),
+        EngineDestinationView::FitBoundingBoxWidth { top } => {
+            Ok(GpuDestinationView::FitBoundingBoxWidth {
+                top: application_destination_coordinate(*top)?,
+                content_bounds: None,
+            })
+        }
+        EngineDestinationView::FitBoundingBoxHeight { left } => {
+            Ok(GpuDestinationView::FitBoundingBoxHeight {
+                left: application_destination_coordinate(*left)?,
+                content_bounds: None,
+            })
         }
     }
+}
+
+fn require_content_extent(
+    bounds: [f64; 4],
+    require_width: bool,
+    require_height: bool,
+) -> std::result::Result<(), GpuActionResolutionError> {
+    let width = bounds[2] - bounds[0];
+    let height = bounds[3] - bounds[1];
+    if (!require_width || width > 0.0) && (!require_height || height > 0.0) {
+        return Ok(());
+    }
+    Err(GpuActionResolutionError::Fallback(
+        application_link_action_fallback(
+            "application-destination-content-bounds-degenerate",
+            "the target content box has no extent along an axis required by its FitB view",
+        ),
+    ))
+}
+
+fn missing_content_bounds_resolution() -> GpuActionResolutionError {
+    GpuActionResolutionError::Fallback(application_link_action_fallback(
+        "application-destination-content-bounds-missing",
+        "the target content box was not attached to its resolved FitB view",
+    ))
+}
+
+fn application_content_bounds(
+    bounds: glyphst_pdf_engine::Rect,
+) -> std::result::Result<[f64; 4], GpuFallbackDiagnostic> {
+    Ok([
+        required_application_destination_coordinate(bounds.x0)?,
+        required_application_destination_coordinate(bounds.y0)?,
+        required_application_destination_coordinate(bounds.x1)?,
+        required_application_destination_coordinate(bounds.y1)?,
+    ])
 }
 
 fn application_destination_coordinate(
@@ -1140,6 +1451,7 @@ trailer <</Root 1 0 R>>\n%%EOF"
     }
 
     fn link_pdf_with_catalog_and_action(catalog_entries: &str, action: &str) -> Arc<[u8]> {
+        let target_content = "0 0 1 rg 20 30 40 50 re f\n";
         Arc::from(
             format!(
                 "%PDF-1.4\n\
@@ -1149,8 +1461,10 @@ trailer <</Root 1 0 R>>\n%%EOF"
 4 0 obj <</Length 0>> stream\nendstream endobj\n\
 5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]/H/N{action}>> endobj\n\
 6 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 7 0 R>> endobj\n\
-7 0 obj <</Length 0>> stream\nendstream endobj\n\
-trailer <</Root 1 0 R>>\n%%EOF"
+7 0 obj <</Length {}>> stream\n{}endstream endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF",
+                target_content.len(),
+                target_content
             )
             .into_bytes(),
         )
@@ -1468,11 +1782,13 @@ trailer <</Root 1 0 R>>
     }
 
     #[test]
-    fn content_bounding_box_destinations_have_a_structured_application_fallback() {
+    fn content_bounding_box_destinations_resolve_lazily_and_cache_one_target() {
         let snapshot = DocumentSnapshot::from_bytes(
             "fit-bounding-box.pdf",
             DocumentFormat::Pdf,
-            link_pdf_with_action("/Dest[6 0 R/FitB]"),
+            link_pdf_with_action(
+                "/A<</S/GoTo/D[6 0 R/FitB]/Next[<</S/GoTo/D[6 0 R/FitBH null]>><</S/GoTo/D[6 0 R/FitBV 12]>>]>>",
+            ),
         );
         let document = GpuPdfDocument::open(&snapshot).expect("open native document");
         let page = document
@@ -1483,14 +1799,58 @@ trailer <</Root 1 0 R>>
             "unexpected diagnostics: {:#?}",
             page.support().diagnostics()
         );
-        let diagnostic = compiled_link_interactions(&page)
-            .expect_err("FitB requires an exact target content bound");
-        assert_eq!(diagnostic.feature, FeatureId::Links);
+        let interactions = compiled_link_interactions(&page).expect("retain lazy FitB actions");
+        assert!(interactions[0].action.requires_content_bounds());
+        assert_eq!(document.content_bounds_cache_entries(), 0);
+        let resolved = document
+            .resolve_link_action(&interactions[0].action, &CancellationToken::new())
+            .expect("resolve FitB action tree");
+        assert!(!resolved.requires_content_bounds());
+        assert_eq!(document.content_bounds_cache_entries(), 1);
         assert_eq!(
-            diagnostic.code,
-            "application-destination-content-bounds-unavailable"
+            resolved,
+            GpuLinkAction::Sequence(Arc::from([
+                GpuLinkAction::GoTo {
+                    page: 1,
+                    view: GpuDestinationView::FitBoundingBox {
+                        content_bounds: Some([20.0, 20.0, 60.0, 70.0]),
+                    },
+                },
+                GpuLinkAction::GoTo {
+                    page: 1,
+                    view: GpuDestinationView::FitBoundingBoxWidth {
+                        top: None,
+                        content_bounds: Some([20.0, 20.0, 60.0, 70.0]),
+                    },
+                },
+                GpuLinkAction::GoTo {
+                    page: 1,
+                    view: GpuDestinationView::FitBoundingBoxHeight {
+                        left: Some(12.0),
+                        content_bounds: Some([20.0, 20.0, 60.0, 70.0]),
+                    },
+                },
+            ]))
         );
-        assert_eq!(diagnostic.source, GpuFallbackSource::Application);
+
+        let cancelled_snapshot = DocumentSnapshot::from_bytes(
+            "cancelled-fit-bounding-box.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action("/Dest[6 0 R/FitB]"),
+        );
+        let cancelled_document =
+            GpuPdfDocument::open(&cancelled_snapshot).expect("open cancellable document");
+        let page = cancelled_document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile cancellable source page");
+        let interactions = compiled_link_interactions(&page).expect("retain cancellable action");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            cancelled_document.resolve_link_action(&interactions[0].action, &cancellation),
+            Err(GpuActionResolutionError::Cancelled)
+        );
+        assert_eq!(cancelled_document.content_bounds_cache_entries(), 0);
 
         let snapshot = DocumentSnapshot::from_bytes(
             "large-destination.pdf",
@@ -1584,6 +1944,30 @@ trailer <</Root 1 0 R>>
             .compile_page(0, &cancellation)
             .expect("recompile evicted page");
         assert!(!Arc::ptr_eq(&first, &recompiled));
+    }
+
+    #[test]
+    fn content_bounds_cache_is_bounded_and_evicts_least_recently_used_pages() {
+        let mut cache = ContentBoundsCache::default();
+        for page in 0..=MAX_CONTENT_BOUNDS_CACHE_ENTRIES {
+            cache
+                .insert(
+                    PageIndex::new(page as u32),
+                    Ok([page as f64, 0.0, page as f64 + 1.0, 1.0]),
+                )
+                .expect("cache content bounds");
+        }
+        assert_eq!(cache.entries.len(), MAX_CONTENT_BOUNDS_CACHE_ENTRIES);
+        assert!(cache.get(PageIndex::new(0)).is_none());
+        assert_eq!(
+            cache.get(PageIndex::new(MAX_CONTENT_BOUNDS_CACHE_ENTRIES as u32)),
+            Some(Ok([
+                MAX_CONTENT_BOUNDS_CACHE_ENTRIES as f64,
+                0.0,
+                MAX_CONTENT_BOUNDS_CACHE_ENTRIES as f64 + 1.0,
+                1.0,
+            ]))
+        );
     }
 
     #[test]

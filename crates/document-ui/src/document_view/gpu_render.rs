@@ -28,6 +28,10 @@ pub(super) struct GpuPdfState {
     motion_generation: u64,
     motion_active: bool,
     motion_settle_task: Option<Task<()>>,
+    destination_generation: u64,
+    destination_cancellation: Option<GpuCancellationToken>,
+    destination_task: Option<Task<()>>,
+    destination_fallback: Option<Arc<[GpuFallbackDiagnostic]>>,
 }
 
 enum GpuPageState {
@@ -50,6 +54,7 @@ struct RenderedGpuPage {
 impl GpuPdfState {
     pub(super) fn reset(&mut self) {
         self.cancel_page_tasks();
+        self.cancel_destination_task();
         self.generation = self.generation.wrapping_add(1);
         self.document = None;
         self.document_task = None;
@@ -71,10 +76,12 @@ impl GpuPdfState {
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
         self.motion_settle_task = None;
+        self.destination_fallback = None;
     }
 
     fn reset_device(&mut self) {
         self.cancel_page_tasks();
+        self.cancel_destination_task();
         self.generation = self.generation.wrapping_add(1);
         self.renderer = None;
         self.renderer_error = None;
@@ -91,6 +98,7 @@ impl GpuPdfState {
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
         self.motion_settle_task = None;
+        self.destination_fallback = None;
     }
 
     fn cancel_page_tasks(&mut self) {
@@ -101,6 +109,14 @@ impl GpuPdfState {
         }
     }
 
+    fn cancel_destination_task(&mut self) {
+        if let Some(cancellation) = self.destination_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.destination_task = None;
+        self.destination_generation = self.destination_generation.wrapping_add(1).max(1);
+    }
+
     fn is_active(&self) -> bool {
         self.document.is_some()
             || self.document_task.is_some()
@@ -109,6 +125,8 @@ impl GpuPdfState {
             || self.device_token.is_some()
             || self.renderer.is_some()
             || self.renderer_error.is_some()
+            || self.destination_task.is_some()
+            || self.destination_fallback.is_some()
             || !self.pages.is_empty()
             || !self.rendered.is_empty()
     }
@@ -720,6 +738,78 @@ impl DocumentView {
         cx.notify();
     }
 
+    /// Resolves FitB-family target bounds off the UI thread, then executes the
+    /// complete action tree in original order. A newer activation cancels and
+    /// supersedes the older generation.
+    pub(super) fn start_native_gpu_action_resolution(
+        &mut self,
+        action: GpuLinkAction,
+        canonical_click: Option<[f64; 2]>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.gpu_pdf.document.clone() else {
+            let diagnostic = GpuFallbackDiagnostic {
+                feature: GpuFeatureId::Links,
+                code: "application-destination-document-unavailable".into(),
+                message: "the native PDF document is unavailable for destination resolution".into(),
+                source: GpuFallbackSource::Application,
+            };
+            eprintln!(
+                "native PDF destination fallback [{}:{}]: {}",
+                diagnostic.feature, diagnostic.code, diagnostic.message
+            );
+            self.gpu_pdf.destination_fallback = Some(Arc::from([diagnostic]));
+            cx.notify();
+            return;
+        };
+
+        self.gpu_pdf.cancel_destination_task();
+        self.gpu_pdf.destination_fallback = None;
+        let cancellation = GpuCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let document_generation = self.gpu_pdf.generation;
+        let destination_generation = self.gpu_pdf.destination_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    document.resolve_link_action(&action, &worker_cancellation)
+                })
+                .await;
+            let update_result = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || this.gpu_pdf.destination_generation != destination_generation
+                {
+                    return;
+                }
+                this.gpu_pdf.destination_task = None;
+                this.gpu_pdf.destination_cancellation = None;
+                match result {
+                    Ok(action) => {
+                        this.gpu_pdf.destination_fallback = None;
+                        this.activate_gpu_link_action(&action, canonical_click, cx);
+                    }
+                    Err(GpuActionResolutionError::Cancelled) => {}
+                    Err(GpuActionResolutionError::Fallback(diagnostic)) => {
+                        eprintln!(
+                            "native PDF destination fallback [{}:{}]: {}",
+                            diagnostic.feature, diagnostic.code, diagnostic.message
+                        );
+                        this.gpu_pdf.destination_fallback = Some(Arc::from([diagnostic]));
+                        cx.notify();
+                    }
+                }
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to install native PDF destination: {error:#}");
+            }
+        });
+        self.gpu_pdf.destination_cancellation = Some(cancellation);
+        self.gpu_pdf.destination_task = Some(task);
+        cx.notify();
+    }
+
     pub(super) fn prune_native_gpu_pages(&mut self, visible_pages: &[usize]) {
         let visible = visible_pages
             .iter()
@@ -745,7 +835,10 @@ impl DocumentView {
     pub(super) fn native_gpu_navigation_fallback_diagnostics(
         &self,
     ) -> Option<&[GpuFallbackDiagnostic]> {
-        self.gpu_pdf.navigation_fallback.as_deref()
+        self.gpu_pdf
+            .destination_fallback
+            .as_deref()
+            .or(self.gpu_pdf.navigation_fallback.as_deref())
     }
 
     pub(super) fn native_gpu_link_interactions(
@@ -798,6 +891,12 @@ impl DocumentView {
                 .as_ref()
                 .map_or(0, |document| document.compiled_cache_entries()),
             compiled_page_limit: GpuPdfDocument::compiled_cache_limit(),
+            content_bound_pages: self
+                .gpu_pdf
+                .document
+                .as_ref()
+                .map_or(0, |document| document.content_bounds_cache_entries()),
+            content_bound_page_limit: GpuPdfDocument::content_bounds_cache_limit(),
             prepared_pages: prepared.len(),
             prepared_page_limit: MAX_RETAINED_GPU_PAGES,
             resident_bytes: prepared.iter().map(|stats| stats.resident_bytes).sum(),

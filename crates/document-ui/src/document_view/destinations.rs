@@ -140,10 +140,9 @@ impl DocumentView {
                     {
                         self.set_zoom(zoom, cx);
                     }
-                    target_x = view_x.map_or_else(
-                        || self.destination_center_scroll(&page, page_width / 2.0),
-                        |left| self.destination_left_scroll(&page, left),
-                    );
+                    target_x = view_x
+                        .map(|left| self.destination_left_scroll(&page, left))
+                        .unwrap_or(retained_x);
                     target_y = page.offset_y;
                 } else {
                     if let Some(zoom) =
@@ -152,7 +151,9 @@ impl DocumentView {
                         self.set_zoom(zoom, cx);
                     }
                     target_x = self.destination_center_scroll(&page, page_width / 2.0);
-                    target_y = page.offset_y + view_y.unwrap_or(0.0);
+                    target_y = view_y
+                        .map(|top| page.offset_y + top)
+                        .unwrap_or(page.offset_y + retained_top);
                 }
             }
             GpuDestinationView::FitHeight { left } => {
@@ -168,17 +169,18 @@ impl DocumentView {
                         self.set_zoom(zoom, cx);
                     }
                     target_x = self.destination_center_scroll(&page, page_width / 2.0);
-                    target_y = page.offset_y + view_y.unwrap_or(0.0);
+                    target_y = view_y
+                        .map(|top| page.offset_y + top)
+                        .unwrap_or(page.offset_y + retained_top);
                 } else {
                     if let Some(zoom) =
                         self.destination_zoom_for_extent(self.viewport_height, page_height)
                     {
                         self.set_zoom(zoom, cx);
                     }
-                    target_x = view_x.map_or_else(
-                        || self.destination_center_scroll(&page, page_width / 2.0),
-                        |left| self.destination_left_scroll(&page, left),
-                    );
+                    target_x = view_x
+                        .map(|left| self.destination_left_scroll(&page, left))
+                        .unwrap_or(retained_x);
                     target_y = page.offset_y;
                 }
             }
@@ -192,6 +194,95 @@ impl DocumentView {
                 }
                 target_x = self.destination_center_scroll(&page, page_width / 2.0);
                 target_y = page.offset_y;
+            }
+            GpuDestinationView::FitBoundingBox { content_bounds } => {
+                let Some(rect) = content_bounds.and_then(|bounds| {
+                    Self::gpu_destination_rect(page.bounds, self.rotation, bounds)
+                }) else {
+                    return;
+                };
+                let zoom = self
+                    .destination_zoom_for_extent(self.viewport_width, rect.width())
+                    .zip(self.destination_zoom_for_extent(self.viewport_height, rect.height()))
+                    .map(|(width, height)| width.min(height));
+                if let Some(zoom) = zoom {
+                    self.set_zoom(zoom, cx);
+                }
+                target_x = self.destination_center_scroll(&page, (rect.x0 + rect.x1) / 2.0);
+                let viewport_height_doc = self.viewport_height / self.effective_scale();
+                target_y = page.offset_y + (rect.y0 + rect.y1) / 2.0 - viewport_height_doc / 2.0;
+            }
+            GpuDestinationView::FitBoundingBoxWidth {
+                top,
+                content_bounds,
+            } => {
+                let Some(rect) = content_bounds.and_then(|bounds| {
+                    Self::gpu_destination_rect(page.bounds, self.rotation, bounds)
+                }) else {
+                    return;
+                };
+                let Some((view_x, view_y)) =
+                    Self::transformed_destination_axes(page.bounds, self.rotation, None, *top)
+                else {
+                    return;
+                };
+                if self.rotation.swaps_width_and_height() {
+                    if let Some(zoom) =
+                        self.destination_zoom_for_extent(self.viewport_height, rect.height())
+                    {
+                        self.set_zoom(zoom, cx);
+                    }
+                    target_x = view_x
+                        .map(|left| self.destination_left_scroll(&page, left))
+                        .unwrap_or(retained_x);
+                    target_y = page.offset_y + rect.y0;
+                } else {
+                    if let Some(zoom) =
+                        self.destination_zoom_for_extent(self.viewport_width, rect.width())
+                    {
+                        self.set_zoom(zoom, cx);
+                    }
+                    target_x = self.destination_center_scroll(&page, (rect.x0 + rect.x1) / 2.0);
+                    target_y = view_y
+                        .map(|top| page.offset_y + top)
+                        .unwrap_or(page.offset_y + retained_top);
+                }
+            }
+            GpuDestinationView::FitBoundingBoxHeight {
+                left,
+                content_bounds,
+            } => {
+                let Some(rect) = content_bounds.and_then(|bounds| {
+                    Self::gpu_destination_rect(page.bounds, self.rotation, bounds)
+                }) else {
+                    return;
+                };
+                let Some((view_x, view_y)) =
+                    Self::transformed_destination_axes(page.bounds, self.rotation, *left, None)
+                else {
+                    return;
+                };
+                if self.rotation.swaps_width_and_height() {
+                    if let Some(zoom) =
+                        self.destination_zoom_for_extent(self.viewport_width, rect.width())
+                    {
+                        self.set_zoom(zoom, cx);
+                    }
+                    target_x = self.destination_center_scroll(&page, (rect.x0 + rect.x1) / 2.0);
+                    target_y = view_y
+                        .map(|top| page.offset_y + top)
+                        .unwrap_or(page.offset_y + retained_top);
+                } else {
+                    if let Some(zoom) =
+                        self.destination_zoom_for_extent(self.viewport_height, rect.height())
+                    {
+                        self.set_zoom(zoom, cx);
+                    }
+                    target_x = view_x
+                        .map(|left| self.destination_left_scroll(&page, left))
+                        .unwrap_or(retained_x);
+                    target_y = page.offset_y + rect.y0;
+                }
             }
             GpuDestinationView::FitRectangle(rect) => {
                 let rect = Rect::new(
@@ -216,12 +307,29 @@ impl DocumentView {
         self.set_scroll_doc(target_x, target_y, cx);
     }
 
+    pub(super) fn gpu_destination_rect(
+        page_bounds: Rect,
+        rotation: DocumentRotation,
+        bounds: [f64; 4],
+    ) -> Option<Rect> {
+        let values = bounds.map(|value| value as f32);
+        if values.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let rect = Rect::new(values[0], values[1], values[2], values[3]);
+        Some(Self::pdf_rect_to_view(page_bounds, rotation, rect))
+    }
+
     pub(super) fn activate_gpu_link_action(
         &mut self,
         action: &GpuLinkAction,
         canonical_click: Option<[f64; 2]>,
         cx: &mut Context<Self>,
     ) {
+        if action.requires_content_bounds() {
+            self.start_native_gpu_action_resolution(action.clone(), canonical_click, cx);
+            return;
+        }
         match action {
             GpuLinkAction::GoTo { page, view } => {
                 self.navigate_to_gpu_destination(*page as usize, view, cx);

@@ -128,6 +128,13 @@ impl DocumentView {
             GpuDestinationView::FitWidth { top } => (top.map(|value| value as f32), None),
             GpuDestinationView::FitHeight { left } => (None, left.map(|value| value as f32)),
             GpuDestinationView::FitPage => (None, None),
+            GpuDestinationView::FitBoundingBox { .. } => (None, None),
+            GpuDestinationView::FitBoundingBoxWidth { top, .. } => {
+                (top.map(|value| value as f32), None)
+            }
+            GpuDestinationView::FitBoundingBoxHeight { left, .. } => {
+                (None, left.map(|value| value as f32))
+            }
             GpuDestinationView::FitRectangle(rect) => (Some(rect[1] as f32), Some(rect[0] as f32)),
         };
         Some((page_idx, target_top, target_left))
