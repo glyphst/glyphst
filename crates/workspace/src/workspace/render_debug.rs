@@ -345,13 +345,32 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             section = section.child(reading(
                 "HAIRLINES",
                 format!(
-                    "{} · {} batch · {} LOD · {} primitive · {} draw",
+                    "{} · {} LOD · {} primitive · {} draw",
                     format_bytes(preparation.hairline_bytes),
-                    preparation.hairline_batches,
                     preparation.hairline_lod_levels,
                     preparation.hairline_primitives,
                     preparation.hairline_draws
                 ),
+                FOREGROUND,
+            ));
+        }
+        if preparation.procedural_stroke_bytes > 0 {
+            section = section.child(reading(
+                "STROKES",
+                format!(
+                    "{} · {} LOD · {} primitive · {} draw",
+                    format_bytes(preparation.procedural_stroke_bytes),
+                    preparation.procedural_stroke_lod_levels,
+                    preparation.procedural_stroke_primitives,
+                    preparation.procedural_stroke_draws
+                ),
+                FOREGROUND,
+            ));
+        }
+        if preparation.procedural_stroke_batches > 0 {
+            section = section.child(reading(
+                "STROKE OPS",
+                format!("{} ordered batch", preparation.procedural_stroke_batches),
                 FOREGROUND,
             ));
         }
@@ -405,11 +424,11 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "GPU WORK",
                 format!(
-                    "{} pass · {} cb · {} vec · {} hair · {} bundle · {} grad · {} img",
+                    "{} pass · {} cb · {} vec · {} stroke · {} bundle · {} grad · {} img",
                     gpu.passes_executed,
                     gpu.command_buffers,
                     gpu.vector_batches,
-                    gpu.hairline_batches,
+                    gpu.procedural_stroke_batches,
                     gpu.render_bundle_runs,
                     gpu.gradient_draws,
                     gpu.image_draws

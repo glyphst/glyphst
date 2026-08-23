@@ -80,6 +80,7 @@ pub enum GpuLinkAction {
     UriMap(GpuUriMapAction),
     Named(GpuNamedAction),
     Sequence(Arc<[Self]>),
+    NoOp { code: Arc<str>, message: Arc<str> },
 }
 
 impl GpuLinkAction {
@@ -89,7 +90,7 @@ impl GpuLinkAction {
         match self {
             Self::GoTo { view, .. } => view.requires_content_bounds(),
             Self::Sequence(actions) => actions.iter().any(Self::requires_content_bounds),
-            Self::Uri(_) | Self::UriMap(_) | Self::Named(_) => false,
+            Self::Uri(_) | Self::UriMap(_) | Self::Named(_) | Self::NoOp { .. } => false,
         }
     }
 }
@@ -553,6 +554,10 @@ impl GpuPdfDocument {
             GpuLinkAction::Uri(uri) => Ok(GpuLinkAction::Uri(Arc::clone(uri))),
             GpuLinkAction::UriMap(action) => Ok(GpuLinkAction::UriMap(action.clone())),
             GpuLinkAction::Named(action) => Ok(GpuLinkAction::Named(*action)),
+            GpuLinkAction::NoOp { code, message } => Ok(GpuLinkAction::NoOp {
+                code: Arc::clone(code),
+                message: Arc::clone(message),
+            }),
         }
     }
 
@@ -883,6 +888,10 @@ fn compiled_link_action(
             .collect::<std::result::Result<Vec<_>, _>>()
             .map(Arc::from)
             .map(GpuLinkAction::Sequence),
+        EngineAction::NoOp { code, message } => Ok(GpuLinkAction::NoOp {
+            code: Arc::from(code.as_str()),
+            message: Arc::from(message.as_str()),
+        }),
         EngineAction::Unsupported { .. } => Err(application_link_action_fallback(
             "application-link-action-unsupported",
             "a native Link action is not safe and executable by the presentation adapter",
@@ -1675,6 +1684,41 @@ trailer <</Root 1 0 R>>
                 }]
             );
         }
+    }
+
+    #[test]
+    fn malformed_null_link_destination_stays_native_as_an_inert_action() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "null-link-destination.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action("/Dest[null/XYZ null null null]"),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "{:#?}",
+            page.support().diagnostics()
+        );
+        assert!(page.support().diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "null-link-destination-noop"
+                && diagnostic.severity == glyphst_pdf_engine::DiagnosticSeverity::Warning
+        }));
+        let interactions = compiled_link_interactions(&page).expect("retain inert interaction");
+        assert!(matches!(
+            &interactions[0].action,
+            GpuLinkAction::NoOp { code, message }
+                if code.as_ref() == "null-link-destination-noop" && message.contains("null")
+        ));
+        assert!(!interactions[0].action.requires_content_bounds());
+        assert_eq!(
+            document
+                .resolve_link_action(&interactions[0].action, &CancellationToken::new())
+                .expect("resolve inert action"),
+            interactions[0].action
+        );
     }
 
     #[test]

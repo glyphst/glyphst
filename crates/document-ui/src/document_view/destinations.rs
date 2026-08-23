@@ -359,6 +359,9 @@ impl DocumentView {
                     self.activate_gpu_link_action(action, canonical_click, cx);
                 }
             }
+            GpuLinkAction::NoOp { code, message } => {
+                eprintln!("native PDF inert Link action [{code}]: {message}");
+            }
         }
     }
 
