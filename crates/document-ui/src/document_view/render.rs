@@ -650,7 +650,7 @@ impl Render for DocumentView {
                     this.pending_selection_anchor = None;
                     if let Some(link_ix) = pending_link {
                         if this.link_at_screen(event.position) == Some(link_ix) {
-                            this.activate_link(link_ix, cx);
+                            this.activate_link(link_ix, event.position, cx);
                             cx.stop_propagation();
                         }
                         cx.notify();

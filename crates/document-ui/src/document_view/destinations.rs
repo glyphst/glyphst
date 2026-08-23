@@ -219,6 +219,7 @@ impl DocumentView {
     pub(super) fn activate_gpu_link_action(
         &mut self,
         action: &GpuLinkAction,
+        canonical_click: Option<[f64; 2]>,
         cx: &mut Context<Self>,
     ) {
         match action {
@@ -226,6 +227,13 @@ impl DocumentView {
                 self.navigate_to_gpu_destination(*page as usize, view, cx);
             }
             GpuLinkAction::Uri(uri) => cx.open_url(uri),
+            GpuLinkAction::UriMap(action) => {
+                if let Some([x, y]) = canonical_click
+                    && let Some(uri) = action.resolve_at(x, y)
+                {
+                    cx.open_url(&uri);
+                }
+            }
             GpuLinkAction::Named(action) => {
                 let current = self.current_page_index();
                 let page = match action {
@@ -240,7 +248,7 @@ impl DocumentView {
             }
             GpuLinkAction::Sequence(actions) => {
                 for action in actions.iter() {
-                    self.activate_gpu_link_action(action, cx);
+                    self.activate_gpu_link_action(action, canonical_click, cx);
                 }
             }
         }
@@ -373,7 +381,7 @@ impl DocumentView {
         self.toc_sidebar_selected = Some(entry_ix);
         cx.notify();
         if let Some(action) = native_action {
-            self.activate_gpu_link_action(&action, cx);
+            self.activate_gpu_link_action(&action, None, cx);
         } else if let Some(page_idx) = page_idx {
             self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
         }
@@ -399,12 +407,22 @@ impl DocumentView {
         self.navigate_to_pdf_destination(page_idx, Some(target_top), None, cx);
     }
 
-    pub(super) fn activate_link(&mut self, link_ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn activate_link(
+        &mut self,
+        link_ix: usize,
+        screen_position: GpuiPoint<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(action) = self
             .native_link_interaction_for_link(link_ix)
             .map(|interaction| interaction.action.clone())
         {
-            self.activate_gpu_link_action(&action, cx);
+            let canonical_click = self
+                .links
+                .get(link_ix)
+                .and_then(|link| self.screen_to_pdf(link.page_idx, screen_position))
+                .map(|point| [f64::from(point.x), f64::from(point.y)]);
+            self.activate_gpu_link_action(&action, canonical_click, cx);
             return;
         }
         let Some(target) = self.links.get(link_ix).map(|link| link.target.clone()) else {

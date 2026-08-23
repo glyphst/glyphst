@@ -76,8 +76,31 @@ pub enum GpuLinkHighlightMode {
 pub enum GpuLinkAction {
     GoTo { page: u32, view: GpuDestinationView },
     Uri(Arc<str>),
+    UriMap(GpuUriMapAction),
     Named(GpuNamedAction),
     Sequence(Arc<[Self]>),
+}
+
+/// A URI action resolved with the canonical click position of its Link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuUriMapAction {
+    inner: glyphst_pdf_engine::UriMapAction,
+}
+
+impl GpuUriMapAction {
+    /// The validated URI before PDF map coordinates are appended.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.inner.uri
+    }
+
+    /// Appends the nearest integer annotation-local coordinates for one
+    /// canonical page click. Non-finite input or mapping fails closed.
+    #[must_use]
+    pub fn resolve_at(&self, x: f64, y: f64) -> Option<String> {
+        self.inner
+            .resolve_at(glyphst_pdf_engine::Point::new(x, y).ok()?)
+    }
 }
 
 /// Canonical viewport operation for an explicit native-page destination.
@@ -562,6 +585,9 @@ fn compiled_link_action(
             "a native Link refers to a named destination that the engine has not resolved to an explicit page view",
         )),
         EngineAction::Uri(uri) => Ok(GpuLinkAction::Uri(Arc::from(uri.as_str()))),
+        EngineAction::UriMap(action) => Ok(GpuLinkAction::UriMap(GpuUriMapAction {
+            inner: action.clone(),
+        })),
         EngineAction::Named(name) => {
             let action = match name.as_str() {
                 "NextPage" => GpuNamedAction::NextPage,
@@ -1416,6 +1442,29 @@ trailer <</Root 1 0 R>>
                 "https://glyphst.com/chapter.html?mode=read#intro"
             ))
         );
+
+        let snapshot = DocumentSnapshot::from_bytes(
+            "uri-map.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_catalog_and_action(
+                "/URI<</Base(https://glyphst.com/docs/guide.pdf)>>",
+                "/A<</S/URI/URI(../map)/IsMap true>>",
+            ),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        let interactions = compiled_link_interactions(&page).expect("retain interactions");
+        let GpuLinkAction::UriMap(action) = &interactions[0].action else {
+            panic!("relative URI IsMap action was not retained")
+        };
+        assert_eq!(action.uri(), "https://glyphst.com/map");
+        assert_eq!(
+            action.resolve_at(30.0, 80.0).as_deref(),
+            Some("https://glyphst.com/map?20,10")
+        );
+        assert!(action.resolve_at(f64::NAN, 80.0).is_none());
     }
 
     #[test]
