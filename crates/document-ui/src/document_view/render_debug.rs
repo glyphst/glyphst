@@ -166,6 +166,8 @@ impl DocumentView {
                 retained_operations: stats.retained_operations,
                 retained_form_resources: stats.retained_form_resources,
                 retained_form_instances: stats.retained_form_instances,
+                retained_type3_glyph_resources: stats.retained_type3_glyph_resources,
+                retained_type3_glyph_instances: stats.retained_type3_glyph_instances,
                 retained_transparency_groups: stats.retained_transparency_groups,
                 retained_soft_mask_resources: stats.retained_soft_mask_resources,
                 retained_soft_mask_instances: stats.retained_soft_mask_instances,

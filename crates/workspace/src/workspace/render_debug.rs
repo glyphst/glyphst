@@ -305,6 +305,17 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 FOREGROUND,
             ));
         }
+        if preparation.retained_type3_glyph_resources > 0 {
+            section = section.child(reading(
+                "TYPE 3",
+                format!(
+                    "{} glyph resource · {} instance",
+                    preparation.retained_type3_glyph_resources,
+                    preparation.retained_type3_glyph_instances
+                ),
+                FOREGROUND,
+            ));
+        }
         if preparation.retained_transparency_groups > 0
             || preparation.retained_soft_mask_resources > 0
             || preparation.retained_soft_mask_instances > 0

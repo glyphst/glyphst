@@ -584,6 +584,8 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub retained_operations: u64,
     pub retained_form_resources: u64,
     pub retained_form_instances: u64,
+    pub retained_type3_glyph_resources: u64,
+    pub retained_type3_glyph_instances: u64,
     pub retained_transparency_groups: u64,
     pub retained_soft_mask_resources: u64,
     pub retained_soft_mask_instances: u64,
