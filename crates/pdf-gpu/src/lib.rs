@@ -1110,10 +1110,14 @@ trailer <</Root 1 0 R>>\n%%EOF"
     }
 
     fn link_pdf_with_action(action: &str) -> Arc<[u8]> {
+        link_pdf_with_catalog_and_action("", action)
+    }
+
+    fn link_pdf_with_catalog_and_action(catalog_entries: &str, action: &str) -> Arc<[u8]> {
         Arc::from(
             format!(
                 "%PDF-1.4\n\
-1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+1 0 obj <</Type/Catalog/Pages 2 0 R{catalog_entries}>> endobj\n\
 2 0 obj <</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>> endobj\n\
 3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
 4 0 obj <</Length 0>> stream\nendstream endobj\n\
@@ -1129,7 +1133,7 @@ trailer <</Root 1 0 R>>\n%%EOF"
     fn catalog_navigation_pdf() -> Arc<[u8]> {
         Arc::from(
             &br#"%PDF-1.7
-1 0 obj <</Type/Catalog/Pages 2 0 R/Names<</Dests 8 0 R>>/Dests 9 0 R/Outlines 10 0 R>> endobj
+1 0 obj <</Type/Catalog/Pages 2 0 R/Names<</Dests 8 0 R>>/Dests 9 0 R/URI<</Base(https://glyphst.com/docs/guide.pdf)>>/Outlines 10 0 R>> endobj
 2 0 obj <</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>> endobj
 3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R>> endobj
 4 0 obj <</Length 0>> stream
@@ -1142,7 +1146,7 @@ endstream endobj
 9 0 obj <</legacy[6 0 R/FitH 40]>> endobj
 10 0 obj <</Type/Outlines/First 11 0 R/Last 12 0 R/Count 3>> endobj
 11 0 obj <</Title(Chapter One)/Parent 10 0 R/Next 12 0 R/First 13 0 R/Last 13 0 R/Count -1/Dest(fit-page)/C[0.1 0.2 0.3]/F 3>> endobj
-12 0 obj <</Title(Chained)/Parent 10 0 R/Prev 11 0 R/A<</S/GoTo/D/legacy/Next<</S/Named/N/LastPage>>>>>> endobj
+12 0 obj <</Title(Chained)/Parent 10 0 R/Prev 11 0 R/A<</S/GoTo/D/legacy/Next[<</S/URI/URI(chapter.html#toc)>><</S/Named/N/LastPage>>]>>>> endobj
 13 0 obj <</Title(Child)/Parent 11 0 R/Dest(chapter-two)>> endobj
 trailer <</Root 1 0 R>>
 %%EOF"#[..],
@@ -1245,6 +1249,7 @@ trailer <</Root 1 0 R>>
                     page: 1,
                     view: GpuDestinationView::FitWidth { top: Some(60.0) },
                 },
+                GpuLinkAction::Uri(Arc::from("https://glyphst.com/docs/chapter.html#toc")),
                 GpuLinkAction::Named(GpuNamedAction::LastPage),
             ])))
         );
@@ -1385,6 +1390,31 @@ trailer <</Root 1 0 R>>
                 GpuLinkAction::Named(GpuNamedAction::NextPage),
                 GpuLinkAction::Named(GpuNamedAction::LastPage),
             ]))
+        );
+
+        let snapshot = DocumentSnapshot::from_bytes(
+            "relative-uri.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_catalog_and_action(
+                "/URI<</Base(https://glyphst.com/docs/guide.pdf)>>",
+                "/A<</S/URI/URI(../chapter.html?mode=read#intro)>>",
+            ),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "unexpected diagnostics: {:#?}",
+            page.support().diagnostics()
+        );
+        let interactions = compiled_link_interactions(&page).expect("retain interactions");
+        assert_eq!(
+            interactions[0].action,
+            GpuLinkAction::Uri(Arc::from(
+                "https://glyphst.com/chapter.html?mode=read#intro"
+            ))
         );
     }
 
