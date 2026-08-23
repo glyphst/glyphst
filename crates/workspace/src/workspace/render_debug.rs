@@ -350,8 +350,10 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             section = section.child(reading(
                 "STROKE GEOM",
                 format!(
-                    "{} geometry · {} chunk",
-                    preparation.hairline_geometry_records, preparation.hairline_chunks
+                    "{} geometry · {} state · {} chunk",
+                    preparation.hairline_geometry_records,
+                    preparation.stroke_state_records,
+                    preparation.hairline_chunks
                 ),
                 FOREGROUND,
             ));

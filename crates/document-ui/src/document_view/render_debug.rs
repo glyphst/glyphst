@@ -150,6 +150,7 @@ impl DocumentView {
                 procedural_stroke_batches: stats.hairline_batches,
                 hairline_lod_levels: stats.hairline_lod_levels,
                 hairline_geometry_records: stats.hairline_geometry_records,
+                stroke_state_records: stats.stroke_state_records,
                 hairline_primitives: stats.hairline_primitives,
                 hairline_draws: stats.hairline_draws,
                 hairline_bytes: stats.hairline_bytes,

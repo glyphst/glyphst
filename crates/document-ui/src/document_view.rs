@@ -568,6 +568,7 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub procedural_stroke_batches: u64,
     pub hairline_lod_levels: u64,
     pub hairline_geometry_records: u64,
+    pub stroke_state_records: u64,
     pub hairline_primitives: u64,
     pub hairline_draws: u64,
     pub hairline_bytes: u64,
