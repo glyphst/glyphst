@@ -216,7 +216,11 @@ impl DocumentView {
         self.set_scroll_doc(target_x, target_y, cx);
     }
 
-    fn activate_gpu_link_action(&mut self, action: &GpuLinkAction, cx: &mut Context<Self>) {
+    pub(super) fn activate_gpu_link_action(
+        &mut self,
+        action: &GpuLinkAction,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             GpuLinkAction::GoTo { page, view } => {
                 self.navigate_to_gpu_destination(*page as usize, view, cx);
@@ -362,12 +366,17 @@ impl DocumentView {
             return;
         }
 
+        let native_action = entry.native_action.clone();
         let page_idx = entry.page_idx;
         let target_top = entry.target_top;
         let target_left = entry.target_left;
         self.toc_sidebar_selected = Some(entry_ix);
         cx.notify();
-        self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
+        if let Some(action) = native_action {
+            self.activate_gpu_link_action(&action, cx);
+        } else if let Some(page_idx) = page_idx {
+            self.navigate_to_pdf_destination(page_idx, target_top, target_left, cx);
+        }
     }
 
     pub(crate) fn navigate_to_note(&mut self, note_ix: usize, cx: &mut Context<Self>) {

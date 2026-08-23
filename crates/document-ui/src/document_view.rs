@@ -62,8 +62,9 @@ use glyphst_pdf::{
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, GpuDestinationView, GpuFallbackDiagnostic,
     GpuFallbackSource, GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction,
-    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer,
-    GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
+    GpuNavigationRoute, GpuOutlineItem, GpuPageRegion, GpuPageRoute, GpuPageTexture,
+    GpuPaintRequest, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats,
+    PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -137,6 +138,16 @@ const MAX_RASTER_BANDS: usize = 8;
 const PAGE_LOADING_INDICATOR_SIZE: f32 = 24.0;
 const MAX_JUMP_HISTORY: usize = 128;
 const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
+
+fn pdf_outline_color(color: [f32; 3]) -> Hsla {
+    let [red, green, blue] = color.map(|component| {
+        (component.clamp(0.0, 1.0) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    });
+    rgba(u32::from_be_bytes([red, green, blue, u8::MAX])).into()
+}
+
 const TOC_SIDEBAR_WIDTH: f32 = 280.0;
 const TOC_SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 const BOOKMARKS_SIDEBAR_WIDTH: f32 = 300.0;
@@ -630,6 +641,9 @@ pub struct DocumentRenderDebugSnapshot {
     pub pending_render_count: usize,
     pub pending_render_limit: usize,
     pub gpu_cache: GpuCacheDebugSnapshot,
+    /// Document-level reasons for retaining MuPDF navigation. These never
+    /// change the rendering backend of a supported page.
+    pub gpu_navigation_fallbacks: Vec<GpuFallbackDebugSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -1691,10 +1705,15 @@ struct TocEntry {
     depth: usize,
     parent_ix: Option<usize>,
     has_children: bool,
-    page_idx: usize,
+    page_idx: Option<usize>,
     target_top: Option<f32>,
     target_left: Option<f32>,
     navigable: bool,
+    native_action: Option<GpuLinkAction>,
+    initially_open: bool,
+    color: Option<[f32; 3]>,
+    italic: bool,
+    bold: bool,
 }
 
 #[derive(Clone, Copy)]

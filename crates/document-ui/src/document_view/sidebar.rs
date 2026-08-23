@@ -83,10 +83,10 @@ fn current_toc_entry_for_anchor(
         if !entry.navigable {
             continue;
         }
-        first_navigable.get_or_insert(entry_ix);
         let Some(destination_y) = destination_y(entry) else {
             continue;
         };
+        first_navigable.get_or_insert(entry_ix);
 
         // Prefer the later outline entry when destinations are identical.
         if destination_y <= anchor_y && best.is_none_or(|(_, best_y)| destination_y >= best_y) {
@@ -317,16 +317,22 @@ impl DocumentView {
         let collapsed = self.toc_collapsed.contains(&entry_ix);
         let current = self.toc_sidebar_selected == Some(entry_ix);
         let title = entry.title.clone();
-        let title_color = if entry.navigable {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        };
+        let title_color = entry.color.map(pdf_outline_color).unwrap_or_else(|| {
+            if entry.navigable {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            }
+        });
         let depth = entry.depth;
         let has_children = entry.has_children;
         let navigable = entry.navigable;
-        let bookmarked = navigable && self.is_page_bookmarked(entry.page_idx);
-        let page_number = entry.page_idx + 1;
+        let bookmarked = entry
+            .page_idx
+            .is_some_and(|page_idx| self.is_page_bookmarked(page_idx));
+        let page_number = entry.page_idx.map(|page_idx| page_idx + 1);
+        let italic = entry.italic;
+        let bold = entry.bold;
         let row_id = if sticky {
             "toc-sidebar-sticky-entry"
         } else {
@@ -441,6 +447,8 @@ impl DocumentView {
                     .truncate()
                     .tooltip(text_tooltip(title.clone()))
                     .text_color(title_color)
+                    .when(italic, |this| this.italic())
+                    .when(bold, |this| this.font_weight(FontWeight::BOLD))
                     .child(title),
             )
             .child(
@@ -450,11 +458,7 @@ impl DocumentView {
                     .w(px(SIDEBAR_PAGE_NUMBER_WIDTH))
                     .text_align(gpui::TextAlign::Right)
                     .text_color(theme.muted_foreground)
-                    .child(if navigable {
-                        format!("{}", page_number)
-                    } else {
-                        String::new()
-                    }),
+                    .child(page_number.map_or_else(String::new, |page| page.to_string())),
             );
 
         Some(
@@ -548,19 +552,16 @@ impl DocumentView {
         let leading_page = self.current_page_index();
 
         current_toc_entry_for_anchor(&self.toc, anchor_y, |entry| {
+            let page_idx = entry.page_idx?;
             if !self.is_presentation_mode()
                 && self.is_two_column_layout()
-                && self.spread_start_page(entry.page_idx) == leading_page
-                && entry.page_idx != leading_page
+                && self.spread_start_page(page_idx) == leading_page
+                && page_idx != leading_page
             {
                 return None;
             }
-            self.pdf_destination_scroll_position(
-                entry.page_idx,
-                entry.target_top,
-                entry.target_left,
-            )
-            .map(|(_, destination_y)| destination_y)
+            self.pdf_destination_scroll_position(page_idx, entry.target_top, entry.target_left)
+                .map(|(_, destination_y)| destination_y)
         })
     }
 
@@ -962,10 +963,15 @@ mod tests {
             depth,
             parent_ix,
             has_children: false,
-            page_idx: 0,
+            page_idx: Some(0),
             target_top: Some(destination_y),
             target_left: None,
             navigable: true,
+            native_action: None,
+            initially_open: true,
+            color: None,
+            italic: false,
+            bold: false,
         }
     }
 
@@ -1009,6 +1015,15 @@ mod tests {
         assert_eq!(
             current_toc_entry_for_anchor(&toc, 5.0, destination_y),
             Some(1)
+        );
+
+        toc[0].navigable = true;
+        toc[0].page_idx = None;
+        toc[0].target_top = None;
+        assert_eq!(
+            current_toc_entry_for_anchor(&toc, 5.0, destination_y),
+            Some(1),
+            "a URI or dynamic native action must not become the positional fallback",
         );
     }
 

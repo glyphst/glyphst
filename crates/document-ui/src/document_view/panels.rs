@@ -308,8 +308,13 @@ impl DocumentView {
                 entry_ix,
                 title: entry.title.clone(),
                 depth: entry.depth,
-                page_number: entry.page_idx + 1,
-                bookmarked: self.is_page_bookmarked(entry.page_idx),
+                page_number: entry.page_idx.map(|page_idx| page_idx + 1),
+                bookmarked: entry
+                    .page_idx
+                    .is_some_and(|page_idx| self.is_page_bookmarked(page_idx)),
+                color: entry.color.map(pdf_outline_color),
+                italic: entry.italic,
+                bold: entry.bold,
             })
             .collect()
     }
@@ -324,11 +329,13 @@ impl DocumentView {
         let current_page_number = self.current_page_index() + 1;
         entries
             .iter()
-            .position(|entry| entry.page_number == current_page_number)
+            .position(|entry| entry.page_number == Some(current_page_number))
             .or_else(|| {
-                entries
-                    .iter()
-                    .rposition(|entry| entry.page_number < current_page_number)
+                entries.iter().rposition(|entry| {
+                    entry
+                        .page_number
+                        .is_some_and(|page_number| page_number < current_page_number)
+                })
             })
             .unwrap_or(0)
     }

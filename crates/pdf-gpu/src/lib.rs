@@ -13,8 +13,8 @@ pub use glyphst_pdf_engine::CancellationToken;
 use glyphst_pdf_engine::{
     Action as EngineAction, CompileOptions, CompiledPage, Destination as EngineDestination,
     DestinationView as EngineDestinationView, DiagnosticSeverity, Document, DocumentSource, Engine,
-    FeatureId, LayerConfiguration, LinkHighlightMode, OpenOptions, PageIndex, Password, Rect,
-    SupportDiagnostic, Transform,
+    FeatureId, LayerConfiguration, LinkHighlightMode, OpenOptions,
+    OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, SupportDiagnostic, Transform,
 };
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
@@ -105,6 +105,27 @@ pub enum GpuNamedAction {
     PreviousPage,
     FirstPage,
     LastPage,
+}
+
+/// Fully owned table-of-contents item installed only after document-level
+/// native navigation preflight and application action conversion both pass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuOutlineItem {
+    pub title: Arc<str>,
+    pub action: Option<GpuLinkAction>,
+    pub children: Arc<[Self]>,
+    pub initially_open: bool,
+    pub color: Option<[f32; 3]>,
+    pub italic: bool,
+    pub bold: bool,
+}
+
+/// Result of attempting to replace the host reader's document navigation.
+/// This is intentionally independent from page routing.
+#[derive(Clone, Debug)]
+pub enum GpuNavigationRoute {
+    Ready(Arc<[GpuOutlineItem]>),
+    Fallback(Arc<[GpuFallbackDiagnostic]>),
 }
 
 /// Engine-owned Link interaction geometry in canonical page coordinates.
@@ -221,6 +242,7 @@ pub struct GpuPdfDocument {
 
 struct GpuPdfDocumentInner {
     document: Document,
+    navigation: GpuNavigationRoute,
     compiled: Mutex<CompiledPageCache>,
 }
 
@@ -289,9 +311,11 @@ impl GpuPdfDocument {
         };
         let document = Engine::open(DocumentSource::from_bytes(snapshot.shared_bytes()), options)
             .context("failed to open PDF with the native GPU engine")?;
+        let navigation = compiled_document_navigation(&document);
         Ok(Self {
             inner: Arc::new(GpuPdfDocumentInner {
                 document,
+                navigation,
                 compiled: Mutex::new(CompiledPageCache::default()),
             }),
         })
@@ -313,6 +337,12 @@ impl GpuPdfDocument {
 
     pub const fn compiled_cache_limit() -> usize {
         MAX_COMPILED_PAGE_CACHE_ENTRIES
+    }
+
+    /// Native outline route for this document. A navigation fallback does not
+    /// affect eligibility of any page for native GPU rendering.
+    pub fn navigation_route(&self) -> GpuNavigationRoute {
+        self.inner.navigation.clone()
     }
 
     /// Conservative frontend-only preflight, suitable before a GPU context exists.
@@ -367,6 +397,71 @@ impl GpuPdfDocument {
         }
         Ok(page)
     }
+}
+
+fn compiled_document_navigation(document: &Document) -> GpuNavigationRoute {
+    let diagnostics = document
+        .navigation_support()
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Unsupported)
+        .map(GpuFallbackDiagnostic::from)
+        .collect::<Vec<_>>();
+    if !diagnostics.is_empty() {
+        return GpuNavigationRoute::Fallback(diagnostics.into());
+    }
+
+    match compiled_outline_items(document.outline()) {
+        Ok(items) => GpuNavigationRoute::Ready(items),
+        Err(diagnostic) => GpuNavigationRoute::Fallback(Arc::from([diagnostic])),
+    }
+}
+
+fn compiled_outline_items(
+    items: &[EngineOutlineItem],
+) -> std::result::Result<Arc<[GpuOutlineItem]>, GpuFallbackDiagnostic> {
+    items
+        .iter()
+        .map(|item| {
+            let action = item
+                .action
+                .as_ref()
+                .map(compiled_outline_action)
+                .transpose()?;
+            Ok(GpuOutlineItem {
+                title: Arc::from(item.title.as_str()),
+                action,
+                children: compiled_outline_items(&item.children)?,
+                initially_open: item.initially_open,
+                color: item.color,
+                italic: item.italic,
+                bold: item.bold,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Arc::from)
+}
+
+fn compiled_outline_action(
+    action: &EngineAction,
+) -> std::result::Result<GpuLinkAction, GpuFallbackDiagnostic> {
+    compiled_link_action(action).map_err(|diagnostic| GpuFallbackDiagnostic {
+        feature: FeatureId::Outlines,
+        code: match diagnostic.code.as_str() {
+            "application-link-action-sequence-empty" => {
+                "application-outline-action-sequence-empty".into()
+            }
+            "application-link-action-unsupported" => {
+                "application-outline-action-unsupported".into()
+            }
+            _ => diagnostic.code,
+        },
+        message: diagnostic
+            .message
+            .replace("a native Link", "an outline item")
+            .replace("the native Link", "the outline item"),
+        source: diagnostic.source,
+    })
 }
 
 /// One complete page retained on a specific GPUI device generation.
@@ -1031,6 +1126,44 @@ trailer <</Root 1 0 R>>\n%%EOF"
         )
     }
 
+    fn catalog_navigation_pdf() -> Arc<[u8]> {
+        Arc::from(
+            &br#"%PDF-1.7
+1 0 obj <</Type/Catalog/Pages 2 0 R/Names<</Dests 8 0 R>>/Dests 9 0 R/Outlines 10 0 R>> endobj
+2 0 obj <</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>> endobj
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R>> endobj
+4 0 obj <</Length 0>> stream
+endstream endobj
+5 0 obj <<>> endobj
+6 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 7 0 R>> endobj
+7 0 obj <</Length 0>> stream
+endstream endobj
+8 0 obj <</Names[(chapter-two)[6 0 R/XYZ 12 34 2](fit-page)[3 0 R/Fit]]/Limits[(chapter-two)(fit-page)]>> endobj
+9 0 obj <</legacy[6 0 R/FitH 40]>> endobj
+10 0 obj <</Type/Outlines/First 11 0 R/Last 12 0 R/Count 3>> endobj
+11 0 obj <</Title(Chapter One)/Parent 10 0 R/Next 12 0 R/First 13 0 R/Last 13 0 R/Count -1/Dest(fit-page)/C[0.1 0.2 0.3]/F 3>> endobj
+12 0 obj <</Title(Chained)/Parent 10 0 R/Prev 11 0 R/A<</S/GoTo/D/legacy/Next<</S/Named/N/LastPage>>>>>> endobj
+13 0 obj <</Title(Child)/Parent 11 0 R/Dest(chapter-two)>> endobj
+trailer <</Root 1 0 R>>
+%%EOF"#[..],
+        )
+    }
+
+    fn cyclic_outline_pdf() -> Arc<[u8]> {
+        Arc::from(
+            &br#"%PDF-1.7
+1 0 obj <</Type/Catalog/Pages 2 0 R/Outlines 5 0 R>> endobj
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R>> endobj
+4 0 obj <</Length 0>> stream
+endstream endobj
+5 0 obj <</Type/Outlines/First 6 0 R/Last 6 0 R/Count 1>> endobj
+6 0 obj <</Title(Cycle)/Parent 5 0 R/Next 6 0 R>> endobj
+trailer <</Root 1 0 R>>
+%%EOF"#[..],
+        )
+    }
+
     fn multipage_pdf(page_count: usize) -> Arc<[u8]> {
         let kids = (0..page_count)
             .map(|index| format!("{} 0 R", index + 3))
@@ -1065,6 +1198,87 @@ trailer <</Root 1 0 R>>\n%%EOF"
             .expect("compile page");
         let second = document.compile_page(0, &cancellation).expect("reuse page");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn document_navigation_retains_owned_outline_actions_hierarchy_and_style() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "catalog-navigation.pdf",
+            DocumentFormat::Pdf,
+            catalog_navigation_pdf(),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let GpuNavigationRoute::Ready(outline) = document.navigation_route() else {
+            panic!("catalog navigation unexpectedly fell back");
+        };
+
+        assert_eq!(outline.len(), 2);
+        assert_eq!(outline[0].title.as_ref(), "Chapter One");
+        assert!(!outline[0].initially_open);
+        assert_eq!(outline[0].color, Some([0.1, 0.2, 0.3]));
+        assert!(outline[0].italic);
+        assert!(outline[0].bold);
+        assert_eq!(outline[0].children.len(), 1);
+        assert_eq!(outline[0].children[0].title.as_ref(), "Child");
+        assert_eq!(
+            outline[0].action,
+            Some(GpuLinkAction::GoTo {
+                page: 0,
+                view: GpuDestinationView::FitPage,
+            })
+        );
+        assert_eq!(
+            outline[0].children[0].action,
+            Some(GpuLinkAction::GoTo {
+                page: 1,
+                view: GpuDestinationView::Xyz {
+                    x: Some(12.0),
+                    y: Some(66.0),
+                    zoom: Some(2.0),
+                },
+            })
+        );
+        assert_eq!(
+            outline[1].action,
+            Some(GpuLinkAction::Sequence(Arc::from([
+                GpuLinkAction::GoTo {
+                    page: 1,
+                    view: GpuDestinationView::FitWidth { top: Some(60.0) },
+                },
+                GpuLinkAction::Named(GpuNamedAction::LastPage),
+            ])))
+        );
+    }
+
+    #[test]
+    fn document_navigation_fallback_does_not_poison_native_page_routing() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "cyclic-outline.pdf",
+            DocumentFormat::Pdf,
+            cyclic_outline_pdf(),
+        );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let GpuNavigationRoute::Fallback(diagnostics) = document.navigation_route() else {
+            panic!("cyclic outline unexpectedly passed navigation preflight");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.feature == FeatureId::Outlines
+                && diagnostic.code == "outline-cycle-or-reuse"
+                && diagnostic.source == GpuFallbackSource::Frontend
+        }));
+        assert!(
+            document
+                .frontend_diagnostics(0)
+                .expect("preflight page")
+                .is_empty()
+        );
+        assert!(
+            document
+                .compile_page(0, &CancellationToken::new())
+                .expect("compile page")
+                .support()
+                .is_supported()
+        );
     }
 
     #[test]
@@ -1261,6 +1475,8 @@ trailer <</Root 1 0 R>>\n%%EOF"
         assert_send_sync::<GpuPageTexture>();
         assert_send_sync::<GpuPageRegion>();
         assert_send_sync::<GpuLinkInteraction>();
+        assert_send_sync::<GpuOutlineItem>();
+        assert_send_sync::<GpuNavigationRoute>();
     }
 
     #[test]

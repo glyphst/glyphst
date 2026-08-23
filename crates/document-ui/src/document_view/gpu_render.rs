@@ -11,6 +11,7 @@ pub(super) struct GpuPdfState {
     document: Option<Arc<GpuPdfDocument>>,
     document_task: Option<Task<()>>,
     document_error: Option<String>,
+    navigation_fallback: Option<Arc<[GpuFallbackDiagnostic]>>,
     device_token: Option<ExternalGpuDeviceToken>,
     renderer: Option<Arc<GpuPdfRenderer>>,
     renderer_error: Option<String>,
@@ -53,6 +54,7 @@ impl GpuPdfState {
         self.document = None;
         self.document_task = None;
         self.document_error = None;
+        self.navigation_fallback = None;
         self.device_token = None;
         self.renderer = None;
         self.renderer_error = None;
@@ -103,6 +105,7 @@ impl GpuPdfState {
         self.document.is_some()
             || self.document_task.is_some()
             || self.document_error.is_some()
+            || self.navigation_fallback.is_some()
             || self.device_token.is_some()
             || self.renderer.is_some()
             || self.renderer_error.is_some()
@@ -588,6 +591,21 @@ impl DocumentView {
                 this.gpu_pdf.document_task = None;
                 match result {
                     Ok(document) if document.page_count() as usize == expected_page_count => {
+                        match document.navigation_route() {
+                            GpuNavigationRoute::Ready(outline) => {
+                                this.gpu_pdf.navigation_fallback = None;
+                                this.install_native_gpu_outline(&outline, cx);
+                            }
+                            GpuNavigationRoute::Fallback(diagnostics) => {
+                                for diagnostic in diagnostics.iter() {
+                                    eprintln!(
+                                        "native PDF navigation fallback [{}:{}]: {}",
+                                        diagnostic.feature, diagnostic.code, diagnostic.message
+                                    );
+                                }
+                                this.gpu_pdf.navigation_fallback = Some(diagnostics);
+                            }
+                        }
                         this.gpu_pdf.document = Some(document);
                     }
                     Ok(document) => {
@@ -722,6 +740,12 @@ impl DocumentView {
             GpuPageState::Fallback(diagnostics) => Some(diagnostics),
             _ => None,
         }
+    }
+
+    pub(super) fn native_gpu_navigation_fallback_diagnostics(
+        &self,
+    ) -> Option<&[GpuFallbackDiagnostic]> {
+        self.gpu_pdf.navigation_fallback.as_deref()
     }
 
     pub(super) fn native_gpu_link_interactions(

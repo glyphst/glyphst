@@ -126,6 +126,17 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             FOREGROUND,
         ));
 
+    for fallback in document.gpu_navigation_fallbacks {
+        this = this.child(reading(
+            "NAV FALLBACK",
+            format!(
+                "[{}:{}] {} · {}",
+                fallback.feature, fallback.code, fallback.source, fallback.message
+            ),
+            WARN,
+        ));
+    }
+
     for page in document.pages {
         this = this.child(render_page(page));
     }

@@ -1,5 +1,18 @@
 use super::*;
 
+fn gpu_fallback_debug_snapshot(diagnostic: &GpuFallbackDiagnostic) -> GpuFallbackDebugSnapshot {
+    GpuFallbackDebugSnapshot {
+        feature: diagnostic.feature.to_string(),
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+        source: match diagnostic.source {
+            GpuFallbackSource::Frontend => "frontend",
+            GpuFallbackSource::Renderer => "renderer",
+            GpuFallbackSource::Application => "application",
+        },
+    }
+}
+
 /// Returns a read-only process-wide cache snapshot without changing LRU order.
 pub fn render_cache_debug_snapshot(cx: &gpui::App) -> RenderCacheDebugSnapshot {
     cx.try_global::<RenderCache>()
@@ -37,6 +50,12 @@ impl DocumentView {
             pending_render_count: self.pending_renders.len(),
             pending_render_limit: MAX_PENDING_PAGE_RENDERS,
             gpu_cache: self.native_gpu_cache_debug(),
+            gpu_navigation_fallbacks: self
+                .native_gpu_navigation_fallback_diagnostics()
+                .unwrap_or_default()
+                .iter()
+                .map(gpu_fallback_debug_snapshot)
+                .collect(),
         }
     }
 
@@ -156,16 +175,7 @@ impl DocumentView {
             .native_gpu_fallback_diagnostics(page_idx)
             .unwrap_or_default()
             .iter()
-            .map(|diagnostic| GpuFallbackDebugSnapshot {
-                feature: diagnostic.feature.to_string(),
-                code: diagnostic.code.clone(),
-                message: diagnostic.message.clone(),
-                source: match diagnostic.source {
-                    GpuFallbackSource::Frontend => "frontend",
-                    GpuFallbackSource::Renderer => "renderer",
-                    GpuFallbackSource::Application => "application",
-                },
-            })
+            .map(gpu_fallback_debug_snapshot)
             .collect::<Vec<_>>();
         let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
         let backend = if gpu.is_some() {

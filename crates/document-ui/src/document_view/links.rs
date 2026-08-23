@@ -1,5 +1,14 @@
 use super::*;
 
+fn initially_collapsed_toc_entries(toc: &[TocEntry]) -> HashSet<usize> {
+    toc.iter()
+        .enumerate()
+        .filter_map(|(entry_ix, entry)| {
+            (entry.has_children && !entry.initially_open).then_some(entry_ix)
+        })
+        .collect()
+}
+
 impl DocumentView {
     pub(super) fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
         let mut entries = Vec::new();
@@ -37,15 +46,112 @@ impl DocumentView {
             depth,
             parent_ix,
             has_children,
-            page_idx,
+            page_idx: navigable.then_some(page_idx),
             target_top,
             target_left,
             navigable,
+            native_action: None,
+            initially_open: true,
+            color: None,
+            italic: false,
+            bold: false,
         });
 
         for child in down {
             Self::push_toc_outline(child, depth + 1, Some(entry_ix), page_count, entries);
         }
+    }
+
+    pub(super) fn flatten_gpu_outline(
+        outline: &[GpuOutlineItem],
+        page_count: usize,
+    ) -> Vec<TocEntry> {
+        let mut entries = Vec::new();
+        for item in outline {
+            Self::push_gpu_outline(item, 0, None, page_count, &mut entries);
+        }
+        entries
+    }
+
+    fn push_gpu_outline(
+        item: &GpuOutlineItem,
+        depth: usize,
+        parent_ix: Option<usize>,
+        page_count: usize,
+        entries: &mut Vec<TocEntry>,
+    ) {
+        let has_children = !item.children.is_empty();
+        let destination = item
+            .action
+            .as_ref()
+            .and_then(|action| Self::gpu_outline_destination(action, page_count));
+        let (page_idx, target_top, target_left) = destination
+            .map(|(page_idx, top, left)| (Some(page_idx), top, left))
+            .unwrap_or((None, None, None));
+        let entry_ix = entries.len();
+        entries.push(TocEntry {
+            title: item.title.to_string().into(),
+            depth,
+            parent_ix,
+            has_children,
+            page_idx,
+            target_top,
+            target_left,
+            navigable: item.action.is_some(),
+            native_action: item.action.clone(),
+            initially_open: item.initially_open,
+            color: item.color,
+            italic: item.italic,
+            bold: item.bold,
+        });
+
+        for child in item.children.iter() {
+            Self::push_gpu_outline(child, depth + 1, Some(entry_ix), page_count, entries);
+        }
+    }
+
+    fn gpu_outline_destination(
+        action: &GpuLinkAction,
+        page_count: usize,
+    ) -> Option<(usize, Option<f32>, Option<f32>)> {
+        let GpuLinkAction::GoTo { page, view } = action else {
+            return None;
+        };
+        let page_idx = usize::try_from(*page).ok()?;
+        if page_idx >= page_count {
+            return None;
+        }
+        let (target_top, target_left) = match view {
+            GpuDestinationView::Xyz { x, y, .. } => {
+                (y.map(|value| value as f32), x.map(|value| value as f32))
+            }
+            GpuDestinationView::FitWidth { top } => (top.map(|value| value as f32), None),
+            GpuDestinationView::FitHeight { left } => (None, left.map(|value| value as f32)),
+            GpuDestinationView::FitPage => (None, None),
+            GpuDestinationView::FitRectangle(rect) => (Some(rect[1] as f32), Some(rect[0] as f32)),
+        };
+        Some((page_idx, target_top, target_left))
+    }
+
+    pub(super) fn install_native_gpu_outline(
+        &mut self,
+        outline: &[GpuOutlineItem],
+        cx: &mut Context<Self>,
+    ) {
+        self.toc = Self::flatten_gpu_outline(outline, self.page_count);
+        self.toc_collapsed = initially_collapsed_toc_entries(&self.toc);
+        self.toc_sidebar_selected = None;
+        self.toc_sidebar_follow_current = true;
+        self.toc_sidebar_manual_scroll.set(false);
+        self.toc_sidebar_visible_entry_ixs.clear();
+        self.toc_sidebar_entries_dirty = true;
+        if let Some(palette) = self.toc_palette.clone() {
+            let entries = self.toc_palette_entries();
+            palette.update(cx, |picker, cx| {
+                picker.update_delegate(move |delegate| delegate.replace_entries(entries), cx);
+            });
+        }
+        cx.notify();
     }
 
     fn destination_coordinates(kind: DestinationKind) -> (Option<f32>, Option<f32>) {
@@ -520,6 +626,47 @@ trailer <</Root 1 0 R>>\n%%EOF"
         assert!(toc[0].has_children);
         assert!(toc[1].has_children);
         assert!(!toc[2].has_children);
+    }
+
+    #[test]
+    fn flatten_gpu_outline_retains_actions_style_and_initial_open_state() {
+        let outline = [GpuOutlineItem {
+            title: Arc::from("Native root"),
+            action: Some(GpuLinkAction::GoTo {
+                page: 1,
+                view: GpuDestinationView::Xyz {
+                    x: Some(12.0),
+                    y: Some(34.0),
+                    zoom: Some(2.0),
+                },
+            }),
+            children: Arc::from([GpuOutlineItem {
+                title: Arc::from("External child"),
+                action: Some(GpuLinkAction::Uri(Arc::from("https://example.com"))),
+                children: Arc::from([]),
+                initially_open: false,
+                color: None,
+                italic: false,
+                bold: false,
+            }]),
+            initially_open: false,
+            color: Some([0.1, 0.2, 0.3]),
+            italic: true,
+            bold: true,
+        }];
+
+        let toc = DocumentView::flatten_gpu_outline(&outline, 2);
+        assert_eq!(toc.len(), 2);
+        assert_eq!(toc[0].page_idx, Some(1));
+        assert_eq!(toc[0].target_top, Some(34.0));
+        assert_eq!(toc[0].target_left, Some(12.0));
+        assert_eq!(toc[0].color, Some([0.1, 0.2, 0.3]));
+        assert!(toc[0].italic);
+        assert!(toc[0].bold);
+        assert_eq!(toc[1].parent_ix, Some(0));
+        assert!(toc[1].navigable);
+        assert_eq!(toc[1].page_idx, None);
+        assert_eq!(initially_collapsed_toc_entries(&toc), HashSet::from([0]));
     }
 
     #[test]

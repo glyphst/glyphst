@@ -8,7 +8,7 @@ use crate::{
 };
 use glyphst_ui::{icons::Icon, tooltip::text_tooltip};
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, SharedString, StyledText,
+    AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, Hsla, SharedString, StyledText,
     WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::ThemeColor;
@@ -27,8 +27,11 @@ pub struct TocPaletteEntry {
     pub entry_ix: usize,
     pub title: SharedString,
     pub depth: usize,
-    pub page_number: usize,
+    pub page_number: Option<usize>,
     pub bookmarked: bool,
+    pub color: Option<Hsla>,
+    pub italic: bool,
+    pub bold: bool,
 }
 
 struct TocMatch {
@@ -131,6 +134,9 @@ impl PickerDelegate for TocPaletteDelegate {
         let title = entry.title.clone();
         let page_number = entry.page_number;
         let depth = entry.depth;
+        let color = entry.color;
+        let italic = entry.italic;
+        let bold = entry.bold;
         let highlights = entry_match
             .highlights
             .iter()
@@ -176,6 +182,9 @@ impl PickerDelegate for TocPaletteDelegate {
                     .min_w_0()
                     .truncate()
                     .tooltip(text_tooltip(title.clone()))
+                    .when_some(color, |this, color| this.text_color(color))
+                    .when(italic, |this| this.italic())
+                    .when(bold, |this| this.font_weight(FontWeight::BOLD))
                     .child(StyledText::new(title).with_highlights(highlights)),
             )
             .child(
@@ -183,7 +192,7 @@ impl PickerDelegate for TocPaletteDelegate {
                     .flex_none()
                     .ml_3()
                     .text_color(theme.muted_foreground)
-                    .child(format!("{}", page_number)),
+                    .child(page_number.map_or_else(String::new, |page| page.to_string())),
             )
             .into_any_element()
     }
