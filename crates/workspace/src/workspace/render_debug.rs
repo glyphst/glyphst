@@ -466,8 +466,11 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "COMPOSITOR",
                 format!(
-                    "{} offscreen · {} mask · {} composite",
-                    gpu.offscreen_passes, gpu.mask_passes, gpu.composite_passes
+                    "{} offscreen · {} mask · {} composite · {} backdrop copies",
+                    gpu.offscreen_passes,
+                    gpu.mask_passes,
+                    gpu.composite_passes,
+                    gpu.backdrop_copies
                 ),
                 FOREGROUND,
             ))

@@ -543,6 +543,7 @@ pub struct GpuPageRenderDebugSnapshot {
     pub offscreen_passes: u64,
     pub mask_passes: u64,
     pub composite_passes: u64,
+    pub backdrop_copies: u64,
     pub transient_peak_bytes: u64,
     pub transient_resident_bytes: u64,
     pub transient_pool_reuses: u64,

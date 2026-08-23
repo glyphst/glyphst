@@ -127,6 +127,7 @@ impl DocumentView {
             offscreen_passes: stats.offscreen_passes,
             mask_passes: stats.mask_passes,
             composite_passes: stats.composite_passes,
+            backdrop_copies: stats.backdrop_copies,
             transient_peak_bytes: stats.transient_peak_bytes,
             transient_resident_bytes: stats.transient_resident_bytes,
             transient_pool_reuses: stats.transient_pool_reuses,
