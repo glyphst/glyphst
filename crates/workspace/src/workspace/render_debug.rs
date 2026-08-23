@@ -316,6 +316,18 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 FOREGROUND,
             ));
         }
+        if preparation.retained_tiling_pattern_resources > 0 {
+            section = section.child(reading(
+                "PATTERNS",
+                format!(
+                    "{} resource · {} target · {} expanded cell",
+                    preparation.retained_tiling_pattern_resources,
+                    preparation.retained_tiling_pattern_instances,
+                    preparation.expanded_tiling_pattern_cells
+                ),
+                FOREGROUND,
+            ));
+        }
         if preparation.retained_transparency_groups > 0
             || preparation.retained_soft_mask_resources > 0
             || preparation.retained_soft_mask_instances > 0
