@@ -52,8 +52,8 @@ gpui_platform = { git = "https://github.com/glyphst/zed", rev = "be3bce86d7ef790
 ] }
 gpui_wgpu = { git = "https://github.com/glyphst/zed", rev = "be3bce86d7ef7908ae2510557a0a3ab830ce4058", package = "gpui_wgpu" }
 glyphst-mermaid-render = { path = "crates/mermaid-render" }
-glyphst-pdf-engine = { git = "https://github.com/glyphst/glyphst-pdf", rev = "fbdac21464da22ea919d9d55c7dadb986ad6c443", package = "glyphst-pdf-engine" }
-glyphst-pdf-render-wgpu = { git = "https://github.com/glyphst/glyphst-pdf", rev = "fbdac21464da22ea919d9d55c7dadb986ad6c443", package = "glyphst-pdf-render-wgpu" }
+glyphst-pdf-engine = { git = "https://github.com/glyphst/glyphst-pdf", rev = "c23a6c151918eed768103227ec6e25018cee921c", package = "glyphst-pdf-engine" }
+glyphst-pdf-render-wgpu = { git = "https://github.com/glyphst/glyphst-pdf", rev = "c23a6c151918eed768103227ec6e25018cee921c", package = "glyphst-pdf-render-wgpu" }
 httpdate = "1"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
