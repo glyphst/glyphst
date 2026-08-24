@@ -570,6 +570,7 @@ impl DocumentView {
             previous.as_ref().map(|rendered| &rendered.texture),
         ) {
             Ok((texture, stats)) => {
+                let refinement_pending = texture.refinement_pending();
                 self.gpu_pdf.rendered.insert(
                     page,
                     RenderedGpuPage {
@@ -580,6 +581,13 @@ impl DocumentView {
                 );
                 self.gpu_pdf.prune_surface_cache();
                 self.gpu_pdf.presented_pages.insert(page);
+                if refinement_pending {
+                    // A capacity page deliberately refines only a bounded
+                    // number of covered tiles per settled frame. Keep the
+                    // reprojected texture visible and ask GPUI for the next
+                    // paint until the engine reports an exact frame.
+                    window.request_animation_frame();
+                }
                 Some(gpu_paint_texture(key, image_bounds, texture))
             }
             Err(error) => {
@@ -941,6 +949,11 @@ impl DocumentView {
                 self.gpu_pdf.pages.get(&page),
                 Some(GpuPageState::Preparing { .. })
             )
+            || self
+                .gpu_pdf
+                .rendered
+                .get(&page)
+                .is_some_and(|rendered| rendered.texture.refinement_pending())
     }
 }
 
