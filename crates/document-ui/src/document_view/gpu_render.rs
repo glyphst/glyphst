@@ -582,10 +582,10 @@ impl DocumentView {
                 self.gpu_pdf.prune_surface_cache();
                 self.gpu_pdf.presented_pages.insert(page);
                 if refinement_pending {
-                    // A capacity page deliberately refines only a bounded
-                    // number of covered tiles per settled frame. Keep the
-                    // reprojected texture visible and ask GPUI for the next
-                    // paint until the engine reports an exact frame.
+                    // Exact analytic and scope-free retained work is bounded
+                    // per settled frame. Keep the reprojected texture visible
+                    // and ask GPUI for the next paint until the engine reports
+                    // complete exact coverage.
                     window.request_animation_frame();
                 }
                 Some(gpu_paint_texture(key, image_bounds, texture))
