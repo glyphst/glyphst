@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=b6bfec4ea3370eac96404ec158b25658ce7c5c2d#b6bfec4ea3370eac96404ec158b25658ce7c5c2d"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=90be6f72fbb0b4598874af72b3bd0a9d8bb82478#90be6f72fbb0b4598874af72b3bd0a9d8bb82478"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=b6bfec4ea3370eac96404ec158b25658ce7c5c2d#b6bfec4ea3370eac96404ec158b25658ce7c5c2d"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=90be6f72fbb0b4598874af72b3bd0a9d8bb82478#90be6f72fbb0b4598874af72b3bd0a9d8bb82478"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3228,13 +3228,13 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=b6bfec4ea3370eac96404ec158b25658ce7c5c2d#b6bfec4ea3370eac96404ec158b25658ce7c5c2d"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=90be6f72fbb0b4598874af72b3bd0a9d8bb82478#90be6f72fbb0b4598874af72b3bd0a9d8bb82478"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
- "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
  "kurbo 0.13.1",
  "smallvec",
 ]
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=b6bfec4ea3370eac96404ec158b25658ce7c5c2d#b6bfec4ea3370eac96404ec158b25658ce7c5c2d"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=90be6f72fbb0b4598874af72b3bd0a9d8bb82478#90be6f72fbb0b4598874af72b3bd0a9d8bb82478"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3258,7 +3258,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=b6bfec4ea3370eac96404ec158b25658ce7c5c2d#b6bfec4ea3370eac96404ec158b25658ce7c5c2d"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=90be6f72fbb0b4598874af72b3bd0a9d8bb82478#90be6f72fbb0b4598874af72b3bd0a9d8bb82478"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -4064,7 +4064,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-ccitt"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 
 [[package]]
 name = "hayro-cmap"
@@ -4078,10 +4078,10 @@ dependencies = [
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 dependencies = [
  "brotli",
- "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
 ]
 
 [[package]]
@@ -4106,11 +4106,11 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 dependencies = [
  "bitflags 2.11.1",
- "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
  "kurbo 0.13.1",
  "moxcms",
  "phf 0.13.1",
@@ -4134,10 +4134,10 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 dependencies = [
  "fearless_simd 0.6.0",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
 ]
 
 [[package]]
@@ -4152,7 +4152,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.4.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 dependencies = [
  "fearless_simd 0.6.0",
 ]
@@ -4166,7 +4166,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 
 [[package]]
 name = "hayro-svg"
@@ -4201,11 +4201,11 @@ dependencies = [
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
+source = "git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20#831c202c06ef55c3f71a95034f360fee38606d20"
 dependencies = [
  "flate2",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
- "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
+ "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=831c202c06ef55c3f71a95034f360fee38606d20)",
  "hayro-jpeg2000 0.4.0",
  "memchr",
  "rustc-hash 2.1.2",
