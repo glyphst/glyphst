@@ -390,14 +390,17 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             section = section.child(reading(
                 "TRIANGLES",
                 format!(
-                    "{} total · {} refs · {} vertex · {} ref · {} instance · {}/{} compact LOD",
+                    "{} total · {} refs · {} vertex · {} logical ref · {} instance · {} compact / {} indexed / {} total LOD · {} canonical index · {} segment",
                     format_bytes(preparation.vector_bytes),
                     format_bytes(preparation.vector_reference_bytes),
                     preparation.vector_vertices,
                     preparation.vector_triangle_references,
                     preparation.vector_instances,
                     preparation.vector_compact_reference_lods,
+                    preparation.vector_indexed_reference_lods,
                     preparation.vector_lod_levels,
+                    preparation.vector_canonical_indices,
+                    preparation.vector_reference_segments,
                 ),
                 FOREGROUND,
             ));
