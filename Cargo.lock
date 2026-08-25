@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=432f5a36df63ffb72d62eb7b9315d45fb32e6faa#432f5a36df63ffb72d62eb7b9315d45fb32e6faa"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=7e124c0c8a38ab26e0e27c28966044b74939058f#7e124c0c8a38ab26e0e27c28966044b74939058f"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=432f5a36df63ffb72d62eb7b9315d45fb32e6faa#432f5a36df63ffb72d62eb7b9315d45fb32e6faa"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=7e124c0c8a38ab26e0e27c28966044b74939058f#7e124c0c8a38ab26e0e27c28966044b74939058f"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3228,7 +3228,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=432f5a36df63ffb72d62eb7b9315d45fb32e6faa#432f5a36df63ffb72d62eb7b9315d45fb32e6faa"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=7e124c0c8a38ab26e0e27c28966044b74939058f#7e124c0c8a38ab26e0e27c28966044b74939058f"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=432f5a36df63ffb72d62eb7b9315d45fb32e6faa#432f5a36df63ffb72d62eb7b9315d45fb32e6faa"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=7e124c0c8a38ab26e0e27c28966044b74939058f#7e124c0c8a38ab26e0e27c28966044b74939058f"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3258,7 +3258,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=432f5a36df63ffb72d62eb7b9315d45fb32e6faa#432f5a36df63ffb72d62eb7b9315d45fb32e6faa"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=7e124c0c8a38ab26e0e27c28966044b74939058f#7e124c0c8a38ab26e0e27c28966044b74939058f"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
