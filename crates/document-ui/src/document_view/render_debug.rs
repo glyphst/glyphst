@@ -159,6 +159,8 @@ impl DocumentView {
                 vector_lod_compacted: stats.vector_lod_compacted,
                 vector_vertices: stats.vector_vertices,
                 vector_triangle_references: stats.vector_triangle_references,
+                vector_reference_bytes: stats.vector_reference_bytes,
+                vector_compact_reference_lods: stats.vector_compact_reference_lods,
                 vector_instances: stats.vector_instances,
                 vector_bytes: stats.vector_bytes,
                 procedural_stroke_batches: stats.hairline_batches,

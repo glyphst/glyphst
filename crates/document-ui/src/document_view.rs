@@ -574,6 +574,8 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub vector_lod_compacted: bool,
     pub vector_vertices: u64,
     pub vector_triangle_references: u64,
+    pub vector_reference_bytes: u64,
+    pub vector_compact_reference_lods: u64,
     pub vector_instances: u64,
     pub vector_bytes: u64,
     pub procedural_stroke_batches: u64,
