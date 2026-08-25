@@ -9,6 +9,10 @@ fn surface_reservation_bytes(output_bytes: u64, retained_source_bytes: u64, sett
 }
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
+fn same_patch_lod_request(existing: f32, required: f32) -> bool {
+    existing.to_bits() == required.to_bits()
+}
+
 #[derive(Default)]
 pub(super) struct GpuPdfState {
     generation: u64,
@@ -28,6 +32,8 @@ pub(super) struct GpuPdfState {
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
     preparation_generation: u64,
+    patch_lod_generation: u64,
+    patch_lod_tasks: HashMap<u32, PatchLodTask>,
     render_generation: u64,
     motion_generation: u64,
     motion_active: bool,
@@ -55,6 +61,13 @@ struct RenderedGpuPage {
     stats: GpuRenderStats,
 }
 
+struct PatchLodTask {
+    generation: u64,
+    required_scale: f32,
+    cancellation: GpuCancellationToken,
+    _task: Task<()>,
+}
+
 impl GpuPdfState {
     pub(super) fn reset(&mut self) {
         self.cancel_page_tasks();
@@ -76,6 +89,8 @@ impl GpuPdfState {
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.preparation_generation = 0;
+        self.patch_lod_generation = 0;
+        self.patch_lod_tasks.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -98,6 +113,8 @@ impl GpuPdfState {
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.preparation_generation = 0;
+        self.patch_lod_generation = 0;
+        self.patch_lod_tasks.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -110,6 +127,9 @@ impl GpuPdfState {
             if let GpuPageState::Preparing { cancellation, .. } = state {
                 cancellation.cancel();
             }
+        }
+        for task in self.patch_lod_tasks.values() {
+            task.cancellation.cancel();
         }
     }
 
@@ -131,6 +151,7 @@ impl GpuPdfState {
             || self.renderer_error.is_some()
             || self.destination_task.is_some()
             || self.destination_fallback.is_some()
+            || !self.patch_lod_tasks.is_empty()
             || !self.pages.is_empty()
             || !self.rendered.is_empty()
     }
@@ -143,6 +164,17 @@ impl GpuPdfState {
     fn prune(&mut self, visible: &HashSet<u32>) {
         self.visible_pages.clone_from(visible);
         self.presented_pages.clear();
+        let stale_patch_lods = self
+            .patch_lod_tasks
+            .keys()
+            .filter(|page| !visible.contains(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in stale_patch_lods {
+            if let Some(task) = self.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
         let stale_preparations = self
             .pages
             .iter()
@@ -181,6 +213,17 @@ impl GpuPdfState {
             .retain(|page, _| self.pages.contains_key(page));
         self.surface_failures
             .retain(|page, _| self.pages.contains_key(page));
+        let evicted_patch_lods = self
+            .patch_lod_tasks
+            .keys()
+            .filter(|page| !self.pages.contains_key(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in evicted_patch_lods {
+            if let Some(task) = self.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
         self.prune_surface_cache();
     }
 
@@ -529,6 +572,38 @@ impl DocumentView {
                 return None;
             }
         };
+        let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
+            Ok(status) => status,
+            Err(error) => {
+                self.gpu_pdf
+                    .surface_failures
+                    .insert(page, format!("{error:#}"));
+                return None;
+            }
+        };
+        if patch_lod_status.ready {
+            if let Some(task) = self.gpu_pdf.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        } else {
+            self.start_native_gpu_patch_lod_prepare(
+                page,
+                Arc::clone(&prepared),
+                Arc::clone(&renderer),
+                request,
+                patch_lod_status.required_scale,
+                cx,
+            );
+            if settled {
+                if let Some(rendered) = self.gpu_pdf.rendered.get(&page) {
+                    let rendered_key = rendered.key;
+                    let texture = rendered.texture.clone();
+                    self.gpu_pdf.presented_pages.insert(page);
+                    return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+                }
+                return None;
+            }
+        }
 
         if let Some(rendered) = self.gpu_pdf.rendered.get(&page)
             && rendered.key == key
@@ -757,6 +832,93 @@ impl DocumentView {
         cx.notify();
     }
 
+    fn start_native_gpu_patch_lod_prepare(
+        &mut self,
+        page: u32,
+        prepared: Arc<PreparedGpuPage>,
+        renderer: Arc<GpuPdfRenderer>,
+        request: GpuPaintRequest,
+        required_scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self.gpu_pdf.patch_lod_tasks.get(&page)
+            && same_patch_lod_request(existing.required_scale, required_scale)
+        {
+            return;
+        }
+        if let Some(existing) = self.gpu_pdf.patch_lod_tasks.remove(&page) {
+            existing.cancellation.cancel();
+        }
+        let cancellation = GpuCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let worker_page = Arc::clone(&prepared);
+        let worker_renderer = Arc::clone(&renderer);
+        let document_generation = self.gpu_pdf.generation;
+        self.gpu_pdf.patch_lod_generation =
+            self.gpu_pdf.patch_lod_generation.wrapping_add(1).max(1);
+        let generation = self.gpu_pdf.patch_lod_generation;
+        let token = renderer.token();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    worker_renderer
+                        .prepare_patch_lods(&worker_page, request, &worker_cancellation)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            let update_result = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || !matches!(
+                        this.gpu_pdf.patch_lod_tasks.get(&page),
+                        Some(task) if task.generation == generation
+                    )
+                    || this
+                        .gpu_pdf
+                        .renderer
+                        .as_ref()
+                        .is_none_or(|renderer| renderer.token() != token)
+                    || !matches!(
+                        this.gpu_pdf.pages.get(&page),
+                        Some(GpuPageState::Ready(current)) if Arc::ptr_eq(current, &prepared)
+                    )
+                {
+                    return;
+                }
+                this.gpu_pdf.patch_lod_tasks.remove(&page);
+                match result {
+                    Ok(_) => {
+                        this.gpu_pdf.surface_failures.remove(&page);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "failed to prepare native PDF page {} patch LOD: {error}",
+                            page + 1
+                        );
+                        this.gpu_pdf.surface_failures.insert(page, error.clone());
+                        this.gpu_pdf.pages.insert(page, GpuPageState::Failed(error));
+                        this.gpu_pdf.rendered.remove(&page);
+                    }
+                }
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to install native PDF patch LOD: {error:#}");
+            }
+        });
+        self.gpu_pdf.patch_lod_tasks.insert(
+            page,
+            PatchLodTask {
+                generation,
+                required_scale,
+                cancellation,
+                _task: task,
+            },
+        );
+        cx.notify();
+    }
+
     /// Resolves FitB-family target bounds off the UI thread, then executes the
     /// complete action tree in original order. A newer activation cancels and
     /// supersedes the older generation.
@@ -893,13 +1055,26 @@ impl DocumentView {
         }
     }
 
+    pub(super) fn native_gpu_patch_lod_preparation_stats(
+        &self,
+        page: usize,
+    ) -> Option<GpuPatchLodPreparationStats> {
+        let page = u32::try_from(page).ok()?;
+        match self.gpu_pdf.pages.get(&page)? {
+            GpuPageState::Ready(page) => Some(page.patch_lod_preparation_stats()),
+            _ => None,
+        }
+    }
+
     pub(super) fn native_gpu_cache_debug(&self) -> GpuCacheDebugSnapshot {
         let prepared = self
             .gpu_pdf
             .pages
             .values()
             .filter_map(|state| match state {
-                GpuPageState::Ready(page) => Some(page.preparation_stats()),
+                GpuPageState::Ready(page) => {
+                    Some((page.preparation_stats(), page.patch_lod_preparation_stats()))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -918,7 +1093,10 @@ impl DocumentView {
             content_bound_page_limit: GpuPdfDocument::content_bounds_cache_limit(),
             prepared_pages: prepared.len(),
             prepared_page_limit: MAX_RETAINED_GPU_PAGES,
-            resident_bytes: prepared.iter().map(|stats| stats.resident_bytes).sum(),
+            resident_bytes: prepared
+                .iter()
+                .map(|(cold, deferred)| cold.resident_bytes.saturating_add(deferred.mesh_bytes))
+                .sum(),
             surface_count: self.gpu_pdf.rendered.len(),
             surface_bytes: self.gpu_pdf.surface_bytes(),
             surface_byte_limit: MAX_RETAINED_GPU_SURFACE_BYTES,
@@ -949,6 +1127,7 @@ impl DocumentView {
                 self.gpu_pdf.pages.get(&page),
                 Some(GpuPageState::Preparing { .. })
             )
+            || self.gpu_pdf.patch_lod_tasks.contains_key(&page)
             || self
                 .gpu_pdf
                 .rendered
@@ -971,6 +1150,13 @@ mod tests {
             physical_width: 1_000,
             physical_height: 2_000,
         }
+    }
+
+    #[test]
+    fn patch_lod_worker_is_reused_only_for_the_same_declared_scale_slot() {
+        assert!(same_patch_lod_request(4.0, 4.0));
+        assert!(!same_patch_lod_request(4.0, 8.0));
+        assert!(!same_patch_lod_request(8.0, 4.0));
     }
 
     #[test]

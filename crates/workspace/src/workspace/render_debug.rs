@@ -292,6 +292,36 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 GOOD,
             ));
         }
+        if preparation.patch_shading_lod_levels > 0
+            || preparation.patch_shading_deferred_lod_levels > 0
+        {
+            section = section.child(reading(
+                "PATCH LODS",
+                format!(
+                    "{} cold · {} deferred · {} cold mesh",
+                    preparation.patch_shading_lod_levels,
+                    preparation.patch_shading_deferred_lod_levels,
+                    format_bytes(preparation.patch_shading_mesh_bytes),
+                ),
+                if preparation.patch_shading_deferred_lod_levels > 0 {
+                    WARN
+                } else {
+                    FOREGROUND
+                },
+            ));
+        }
+        if preparation.deferred_patch_lod_levels > 0 {
+            section = section.child(reading(
+                "PATCH REFINE",
+                format!(
+                    "{} · {} LOD · {}",
+                    format_duration(preparation.deferred_patch_lod_elapsed),
+                    preparation.deferred_patch_lod_levels,
+                    format_bytes(preparation.deferred_patch_lod_bytes),
+                ),
+                GOOD,
+            ));
+        }
         if preparation.retained_form_resources > 0 {
             section = section.child(reading(
                 "FORMS",
@@ -486,6 +516,22 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ))
+            .when(gpu.patch_lod_required_scale != "0.000", |section| {
+                section.child(reading(
+                    "PATCH LOD",
+                    format!(
+                        "required {} · available {} · {}",
+                        gpu.patch_lod_required_scale,
+                        gpu.patch_lod_available_scale,
+                        if gpu.patch_lod_deferred {
+                            "background pending"
+                        } else {
+                            "exact"
+                        },
+                    ),
+                    if gpu.patch_lod_deferred { WARN } else { GOOD },
+                ))
+            })
             .child(reading(
                 "COMPOSITOR",
                 format!(

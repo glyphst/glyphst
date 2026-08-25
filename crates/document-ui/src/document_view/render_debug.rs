@@ -115,6 +115,9 @@ impl DocumentView {
             reprojected_frame: stats.reprojected_frame,
             gradient_draws: stats.gradient_draws,
             image_draws: stats.image_draws,
+            patch_lod_required_scale: format!("{:.3}", stats.patch_lod_required_scale),
+            patch_lod_available_scale: format!("{:.3}", stats.patch_lod_available_scale),
+            patch_lod_deferred: stats.patch_lod_deferred,
             reused_tiles: stats.reused_tiles,
             rendered_tiles: stats.rendered_tiles,
             dirty_tiles: stats.dirty_tiles,
@@ -134,6 +137,9 @@ impl DocumentView {
             generation: stats.generation,
             coverage_strategy: format!("{:?}", stats.coverage_strategy),
         });
+        let patch_lod_preparation = self
+            .native_gpu_patch_lod_preparation_stats(page_idx)
+            .unwrap_or_default();
         let gpu_preparation = self.native_gpu_preparation_stats(page_idx).map(|stats| {
             GpuPagePreparationDebugSnapshot {
                 elapsed: stats.elapsed,
@@ -142,6 +148,12 @@ impl DocumentView {
                 image_textures: stats.image_textures,
                 alpha_textures: stats.alpha_textures,
                 gradient_tables: stats.gradient_tables,
+                patch_shading_lod_levels: stats.patch_shading_lod_levels,
+                patch_shading_deferred_lod_levels: stats.patch_shading_deferred_lod_levels,
+                patch_shading_mesh_bytes: stats.mesh_shading_bytes,
+                deferred_patch_lod_elapsed: patch_lod_preparation.elapsed,
+                deferred_patch_lod_levels: patch_lod_preparation.prepared_lod_levels,
+                deferred_patch_lod_bytes: patch_lod_preparation.mesh_bytes,
                 vector_batches: stats.vector_batches,
                 vector_lod_levels: stats.vector_lod_levels,
                 vector_lod_compacted: stats.vector_lod_compacted,

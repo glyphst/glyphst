@@ -21,6 +21,7 @@ use glyphst_pdf_render_wgpu::{
     RenderConfig, RenderError, RenderRequest, RenderSupportIssue, RendererInitError,
 };
 pub use glyphst_pdf_render_wgpu::{
+    PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
     PreparationStats as GpuPreparationStats, RenderStats as GpuRenderStats,
 };
 use gpui::{ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle};
@@ -791,6 +792,10 @@ impl PreparedGpuPage {
         self.gpu.preparation_stats()
     }
 
+    pub fn patch_lod_preparation_stats(&self) -> GpuPatchLodPreparationStats {
+        self.gpu.patch_lod_preparation_stats()
+    }
+
     /// Exact Link press regions that must be honored by the presentation UI.
     pub fn link_interactions(&self) -> &[GpuLinkInteraction] {
         &self.link_interactions
@@ -1103,7 +1108,7 @@ impl GpuPdfRenderer {
             Ok(interactions) => interactions,
             Err(diagnostic) => return Ok(GpuPageRoute::Fallback(Arc::from([diagnostic]))),
         };
-        let gpu = match self.renderer.prepare(compiled.scene()) {
+        let gpu = match self.renderer.prepare_interactive(compiled.scene()) {
             Ok(page) => page,
             Err(PrepareError::Unsupported(report)) => {
                 let diagnostics = report
@@ -1120,6 +1125,65 @@ impl GpuPdfRenderer {
             gpu: Arc::new(gpu),
             link_interactions,
         })))
+    }
+
+    /// Returns whether the exact Type 6/7 mesh slot for this presentation is
+    /// already available without allocating GPU resources.
+    pub fn patch_lod_status(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+    ) -> Result<GpuPatchLodStatus> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        let (_, root_transform) = self.render_root_transform(page, request)?;
+        self.renderer
+            .patch_lod_status(&page.gpu, root_transform)
+            .map_err(render_error)
+    }
+
+    /// Builds the exact patch mesh slot needed by `request`. This method is
+    /// thread-safe and intended for the document view's cancellable worker.
+    pub fn prepare_patch_lods(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<GpuPatchLodPreparationStats> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        let (_, root_transform) = self.render_root_transform(page, request)?;
+        self.renderer
+            .prepare_patch_lods(&page.gpu, root_transform, cancellation)
+            .map_err(|error| anyhow!(error).context("failed to prepare native PDF patch LOD"))
+    }
+
+    fn render_root_transform(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+    ) -> Result<(GpuPageRegion, Transform)> {
+        let surface_region = request.surface_region()?;
+        let page_transform =
+            page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
+        let surface_translation = Transform::new([
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -f64::from(surface_region.x),
+            -f64::from(surface_region.y),
+        ])
+        .context("failed to construct native PDF surface translation")?;
+        Ok((surface_region, surface_translation.compose(page_transform)))
     }
 
     /// Render a prepared complete page into a clipped same-device texture.
@@ -1139,7 +1203,7 @@ impl GpuPdfRenderer {
         if page.device_token() != self.token() {
             bail!("the prepared PDF page belongs to a stale GPU generation");
         }
-        let surface_region = request.surface_region()?;
+        let (surface_region, root_transform) = self.render_root_transform(page, request)?;
         let [width, height] = surface_region.size();
         if width == 0 || height == 0 {
             bail!("native PDF render target must be non-empty");
@@ -1150,18 +1214,6 @@ impl GpuPdfRenderer {
         }
 
         let mut texture = self.create_texture(surface_region);
-        let page_transform =
-            page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
-        let surface_translation = Transform::new([
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            -f64::from(surface_region.x),
-            -f64::from(surface_region.y),
-        ])
-        .context("failed to construct native PDF surface translation")?;
-        let root_transform = surface_translation.compose(page_transform);
         let visible = request.visible_region.clamp(request.page_size)?;
         let visible_local = Rect {
             x0: f64::from(visible.x.saturating_sub(surface_region.x)),
