@@ -278,7 +278,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1297,7 +1297,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -2198,7 +2198,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=8481e461693a008d3c884ee8c6bf0e33ecfc79e7#8481e461693a008d3c884ee8c6bf0e33ecfc79e7"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=0e314aeaae1645cca545e150b37c7cb1255a4dd5#0e314aeaae1645cca545e150b37c7cb1255a4dd5"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=8481e461693a008d3c884ee8c6bf0e33ecfc79e7#8481e461693a008d3c884ee8c6bf0e33ecfc79e7"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=0e314aeaae1645cca545e150b37c7cb1255a4dd5#0e314aeaae1645cca545e150b37c7cb1255a4dd5"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3228,13 +3228,13 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=8481e461693a008d3c884ee8c6bf0e33ecfc79e7#8481e461693a008d3c884ee8c6bf0e33ecfc79e7"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=0e314aeaae1645cca545e150b37c7cb1255a4dd5#0e314aeaae1645cca545e150b37c7cb1255a4dd5"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
- "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
+ "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
  "kurbo 0.13.1",
  "smallvec",
 ]
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=8481e461693a008d3c884ee8c6bf0e33ecfc79e7#8481e461693a008d3c884ee8c6bf0e33ecfc79e7"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=0e314aeaae1645cca545e150b37c7cb1255a4dd5#0e314aeaae1645cca545e150b37c7cb1255a4dd5"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3258,7 +3258,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=8481e461693a008d3c884ee8c6bf0e33ecfc79e7#8481e461693a008d3c884ee8c6bf0e33ecfc79e7"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=0e314aeaae1645cca545e150b37c7cb1255a4dd5#0e314aeaae1645cca545e150b37c7cb1255a4dd5"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -3459,7 +3459,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.18",
- "windows 0.58.0",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -4064,7 +4064,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-ccitt"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 
 [[package]]
 name = "hayro-cmap"
@@ -4078,10 +4078,10 @@ dependencies = [
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 dependencies = [
  "brotli",
- "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
+ "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
 ]
 
 [[package]]
@@ -4106,11 +4106,11 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 dependencies = [
  "bitflags 2.11.1",
- "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
+ "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
  "kurbo 0.13.1",
  "moxcms",
  "phf 0.13.1",
@@ -4134,10 +4134,10 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 dependencies = [
  "fearless_simd 0.6.0",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
 ]
 
 [[package]]
@@ -4152,7 +4152,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.4.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 dependencies = [
  "fearless_simd 0.6.0",
 ]
@@ -4166,7 +4166,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 
 [[package]]
 name = "hayro-svg"
@@ -4201,11 +4201,11 @@ dependencies = [
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d#93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d"
+source = "git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f#ca885fcdb9d5587c95e94568c1ee89426c785e1f"
 dependencies = [
  "flate2",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
- "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=93aa6e7b6f34dcb7fc09f5aeba27ce6495f6378d)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
+ "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=ca885fcdb9d5587c95e94568c1ee89426c785e1f)",
  "hayro-jpeg2000 0.4.0",
  "memchr",
  "rustc-hash 2.1.2",
@@ -4529,7 +4529,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -6589,7 +6589,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7385,7 +7385,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8125,7 +8125,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8138,7 +8138,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9255,7 +9255,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -11223,7 +11223,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
