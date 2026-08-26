@@ -1462,6 +1462,14 @@ fn page_transform(
     };
     let scale_x = f64::from(target_size[0]) / rotated_width;
     let scale_y = f64::from(target_size[1]) / rotated_height;
+    // Render keys have integer texture dimensions, so independently rounding
+    // their width and height makes the two nominal scale ratios differ by a
+    // fraction of a pixel. Keep the engine root an exact uniform similarity
+    // and center the resulting (at most rounding-sized) slack in the target
+    // instead of introducing a non-uniform page distortion.
+    let scale = scale_x.min(scale_y);
+    let offset_x = (f64::from(target_size[0]) - rotated_width * scale) * 0.5;
+    let offset_y = (f64::from(target_size[1]) - rotated_height * scale) * 0.5;
     let (a, b, c, d, tx, ty) = match rotation.quarter_turns() {
         0 => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
         1 => (0.0, 1.0, -1.0, 0.0, height, 0.0),
@@ -1470,12 +1478,12 @@ fn page_transform(
         _ => unreachable!("document rotation is normalized"),
     };
     Transform::new([
-        a * scale_x,
-        b * scale_y,
-        c * scale_x,
-        d * scale_y,
-        (tx - a * bounds.x0 - c * bounds.y0) * scale_x,
-        (ty - b * bounds.x0 - d * bounds.y0) * scale_y,
+        a * scale,
+        b * scale,
+        c * scale,
+        d * scale,
+        offset_x + (tx - a * bounds.x0 - c * bounds.y0) * scale,
+        offset_y + (ty - b * bounds.x0 - d * bounds.y0) * scale,
     ])
     .context("failed to construct native PDF page transform")
 }
@@ -2101,12 +2109,57 @@ trailer <</Root 1 0 R>>
             DocumentRotation::Degrees180,
             DocumentRotation::Degrees270,
         ] {
-            let transform = page_transform(bounds, rotation, [600, 300]).unwrap();
+            let target = if rotation.swaps_width_and_height() {
+                [600, 300]
+            } else {
+                [150, 300]
+            };
+            let transform = page_transform(bounds, rotation, target).unwrap();
             let mapped = transform.map_rect(bounds);
             assert!((mapped.x0 - 0.0).abs() < 1e-8);
             assert!((mapped.y0 - 0.0).abs() < 1e-8);
-            assert!((mapped.x1 - 600.0).abs() < 1e-8);
-            assert!((mapped.y1 - 300.0).abs() < 1e-8);
+            assert!((mapped.x1 - f64::from(target[0])).abs() < 1e-8);
+            assert!((mapped.y1 - f64::from(target[1])).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn independently_rounded_reader_sizes_keep_a_uniform_page_root() {
+        let bounds = glyphst_pdf_engine::Rect::from_corners(
+            glyphst_pdf_engine::Point::new(0.0, 0.0).unwrap(),
+            glyphst_pdf_engine::Point::new(595.275_573_730_468_8, 841.889_770_507_812_5).unwrap(),
+        )
+        .unwrap();
+        let nominal_scale = 1.337_f64;
+        for rotation in [
+            DocumentRotation::Degrees0,
+            DocumentRotation::Degrees90,
+            DocumentRotation::Degrees180,
+            DocumentRotation::Degrees270,
+        ] {
+            let (width, height) = if rotation.swaps_width_and_height() {
+                (bounds.height(), bounds.width())
+            } else {
+                (bounds.width(), bounds.height())
+            };
+            let target = [
+                (width * nominal_scale).ceil() as u32,
+                (height * nominal_scale).ceil() as u32,
+            ];
+            let transform = page_transform(bounds, rotation, target).unwrap();
+            let [a, b, c, d, _, _] = transform.coefficients();
+            let first = a * a + b * b;
+            let second = c * c + d * d;
+            assert!((first - second).abs() <= first.max(second) * 1.0e-12);
+            assert!((a * c + b * d).abs() <= first.max(second) * 1.0e-12);
+            assert!(a * d - b * c > 0.0);
+
+            let mapped = transform.map_rect(bounds);
+            assert!(mapped.x0 >= -1.0e-8 && mapped.y0 >= -1.0e-8);
+            assert!(mapped.x1 <= f64::from(target[0]) + 1.0e-8);
+            assert!(mapped.y1 <= f64::from(target[1]) + 1.0e-8);
+            assert!((mapped.x0 - (f64::from(target[0]) - mapped.x1)).abs() < 1.0e-8);
+            assert!((mapped.y0 - (f64::from(target[1]) - mapped.y1)).abs() < 1.0e-8);
         }
     }
 
