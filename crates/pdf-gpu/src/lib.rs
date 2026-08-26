@@ -15,7 +15,7 @@ use glyphst_pdf_engine::{
     Document, DocumentSource, Engine, LayerConfiguration, LinkHighlightMode, OpenOptions,
     OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, SupportDiagnostic, Transform,
 };
-pub use glyphst_pdf_engine::{CancellationToken, FeatureId};
+pub use glyphst_pdf_engine::{CancellationToken, FeatureId, Permissions as GpuPdfPermissions};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
     RenderConfig, RenderError, RenderRequest, RenderSupportIssue, RendererInitError,
@@ -451,6 +451,18 @@ impl GpuPdfDocument {
     /// Number of checked pages in the native engine.
     pub fn page_count(&self) -> u32 {
         self.inner.document.page_count().get()
+    }
+
+    /// Whether the source uses a PDF encryption security handler.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.inner.document.is_encrypted()
+    }
+
+    /// Validated permissions for the authenticated owner or user password.
+    #[must_use]
+    pub fn permissions(&self) -> GpuPdfPermissions {
+        self.inner.document.permissions()
     }
 
     /// Current bounded CPU semantic-scene cache occupancy.
@@ -1605,6 +1617,8 @@ trailer <</Root 1 0 R>>
 
         let document = GpuPdfDocument::open(&snapshot).expect("open native document");
         assert_eq!(document.page_count(), 1);
+        assert!(!document.is_encrypted());
+        assert_eq!(document.permissions(), GpuPdfPermissions::default());
         let cancellation = CancellationToken::new();
         let first = document
             .compile_page(0, &cancellation)
