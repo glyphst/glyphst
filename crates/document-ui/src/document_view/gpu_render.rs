@@ -1013,6 +1013,19 @@ impl DocumentView {
         }
     }
 
+    pub(super) fn native_gpu_warning_diagnostics(
+        &self,
+        page: usize,
+    ) -> Option<&[GpuWarningDiagnostic]> {
+        let page = u32::try_from(page).ok()?;
+        match self.gpu_pdf.pages.get(&page)? {
+            GpuPageState::Ready(page) => Some(page.warnings()),
+            GpuPageState::Preparing { .. }
+            | GpuPageState::Fallback(_)
+            | GpuPageState::Failed(_) => None,
+        }
+    }
+
     pub(super) fn native_gpu_navigation_fallback_diagnostics(
         &self,
     ) -> Option<&[GpuFallbackDiagnostic]> {

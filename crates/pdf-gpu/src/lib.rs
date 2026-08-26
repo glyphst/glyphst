@@ -44,6 +44,14 @@ pub struct GpuFallbackDiagnostic {
     pub source: GpuFallbackSource,
 }
 
+/// Observable frontend recovery that does not require whole-page fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuWarningDiagnostic {
+    pub feature: FeatureId,
+    pub code: String,
+    pub message: String,
+}
+
 /// Stage that rejected a complete page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFallbackSource {
@@ -85,6 +93,16 @@ pub enum GpuLinkAction {
 }
 
 impl GpuLinkAction {
+    /// Whether this action chain has no executable effect.
+    #[must_use]
+    pub fn is_inert(&self) -> bool {
+        match self {
+            Self::NoOp { .. } => true,
+            Self::Sequence(actions) => actions.iter().all(Self::is_inert),
+            Self::GoTo { .. } | Self::Uri(_) | Self::UriMap(_) | Self::Named(_) => false,
+        }
+    }
+
     /// Whether exact execution first needs a lazy target-page content query.
     #[must_use]
     pub fn requires_content_bounds(&self) -> bool {
@@ -273,6 +291,16 @@ impl From<&SupportDiagnostic> for GpuFallbackDiagnostic {
             code: diagnostic.code.clone(),
             message: diagnostic.message.clone(),
             source: GpuFallbackSource::Frontend,
+        }
+    }
+}
+
+impl From<&SupportDiagnostic> for GpuWarningDiagnostic {
+    fn from(diagnostic: &SupportDiagnostic) -> Self {
+        Self {
+            feature: diagnostic.feature,
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
         }
     }
 }
@@ -778,6 +806,7 @@ pub struct PreparedGpuPage {
     compiled: Arc<CompiledPage>,
     gpu: Arc<GpuPage>,
     link_interactions: Arc<[GpuLinkInteraction]>,
+    warnings: Arc<[GpuWarningDiagnostic]>,
 }
 
 impl fmt::Debug for PreparedGpuPage {
@@ -812,6 +841,21 @@ impl PreparedGpuPage {
     pub fn link_interactions(&self) -> &[GpuLinkInteraction] {
         &self.link_interactions
     }
+
+    /// Deterministic frontend repairs retained for diagnostics and inspection.
+    pub fn warnings(&self) -> &[GpuWarningDiagnostic] {
+        &self.warnings
+    }
+}
+
+fn compiled_page_warnings(page: &CompiledPage) -> Arc<[GpuWarningDiagnostic]> {
+    page.support()
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+        .map(GpuWarningDiagnostic::from)
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn compiled_link_interactions(
@@ -1120,6 +1164,7 @@ impl GpuPdfRenderer {
             Ok(interactions) => interactions,
             Err(diagnostic) => return Ok(GpuPageRoute::Fallback(Arc::from([diagnostic]))),
         };
+        let warnings = compiled_page_warnings(&compiled);
         let gpu = match self.renderer.prepare_interactive(compiled.scene()) {
             Ok(page) => page,
             Err(PrepareError::Unsupported(report)) => {
@@ -1136,6 +1181,7 @@ impl GpuPdfRenderer {
             compiled,
             gpu: Arc::new(gpu),
             link_interactions,
+            warnings,
         })))
     }
 
@@ -1769,7 +1815,7 @@ trailer <</Root 1 0 R>>
     }
 
     #[test]
-    fn malformed_null_link_destination_stays_native_as_an_inert_action() {
+    fn malformed_null_link_destination_stays_native_without_a_dead_hit_target() {
         let snapshot = DocumentSnapshot::from_bytes(
             "null-link-destination.pdf",
             DocumentFormat::Pdf,
@@ -1788,19 +1834,42 @@ trailer <</Root 1 0 R>>
             diagnostic.code == "null-link-destination-noop"
                 && diagnostic.severity == glyphst_pdf_engine::DiagnosticSeverity::Warning
         }));
-        let interactions = compiled_link_interactions(&page).expect("retain inert interaction");
-        assert!(matches!(
-            &interactions[0].action,
-            GpuLinkAction::NoOp { code, message }
-                if code.as_ref() == "null-link-destination-noop" && message.contains("null")
-        ));
-        assert!(!interactions[0].action.requires_content_bounds());
-        assert_eq!(
-            document
-                .resolve_link_action(&interactions[0].action, &CancellationToken::new())
-                .expect("resolve inert action"),
-            interactions[0].action
+        let warnings = compiled_page_warnings(&page);
+        assert!(warnings.iter().any(|diagnostic| {
+            diagnostic.feature == FeatureId::Links
+                && diagnostic.code == "null-link-destination-noop"
+                && diagnostic.message.contains("null")
+        }));
+        let interactions = compiled_link_interactions(&page).expect("compile interactions");
+        assert_eq!(interactions.len(), 1);
+        assert!(interactions[0].action.is_inert());
+    }
+
+    #[test]
+    fn malformed_empty_link_destination_stays_native_without_a_dead_hit_target() {
+        let snapshot = DocumentSnapshot::from_bytes(
+            "empty-link-destination.pdf",
+            DocumentFormat::Pdf,
+            link_pdf_with_action("/Dest[]"),
         );
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let page = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile page");
+        assert!(
+            page.support().is_supported(),
+            "{:#?}",
+            page.support().diagnostics()
+        );
+        let warnings = compiled_page_warnings(&page);
+        assert!(warnings.iter().any(|diagnostic| {
+            diagnostic.feature == FeatureId::Links
+                && diagnostic.code == "invalid-link-destination-noop"
+                && diagnostic.message.contains("destination-page-invalid")
+        }));
+        let interactions = compiled_link_interactions(&page).expect("compile interactions");
+        assert_eq!(interactions.len(), 1);
+        assert!(interactions[0].action.is_inert());
     }
 
     #[test]
@@ -2028,6 +2097,23 @@ trailer <</Root 1 0 R>>
         assert!(!interaction.contains_point(10.5, 80.5));
         assert!(!interaction.contains_point(45.0, 75.0));
         assert!(!interaction.contains_point(f64::NAN, 85.0));
+    }
+
+    #[test]
+    fn only_all_noop_action_chains_are_inert() {
+        let noop = GpuLinkAction::NoOp {
+            code: Arc::from("invalid-link-destination-noop"),
+            message: Arc::from("no destination"),
+        };
+        assert!(noop.is_inert());
+        assert!(GpuLinkAction::Sequence(Arc::from([noop.clone()])).is_inert());
+        assert!(
+            !GpuLinkAction::Sequence(Arc::from([
+                noop,
+                GpuLinkAction::Named(GpuNamedAction::NextPage),
+            ]))
+            .is_inert()
+        );
     }
 
     #[test]

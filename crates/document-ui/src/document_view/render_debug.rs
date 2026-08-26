@@ -13,6 +13,14 @@ fn gpu_fallback_debug_snapshot(diagnostic: &GpuFallbackDiagnostic) -> GpuFallbac
     }
 }
 
+fn gpu_warning_debug_snapshot(diagnostic: &GpuWarningDiagnostic) -> GpuWarningDebugSnapshot {
+    GpuWarningDebugSnapshot {
+        feature: diagnostic.feature.to_string(),
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+    }
+}
+
 /// Returns a read-only process-wide cache snapshot without changing LRU order.
 pub fn render_cache_debug_snapshot(cx: &gpui::App) -> RenderCacheDebugSnapshot {
     cx.try_global::<RenderCache>()
@@ -213,6 +221,12 @@ impl DocumentView {
             .iter()
             .map(gpu_fallback_debug_snapshot)
             .collect::<Vec<_>>();
+        let gpu_warnings = self
+            .native_gpu_warning_diagnostics(page_idx)
+            .unwrap_or_default()
+            .iter()
+            .map(gpu_warning_debug_snapshot)
+            .collect::<Vec<_>>();
         let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
         let backend = if gpu.is_some() {
             PageRenderBackendDebug::GlyphstGpu
@@ -262,6 +276,7 @@ impl DocumentView {
             gpu,
             gpu_preparation,
             gpu_fallbacks,
+            gpu_warnings,
             gpu_failure,
             requested_raster: requested.map(|key| self.raster_debug_snapshot(key)),
             displayed_raster: displayed.map(|key| self.raster_debug_snapshot(key)),

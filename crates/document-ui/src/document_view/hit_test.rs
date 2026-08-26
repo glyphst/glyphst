@@ -4,6 +4,10 @@ fn should_hit_test_document_content(dragging: bool, panning: bool) -> bool {
     !dragging && !panning
 }
 
+fn native_link_contains_point(interaction: &GpuLinkInteraction, x: f64, y: f64) -> bool {
+    !interaction.action.is_inert() && interaction.contains_point(x, y)
+}
+
 impl DocumentView {
     pub(super) fn collect_images(display_list: &DisplayList) -> Result<Vec<CollectedImage>> {
         let collector = Rc::new(RefCell::new(ImageCollector::default()));
@@ -69,7 +73,11 @@ impl DocumentView {
                 native_interactions
                     .and_then(|interactions| interactions.get(interaction_ix))
                     .map(|interaction| {
-                        interaction.contains_point(f64::from(pdf_point.x), f64::from(pdf_point.y))
+                        native_link_contains_point(
+                            interaction,
+                            f64::from(pdf_point.x),
+                            f64::from(pdf_point.y),
+                        )
                     })
             });
             native_hit
@@ -188,12 +196,28 @@ impl DocumentView {
 
 #[cfg(test)]
 mod tests {
-    use super::should_hit_test_document_content;
+    use super::*;
 
     #[test]
     fn document_content_hover_hit_testing_pauses_during_drag_and_pan() {
         assert!(should_hit_test_document_content(false, false));
         assert!(!should_hit_test_document_content(true, false));
         assert!(!should_hit_test_document_content(false, true));
+    }
+
+    #[test]
+    fn inert_native_links_keep_geometry_but_are_not_hittable() {
+        let interaction = GpuLinkInteraction {
+            annotation_bounds: [10.0, 20.0, 30.0, 40.0],
+            regions: Arc::from([[10.0, 20.0, 30.0, 20.0, 30.0, 40.0, 10.0, 40.0]]),
+            highlight_mode: GpuLinkHighlightMode::None,
+            action: GpuLinkAction::NoOp {
+                code: Arc::from("invalid-link-destination-noop"),
+                message: Arc::from("no destination"),
+            },
+        };
+
+        assert!(interaction.contains_point(20.0, 30.0));
+        assert!(!native_link_contains_point(&interaction, 20.0, 30.0));
     }
 }

@@ -612,6 +612,16 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             ));
     }
 
+    for warning in page.gpu_warnings {
+        section = section.child(reading(
+            "WARNING",
+            format!(
+                "[{}:{}] frontend · {}",
+                warning.feature, warning.code, warning.message
+            ),
+            WARN,
+        ));
+    }
     for fallback in page.gpu_fallbacks {
         section = section.child(reading(
             "FALLBACK",

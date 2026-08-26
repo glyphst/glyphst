@@ -64,7 +64,8 @@ use glyphst_pdf_gpu::{
     GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
     GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute, GpuOutlineItem,
     GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPatchLodPreparationStats,
-    GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats, PreparedGpuPage,
+    GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic,
+    PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -646,6 +647,14 @@ pub struct GpuFallbackDebugSnapshot {
     pub source: &'static str,
 }
 
+/// One deterministic native frontend repair that did not require fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuWarningDebugSnapshot {
+    pub feature: String,
+    pub code: String,
+    pub message: String,
+}
+
 /// Rendering and content diagnostics for one active page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageRenderDebugSnapshot {
@@ -655,6 +664,7 @@ pub struct PageRenderDebugSnapshot {
     pub gpu: Option<GpuPageRenderDebugSnapshot>,
     pub gpu_preparation: Option<GpuPagePreparationDebugSnapshot>,
     pub gpu_fallbacks: Vec<GpuFallbackDebugSnapshot>,
+    pub gpu_warnings: Vec<GpuWarningDebugSnapshot>,
     pub gpu_failure: Option<String>,
     pub requested_raster: Option<RasterDebugSnapshot>,
     pub displayed_raster: Option<RasterDebugSnapshot>,
