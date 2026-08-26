@@ -464,6 +464,26 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ));
+            if preparation.image_textures > 0 || preparation.alpha_textures > 0 {
+                section = section
+                    .child(reading(
+                        "IMAGE MIPS",
+                        format!(
+                            "{} color · {} alpha",
+                            preparation.image_mip_levels, preparation.alpha_mip_levels
+                        ),
+                        FOREGROUND,
+                    ))
+                    .child(reading(
+                        "IMAGE VRAM",
+                        format!(
+                            "{} total · {} mips",
+                            format_bytes(preparation.image_texture_bytes),
+                            format_bytes(preparation.mip_texture_bytes)
+                        ),
+                        FOREGROUND,
+                    ));
+            }
         }
         if let Some(fallback) = preparation.analytic_fallback {
             section = section.child(reading("VECTOR PLAN", fallback, WARN));
