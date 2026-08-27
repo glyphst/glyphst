@@ -217,7 +217,7 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        self.prune_native_gpu_pages(&[page_idx], cx);
+        let adjacent_gpu_page = self.prune_native_gpu_pages(&[page_idx], cx);
         let mut refinement_budget = true;
         let gpu_texture = self.native_gpu_texture(
             key,
@@ -227,6 +227,21 @@ impl DocumentView {
             window,
             cx,
         );
+        if let Some(adjacent_page) = adjacent_gpu_page {
+            let adjacent_scale = self.presentation_scale_for_page(adjacent_page);
+            let adjacent_bounds =
+                self.presentation_image_bounds_for_page(adjacent_page, bounds, adjacent_scale);
+            let adjacent_bounds = Self::pixel_aligned_image_bounds(adjacent_bounds, scale_factor);
+            let adjacent_key = self.render_key(adjacent_page, adjacent_bounds, scale_factor);
+            self.warm_native_gpu_surface(
+                adjacent_key,
+                adjacent_bounds,
+                bounds,
+                adjacent_page > page_idx,
+                window,
+                cx,
+            );
+        }
         let (image, displayed) = if gpu_texture.is_some() {
             (None, None)
         } else {
@@ -368,7 +383,13 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        self.prune_native_gpu_pages(&visible_pages, cx);
+        let adjacent_gpu_page = self.prune_native_gpu_pages(&visible_pages, cx);
+        let adjacent_gpu_render = adjacent_gpu_page.map(|page_idx| {
+            let (image_bounds, key) =
+                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
+            let forward = visible_pages.last().is_none_or(|last| page_idx > *last);
+            (key, image_bounds, forward)
+        });
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         let mut refinement_budget = true;
@@ -409,6 +430,9 @@ impl DocumentView {
                 image,
                 gpu_texture,
             });
+        }
+        if let Some((key, image_bounds, forward)) = adjacent_gpu_render {
+            self.warm_native_gpu_surface(key, image_bounds, bounds, forward, window, cx);
         }
         // Desired keys were protected before resolution so a final render can
         // land safely. Add the actual fallback keys as well so cache pressure

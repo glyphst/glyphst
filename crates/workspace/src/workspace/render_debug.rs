@@ -172,7 +172,7 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
         PageRenderDebugStatus::Exact => ("exact", GOOD),
         PageRenderDebugStatus::Fallback {
             exact_pending: true,
-        } => ("fallback → pending", WARN),
+        } => ("placeholder → native", WARN),
         PageRenderDebugStatus::Fallback {
             exact_pending: false,
         } => ("fallback", WARN),
@@ -193,7 +193,7 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
     let (engine, engine_color) = match page.backend {
         PageRenderBackendDebug::MuPdf => ("MuPDF", FOREGROUND),
         PageRenderBackendDebug::GlyphstGpu => ("Glyphst GPU", GOOD),
-        PageRenderBackendDebug::MuPdfWhileGpuPending => ("MuPDF · GPU pending", WARN),
+        PageRenderBackendDebug::MuPdfWhileGpuPending => ("Glyphst GPU · MuPDF placeholder", WARN),
         PageRenderBackendDebug::MuPdfFallback => ("MuPDF · GPU fallback", WARN),
     };
     section = section.child(reading("ENGINE", engine.to_string(), engine_color));

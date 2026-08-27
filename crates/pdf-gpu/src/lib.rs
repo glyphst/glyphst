@@ -1247,12 +1247,24 @@ impl GpuPdfRenderer {
         Ok((surface_region, surface_translation.compose(page_transform)))
     }
 
-    fn engine_render_request(
+    fn engine_render_request_for_region(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
+        surface_region: GpuPageRegion,
     ) -> Result<(GpuPageRegion, RenderRequest)> {
-        let (surface_region, root_transform) = self.render_root_transform(page, request)?;
+        let page_transform =
+            page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
+        let surface_translation = Transform::new([
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -f64::from(surface_region.x),
+            -f64::from(surface_region.y),
+        ])
+        .context("failed to construct native PDF surface translation")?;
+        let root_transform = surface_translation.compose(page_transform);
         let visible = request.visible_region.clamp(request.page_size)?;
         let visible_local = Rect {
             x0: f64::from(visible.x.saturating_sub(surface_region.x)),
@@ -1283,7 +1295,7 @@ impl GpuPdfRenderer {
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
-        presentation: &GpuPagePresentation,
+        presentation: &mut GpuPagePresentation,
     ) -> Result<IncrementalWorkPlan> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
@@ -1295,15 +1307,30 @@ impl GpuPdfRenderer {
         {
             bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
         }
-        let (_, request) = self.engine_render_request(page, request)?;
-        self.renderer
-            .plan_incremental(
+        let mut region_mode = presentation.region_mode;
+        loop {
+            let surface_region = request.surface_region_for(region_mode)?;
+            let (_, engine_request) =
+                self.engine_render_request_for_region(page, request, surface_region)?;
+            match self.renderer.plan_incremental(
                 &page.gpu,
                 &presentation.incremental,
                 presentation.current_view(),
-                request,
-            )
-            .map_err(render_error)
+                engine_request,
+            ) {
+                Ok(work) => {
+                    presentation.region_mode = region_mode;
+                    return Ok(work);
+                }
+                Err(error) if render_target_limit(&error) => {
+                    let Some(tighter) = region_mode.tighter() else {
+                        return Err(render_error(error));
+                    };
+                    region_mode = tighter;
+                }
+                Err(error) => return Err(render_error(error)),
+            }
+        }
     }
 
     /// Render a prepared complete page into a bounded three-surface ring.
@@ -1330,43 +1357,67 @@ impl GpuPdfRenderer {
             bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
         }
         presentation.token = Some(self.token());
-        let (surface_region, engine_request) = self.engine_render_request(page, request)?;
-        let [width, height] = surface_region.size();
-        if width == 0 || height == 0 {
-            bail!("native PDF render target must be non-empty");
-        }
-        let limit = self.context.device().limits().max_texture_dimension_2d;
-        if width > limit || height > limit {
-            bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
-        }
-        let work = self
-            .renderer
-            .plan_incremental(
+        let mut region_mode = presentation.region_mode;
+        loop {
+            let surface_region = request.surface_region_for(region_mode)?;
+            let (_, engine_request) =
+                self.engine_render_request_for_region(page, request, surface_region)?;
+            let [width, height] = surface_region.size();
+            if width == 0 || height == 0 {
+                bail!("native PDF render target must be non-empty");
+            }
+            let limit = self.context.device().limits().max_texture_dimension_2d;
+            if width > limit || height > limit {
+                let Some(tighter) = region_mode.tighter() else {
+                    bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
+                };
+                region_mode = tighter;
+                continue;
+            }
+            let work = match self.renderer.plan_incremental(
                 &page.gpu,
                 &presentation.incremental,
                 presentation.current_view(),
                 engine_request,
-            )
-            .map_err(render_error)?;
-        let selection = presentation.select_target(
-            surface_region.size(),
-            work.kind == GpuIncrementalWorkKind::Direct,
-            |size| self.create_surface(size),
-        );
-        let target = selection.surface();
-        let mut incremental = presentation.incremental.clone();
-        let stats = self
-            .renderer
-            .render_incremental(
+            ) {
+                Ok(work) => work,
+                Err(error) if render_target_limit(&error) => {
+                    let Some(tighter) = region_mode.tighter() else {
+                        return Err(render_error(error));
+                    };
+                    region_mode = tighter;
+                    continue;
+                }
+                Err(error) => return Err(render_error(error)),
+            };
+            let selection = presentation.select_target(
+                surface_region.size(),
+                work.kind == GpuIncrementalWorkKind::Direct,
+                |size| self.create_surface(size),
+            );
+            let target = selection.surface();
+            let mut incremental = presentation.incremental.clone();
+            match self.renderer.render_incremental(
                 &page.gpu,
                 &mut incremental,
                 presentation.current_view(),
                 engine_request,
                 &target.view,
-            )
-            .map_err(render_error)?;
-        let texture = presentation.commit(selection, surface_region, incremental);
-        Ok((texture, stats))
+            ) {
+                Ok(stats) => {
+                    presentation.region_mode = region_mode;
+                    let texture = presentation.commit(selection, surface_region, incremental);
+                    return Ok((texture, stats));
+                }
+                Err(error) if render_target_limit(&error) => {
+                    let Some(tighter) = region_mode.tighter() else {
+                        return Err(render_error(error));
+                    };
+                    region_mode = tighter;
+                }
+                Err(error) => return Err(render_error(error)),
+            }
+        }
     }
 
     fn create_surface(&self, size: [u32; 2]) -> Arc<GpuPageSurface> {
@@ -1407,6 +1458,14 @@ fn renderer_init_error(error: RendererInitError) -> anyhow::Error {
 
 fn render_error(error: RenderError) -> anyhow::Error {
     anyhow!(error).context("failed to execute native PDF GPU render")
+}
+
+fn render_target_limit(error: &RenderError) -> bool {
+    matches!(
+        error,
+        RenderError::Limit { resource, .. }
+            if resource.contains("transient") || resource.contains("frame-pool")
+    )
 }
 
 /// A non-empty physical-pixel region in full-page coordinates.
@@ -1504,12 +1563,45 @@ pub struct GpuPaintRequest {
 
 impl GpuPaintRequest {
     pub fn surface_region(self) -> Result<GpuPageRegion> {
+        self.surface_region_for(SurfaceRegionMode::Overscanned)
+    }
+
+    fn surface_region_for(self, mode: SurfaceRegionMode) -> Result<GpuPageRegion> {
+        if mode == SurfaceRegionMode::Visible {
+            return self.visible_region.clamp(self.page_size);
+        }
         let gutter = [
-            (self.visible_region.width / 4).max(ANALYTIC_TILE_SIZE),
-            (self.visible_region.height / 4).max(ANALYTIC_TILE_SIZE),
+            if mode == SurfaceRegionMode::Overscanned {
+                (self.visible_region.width / 4).max(ANALYTIC_TILE_SIZE)
+            } else {
+                0
+            },
+            if mode == SurfaceRegionMode::Overscanned {
+                (self.visible_region.height / 4).max(ANALYTIC_TILE_SIZE)
+            } else {
+                0
+            },
         ];
         self.visible_region
             .with_gutter_aligned(self.page_size, gutter, ANALYTIC_TILE_SIZE)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SurfaceRegionMode {
+    #[default]
+    Overscanned,
+    TileAligned,
+    Visible,
+}
+
+impl SurfaceRegionMode {
+    const fn tighter(self) -> Option<Self> {
+        match self {
+            Self::Overscanned => Some(Self::TileAligned),
+            Self::TileAligned => Some(Self::Visible),
+            Self::Visible => None,
+        }
     }
 }
 
@@ -1549,6 +1641,7 @@ pub struct GpuPagePresentation {
     surfaces: Vec<Arc<GpuPageSurface>>,
     current: Option<usize>,
     current_region: Option<GpuPageRegion>,
+    region_mode: SurfaceRegionMode,
     incremental: IncrementalRenderState,
 }
 
@@ -1560,12 +1653,19 @@ impl fmt::Debug for GpuPagePresentation {
             .field("surfaces", &self.surfaces.len())
             .field("current", &self.current)
             .field("current_region", &self.current_region)
+            .field("region_mode", &self.region_mode)
             .field("refinement_pending", &self.incremental.refinement_pending())
             .finish()
     }
 }
 
 impl GpuPagePresentation {
+    /// Chooses the stable presentation extent, including any budget-driven
+    /// reduction learned from an earlier render of this page.
+    pub fn surface_region(&self, request: GpuPaintRequest) -> Result<GpuPageRegion> {
+        request.surface_region_for(self.region_mode)
+    }
+
     fn current_view(&self) -> Option<&wgpu::TextureView> {
         self.current
             .and_then(|index| self.surfaces.get(index))
@@ -2650,5 +2750,59 @@ trailer <</Root 1 0 R>>
             SurfaceSlot::Existing(1),
             "direct redraw may overwrite the current matching surface"
         );
+    }
+
+    #[test]
+    fn presentation_region_tightens_after_a_render_target_limit() {
+        let request = GpuPaintRequest {
+            page_size: [4_000, 4_000],
+            visible_region: GpuPageRegion {
+                x: 1_000,
+                y: 1_000,
+                width: 1_600,
+                height: 1_000,
+            },
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0; 4],
+            settled: false,
+            generation: 1,
+        };
+        let mut presentation = GpuPagePresentation::default();
+        assert_eq!(
+            presentation.surface_region(request).unwrap(),
+            GpuPageRegion {
+                x: 512,
+                y: 640,
+                width: 2_560,
+                height: 1_664,
+            }
+        );
+
+        presentation.region_mode = SurfaceRegionMode::TileAligned;
+        assert_eq!(
+            presentation.surface_region(request).unwrap(),
+            GpuPageRegion {
+                x: 896,
+                y: 896,
+                width: 1_792,
+                height: 1_152,
+            }
+        );
+
+        presentation.region_mode = SurfaceRegionMode::Visible;
+        assert_eq!(
+            presentation.surface_region(request).unwrap(),
+            request.visible_region
+        );
+        assert!(render_target_limit(&RenderError::Limit {
+            resource: "transient target bytes",
+            requested: 513,
+            limit: 512,
+        }));
+        assert!(!render_target_limit(&RenderError::Limit {
+            resource: "render dimension",
+            requested: 513,
+            limit: 512,
+        }));
     }
 }

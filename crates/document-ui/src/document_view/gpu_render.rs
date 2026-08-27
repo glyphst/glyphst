@@ -203,7 +203,7 @@ impl GpuPdfState {
             }
         }
         self.surface_seed_tasks
-            .retain(|page, _| visible.contains(page));
+            .retain(|page, _| retained.contains(page));
         let stale_preparations = self
             .pages
             .iter()
@@ -444,6 +444,23 @@ fn gpu_paint_texture(
     }
 }
 
+fn adjacent_gpu_viewport_bounds(
+    image_bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+    forward: bool,
+) -> Bounds<Pixels> {
+    let y = if forward {
+        image_bounds.origin.y
+    } else {
+        image_bounds.origin.y + image_bounds.size.height - viewport_bounds.size.height
+    };
+    Bounds::new(point(viewport_bounds.origin.x, y), viewport_bounds.size)
+}
+
+fn should_start_surface_seed(settled: bool, allow_motion_seed: bool, has_previous: bool) -> bool {
+    settled || allow_motion_seed || !has_previous
+}
+
 impl DocumentView {
     pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
         self.gpu_pdf.motion_active = true;
@@ -572,6 +589,7 @@ impl DocumentView {
         let renderer = self.gpu_pdf.renderer.clone()?;
 
         let page = u32::try_from(key.page_idx).ok()?;
+        let allow_motion_seed = !self.gpu_pdf.visible_pages.contains(&page);
         self.gpu_pdf.mark_page_used(page);
         let prepared = match self.gpu_pdf.pages.get(&page) {
             Some(GpuPageState::Ready(page)) => Some(Arc::clone(page)),
@@ -642,7 +660,13 @@ impl DocumentView {
             settled,
             generation: self.gpu_pdf.render_generation,
         };
-        let surface_region = match request.surface_region() {
+        let mut presentation = self
+            .gpu_pdf
+            .rendered
+            .get(&page)
+            .map(|rendered| rendered.presentation.clone())
+            .unwrap_or_default();
+        let mut surface_region = match presentation.surface_region(request) {
             Ok(region) => region,
             Err(error) => {
                 self.gpu_pdf
@@ -710,14 +734,17 @@ impl DocumentView {
             return Some(gpu_paint_texture(key, image_bounds, texture));
         }
 
-        let mut presentation = self
-            .gpu_pdf
-            .rendered
-            .get(&page)
-            .map(|rendered| rendered.presentation.clone())
-            .unwrap_or_default();
-        let work = match renderer.plan_page(&prepared, request, &presentation) {
+        let work = match renderer.plan_page(&prepared, request, &mut presentation) {
             Ok(work) => work,
+            Err(error) => {
+                self.gpu_pdf
+                    .surface_failures
+                    .insert(page, format!("{error:#}"));
+                return None;
+            }
+        };
+        surface_region = match presentation.surface_region(request) {
+            Ok(region) => region,
             Err(error) => {
                 self.gpu_pdf
                     .surface_failures
@@ -751,7 +778,11 @@ impl DocumentView {
                     .current_texture()
                     .map(|texture| (rendered.key, texture))
             });
-            if settled {
+            // Motion may defer replacing an already usable native texture, but
+            // it must not starve a newly visible page behind a MuPDF
+            // placeholder. Adjacent warming normally makes this branch cheap;
+            // a cold jump still starts one bounded, visible-priority seed.
+            if should_start_surface_seed(settled, allow_motion_seed, previous.is_some()) {
                 self.start_native_gpu_surface_seed(
                     page,
                     key,
@@ -796,6 +827,9 @@ impl DocumentView {
                 Some(gpu_paint_texture(key, image_bounds, texture))
             }
             Err(error) => {
+                self.gpu_pdf
+                    .surface_failures
+                    .insert(page, format!("{error:#}"));
                 eprintln!(
                     "failed to render native PDF page {} on the GPU: {error:#}",
                     page + 1
@@ -971,10 +1005,25 @@ impl DocumentView {
         mut presentation: GpuPagePresentation,
         cx: &mut Context<Self>,
     ) {
-        if self.gpu_pdf.surface_seed_tasks.contains_key(&page)
-            || self.gpu_pdf.surface_seed_tasks.len() >= MAX_SURFACE_SEED_TASKS
-        {
+        if self.gpu_pdf.surface_seed_tasks.contains_key(&page) {
             return;
+        }
+        if self.gpu_pdf.surface_seed_tasks.len() >= MAX_SURFACE_SEED_TASKS {
+            if self.gpu_pdf.visible_pages.contains(&page) {
+                let offscreen = self
+                    .gpu_pdf
+                    .surface_seed_tasks
+                    .keys()
+                    .find(|candidate| !self.gpu_pdf.visible_pages.contains(candidate))
+                    .copied();
+                if let Some(offscreen) = offscreen {
+                    self.gpu_pdf.surface_seed_tasks.remove(&offscreen);
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
         let document_generation = self.gpu_pdf.generation;
         self.gpu_pdf.surface_seed_generation =
@@ -1237,7 +1286,7 @@ impl DocumentView {
         &mut self,
         visible_pages: &[usize],
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<usize> {
         let visible = visible_pages
             .iter()
             .filter_map(|page| u32::try_from(*page).ok())
@@ -1268,6 +1317,7 @@ impl DocumentView {
         let mut retained = visible.clone();
         retained.extend(adjacent);
         self.gpu_pdf.prune(&visible, &retained);
+        let adjacent_index = adjacent.and_then(|page| usize::try_from(page).ok());
 
         let engine = cx
             .global::<SettingsStore>()
@@ -1275,19 +1325,50 @@ impl DocumentView {
             .document_view
             .pdf_render_engine;
         if engine == PdfRenderEngine::MuPdf || self.format != DocumentFormat::Pdf {
-            return;
+            return None;
         }
         let (Some(page), Some(document), Some(renderer)) = (
             adjacent,
             self.gpu_pdf.document.clone(),
             self.gpu_pdf.renderer.clone(),
         ) else {
-            return;
+            return adjacent_index;
         };
         if !self.gpu_pdf.pages.contains_key(&page) && self.gpu_pdf.has_preparation_capacity() {
             self.gpu_pdf.mark_page_used(page);
             self.start_native_gpu_page_prepare(page, document, renderer, cx);
         }
+        adjacent_index
+    }
+
+    pub(super) fn warm_native_gpu_surface(
+        &mut self,
+        key: RenderKey,
+        image_bounds: Bounds<Pixels>,
+        viewport_bounds: Bounds<Pixels>,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(page) = u32::try_from(key.page_idx) else {
+            return;
+        };
+        if self.gpu_pdf.rendered.contains_key(&page)
+            || self.gpu_pdf.surface_seed_tasks.contains_key(&page)
+        {
+            return;
+        }
+        let predicted_viewport =
+            adjacent_gpu_viewport_bounds(image_bounds, viewport_bounds, forward);
+        let mut refinement_budget = true;
+        _ = self.native_gpu_texture(
+            key,
+            image_bounds,
+            predicted_viewport,
+            &mut refinement_budget,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn native_gpu_fallback_diagnostics(
@@ -1515,5 +1596,43 @@ mod tests {
         );
         assert_eq!(bounds.origin, point(px(200.0), px(300.0)));
         assert_eq!(bounds.size, size(px(300.0), px(400.0)));
+    }
+
+    #[test]
+    fn adjacent_page_warming_predicts_the_entering_viewport_edge() {
+        let image = Bounds::new(point(px(100.0), px(100.0)), size(px(500.0), px(1_000.0)));
+        let viewport = Bounds::new(point(px(0.0), px(0.0)), size(px(800.0), px(600.0)));
+
+        let forward = adjacent_gpu_viewport_bounds(image, viewport, true);
+        assert_eq!(forward.origin, point(px(0.0), px(100.0)));
+        assert_eq!(
+            visible_gpu_region(render_key(), image, forward),
+            Some(GpuPageRegion {
+                x: 0,
+                y: 0,
+                width: 1_000,
+                height: 1_200,
+            })
+        );
+
+        let backward = adjacent_gpu_viewport_bounds(image, viewport, false);
+        assert_eq!(backward.origin, point(px(0.0), px(500.0)));
+        assert_eq!(
+            visible_gpu_region(render_key(), image, backward),
+            Some(GpuPageRegion {
+                x: 0,
+                y: 800,
+                width: 1_000,
+                height: 1_200,
+            })
+        );
+    }
+
+    #[test]
+    fn cold_visible_pages_are_not_starved_during_motion() {
+        assert!(should_start_surface_seed(false, false, false));
+        assert!(!should_start_surface_seed(false, false, true));
+        assert!(should_start_surface_seed(false, true, true));
+        assert!(should_start_surface_seed(true, false, true));
     }
 }
