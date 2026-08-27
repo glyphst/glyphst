@@ -30,6 +30,7 @@ impl DocumentView {
         let changed = (self.scroll_x_doc - previous_x).abs() > f32::EPSILON
             || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON;
         if changed {
+            self.mark_native_gpu_motion(cx);
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
@@ -73,6 +74,7 @@ impl DocumentView {
         let changed = (self.target_scroll_x_doc - previous_x).abs() > f32::EPSILON
             || (self.target_scroll_y_doc - previous_y).abs() > f32::EPSILON;
         if changed {
+            self.mark_native_gpu_motion(cx);
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
@@ -192,6 +194,7 @@ impl DocumentView {
             smooth_scrolling,
         );
         if changed_x || changed_y {
+            self.mark_native_gpu_motion(cx);
             window.request_animation_frame();
         }
     }

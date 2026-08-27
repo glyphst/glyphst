@@ -61,11 +61,11 @@ use glyphst_pdf::{
 };
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
-    GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
-    GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute, GpuOutlineItem,
-    GpuPageRegion, GpuPageRoute, GpuPageTexture, GpuPaintRequest, GpuPatchLodPreparationStats,
-    GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic,
-    PreparedGpuPage,
+    GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuIncrementalWorkKind,
+    GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute,
+    GpuOutlineItem, GpuPagePresentation, GpuPageRegion, GpuPageRoute, GpuPageTexture,
+    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
+    GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -601,6 +601,7 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub render_bundle_runs: u64,
     pub render_bundle_operations: u64,
     pub retained_operations: u64,
+    pub flattened_opaque_knockout_groups: u64,
     pub retained_form_resources: u64,
     pub retained_form_instances: u64,
     pub retained_type3_glyph_resources: u64,
@@ -636,6 +637,9 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_count: usize,
     pub surface_bytes: u64,
     pub surface_byte_limit: u64,
+    pub surface_seed_tasks: usize,
+    pub refinement_pages: usize,
+    pub motion_active: bool,
 }
 
 /// One exact semantic or capability reason for routing the whole page to MuPDF.

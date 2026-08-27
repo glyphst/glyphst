@@ -217,8 +217,16 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        self.prune_native_gpu_pages(&[page_idx]);
-        let gpu_texture = self.native_gpu_texture(key, image_bounds, bounds, window, cx);
+        self.prune_native_gpu_pages(&[page_idx], cx);
+        let mut refinement_budget = true;
+        let gpu_texture = self.native_gpu_texture(
+            key,
+            image_bounds,
+            bounds,
+            &mut refinement_budget,
+            window,
+            cx,
+        );
         let (image, displayed) = if gpu_texture.is_some() {
             (None, None)
         } else {
@@ -355,11 +363,19 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        self.prune_native_gpu_pages(&visible_pages);
+        self.prune_native_gpu_pages(&visible_pages, cx);
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
+        let mut refinement_budget = true;
         for (page_idx, image_bounds, key) in visible_page_renders {
-            let gpu_texture = self.native_gpu_texture(key, image_bounds, bounds, window, cx);
+            let gpu_texture = self.native_gpu_texture(
+                key,
+                image_bounds,
+                bounds,
+                &mut refinement_budget,
+                window,
+                cx,
+            );
             let (image, fallback_key) = if gpu_texture.is_some() {
                 (None, None)
             } else {

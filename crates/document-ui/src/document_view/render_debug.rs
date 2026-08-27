@@ -193,6 +193,7 @@ impl DocumentView {
                 render_bundle_runs: stats.render_bundle_runs,
                 render_bundle_operations: stats.render_bundle_operations,
                 retained_operations: stats.retained_operations,
+                flattened_opaque_knockout_groups: stats.flattened_opaque_knockout_groups,
                 retained_form_resources: stats.retained_form_resources,
                 retained_form_instances: stats.retained_form_instances,
                 retained_type3_glyph_resources: stats.retained_type3_glyph_resources,

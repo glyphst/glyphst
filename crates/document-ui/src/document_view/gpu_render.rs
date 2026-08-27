@@ -3,10 +3,8 @@ use super::*;
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SURFACE_SEED_TASKS: usize = 1;
 
-fn surface_reservation_bytes(output_bytes: u64, retained_source_bytes: u64, settled: bool) -> u64 {
-    output_bytes.saturating_add(if settled { 0 } else { retained_source_bytes })
-}
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 fn same_patch_lod_request(existing: f32, required: f32) -> bool {
@@ -31,9 +29,12 @@ pub(super) struct GpuPdfState {
     surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
+    last_scroll_y_doc: Option<f32>,
     preparation_generation: u64,
     patch_lod_generation: u64,
     patch_lod_tasks: HashMap<u32, PatchLodTask>,
+    surface_seed_generation: u64,
+    surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
     render_generation: u64,
     motion_generation: u64,
     motion_active: bool,
@@ -57,7 +58,7 @@ enum GpuPageState {
 
 struct RenderedGpuPage {
     key: RenderKey,
-    texture: GpuPageTexture,
+    presentation: GpuPagePresentation,
     stats: GpuRenderStats,
 }
 
@@ -65,6 +66,13 @@ struct PatchLodTask {
     generation: u64,
     required_scale: f32,
     cancellation: GpuCancellationToken,
+    _task: Task<()>,
+}
+
+struct SurfaceSeedTask {
+    generation: u64,
+    key: RenderKey,
+    region: GpuPageRegion,
     _task: Task<()>,
 }
 
@@ -88,9 +96,12 @@ impl GpuPdfState {
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
+        self.last_scroll_y_doc = None;
         self.preparation_generation = 0;
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
+        self.surface_seed_generation = 0;
+        self.surface_seed_tasks.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -112,9 +123,12 @@ impl GpuPdfState {
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
+        self.last_scroll_y_doc = None;
         self.preparation_generation = 0;
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
+        self.surface_seed_generation = 0;
+        self.surface_seed_tasks.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -131,6 +145,7 @@ impl GpuPdfState {
         for task in self.patch_lod_tasks.values() {
             task.cancellation.cancel();
         }
+        self.surface_seed_tasks.clear();
     }
 
     fn cancel_destination_task(&mut self) {
@@ -152,6 +167,7 @@ impl GpuPdfState {
             || self.destination_task.is_some()
             || self.destination_fallback.is_some()
             || !self.patch_lod_tasks.is_empty()
+            || !self.surface_seed_tasks.is_empty()
             || !self.pages.is_empty()
             || !self.rendered.is_empty()
     }
@@ -161,7 +177,7 @@ impl GpuPdfState {
         self.page_last_used.insert(page, self.page_usage_clock);
     }
 
-    fn prune(&mut self, visible: &HashSet<u32>) {
+    fn prune(&mut self, visible: &HashSet<u32>, retained: &HashSet<u32>) {
         self.visible_pages.clone_from(visible);
         self.presented_pages.clear();
         let stale_patch_lods = self
@@ -175,11 +191,13 @@ impl GpuPdfState {
                 task.cancellation.cancel();
             }
         }
+        self.surface_seed_tasks
+            .retain(|page, _| visible.contains(page));
         let stale_preparations = self
             .pages
             .iter()
             .filter_map(|(page, state)| {
-                (!visible.contains(page) && matches!(state, GpuPageState::Preparing { .. }))
+                (!retained.contains(page) && matches!(state, GpuPageState::Preparing { .. }))
                     .then_some(*page)
             })
             .collect::<Vec<_>>();
@@ -194,15 +212,15 @@ impl GpuPdfState {
             self.surface_failures.remove(&page);
         }
 
-        let incoming_visible = visible
+        let incoming_visible = retained
             .iter()
             .filter(|page| !self.pages.contains_key(page))
             .count();
         let retained_limit = MAX_RETAINED_GPU_PAGES.saturating_sub(incoming_visible);
-        self.prune_states(visible, retained_limit, |state| {
+        self.prune_states(retained, retained_limit, |state| {
             matches!(state, GpuPageState::Ready(_))
         });
-        self.prune_states(visible, MAX_RETAINED_GPU_DIAGNOSTICS, |state| {
+        self.prune_states(retained, MAX_RETAINED_GPU_DIAGNOSTICS, |state| {
             matches!(state, GpuPageState::Fallback(_) | GpuPageState::Failed(_))
         });
         self.rendered
@@ -262,7 +280,7 @@ impl GpuPdfState {
     fn surface_bytes(&self) -> u64 {
         self.rendered
             .values()
-            .map(|rendered| rendered.texture.byte_len())
+            .map(|rendered| rendered.presentation.byte_len())
             .sum()
     }
 
@@ -287,7 +305,7 @@ impl GpuPdfState {
                 .rendered
                 .iter()
                 .filter(|(candidate, _)| **candidate != page)
-                .map(|(_, rendered)| rendered.texture.byte_len())
+                .map(|(_, rendered)| rendered.presentation.byte_len())
                 .sum::<u64>();
             if retained.saturating_add(bytes) <= MAX_RETAINED_GPU_SURFACE_BYTES {
                 return Ok(());
@@ -438,6 +456,7 @@ impl DocumentView {
         key: RenderKey,
         image_bounds: Bounds<Pixels>,
         viewport_bounds: Bounds<Pixels>,
+        refinement_budget: &mut bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<GpuPaintTexture> {
@@ -597,7 +616,7 @@ impl DocumentView {
             if settled {
                 if let Some(rendered) = self.gpu_pdf.rendered.get(&page) {
                     let rendered_key = rendered.key;
-                    let texture = rendered.texture.clone();
+                    let texture = rendered.presentation.current_texture()?;
                     self.gpu_pdf.presented_pages.insert(page);
                     return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
                 }
@@ -605,28 +624,55 @@ impl DocumentView {
             }
         }
 
+        if self.gpu_pdf.surface_seed_tasks.contains_key(&page) {
+            if let Some(rendered) = self.gpu_pdf.rendered.get(&page)
+                && let Some(texture) = rendered.presentation.current_texture()
+            {
+                let rendered_key = rendered.key;
+                self.gpu_pdf.presented_pages.insert(page);
+                return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+            }
+            return None;
+        }
+
         if let Some(rendered) = self.gpu_pdf.rendered.get(&page)
             && rendered.key == key
-            && rendered.texture.token() == renderer.token()
-            && rendered.texture.region() == surface_region
-            && (!settled || !rendered.texture.refinement_pending())
+            && rendered.presentation.token() == Some(renderer.token())
+            && rendered
+                .presentation
+                .current_texture()
+                .is_some_and(|texture| texture.region() == surface_region)
+            && (!settled || !rendered.presentation.refinement_pending())
         {
-            let texture = rendered.texture.clone();
+            let texture = rendered.presentation.current_texture()?;
             self.gpu_pdf.presented_pages.insert(page);
             self.gpu_pdf.surface_failures.remove(&page);
             return Some(gpu_paint_texture(key, image_bounds, texture));
         }
 
-        let retained_source_bytes = if settled {
-            0
-        } else {
-            self.gpu_pdf
-                .rendered
-                .get(&page)
-                .map_or(0, |rendered| rendered.texture.retained_source_byte_len())
+        let mut presentation = self
+            .gpu_pdf
+            .rendered
+            .get(&page)
+            .map(|rendered| rendered.presentation.clone())
+            .unwrap_or_default();
+        let work = match renderer.plan_page(&prepared, request, &presentation) {
+            Ok(work) => work,
+            Err(error) => {
+                self.gpu_pdf
+                    .surface_failures
+                    .insert(page, format!("{error:#}"));
+                return None;
+            }
         };
-        let requested_surface_bytes =
-            surface_reservation_bytes(surface_region.byte_len(), retained_source_bytes, settled);
+        if work.kind == GpuIncrementalWorkKind::Refine && !*refinement_budget {
+            let rendered = self.gpu_pdf.rendered.get(&page)?;
+            let texture = rendered.presentation.current_texture()?;
+            self.gpu_pdf.presented_pages.insert(page);
+            window.request_animation_frame();
+            return Some(gpu_paint_texture(rendered.key, image_bounds, texture));
+        }
+        let requested_surface_bytes = presentation.projected_byte_len(surface_region);
         if let Err(required) = self.gpu_pdf.reserve_surface(page, requested_surface_bytes) {
             self.gpu_pdf.surface_failures.insert(
                 page,
@@ -637,20 +683,43 @@ impl DocumentView {
             );
             return None;
         }
+        if work.kind == GpuIncrementalWorkKind::Full {
+            let previous = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
+                rendered
+                    .presentation
+                    .current_texture()
+                    .map(|texture| (rendered.key, texture))
+            });
+            if settled {
+                self.start_native_gpu_surface_seed(
+                    page,
+                    key,
+                    Arc::clone(&prepared),
+                    Arc::clone(&renderer),
+                    request,
+                    surface_region,
+                    presentation,
+                    cx,
+                );
+            }
+            if let Some((rendered_key, texture)) = previous {
+                self.gpu_pdf.presented_pages.insert(page);
+                return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+            }
+            return None;
+        }
+        if work.kind == GpuIncrementalWorkKind::Refine {
+            *refinement_budget = false;
+        }
         self.gpu_pdf.surface_failures.remove(&page);
-        let previous = self.gpu_pdf.rendered.remove(&page);
-        match renderer.render_page(
-            &prepared,
-            request,
-            previous.as_ref().map(|rendered| &rendered.texture),
-        ) {
+        match renderer.render_page(&prepared, request, &mut presentation) {
             Ok((texture, stats)) => {
-                let refinement_pending = texture.refinement_pending();
+                let refinement_pending = presentation.refinement_pending();
                 self.gpu_pdf.rendered.insert(
                     page,
                     RenderedGpuPage {
                         key,
-                        texture: texture.clone(),
+                        presentation,
                         stats,
                     },
                 );
@@ -666,9 +735,6 @@ impl DocumentView {
                 Some(gpu_paint_texture(key, image_bounds, texture))
             }
             Err(error) => {
-                if let Some(previous) = previous {
-                    self.gpu_pdf.rendered.insert(page, previous);
-                }
                 eprintln!(
                     "failed to render native PDF page {} on the GPU: {error:#}",
                     page + 1
@@ -826,6 +892,121 @@ impl DocumentView {
             GpuPageState::Preparing {
                 generation: preparation_generation,
                 cancellation,
+                _task: task,
+            },
+        );
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_native_gpu_surface_seed(
+        &mut self,
+        page: u32,
+        key: RenderKey,
+        prepared: Arc<PreparedGpuPage>,
+        renderer: Arc<GpuPdfRenderer>,
+        request: GpuPaintRequest,
+        region: GpuPageRegion,
+        mut presentation: GpuPagePresentation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.gpu_pdf.surface_seed_tasks.contains_key(&page)
+            || self.gpu_pdf.surface_seed_tasks.len() >= MAX_SURFACE_SEED_TASKS
+        {
+            return;
+        }
+        let document_generation = self.gpu_pdf.generation;
+        self.gpu_pdf.surface_seed_generation =
+            self.gpu_pdf.surface_seed_generation.wrapping_add(1).max(1);
+        let generation = self.gpu_pdf.surface_seed_generation;
+        let token = renderer.token();
+        let worker_page = Arc::clone(&prepared);
+        let worker_renderer = Arc::clone(&renderer);
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    worker_renderer
+                        .render_page(&worker_page, request, &mut presentation)
+                        .map(|(_, stats)| (presentation, stats))
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            let update_result = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || !matches!(
+                        this.gpu_pdf.surface_seed_tasks.get(&page),
+                        Some(task)
+                            if task.generation == generation
+                                && task.key == key
+                                && task.region == region
+                    )
+                    || this
+                        .gpu_pdf
+                        .renderer
+                        .as_ref()
+                        .is_none_or(|renderer| renderer.token() != token)
+                    || !matches!(
+                        this.gpu_pdf.pages.get(&page),
+                        Some(GpuPageState::Ready(current)) if Arc::ptr_eq(current, &prepared)
+                    )
+                {
+                    return;
+                }
+                this.gpu_pdf.surface_seed_tasks.remove(&page);
+                match result {
+                    Ok((presentation, stats)) => {
+                        let bytes = presentation.byte_len();
+                        if let Err(required) = this.gpu_pdf.reserve_surface(page, bytes) {
+                            this.gpu_pdf.surface_failures.insert(
+                                page,
+                                format!(
+                                    "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
+                                    required, MAX_RETAINED_GPU_SURFACE_BYTES
+                                ),
+                            );
+                        } else {
+                            this.gpu_pdf.rendered.insert(
+                                page,
+                                RenderedGpuPage {
+                                    key,
+                                    presentation,
+                                    stats,
+                                },
+                            );
+                            this.gpu_pdf.surface_failures.remove(&page);
+                            this.gpu_pdf.prune_surface_cache();
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "failed to seed native PDF page {} GPU surface: {error}",
+                            page + 1
+                        );
+                        this.gpu_pdf.surface_failures.insert(page, error);
+                        if this
+                            .gpu_pdf
+                            .renderer
+                            .as_ref()
+                            .is_some_and(|renderer| renderer.is_device_lost())
+                        {
+                            this.gpu_pdf.reset_device();
+                        }
+                    }
+                }
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to install native PDF GPU surface seed: {error:#}");
+            }
+        });
+        self.gpu_pdf.surface_seed_tasks.insert(
+            page,
+            SurfaceSeedTask {
+                generation,
+                key,
+                region,
                 _task: task,
             },
         );
@@ -991,12 +1172,61 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(super) fn prune_native_gpu_pages(&mut self, visible_pages: &[usize]) {
+    pub(super) fn prune_native_gpu_pages(
+        &mut self,
+        visible_pages: &[usize],
+        cx: &mut Context<Self>,
+    ) {
         let visible = visible_pages
             .iter()
             .filter_map(|page| u32::try_from(*page).ok())
             .collect::<HashSet<_>>();
-        self.gpu_pdf.prune(&visible);
+        let target_delta = self.target_scroll_y_doc - self.scroll_y_doc;
+        let observed_delta = self
+            .gpu_pdf
+            .last_scroll_y_doc
+            .map_or(0.0, |previous| self.scroll_y_doc - previous);
+        self.gpu_pdf.last_scroll_y_doc = Some(self.scroll_y_doc);
+        let direction = if target_delta.abs() > f32::EPSILON {
+            target_delta
+        } else {
+            observed_delta
+        };
+        let first = visible.iter().min().copied();
+        let last = visible.iter().max().copied();
+        let forward = last.and_then(|page| {
+            page.checked_add(1)
+                .filter(|page| (*page as usize) < self.pages.len())
+        });
+        let backward = first.and_then(|page| page.checked_sub(1));
+        let adjacent = if direction < 0.0 {
+            backward.or(forward)
+        } else {
+            forward.or(backward)
+        };
+        let mut retained = visible.clone();
+        retained.extend(adjacent);
+        self.gpu_pdf.prune(&visible, &retained);
+
+        let engine = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .pdf_render_engine;
+        if engine == PdfRenderEngine::MuPdf || self.format != DocumentFormat::Pdf {
+            return;
+        }
+        let (Some(page), Some(document), Some(renderer)) = (
+            adjacent,
+            self.gpu_pdf.document.clone(),
+            self.gpu_pdf.renderer.clone(),
+        ) else {
+            return;
+        };
+        if !self.gpu_pdf.pages.contains_key(&page) && self.gpu_pdf.has_preparation_capacity() {
+            self.gpu_pdf.mark_page_used(page);
+            self.start_native_gpu_page_prepare(page, document, renderer, cx);
+        }
     }
 
     pub(super) fn native_gpu_fallback_diagnostics(
@@ -1110,9 +1340,22 @@ impl DocumentView {
                 .iter()
                 .map(|(cold, deferred)| cold.resident_bytes.saturating_add(deferred.mesh_bytes))
                 .sum(),
-            surface_count: self.gpu_pdf.rendered.len(),
+            surface_count: self
+                .gpu_pdf
+                .rendered
+                .values()
+                .map(|rendered| rendered.presentation.surface_count())
+                .sum(),
             surface_bytes: self.gpu_pdf.surface_bytes(),
             surface_byte_limit: MAX_RETAINED_GPU_SURFACE_BYTES,
+            surface_seed_tasks: self.gpu_pdf.surface_seed_tasks.len(),
+            refinement_pages: self
+                .gpu_pdf
+                .rendered
+                .values()
+                .filter(|rendered| rendered.presentation.refinement_pending())
+                .count(),
+            motion_active: self.gpu_pdf.motion_active,
         }
     }
 
@@ -1141,11 +1384,12 @@ impl DocumentView {
                 Some(GpuPageState::Preparing { .. })
             )
             || self.gpu_pdf.patch_lod_tasks.contains_key(&page)
+            || self.gpu_pdf.surface_seed_tasks.contains_key(&page)
             || self
                 .gpu_pdf
                 .rendered
                 .get(&page)
-                .is_some_and(|rendered| rendered.texture.refinement_pending())
+                .is_some_and(|rendered| rendered.presentation.refinement_pending())
     }
 }
 
@@ -1202,12 +1446,5 @@ mod tests {
         );
         assert_eq!(bounds.origin, point(px(200.0), px(300.0)));
         assert_eq!(bounds.size, size(px(300.0), px(400.0)));
-    }
-
-    #[test]
-    fn motion_surface_reservation_counts_the_exact_reprojection_source() {
-        assert_eq!(surface_reservation_bytes(4_096, 8_192, false), 12_288);
-        assert_eq!(surface_reservation_bytes(4_096, 8_192, true), 4_096);
-        assert_eq!(surface_reservation_bytes(u64::MAX, 1, false), u64::MAX);
     }
 }

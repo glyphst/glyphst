@@ -126,6 +126,27 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 document.gpu_cache.surface_count
             ),
             FOREGROUND,
+        ))
+        .child(reading(
+            "GPU PIPELINE",
+            format!(
+                "{} seed · {} refine · motion {}",
+                document.gpu_cache.surface_seed_tasks,
+                document.gpu_cache.refinement_pages,
+                if document.gpu_cache.motion_active {
+                    "active"
+                } else {
+                    "settled"
+                }
+            ),
+            if document.gpu_cache.surface_seed_tasks > 0
+                || document.gpu_cache.refinement_pages > 0
+                || document.gpu_cache.motion_active
+            {
+                WARN
+            } else {
+                GOOD
+            },
         ));
 
     for fallback in document.gpu_navigation_fallbacks {
@@ -282,6 +303,16 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ));
+        if preparation.flattened_opaque_knockout_groups > 0 {
+            section = section.child(reading(
+                "KNOCKOUT FAST",
+                format!(
+                    "{} opaque text group",
+                    preparation.flattened_opaque_knockout_groups
+                ),
+                GOOD,
+            ));
+        }
         if preparation.render_bundle_runs > 0 {
             section = section.child(reading(
                 "BUNDLES",

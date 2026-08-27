@@ -17,10 +17,12 @@ use glyphst_pdf_engine::{
 };
 pub use glyphst_pdf_engine::{CancellationToken, FeatureId, Permissions as GpuPdfPermissions};
 use glyphst_pdf_render_wgpu::{
-    ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState, PrepareError,
-    RenderConfig, RenderError, RenderRequest, RenderSupportIssue, RendererInitError,
+    ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
+    IncrementalWorkPlan, PrepareError, RenderConfig, RenderError, RenderRequest,
+    RenderSupportIssue, RendererInitError,
 };
 pub use glyphst_pdf_render_wgpu::{
+    IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
     PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
     PreparationStats as GpuPreparationStats, RenderStats as GpuRenderStats,
 };
@@ -34,6 +36,7 @@ use std::{
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
+const MAX_PRESENTATION_SURFACES: usize = 3;
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1244,34 +1247,12 @@ impl GpuPdfRenderer {
         Ok((surface_region, surface_translation.compose(page_transform)))
     }
 
-    /// Render a prepared complete page into a clipped same-device texture.
-    ///
-    /// `previous` remains untouched and can continue to be presented if this
-    /// call fails. A successful render inherits its incremental exactness map
-    /// and samples the prior texture only when the engine proves reuse safe.
-    pub fn render_page(
+    fn engine_render_request(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
-        previous: Option<&GpuPageTexture>,
-    ) -> Result<(GpuPageTexture, GpuRenderStats)> {
-        if self.is_device_lost() {
-            bail!("the active GPUI WGPU device is lost");
-        }
-        if page.device_token() != self.token() {
-            bail!("the prepared PDF page belongs to a stale GPU generation");
-        }
+    ) -> Result<(GpuPageRegion, RenderRequest)> {
         let (surface_region, root_transform) = self.render_root_transform(page, request)?;
-        let [width, height] = surface_region.size();
-        if width == 0 || height == 0 {
-            bail!("native PDF render target must be non-empty");
-        }
-        let limit = self.context.device().limits().max_texture_dimension_2d;
-        if width > limit || height > limit {
-            bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
-        }
-
-        let mut texture = self.create_texture(surface_region);
         let visible = request.visible_region.clamp(request.page_size)?;
         let visible_local = Rect {
             x0: f64::from(visible.x.saturating_sub(surface_region.x)),
@@ -1283,35 +1264,99 @@ impl GpuPdfRenderer {
             .inverse()
             .context("failed to invert native PDF surface transform")?
             .map_rect(visible_local);
-        let mut incremental = previous
-            .filter(|texture| texture.token == self.token())
-            .map(|texture| texture.incremental.clone())
-            .unwrap_or_default();
+        Ok((
+            surface_region,
+            RenderRequest {
+                root_transform,
+                viewport,
+                target_size: surface_region.size(),
+                background: request.background,
+                settled: request.settled,
+                generation: request.generation,
+            },
+        ))
+    }
+
+    /// Classify the next page update without allocating a texture, encoding
+    /// commands, submitting work, or advancing the render generation.
+    pub fn plan_page(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+        presentation: &GpuPagePresentation,
+    ) -> Result<IncrementalWorkPlan> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token()
+            || presentation
+                .token
+                .is_some_and(|token| token != self.token())
+        {
+            bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
+        }
+        let (_, request) = self.engine_render_request(page, request)?;
+        self.renderer
+            .plan_incremental(
+                &page.gpu,
+                &presentation.incremental,
+                presentation.current_view(),
+                request,
+            )
+            .map_err(render_error)
+    }
+
+    /// Render a prepared complete page into a bounded three-surface ring.
+    ///
+    /// The current presentation and the engine's retained exact source are
+    /// never selected as the destination. The ring and incremental state are
+    /// committed only after a successful submission, so callers can keep
+    /// presenting the previous texture when this method fails.
+    pub fn render_page(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+        presentation: &mut GpuPagePresentation,
+    ) -> Result<(GpuPageTexture, GpuRenderStats)> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token()
+            || presentation
+                .token
+                .is_some_and(|token| token != self.token())
+        {
+            bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
+        }
+        presentation.token = Some(self.token());
+        let (surface_region, engine_request) = self.engine_render_request(page, request)?;
+        let [width, height] = surface_region.size();
+        if width == 0 || height == 0 {
+            bail!("native PDF render target must be non-empty");
+        }
+        let limit = self.context.device().limits().max_texture_dimension_2d;
+        if width > limit || height > limit {
+            bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
+        }
+        let selection =
+            presentation.select_target(surface_region.size(), |size| self.create_surface(size));
+        let target = selection.surface();
+        let mut incremental = presentation.incremental.clone();
         let stats = self
             .renderer
             .render_incremental(
                 &page.gpu,
                 &mut incremental,
-                previous
-                    .filter(|texture| texture.token == self.token())
-                    .map(|texture| texture.view.as_ref()),
-                RenderRequest {
-                    root_transform,
-                    viewport,
-                    target_size: surface_region.size(),
-                    background: request.background,
-                    settled: request.settled,
-                    generation: request.generation,
-                },
-                &texture.view,
+                presentation.current_view(),
+                engine_request,
+                &target.view,
             )
             .map_err(render_error)?;
-        texture.incremental = incremental;
+        let texture = presentation.commit(selection, surface_region, incremental);
         Ok((texture, stats))
     }
 
-    fn create_texture(&self, region: GpuPageRegion) -> GpuPageTexture {
-        let size = region.size();
+    fn create_surface(&self, size: [u32; 2]) -> Arc<GpuPageSurface> {
         let texture = Arc::new(
             self.context
                 .device()
@@ -1333,15 +1378,13 @@ impl GpuPdfRenderer {
         );
         let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         let handle = self.context.texture_handle(Arc::clone(&view));
-        GpuPageTexture {
+        Arc::new(GpuPageSurface {
             _texture: texture,
             view,
             handle,
             size,
-            region,
             token: self.token(),
-            incremental: IncrementalRenderState::default(),
-        }
+        })
     }
 }
 
@@ -1400,12 +1443,27 @@ impl GpuPageRegion {
         })
     }
 
-    fn with_gutter(self, page_size: [u32; 2], gutter: u32) -> Result<Self> {
+    fn with_gutter_aligned(self, page_size: [u32; 2], gutter: u32, alignment: u32) -> Result<Self> {
+        if alignment == 0 {
+            bail!("native PDF surface alignment must be non-zero");
+        }
         let visible = self.clamp(page_size)?;
-        let x0 = visible.x.saturating_sub(gutter);
-        let y0 = visible.y.saturating_sub(gutter);
-        let x1 = visible.right().saturating_add(gutter).min(page_size[0]);
-        let y1 = visible.bottom().saturating_add(gutter).min(page_size[1]);
+        let x0 = visible.x.saturating_sub(gutter) / alignment * alignment;
+        let y0 = visible.y.saturating_sub(gutter) / alignment * alignment;
+        let x1 = visible
+            .right()
+            .saturating_add(gutter)
+            .min(page_size[0])
+            .div_ceil(alignment)
+            .saturating_mul(alignment)
+            .min(page_size[0]);
+        let y1 = visible
+            .bottom()
+            .saturating_add(gutter)
+            .min(page_size[1])
+            .div_ceil(alignment)
+            .saturating_mul(alignment)
+            .min(page_size[1]);
         Ok(Self {
             x: x0,
             y: y0,
@@ -1428,42 +1486,251 @@ pub struct GpuPaintRequest {
 
 impl GpuPaintRequest {
     pub fn surface_region(self) -> Result<GpuPageRegion> {
-        self.visible_region
-            .with_gutter(self.page_size, ANALYTIC_TILE_SIZE)
+        self.visible_region.with_gutter_aligned(
+            self.page_size,
+            ANALYTIC_TILE_SIZE,
+            ANALYTIC_TILE_SIZE,
+        )
     }
 }
 
-/// Reusable render target and GPUI presentation handle.
-#[derive(Clone)]
-pub struct GpuPageTexture {
+struct GpuPageSurface {
     _texture: Arc<wgpu::Texture>,
     view: Arc<wgpu::TextureView>,
     handle: ExternalTextureHandle,
     size: [u32; 2],
-    region: GpuPageRegion,
     token: ExternalGpuDeviceToken,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceSlot {
+    Existing(usize),
+    Insert,
+    Replace(usize),
+}
+
+struct SurfaceSelection {
+    slot: SurfaceSlot,
+    surface: Arc<GpuPageSurface>,
+}
+
+impl SurfaceSelection {
+    fn surface(&self) -> &GpuPageSurface {
+        &self.surface
+    }
+}
+
+/// Bounded same-device presentation state for one prepared page.
+///
+/// At most three surfaces are retained: the currently displayed output, the
+/// stable exact reprojection source when distinct, and one writable target.
+#[derive(Clone, Default)]
+pub struct GpuPagePresentation {
+    token: Option<ExternalGpuDeviceToken>,
+    surfaces: Vec<Arc<GpuPageSurface>>,
+    current: Option<usize>,
+    current_region: Option<GpuPageRegion>,
     incremental: IncrementalRenderState,
+}
+
+impl fmt::Debug for GpuPagePresentation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuPagePresentation")
+            .field("token", &self.token)
+            .field("surfaces", &self.surfaces.len())
+            .field("current", &self.current)
+            .field("current_region", &self.current_region)
+            .field("refinement_pending", &self.incremental.refinement_pending())
+            .finish()
+    }
+}
+
+impl GpuPagePresentation {
+    fn current_view(&self) -> Option<&wgpu::TextureView> {
+        self.current
+            .and_then(|index| self.surfaces.get(index))
+            .map(|surface| surface.view.as_ref())
+    }
+
+    fn target_slot(&self, size: [u32; 2]) -> SurfaceSlot {
+        let retained = self
+            .surfaces
+            .iter()
+            .position(|surface| self.incremental.references_texture(&surface.view));
+        let mut sizes = [[0_u32; 2]; MAX_PRESENTATION_SURFACES];
+        for (output, surface) in sizes.iter_mut().zip(&self.surfaces) {
+            *output = surface.size;
+        }
+        presentation_surface_slot(&sizes[..self.surfaces.len()], self.current, retained, size)
+    }
+
+    fn select_target(
+        &self,
+        size: [u32; 2],
+        create: impl FnOnce([u32; 2]) -> Arc<GpuPageSurface>,
+    ) -> SurfaceSelection {
+        let slot = self.target_slot(size);
+        let surface = match slot {
+            SurfaceSlot::Existing(index) => Arc::clone(&self.surfaces[index]),
+            SurfaceSlot::Insert | SurfaceSlot::Replace(_) => create(size),
+        };
+        SurfaceSelection { slot, surface }
+    }
+
+    fn commit(
+        &mut self,
+        selection: SurfaceSelection,
+        region: GpuPageRegion,
+        incremental: IncrementalRenderState,
+    ) -> GpuPageTexture {
+        let index = match selection.slot {
+            SurfaceSlot::Existing(index) => index,
+            SurfaceSlot::Insert => {
+                let index = self.surfaces.len();
+                self.surfaces.push(Arc::clone(&selection.surface));
+                index
+            }
+            SurfaceSlot::Replace(index) => {
+                self.surfaces[index] = Arc::clone(&selection.surface);
+                index
+            }
+        };
+        self.current = Some(index);
+        self.current_region = Some(region);
+        self.incremental = incremental;
+        GpuPageTexture {
+            surface: selection.surface,
+            region,
+        }
+    }
+
+    #[must_use]
+    pub fn current_texture(&self) -> Option<GpuPageTexture> {
+        let surface = Arc::clone(self.surfaces.get(self.current?)?);
+        Some(GpuPageTexture {
+            surface,
+            region: self.current_region?,
+        })
+    }
+
+    #[must_use]
+    pub fn projected_byte_len(&self, region: GpuPageRegion) -> u64 {
+        let mut bytes = self
+            .surfaces
+            .iter()
+            .map(|surface| surface_byte_len(surface.size))
+            .sum::<u64>();
+        match self.target_slot(region.size()) {
+            SurfaceSlot::Existing(_) => {}
+            SurfaceSlot::Insert => bytes = bytes.saturating_add(region.byte_len()),
+            SurfaceSlot::Replace(index) => {
+                bytes = bytes
+                    .saturating_sub(surface_byte_len(self.surfaces[index].size))
+                    .saturating_add(region.byte_len());
+            }
+        }
+        if self.incremental.retained_texture_bytes() > 0
+            && !self
+                .surfaces
+                .iter()
+                .any(|surface| self.incremental.references_texture(&surface.view))
+        {
+            bytes = bytes.saturating_add(self.incremental.retained_texture_bytes());
+        }
+        bytes
+    }
+
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.surfaces
+            .iter()
+            .map(|surface| surface_byte_len(surface.size))
+            .sum()
+    }
+
+    #[must_use]
+    pub fn surface_count(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    #[must_use]
+    pub fn retained_source_byte_len(&self) -> u64 {
+        self.incremental.retained_texture_bytes()
+    }
+
+    #[must_use]
+    pub fn refinement_pending(&self) -> bool {
+        self.incremental.refinement_pending()
+    }
+
+    #[must_use]
+    pub const fn token(&self) -> Option<ExternalGpuDeviceToken> {
+        self.token
+    }
+}
+
+fn presentation_surface_slot(
+    sizes: &[[u32; 2]],
+    current: Option<usize>,
+    retained: Option<usize>,
+    requested: [u32; 2],
+) -> SurfaceSlot {
+    let reusable = |index: usize| Some(index) != current && Some(index) != retained;
+    if let Some(index) = sizes
+        .iter()
+        .enumerate()
+        .find_map(|(index, size)| (reusable(index) && *size == requested).then_some(index))
+    {
+        return SurfaceSlot::Existing(index);
+    }
+    if sizes.len() < MAX_PRESENTATION_SURFACES {
+        return SurfaceSlot::Insert;
+    }
+    let start = current.map_or(0, |index| index + 1);
+    for offset in 0..sizes.len() {
+        let index = (start + offset) % sizes.len();
+        if reusable(index) {
+            return SurfaceSlot::Replace(index);
+        }
+    }
+    // The incremental renderer retains at most one source in addition to the
+    // current surface, so a three-entry ring always has a writable third slot.
+    unreachable!("native PDF presentation ring has no writable surface")
+}
+
+fn surface_byte_len(size: [u32; 2]) -> u64 {
+    u64::from(size[0])
+        .saturating_mul(u64::from(size[1]))
+        .saturating_mul(4)
+}
+
+/// Reusable render target and stable GPUI presentation handle.
+#[derive(Clone)]
+pub struct GpuPageTexture {
+    surface: Arc<GpuPageSurface>,
+    region: GpuPageRegion,
 }
 
 impl fmt::Debug for GpuPageTexture {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GpuPageTexture")
-            .field("handle", &self.handle)
-            .field("size", &self.size)
+            .field("handle", &self.surface.handle)
+            .field("size", &self.surface.size)
             .field("region", &self.region)
-            .field("token", &self.token)
+            .field("token", &self.surface.token)
             .finish_non_exhaustive()
     }
 }
 
 impl GpuPageTexture {
     pub fn handle(&self) -> &ExternalTextureHandle {
-        &self.handle
+        &self.surface.handle
     }
 
-    pub const fn size(&self) -> [u32; 2] {
-        self.size
+    pub fn size(&self) -> [u32; 2] {
+        self.surface.size
     }
 
     pub const fn region(&self) -> GpuPageRegion {
@@ -1471,23 +1738,11 @@ impl GpuPageTexture {
     }
 
     pub fn byte_len(&self) -> u64 {
-        self.region.byte_len().saturating_add(
-            self.incremental
-                .additional_retained_texture_bytes(self.view.as_ref()),
-        )
+        surface_byte_len(self.surface.size)
     }
 
-    /// Exact presentation-source bytes retained for future motion frames.
-    pub fn retained_source_byte_len(&self) -> u64 {
-        self.incremental.retained_texture_bytes()
-    }
-
-    pub fn refinement_pending(&self) -> bool {
-        self.incremental.refinement_pending()
-    }
-
-    pub const fn token(&self) -> ExternalGpuDeviceToken {
-        self.token
+    pub fn token(&self) -> ExternalGpuDeviceToken {
+        self.surface.token
     }
 }
 
@@ -2123,6 +2378,7 @@ trailer <</Root 1 0 R>>
         assert_send_sync::<GpuPdfDocument>();
         assert_send_sync::<PreparedGpuPage>();
         assert_send_sync::<GpuPdfRenderer>();
+        assert_send_sync::<GpuPagePresentation>();
         assert_send_sync::<GpuPageTexture>();
         assert_send_sync::<GpuPageRegion>();
         assert_send_sync::<GpuLinkInteraction>();
@@ -2250,7 +2506,7 @@ trailer <</Root 1 0 R>>
     }
 
     #[test]
-    fn visible_regions_are_clamped_and_expanded_by_one_analytic_tile() {
+    fn visible_regions_are_clamped_and_expanded_to_stable_tile_boundaries() {
         let request = GpuPaintRequest {
             page_size: [1_000, 2_000],
             visible_region: GpuPageRegion {
@@ -2267,10 +2523,10 @@ trailer <</Root 1 0 R>>
         assert_eq!(
             request.surface_region().unwrap(),
             GpuPageRegion {
-                x: 72,
-                y: 372,
-                width: 556,
-                height: 656,
+                x: 0,
+                y: 256,
+                width: 640,
+                height: 896,
             }
         );
 
@@ -2286,11 +2542,54 @@ trailer <</Root 1 0 R>>
         assert_eq!(
             edge.surface_region().unwrap(),
             GpuPageRegion {
-                x: 822,
-                y: 1_822,
-                width: 178,
-                height: 178,
+                x: 768,
+                y: 1_792,
+                width: 232,
+                height: 208,
             }
+        );
+
+        let shifted = GpuPaintRequest {
+            visible_region: GpuPageRegion {
+                x: 201,
+                y: 501,
+                width: 300,
+                height: 400,
+            },
+            ..request
+        };
+        assert_eq!(
+            shifted.surface_region().unwrap(),
+            request.surface_region().unwrap()
+        );
+    }
+
+    #[test]
+    fn presentation_ring_never_selects_current_or_retained_source() {
+        let size = [640, 896];
+        assert_eq!(
+            presentation_surface_slot(&[], None, None, size),
+            SurfaceSlot::Insert
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size], Some(0), Some(0), size),
+            SurfaceSlot::Insert
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size, size], Some(1), Some(0), size),
+            SurfaceSlot::Insert
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size, size, size], Some(1), Some(0), size),
+            SurfaceSlot::Existing(2)
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size, size, size], Some(2), Some(0), size),
+            SurfaceSlot::Existing(1)
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size, size, size], Some(2), Some(0), [768, 896]),
+            SurfaceSlot::Replace(1)
         );
     }
 }
