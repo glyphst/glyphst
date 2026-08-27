@@ -152,6 +152,24 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             } else {
                 GOOD
             },
+        ))
+        .child(reading(
+            "GPU PREP QUEUE",
+            format!(
+                "{} active · {} queued · {} speculative · {} done · {} cancelled",
+                document.gpu_cache.active_preparations,
+                document.gpu_cache.queued_preparations,
+                document.gpu_cache.speculative_preparations,
+                document.gpu_cache.completed_preparations,
+                document.gpu_cache.cancelled_preparations,
+            ),
+            if document.gpu_cache.active_preparations > 0
+                || document.gpu_cache.queued_preparations > 0
+            {
+                WARN
+            } else {
+                GOOD
+            },
         ));
 
     for fallback in document.gpu_navigation_fallbacks {
@@ -279,6 +297,27 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
 
     if let Some(preparation) = page.gpu_preparation {
         section = section
+            .child(reading(
+                "COLD TOTAL",
+                format_duration(preparation.total),
+                FOREGROUND,
+            ))
+            .child(reading(
+                "COLD STAGES",
+                format!(
+                    "preflight {} · compile {}{} · links {} · GPU {}",
+                    format_duration(preparation.frontend_preflight),
+                    format_duration(preparation.compile),
+                    if preparation.compiled_cache_hit {
+                        " (cached)"
+                    } else {
+                        ""
+                    },
+                    format_duration(preparation.link_conversion),
+                    format_duration(preparation.gpu_prepare),
+                ),
+                FOREGROUND,
+            ))
             .child(reading(
                 "PREPARE",
                 format_duration(preparation.elapsed),

@@ -63,8 +63,8 @@ use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuIncrementalWorkKind,
     GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute,
-    GpuOutlineItem, GpuPagePresentation, GpuPageRegion, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
+    GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation, GpuPageRegion, GpuPageRoute,
+    GpuPageTexture, GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
     GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
@@ -562,6 +562,12 @@ pub struct GpuPageRenderDebugSnapshot {
 /// One page's retained preparation and residency accounting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuPagePreparationDebugSnapshot {
+    pub frontend_preflight: Duration,
+    pub compile: Duration,
+    pub link_conversion: Duration,
+    pub gpu_prepare: Duration,
+    pub total: Duration,
+    pub compiled_cache_hit: bool,
     pub elapsed: Duration,
     pub host_to_device_bytes: u64,
     pub resident_bytes: u64,
@@ -644,6 +650,11 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_byte_limit: u64,
     pub surface_seed_tasks: usize,
     pub refinement_pages: usize,
+    pub active_preparations: usize,
+    pub queued_preparations: usize,
+    pub speculative_preparations: usize,
+    pub completed_preparations: u64,
+    pub cancelled_preparations: u64,
     pub motion_active: bool,
 }
 

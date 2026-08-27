@@ -152,8 +152,17 @@ impl DocumentView {
         let patch_lod_preparation = self
             .native_gpu_patch_lod_preparation_stats(page_idx)
             .unwrap_or_default();
+        let preparation_timings = self
+            .native_gpu_preparation_timings(page_idx)
+            .unwrap_or_default();
         let gpu_preparation = self.native_gpu_preparation_stats(page_idx).map(|stats| {
             GpuPagePreparationDebugSnapshot {
+                frontend_preflight: preparation_timings.frontend_preflight,
+                compile: preparation_timings.compile,
+                link_conversion: preparation_timings.link_conversion,
+                gpu_prepare: preparation_timings.gpu_prepare,
+                total: preparation_timings.total,
+                compiled_cache_hit: preparation_timings.compiled_cache_hit,
                 elapsed: stats.elapsed,
                 host_to_device_bytes: stats.host_to_device_bytes,
                 resident_bytes: stats.resident_bytes,

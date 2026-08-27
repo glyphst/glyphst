@@ -34,6 +34,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
@@ -553,6 +554,15 @@ impl GpuPdfDocument {
         page: u32,
         cancellation: &CancellationToken,
     ) -> Result<Arc<CompiledPage>> {
+        self.compile_page_with_cache_status(page, cancellation)
+            .map(|(page, _)| page)
+    }
+
+    fn compile_page_with_cache_status(
+        &self,
+        page: u32,
+        cancellation: &CancellationToken,
+    ) -> Result<(Arc<CompiledPage>, bool)> {
         let page = self.checked_page(page)?;
         if let Some(compiled) = self
             .inner
@@ -561,7 +571,7 @@ impl GpuPdfDocument {
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
             .get(page)
         {
-            return Ok(compiled);
+            return Ok((compiled, true));
         }
 
         let compiled = self
@@ -575,7 +585,7 @@ impl GpuPdfDocument {
             .lock()
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
             .insert(page, compiled);
-        Ok(compiled)
+        Ok((compiled, false))
     }
 
     /// Deterministically renders a complete page through the native CPU
@@ -882,6 +892,18 @@ pub struct PreparedGpuPage {
     gpu: Arc<GpuPage>,
     link_interactions: Arc<[GpuLinkInteraction]>,
     warnings: Arc<[GpuWarningDiagnostic]>,
+    timings: GpuPagePreparationTimings,
+}
+
+/// Reader-relevant cold stages for one prepared page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuPagePreparationTimings {
+    pub frontend_preflight: Duration,
+    pub compile: Duration,
+    pub link_conversion: Duration,
+    pub gpu_prepare: Duration,
+    pub total: Duration,
+    pub compiled_cache_hit: bool,
 }
 
 impl fmt::Debug for PreparedGpuPage {
@@ -906,6 +928,10 @@ impl PreparedGpuPage {
 
     pub fn preparation_stats(&self) -> GpuPreparationStats {
         self.gpu.preparation_stats()
+    }
+
+    pub const fn preparation_timings(&self) -> GpuPagePreparationTimings {
+        self.timings
     }
 
     pub fn patch_lod_preparation_stats(&self) -> GpuPatchLodPreparationStats {
@@ -1205,12 +1231,18 @@ impl GpuPdfRenderer {
         page: u32,
         cancellation: &CancellationToken,
     ) -> Result<GpuPageRoute> {
+        let total_started = Instant::now();
+        let preflight_started = Instant::now();
         let frontend = document.frontend_diagnostics(page)?;
+        let frontend_preflight = preflight_started.elapsed();
         if !frontend.is_empty() {
             return Ok(GpuPageRoute::Fallback(frontend.into()));
         }
 
-        let compiled = document.compile_page(page, cancellation)?;
+        let compile_started = Instant::now();
+        let (compiled, compiled_cache_hit) =
+            document.compile_page_with_cache_status(page, cancellation)?;
+        let compile = compile_started.elapsed();
         let compiled_diagnostics = compiled
             .support()
             .diagnostics()
@@ -1222,24 +1254,14 @@ impl GpuPdfRenderer {
             return Ok(GpuPageRoute::Fallback(compiled_diagnostics.into()));
         }
 
-        let renderer_support = self
-            .renderer
-            .preflight(compiled.scene())
-            .context("failed to plan native PDF page")?;
-        if !renderer_support.is_supported() {
-            let diagnostics = renderer_support
-                .issues()
-                .iter()
-                .map(GpuFallbackDiagnostic::from)
-                .collect::<Vec<_>>();
-            return Ok(GpuPageRoute::Fallback(diagnostics.into()));
-        }
-
+        let link_started = Instant::now();
         let link_interactions = match compiled_link_interactions(&compiled) {
             Ok(interactions) => interactions,
             Err(diagnostic) => return Ok(GpuPageRoute::Fallback(Arc::from([diagnostic]))),
         };
         let warnings = compiled_page_warnings(&compiled);
+        let link_conversion = link_started.elapsed();
+        let gpu_started = Instant::now();
         let gpu = match self
             .renderer
             .prepare_interactive_with_cancellation(compiled.scene(), cancellation)
@@ -1255,11 +1277,20 @@ impl GpuPdfRenderer {
             }
             Err(error) => return Err(error).context("failed to prepare native PDF GPU page"),
         };
+        let gpu_prepare = gpu_started.elapsed();
         Ok(GpuPageRoute::Ready(Arc::new(PreparedGpuPage {
             compiled,
             gpu: Arc::new(gpu),
             link_interactions,
             warnings,
+            timings: GpuPagePreparationTimings {
+                frontend_preflight,
+                compile,
+                link_conversion,
+                gpu_prepare,
+                total: total_started.elapsed(),
+                compiled_cache_hit,
+            },
         })))
     }
 
@@ -2137,11 +2168,15 @@ trailer <</Root 1 0 R>>
         assert!(!document.is_encrypted());
         assert_eq!(document.permissions(), GpuPdfPermissions::default());
         let cancellation = CancellationToken::new();
-        let first = document
-            .compile_page(0, &cancellation)
+        let (first, first_hit) = document
+            .compile_page_with_cache_status(0, &cancellation)
             .expect("compile page");
-        let second = document.compile_page(0, &cancellation).expect("reuse page");
+        let (second, second_hit) = document
+            .compile_page_with_cache_status(0, &cancellation)
+            .expect("reuse page");
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(!first_hit);
+        assert!(second_hit);
     }
 
     #[test]

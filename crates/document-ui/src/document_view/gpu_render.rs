@@ -3,6 +3,8 @@ use super::*;
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
 const MAX_CONCURRENT_GPU_PAGE_PREPARATIONS: usize = 2;
+const GPU_PREPARE_AHEAD_PAGES: usize = 3;
+const GPU_PREPARE_BEHIND_PAGES: usize = 1;
 const MAX_RETAINED_GPU_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SURFACE_SEED_TASKS: usize = 2;
@@ -36,7 +38,13 @@ pub(super) struct GpuPdfState {
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
     last_scroll_y_doc: Option<f32>,
+    last_scroll_direction: i8,
     preparation_generation: u64,
+    preparation_sequence: u64,
+    preparation_demands: HashMap<u32, GpuPreparationDemand>,
+    preparation_completed: u64,
+    preparation_cancelled: u64,
+    terminal_pages: HashSet<u32>,
     patch_lod_generation: u64,
     patch_lod_tasks: HashMap<u32, PatchLodTask>,
     surface_seed_generation: u64,
@@ -59,11 +67,26 @@ enum GpuPageState {
     Preparing {
         generation: u64,
         cancellation: GpuCancellationToken,
+        demand: GpuPreparationDemand,
         _task: Task<()>,
     },
     Ready(Arc<PreparedGpuPage>),
     Fallback(Arc<[GpuFallbackDiagnostic]>),
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GpuPreparationDemand {
+    priority: usize,
+    speculative: bool,
+    sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GpuPreparationTarget {
+    page: u32,
+    priority: usize,
+    speculative: bool,
 }
 
 enum CachedLinkMapping {
@@ -120,7 +143,13 @@ impl GpuPdfState {
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.last_scroll_y_doc = None;
+        self.last_scroll_direction = 1;
         self.preparation_generation = 0;
+        self.preparation_sequence = 0;
+        self.preparation_demands.clear();
+        self.preparation_completed = 0;
+        self.preparation_cancelled = 0;
+        self.terminal_pages.clear();
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
@@ -152,7 +181,13 @@ impl GpuPdfState {
         self.page_last_used.clear();
         self.page_usage_clock = 0;
         self.last_scroll_y_doc = None;
+        self.last_scroll_direction = 1;
         self.preparation_generation = 0;
+        self.preparation_sequence = 0;
+        self.preparation_demands.clear();
+        self.preparation_completed = 0;
+        self.preparation_cancelled = 0;
+        self.terminal_pages.clear();
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
@@ -202,6 +237,8 @@ impl GpuPdfState {
             || self.reader_original_links.is_some()
             || !self.patch_lod_tasks.is_empty()
             || !self.surface_seed_tasks.is_empty()
+            || !self.preparation_demands.is_empty()
+            || !self.terminal_pages.is_empty()
             || !self.pages.is_empty()
             || !self.rendered.is_empty()
     }
@@ -242,7 +279,9 @@ impl GpuPdfState {
         for page in stale_preparations {
             if let Some(GpuPageState::Preparing { cancellation, .. }) = self.pages.remove(&page) {
                 cancellation.cancel();
+                self.preparation_cancelled = self.preparation_cancelled.saturating_add(1);
             }
+            self.preparation_demands.remove(&page);
             self.page_last_used.remove(&page);
             self.rendered.remove(&page);
             self.presented_pages.remove(&page);
@@ -412,24 +451,144 @@ impl GpuPdfState {
         }
     }
 
-    fn has_preparation_capacity(&self) -> bool {
-        let preparing = self
-            .pages
+    fn active_preparations(&self) -> usize {
+        self.pages
             .values()
             .filter(|state| matches!(state, GpuPageState::Preparing { .. }))
-            .count();
-        preparing < MAX_CONCURRENT_GPU_PAGE_PREPARATIONS
-            && self
-                .pages
-                .values()
-                .filter(|state| {
-                    matches!(
-                        state,
-                        GpuPageState::Preparing { .. } | GpuPageState::Ready(_)
+            .count()
+    }
+
+    fn active_speculative_preparations(&self) -> usize {
+        self.pages
+            .values()
+            .filter(|state| {
+                matches!(
+                    state,
+                    GpuPageState::Preparing {
+                        demand: GpuPreparationDemand {
+                            speculative: true,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn worst_speculative_preparation(&self) -> Option<u32> {
+        self.pages
+            .iter()
+            .filter_map(|(page, state)| match state {
+                GpuPageState::Preparing {
+                    demand:
+                        demand @ GpuPreparationDemand {
+                            speculative: true, ..
+                        },
+                    ..
+                } => Some((*page, *demand)),
+                _ => None,
+            })
+            .max_by_key(|(page, demand)| (demand.priority, demand.sequence, *page))
+            .map(|(page, _)| page)
+    }
+
+    fn queued_preparations(&self) -> usize {
+        self.preparation_demands
+            .keys()
+            .filter(|page| !self.pages.contains_key(page))
+            .count()
+    }
+
+    fn queued_speculative_preparations(&self) -> usize {
+        self.preparation_demands
+            .iter()
+            .filter(|(page, demand)| demand.speculative && !self.pages.contains_key(page))
+            .count()
+    }
+
+    fn set_preparation_demands(&mut self, targets: &[GpuPreparationTarget]) {
+        let desired = targets
+            .iter()
+            .map(|target| target.page)
+            .collect::<HashSet<_>>();
+        let dropped = self
+            .preparation_demands
+            .keys()
+            .filter(|page| !desired.contains(page))
+            .count() as u64;
+        self.preparation_cancelled = self.preparation_cancelled.saturating_add(dropped);
+        self.preparation_demands
+            .retain(|page, _| desired.contains(page));
+
+        for target in targets {
+            if self.terminal_pages.contains(&target.page)
+                || matches!(
+                    self.pages.get(&target.page),
+                    Some(
+                        GpuPageState::Ready(_)
+                            | GpuPageState::Fallback(_)
+                            | GpuPageState::Failed(_)
                     )
-                })
-                .count()
-                < MAX_RETAINED_GPU_PAGES
+                )
+            {
+                self.preparation_demands.remove(&target.page);
+                continue;
+            }
+            let sequence = if let Some(demand) = self.preparation_demands.get(&target.page) {
+                demand.sequence
+            } else {
+                self.preparation_sequence = self.preparation_sequence.wrapping_add(1).max(1);
+                self.preparation_sequence
+            };
+            let demand = GpuPreparationDemand {
+                priority: target.priority,
+                speculative: target.speculative,
+                sequence,
+            };
+            self.preparation_demands.insert(target.page, demand);
+            if let Some(GpuPageState::Preparing { demand: active, .. }) =
+                self.pages.get_mut(&target.page)
+            {
+                *active = demand;
+            }
+        }
+    }
+
+    fn demand_page(&mut self, page: u32, speculative: bool, priority: usize) {
+        if self.terminal_pages.contains(&page)
+            || matches!(
+                self.pages.get(&page),
+                Some(GpuPageState::Ready(_) | GpuPageState::Fallback(_) | GpuPageState::Failed(_))
+            )
+        {
+            return;
+        }
+        let sequence = if let Some(demand) = self.preparation_demands.get(&page) {
+            demand.sequence
+        } else {
+            self.preparation_sequence = self.preparation_sequence.wrapping_add(1).max(1);
+            self.preparation_sequence
+        };
+        let demand = GpuPreparationDemand {
+            priority,
+            speculative,
+            sequence,
+        };
+        self.preparation_demands.insert(page, demand);
+        if let Some(GpuPageState::Preparing { demand: active, .. }) = self.pages.get_mut(&page) {
+            *active = demand;
+        }
+    }
+
+    fn cancel_active_preparation(&mut self, page: u32, retain_demand: bool) {
+        if let Some(GpuPageState::Preparing { cancellation, .. }) = self.pages.remove(&page) {
+            cancellation.cancel();
+            self.preparation_cancelled = self.preparation_cancelled.saturating_add(1);
+        }
+        if !retain_demand {
+            self.preparation_demands.remove(&page);
+        }
     }
 
     pub(super) fn invalidate_link_mappings(&mut self) {
@@ -442,6 +601,110 @@ impl Drop for GpuPdfState {
     fn drop(&mut self) {
         self.cancel_page_tasks();
     }
+}
+
+fn gpu_preparation_targets(
+    visible: &HashSet<u32>,
+    page_count: u32,
+    forward: bool,
+) -> (Vec<GpuPreparationTarget>, Option<u32>) {
+    let Some(first) = visible.iter().min().copied() else {
+        return (Vec::new(), None);
+    };
+    let last = visible.iter().max().copied().unwrap_or(first);
+    let center = first.saturating_add(last).saturating_div(2);
+    let mut visible_pages = visible.iter().copied().collect::<Vec<_>>();
+    visible_pages.sort_unstable_by_key(|page| (page.abs_diff(center), *page));
+
+    let mut ordered = visible_pages
+        .into_iter()
+        .enumerate()
+        .map(|(priority, page)| GpuPreparationTarget {
+            page,
+            priority,
+            speculative: false,
+        })
+        .collect::<Vec<_>>();
+    let speculative_budget = MAX_RETAINED_GPU_PAGES.saturating_sub(visible.len());
+    if speculative_budget == 0 {
+        return (ordered, None);
+    }
+
+    fn push_speculative(
+        pages: &mut Vec<u32>,
+        visible: &HashSet<u32>,
+        page_count: u32,
+        page: Option<u32>,
+    ) {
+        if let Some(page) = page
+            && page < page_count
+            && !visible.contains(&page)
+            && !pages.contains(&page)
+        {
+            pages.push(page);
+        }
+    }
+
+    let mut speculative =
+        Vec::with_capacity(GPU_PREPARE_AHEAD_PAGES.saturating_add(GPU_PREPARE_BEHIND_PAGES));
+    if forward {
+        for distance in 1..=GPU_PREPARE_AHEAD_PAGES {
+            push_speculative(
+                &mut speculative,
+                visible,
+                page_count,
+                u32::try_from(distance)
+                    .ok()
+                    .and_then(|distance| last.checked_add(distance)),
+            );
+        }
+        for distance in 1..=GPU_PREPARE_BEHIND_PAGES {
+            push_speculative(
+                &mut speculative,
+                visible,
+                page_count,
+                u32::try_from(distance)
+                    .ok()
+                    .and_then(|distance| first.checked_sub(distance)),
+            );
+        }
+    } else {
+        for distance in 1..=GPU_PREPARE_AHEAD_PAGES {
+            push_speculative(
+                &mut speculative,
+                visible,
+                page_count,
+                u32::try_from(distance)
+                    .ok()
+                    .and_then(|distance| first.checked_sub(distance)),
+            );
+        }
+        for distance in 1..=GPU_PREPARE_BEHIND_PAGES {
+            push_speculative(
+                &mut speculative,
+                visible,
+                page_count,
+                u32::try_from(distance)
+                    .ok()
+                    .and_then(|distance| last.checked_add(distance)),
+            );
+        }
+    }
+    speculative.truncate(speculative_budget);
+    let nearest = speculative.first().copied();
+    let base_priority = ordered.len();
+    ordered.extend(speculative.into_iter().enumerate().map(|(offset, page)| {
+        GpuPreparationTarget {
+            page,
+            priority: base_priority.saturating_add(offset),
+            speculative: true,
+        }
+    }));
+    (ordered, nearest)
+}
+
+fn speculative_preparation_allowed(motion_active: bool, active_speculative: usize) -> bool {
+    !motion_active || active_speculative == 0
 }
 
 fn visible_gpu_region(
@@ -613,6 +876,7 @@ impl DocumentView {
         let terminal_native_route = self.gpu_pdf.document_error.is_some()
             || self.gpu_pdf.renderer_error.is_some()
             || self.gpu_pdf.surface_failures.contains_key(&page)
+            || self.gpu_pdf.terminal_pages.contains(&page)
             || matches!(
                 self.gpu_pdf.pages.get(&page),
                 Some(GpuPageState::Fallback(_) | GpuPageState::Failed(_))
@@ -649,6 +913,7 @@ impl DocumentView {
                     this.gpu_pdf.motion_active = false;
                     this.gpu_pdf.motion_deadline = None;
                     this.gpu_pdf.motion_settle_task = None;
+                    this.dispatch_native_gpu_page_preparations(cx);
                     cx.notify();
                     None
                 }) else {
@@ -713,13 +978,10 @@ impl DocumentView {
             self.start_native_gpu_fallback_grace(page, cx);
         }
 
-        let document = match self.gpu_pdf.document.clone() {
-            Some(document) => document,
-            None => {
-                self.start_native_gpu_document_open(cx);
-                return None;
-            }
-        };
+        if self.gpu_pdf.document.is_none() {
+            self.start_native_gpu_document_open(cx);
+            return None;
+        }
 
         let external_context = match window.external_gpu_context() {
             Some(context) => context,
@@ -773,15 +1035,11 @@ impl DocumentView {
             | Some(GpuPageState::Fallback(_))
             | Some(GpuPageState::Failed(_)) => None,
             None => {
-                if !self.gpu_pdf.has_preparation_capacity() {
+                if self.gpu_pdf.terminal_pages.contains(&page) {
                     return None;
                 }
-                self.start_native_gpu_page_prepare(
-                    page,
-                    Arc::clone(&document),
-                    Arc::clone(&renderer),
-                    cx,
-                );
+                self.gpu_pdf.demand_page(page, false, 0);
+                self.dispatch_native_gpu_page_preparations(cx);
                 None
             }
         }?;
@@ -1099,6 +1357,7 @@ impl DocumentView {
     fn start_native_gpu_page_prepare(
         &mut self,
         page: u32,
+        demand: GpuPreparationDemand,
         document: Arc<GpuPdfDocument>,
         renderer: Arc<GpuPdfRenderer>,
         cx: &mut Context<Self>,
@@ -1136,6 +1395,9 @@ impl DocumentView {
                 {
                     return;
                 }
+                this.gpu_pdf.preparation_demands.remove(&page);
+                this.gpu_pdf.preparation_completed =
+                    this.gpu_pdf.preparation_completed.saturating_add(1);
                 match result {
                     Ok(GpuPageRoute::Ready(prepared)) => {
                         this.gpu_pdf.fallback_grace_tasks.remove(&page);
@@ -1159,6 +1421,7 @@ impl DocumentView {
                         this.gpu_pdf
                             .pages
                             .insert(page, GpuPageState::Fallback(diagnostics));
+                        this.gpu_pdf.terminal_pages.insert(page);
                     }
                     Err(error) => {
                         this.gpu_pdf.fallback_grace_tasks.remove(&page);
@@ -1168,8 +1431,10 @@ impl DocumentView {
                             page + 1
                         );
                         this.gpu_pdf.pages.insert(page, GpuPageState::Failed(error));
+                        this.gpu_pdf.terminal_pages.insert(page);
                     }
                 }
+                this.dispatch_native_gpu_page_preparations(cx);
                 cx.notify();
             });
             if let Err(error) = update_result
@@ -1183,10 +1448,89 @@ impl DocumentView {
             GpuPageState::Preparing {
                 generation: preparation_generation,
                 cancellation,
+                demand,
                 _task: task,
             },
         );
         cx.notify();
+    }
+
+    fn native_gpu_preparation_motion_active(&self) -> bool {
+        self.dock_snapshot.layout_motion_active
+            || self.panning.is_some()
+            || self.gpu_pdf.motion_active
+            || (self.scroll_x_doc - self.target_scroll_x_doc).abs() > 0.01
+            || (self.scroll_y_doc - self.target_scroll_y_doc).abs() > 0.01
+    }
+
+    fn dispatch_native_gpu_page_preparations(&mut self, cx: &mut Context<Self>) {
+        let (Some(document), Some(renderer)) =
+            (self.gpu_pdf.document.clone(), self.gpu_pdf.renderer.clone())
+        else {
+            return;
+        };
+        let motion_active = self.native_gpu_preparation_motion_active();
+        while motion_active && self.gpu_pdf.active_speculative_preparations() > 1 {
+            let Some(page) = self.gpu_pdf.worst_speculative_preparation() else {
+                break;
+            };
+            self.gpu_pdf.cancel_active_preparation(page, true);
+        }
+
+        loop {
+            let active = self.gpu_pdf.active_preparations();
+            let active_speculative = self.gpu_pdf.active_speculative_preparations();
+            let candidate = self
+                .gpu_pdf
+                .preparation_demands
+                .iter()
+                .filter(|(page, _)| {
+                    !self.gpu_pdf.pages.contains_key(page)
+                        && !self.gpu_pdf.terminal_pages.contains(page)
+                })
+                .filter(|(_, demand)| {
+                    !demand.speculative
+                        || speculative_preparation_allowed(motion_active, active_speculative)
+                })
+                .min_by_key(|(page, demand)| (demand.priority, demand.sequence, **page))
+                .map(|(page, demand)| (*page, *demand));
+            let Some((page, demand)) = candidate else {
+                break;
+            };
+
+            if active >= MAX_CONCURRENT_GPU_PAGE_PREPARATIONS {
+                if !demand.speculative
+                    && let Some(preempted) = self.gpu_pdf.worst_speculative_preparation()
+                {
+                    self.gpu_pdf.cancel_active_preparation(preempted, true);
+                    continue;
+                }
+                break;
+            }
+            let retained_pages = self
+                .gpu_pdf
+                .pages
+                .values()
+                .filter(|state| {
+                    matches!(
+                        state,
+                        GpuPageState::Preparing { .. } | GpuPageState::Ready(_)
+                    )
+                })
+                .count();
+            if demand.speculative && retained_pages >= MAX_RETAINED_GPU_PAGES {
+                break;
+            }
+
+            self.gpu_pdf.mark_page_used(page);
+            self.start_native_gpu_page_prepare(
+                page,
+                demand,
+                Arc::clone(&document),
+                Arc::clone(&renderer),
+                cx,
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1498,22 +1842,18 @@ impl DocumentView {
         } else {
             observed_delta
         };
-        let first = visible.iter().min().copied();
-        let last = visible.iter().max().copied();
-        let forward = last.and_then(|page| {
-            page.checked_add(1)
-                .filter(|page| (*page as usize) < self.pages.len())
-        });
-        let backward = first.and_then(|page| page.checked_sub(1));
-        let adjacent = if direction < 0.0 {
-            backward.or(forward)
-        } else {
-            forward.or(backward)
-        };
-        let mut retained = visible.clone();
-        retained.extend(adjacent);
+        if direction.abs() > f32::EPSILON {
+            self.gpu_pdf.last_scroll_direction = if direction < 0.0 { -1 } else { 1 };
+        }
+        let forward = self.gpu_pdf.last_scroll_direction >= 0;
+        let page_count = u32::try_from(self.pages.len()).unwrap_or(u32::MAX);
+        let (targets, nearest) = gpu_preparation_targets(&visible, page_count, forward);
+        let retained = targets
+            .iter()
+            .map(|target| target.page)
+            .collect::<HashSet<_>>();
         self.gpu_pdf.prune(&visible, &retained);
-        let adjacent_index = adjacent.and_then(|page| usize::try_from(page).ok());
+        let nearest_index = nearest.and_then(|page| usize::try_from(page).ok());
 
         let engine = cx
             .global::<SettingsStore>()
@@ -1523,18 +1863,9 @@ impl DocumentView {
         if !engine.uses_native_reader() || self.format != DocumentFormat::Pdf {
             return None;
         }
-        let (Some(page), Some(document), Some(renderer)) = (
-            adjacent,
-            self.gpu_pdf.document.clone(),
-            self.gpu_pdf.renderer.clone(),
-        ) else {
-            return adjacent_index;
-        };
-        if !self.gpu_pdf.pages.contains_key(&page) && self.gpu_pdf.has_preparation_capacity() {
-            self.gpu_pdf.mark_page_used(page);
-            self.start_native_gpu_page_prepare(page, document, renderer, cx);
-        }
-        adjacent_index
+        self.gpu_pdf.set_preparation_demands(&targets);
+        self.dispatch_native_gpu_page_preparations(cx);
+        nearest_index
     }
 
     pub(super) fn warm_native_gpu_surface(
@@ -1644,6 +1975,17 @@ impl DocumentView {
         }
     }
 
+    pub(super) fn native_gpu_preparation_timings(
+        &self,
+        page: usize,
+    ) -> Option<GpuPagePreparationTimings> {
+        let page = u32::try_from(page).ok()?;
+        match self.gpu_pdf.pages.get(&page)? {
+            GpuPageState::Ready(page) => Some(page.preparation_timings()),
+            _ => None,
+        }
+    }
+
     pub(super) fn native_gpu_patch_lod_preparation_stats(
         &self,
         page: usize,
@@ -1702,6 +2044,14 @@ impl DocumentView {
                 .values()
                 .filter(|rendered| rendered.presentation.refinement_pending())
                 .count(),
+            active_preparations: self.gpu_pdf.active_preparations(),
+            queued_preparations: self.gpu_pdf.queued_preparations(),
+            speculative_preparations: self
+                .gpu_pdf
+                .active_speculative_preparations()
+                .saturating_add(self.gpu_pdf.queued_speculative_preparations()),
+            completed_preparations: self.gpu_pdf.preparation_completed,
+            cancelled_preparations: self.gpu_pdf.preparation_cancelled,
             motion_active: self.gpu_pdf.motion_active,
         }
     }
@@ -1713,6 +2063,9 @@ impl DocumentView {
         }
         match self.gpu_pdf.pages.get(&page) {
             Some(GpuPageState::Failed(error)) => Some(error),
+            None if self.gpu_pdf.terminal_pages.contains(&page) => {
+                Some("native PDF page preparation has a cached terminal route")
+            }
             _ => self
                 .gpu_pdf
                 .renderer_error
@@ -1726,6 +2079,7 @@ impl DocumentView {
             return false;
         };
         self.gpu_pdf.document_task.is_some()
+            || self.gpu_pdf.preparation_demands.contains_key(&page)
             || matches!(
                 self.gpu_pdf.pages.get(&page),
                 Some(GpuPageState::Preparing { .. })
@@ -1761,6 +2115,176 @@ mod tests {
         assert!(same_patch_lod_request(4.0, 4.0));
         assert!(!same_patch_lod_request(4.0, 8.0));
         assert!(!same_patch_lod_request(8.0, 4.0));
+    }
+
+    #[test]
+    fn preparation_window_is_directional_and_deterministic() {
+        let visible = [4, 5].into_iter().collect::<HashSet<_>>();
+        let (forward, nearest_forward) = gpu_preparation_targets(&visible, 10, true);
+        assert_eq!(nearest_forward, Some(6));
+        assert_eq!(
+            forward
+                .iter()
+                .map(|target| (target.page, target.speculative))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, false),
+                (5, false),
+                (6, true),
+                (7, true),
+                (8, true),
+                (3, true)
+            ]
+        );
+
+        let (backward, nearest_backward) = gpu_preparation_targets(&visible, 10, false);
+        assert_eq!(nearest_backward, Some(3));
+        assert_eq!(
+            backward
+                .iter()
+                .map(|target| (target.page, target.speculative))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, false),
+                (5, false),
+                (3, true),
+                (2, true),
+                (1, true),
+                (6, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_pages_consume_the_speculative_cache_budget_first() {
+        let visible = (0..MAX_RETAINED_GPU_PAGES as u32).collect::<HashSet<_>>();
+        let (targets, nearest) = gpu_preparation_targets(&visible, 20, true);
+        assert_eq!(targets.len(), visible.len());
+        assert!(targets.iter().all(|target| !target.speculative));
+        assert_eq!(nearest, None);
+    }
+
+    #[test]
+    fn motion_limits_speculative_preparation_to_one_worker() {
+        assert!(speculative_preparation_allowed(true, 0));
+        assert!(!speculative_preparation_allowed(true, 1));
+        assert!(speculative_preparation_allowed(false, 1));
+    }
+
+    #[test]
+    fn demand_changes_update_active_priority_without_restarting_the_page() {
+        let mut state = GpuPdfState::default();
+        let cancellation = GpuCancellationToken::new();
+        state.pages.insert(
+            4,
+            GpuPageState::Preparing {
+                generation: 1,
+                cancellation: cancellation.clone(),
+                demand: GpuPreparationDemand {
+                    priority: 4,
+                    speculative: true,
+                    sequence: 1,
+                },
+                _task: Task::ready(()),
+            },
+        );
+        state.preparation_demands.insert(
+            4,
+            GpuPreparationDemand {
+                priority: 4,
+                speculative: true,
+                sequence: 1,
+            },
+        );
+        state.set_preparation_demands(&[GpuPreparationTarget {
+            page: 4,
+            priority: 0,
+            speculative: false,
+        }]);
+
+        assert!(!cancellation.is_cancelled());
+        assert!(matches!(
+            state.pages.get(&4),
+            Some(GpuPageState::Preparing {
+                demand: GpuPreparationDemand {
+                    priority: 0,
+                    speculative: false,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pruning_cancels_stale_preparation_and_drops_its_demand() {
+        let mut state = GpuPdfState::default();
+        let cancellation = GpuCancellationToken::new();
+        let demand = GpuPreparationDemand {
+            priority: 2,
+            speculative: true,
+            sequence: 1,
+        };
+        state.pages.insert(
+            7,
+            GpuPageState::Preparing {
+                generation: 1,
+                cancellation: cancellation.clone(),
+                demand,
+                _task: Task::ready(()),
+            },
+        );
+        state.preparation_demands.insert(7, demand);
+        state.prune(&HashSet::new(), &HashSet::new());
+
+        assert!(cancellation.is_cancelled());
+        assert!(!state.pages.contains_key(&7));
+        assert!(!state.preparation_demands.contains_key(&7));
+        assert_eq!(state.preparation_cancelled, 1);
+    }
+
+    #[test]
+    fn visible_preemption_selects_the_least_useful_speculative_worker() {
+        let mut state = GpuPdfState::default();
+        for (page, priority, sequence) in [(6, 2, 1), (8, 4, 2)] {
+            let demand = GpuPreparationDemand {
+                priority,
+                speculative: true,
+                sequence,
+            };
+            state.preparation_demands.insert(page, demand);
+            state.pages.insert(
+                page,
+                GpuPageState::Preparing {
+                    generation: sequence,
+                    cancellation: GpuCancellationToken::new(),
+                    demand,
+                    _task: Task::ready(()),
+                },
+            );
+        }
+
+        assert_eq!(state.worst_speculative_preparation(), Some(8));
+        state.cancel_active_preparation(8, true);
+        assert!(!state.pages.contains_key(&8));
+        assert!(state.preparation_demands.contains_key(&8));
+        assert_eq!(state.preparation_cancelled, 1);
+    }
+
+    #[test]
+    fn terminal_pages_are_not_requeued_until_state_reset() {
+        let mut state = GpuPdfState::default();
+        state.terminal_pages.insert(3);
+        state.set_preparation_demands(&[GpuPreparationTarget {
+            page: 3,
+            priority: 0,
+            speculative: false,
+        }]);
+        assert!(!state.preparation_demands.contains_key(&3));
+
+        state.reset();
+        state.demand_page(3, false, 0);
+        assert!(state.preparation_demands.contains_key(&3));
     }
 
     #[test]
