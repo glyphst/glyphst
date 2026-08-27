@@ -82,6 +82,8 @@ impl DocumentView {
         let mupdf_displayed = viewport.and_then(|viewport| viewport.displayed);
         let native_gpu_requested =
             requested.is_some_and(|key| self.native_gpu_key_enabled(key, configured_engine));
+        let strict_native =
+            configured_engine.is_strict_native() && self.format == DocumentFormat::Pdf;
         let native_gpu_render = self
             .native_gpu_render(page_idx)
             .filter(|(key, _)| requested.is_some_and(|requested| requested == *key));
@@ -233,10 +235,18 @@ impl DocumentView {
         let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
         let backend = if gpu.is_some() {
             PageRenderBackendDebug::GlyphstGpu
+        } else if strict_native && (!gpu_fallbacks.is_empty() || gpu_failure.is_some()) {
+            PageRenderBackendDebug::GlyphstFailed
+        } else if strict_native && native_gpu_requested {
+            PageRenderBackendDebug::GlyphstPending
+        } else if strict_native {
+            PageRenderBackendDebug::GlyphstFailed
         } else if !gpu_fallbacks.is_empty() || gpu_failure.is_some() {
             PageRenderBackendDebug::MuPdfFallback
-        } else if native_gpu_requested {
+        } else if native_gpu_requested && mupdf_displayed.is_some() {
             PageRenderBackendDebug::MuPdfWhileGpuPending
+        } else if native_gpu_requested {
+            PageRenderBackendDebug::GlyphstPending
         } else {
             PageRenderBackendDebug::MuPdf
         };

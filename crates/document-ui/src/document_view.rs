@@ -514,6 +514,8 @@ pub struct PageRenderTimingDebugSnapshot {
 pub enum PageRenderBackendDebug {
     MuPdf,
     GlyphstGpu,
+    GlyphstPending,
+    GlyphstFailed,
     MuPdfWhileGpuPending,
     MuPdfFallback,
 }
@@ -636,6 +638,7 @@ pub struct GpuCacheDebugSnapshot {
     pub prepared_pages: usize,
     pub prepared_page_limit: usize,
     pub resident_bytes: u64,
+    pub resident_byte_limit: u64,
     pub surface_count: usize,
     pub surface_bytes: u64,
     pub surface_byte_limit: u64,
@@ -1461,6 +1464,7 @@ struct ContextMenuState {
     has_note: bool,
     has_region: bool,
     grid_overview: bool,
+    allow_text_selection: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1743,11 +1747,13 @@ enum LinkTarget {
     External(String),
 }
 
+#[derive(Clone)]
 struct DocumentLink {
     page_idx: usize,
     rects: Vec<Rect>,
     target: LinkTarget,
     pdf_annotation: bool,
+    native_interaction_ix: Option<usize>,
 }
 
 #[derive(Clone)]

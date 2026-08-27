@@ -278,7 +278,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1891,7 +1891,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=cd48d6d3607238d42237a5a1be0db16893c6b538#cd48d6d3607238d42237a5a1be0db16893c6b538"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=cd48d6d3607238d42237a5a1be0db16893c6b538#cd48d6d3607238d42237a5a1be0db16893c6b538"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3220,6 +3220,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-pdf",
  "glyphst-pdf-engine",
+ "glyphst-pdf-render-cpu",
  "glyphst-pdf-render-wgpu",
  "gpui",
  "gpui_wgpu",
@@ -3228,7 +3229,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=cd48d6d3607238d42237a5a1be0db16893c6b538#cd48d6d3607238d42237a5a1be0db16893c6b538"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3240,9 +3241,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-pdf-render-cpu"
+version = "0.1.0"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
+dependencies = [
+ "glyphst-pdf-core",
+ "glyphst-pdf-scene",
+ "kurbo 0.13.1",
+ "png 0.18.1",
+ "thiserror 2.0.18",
+ "tiny-skia 0.11.4",
+]
+
+[[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=cd48d6d3607238d42237a5a1be0db16893c6b538#cd48d6d3607238d42237a5a1be0db16893c6b538"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3258,7 +3272,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=cd48d6d3607238d42237a5a1be0db16893c6b538#cd48d6d3607238d42237a5a1be0db16893c6b538"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=d79ee951c2170ff694a95763516600e1dd756726#d79ee951c2170ff694a95763516600e1dd756726"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -6039,7 +6053,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7386,7 +7400,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8126,7 +8140,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

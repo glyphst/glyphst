@@ -390,12 +390,12 @@ impl SettingsWindow {
                         crate::fl!("settings-pdf-render-engine-mupdf"),
                     ),
                     Self::setting_option(
-                        PdfRenderEngine::GlyphstGpu.as_str(),
-                        crate::fl!("settings-pdf-render-engine-glyphst-gpu"),
+                        PdfRenderEngine::Glyphst.as_str(),
+                        crate::fl!("settings-pdf-render-engine-glyphst"),
                     ),
                     Self::setting_option(
-                        PdfRenderEngine::Auto.as_str(),
-                        crate::fl!("settings-pdf-render-engine-auto"),
+                        PdfRenderEngine::GlyphstFirst.as_str(),
+                        crate::fl!("settings-pdf-render-engine-glyphst-first"),
                     ),
                 ]
                 .into(),
@@ -411,8 +411,8 @@ impl SettingsWindow {
                     let view = view.clone();
                     move |value: SharedString, cx: &mut App| {
                         let engine = match value.as_ref() {
-                            "glyphst-gpu" => PdfRenderEngine::GlyphstGpu,
-                            "auto" => PdfRenderEngine::Auto,
+                            "glyphst" => PdfRenderEngine::Glyphst,
+                            "glyphst-first" => PdfRenderEngine::GlyphstFirst,
                             _ => PdfRenderEngine::MuPdf,
                         };
                         Self::update_settings(&view, cx, move |settings| {

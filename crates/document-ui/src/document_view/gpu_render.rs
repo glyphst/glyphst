@@ -2,10 +2,13 @@ use super::*;
 
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
+const MAX_CONCURRENT_GPU_PAGE_PREPARATIONS: usize = 2;
+const MAX_RETAINED_GPU_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_SURFACE_SEED_TASKS: usize = 1;
+const MAX_SURFACE_SEED_TASKS: usize = 2;
 
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
+const GPU_FIRST_PAINT_GRACE: Duration = Duration::from_millis(50);
 
 fn same_patch_lod_request(existing: f32, required: f32) -> bool {
     existing.to_bits() == required.to_bits()
@@ -27,6 +30,8 @@ pub(super) struct GpuPdfState {
     visible_pages: HashSet<u32>,
     application_fallbacks: HashMap<u32, Arc<[GpuFallbackDiagnostic]>>,
     link_mappings: HashMap<u32, CachedLinkMapping>,
+    pub(super) reader_link_replacements: HashMap<u32, Vec<(usize, DocumentLink)>>,
+    pub(super) reader_original_links: Option<Vec<DocumentLink>>,
     surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
@@ -36,6 +41,9 @@ pub(super) struct GpuPdfState {
     patch_lod_tasks: HashMap<u32, PatchLodTask>,
     surface_seed_generation: u64,
     surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
+    fallback_grace_generation: u64,
+    fallback_grace_tasks: HashMap<u32, FallbackGraceTask>,
+    fallback_grace_elapsed: HashSet<u32>,
     render_generation: u64,
     motion_generation: u64,
     motion_active: bool,
@@ -83,6 +91,11 @@ struct SurfaceSeedTask {
     _task: Task<()>,
 }
 
+struct FallbackGraceTask {
+    generation: u64,
+    _task: Task<()>,
+}
+
 impl GpuPdfState {
     pub(super) fn reset(&mut self) {
         self.cancel_page_tasks();
@@ -101,6 +114,8 @@ impl GpuPdfState {
         self.visible_pages.clear();
         self.application_fallbacks.clear();
         self.link_mappings.clear();
+        self.reader_link_replacements.clear();
+        self.reader_original_links = None;
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
@@ -110,6 +125,9 @@ impl GpuPdfState {
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
+        self.fallback_grace_generation = 0;
+        self.fallback_grace_tasks.clear();
+        self.fallback_grace_elapsed.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -139,6 +157,9 @@ impl GpuPdfState {
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
+        self.fallback_grace_generation = 0;
+        self.fallback_grace_tasks.clear();
+        self.fallback_grace_elapsed.clear();
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
@@ -157,6 +178,7 @@ impl GpuPdfState {
             task.cancellation.cancel();
         }
         self.surface_seed_tasks.clear();
+        self.fallback_grace_tasks.clear();
     }
 
     fn cancel_destination_task(&mut self) {
@@ -177,6 +199,7 @@ impl GpuPdfState {
             || self.renderer_error.is_some()
             || self.destination_task.is_some()
             || self.destination_fallback.is_some()
+            || self.reader_original_links.is_some()
             || !self.patch_lod_tasks.is_empty()
             || !self.surface_seed_tasks.is_empty()
             || !self.pages.is_empty()
@@ -204,6 +227,10 @@ impl GpuPdfState {
         }
         self.surface_seed_tasks
             .retain(|page, _| retained.contains(page));
+        self.fallback_grace_tasks
+            .retain(|page, _| retained.contains(page));
+        self.fallback_grace_elapsed
+            .retain(|page| retained.contains(page));
         let stale_preparations = self
             .pages
             .iter()
@@ -235,6 +262,7 @@ impl GpuPdfState {
         self.prune_states(retained, MAX_RETAINED_GPU_DIAGNOSTICS, |state| {
             matches!(state, GpuPageState::Fallback(_) | GpuPageState::Failed(_))
         });
+        self.prune_prepared_resource_cache(visible);
         self.rendered
             .retain(|page, _| self.pages.contains_key(page));
         self.page_last_used
@@ -299,6 +327,47 @@ impl GpuPdfState {
             .sum()
     }
 
+    fn prepared_resource_bytes(&self) -> u64 {
+        self.pages
+            .values()
+            .filter_map(|state| match state {
+                GpuPageState::Ready(page) => Some(
+                    page.preparation_stats()
+                        .resident_bytes
+                        .saturating_add(page.patch_lod_preparation_stats().mesh_bytes),
+                ),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn prune_prepared_resource_cache(&mut self, visible: &HashSet<u32>) {
+        while self.prepared_resource_bytes() > MAX_RETAINED_GPU_RESOURCE_BYTES {
+            let Some(page) =
+                self.pages
+                    .iter()
+                    .filter_map(|(page, state)| {
+                        (!visible.contains(page) && matches!(state, GpuPageState::Ready(_)))
+                            .then_some((
+                                *page,
+                                self.page_last_used.get(page).copied().unwrap_or_default(),
+                            ))
+                    })
+                    .min_by_key(|(_, last_used)| *last_used)
+                    .map(|(page, _)| page)
+            else {
+                break;
+            };
+            self.pages.remove(&page);
+            self.page_last_used.remove(&page);
+            self.rendered.remove(&page);
+            self.presented_pages.remove(&page);
+            self.application_fallbacks.remove(&page);
+            self.link_mappings.remove(&page);
+            self.surface_failures.remove(&page);
+        }
+    }
+
     fn prune_surface_cache(&mut self) {
         while self.surface_bytes() > MAX_RETAINED_GPU_SURFACE_BYTES {
             let Some(page) = self
@@ -344,16 +413,23 @@ impl GpuPdfState {
     }
 
     fn has_preparation_capacity(&self) -> bool {
-        self.pages
+        let preparing = self
+            .pages
             .values()
-            .filter(|state| {
-                matches!(
-                    state,
-                    GpuPageState::Preparing { .. } | GpuPageState::Ready(_)
-                )
-            })
-            .count()
-            < MAX_RETAINED_GPU_PAGES
+            .filter(|state| matches!(state, GpuPageState::Preparing { .. }))
+            .count();
+        preparing < MAX_CONCURRENT_GPU_PAGE_PREPARATIONS
+            && self
+                .pages
+                .values()
+                .filter(|state| {
+                    matches!(
+                        state,
+                        GpuPageState::Preparing { .. } | GpuPageState::Ready(_)
+                    )
+                })
+                .count()
+                < MAX_RETAINED_GPU_PAGES
     }
 
     pub(super) fn invalidate_link_mappings(&mut self) {
@@ -461,7 +537,93 @@ fn should_start_surface_seed(settled: bool, allow_motion_seed: bool, has_previou
     settled || allow_motion_seed || !has_previous
 }
 
+fn mupdf_placeholder_allowed(
+    engine: PdfRenderEngine,
+    terminal_native_route: bool,
+    grace_elapsed: bool,
+) -> bool {
+    match engine {
+        PdfRenderEngine::MuPdf => true,
+        PdfRenderEngine::Glyphst => false,
+        PdfRenderEngine::GlyphstFirst => terminal_native_route || grace_elapsed,
+    }
+}
+
 impl DocumentView {
+    pub(super) fn strict_native_pdf(&self, cx: &gpui::App) -> bool {
+        self.format == DocumentFormat::Pdf
+            && cx
+                .global::<SettingsStore>()
+                .settings
+                .document_view
+                .pdf_render_engine
+                .is_strict_native()
+    }
+
+    pub(super) fn native_gpu_document(&self) -> Option<Arc<GpuPdfDocument>> {
+        self.gpu_pdf.document.clone()
+    }
+
+    fn start_native_gpu_fallback_grace(&mut self, page: u32, cx: &mut Context<Self>) {
+        if self.gpu_pdf.fallback_grace_elapsed.contains(&page)
+            || self.gpu_pdf.fallback_grace_tasks.contains_key(&page)
+        {
+            return;
+        }
+        let document_generation = self.gpu_pdf.generation;
+        self.gpu_pdf.fallback_grace_generation = self
+            .gpu_pdf
+            .fallback_grace_generation
+            .wrapping_add(1)
+            .max(1);
+        let generation = self.gpu_pdf.fallback_grace_generation;
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(GPU_FIRST_PAINT_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || !matches!(
+                        this.gpu_pdf.fallback_grace_tasks.get(&page),
+                        Some(task) if task.generation == generation
+                    )
+                {
+                    return;
+                }
+                this.gpu_pdf.fallback_grace_tasks.remove(&page);
+                this.gpu_pdf.fallback_grace_elapsed.insert(page);
+                cx.notify();
+            });
+        });
+        self.gpu_pdf.fallback_grace_tasks.insert(
+            page,
+            FallbackGraceTask {
+                generation,
+                _task: task,
+            },
+        );
+    }
+
+    pub(super) fn native_gpu_mupdf_placeholder_allowed(
+        &self,
+        page: u32,
+        engine: PdfRenderEngine,
+    ) -> bool {
+        if self.format != DocumentFormat::Pdf {
+            return true;
+        }
+        let terminal_native_route = self.gpu_pdf.document_error.is_some()
+            || self.gpu_pdf.renderer_error.is_some()
+            || self.gpu_pdf.surface_failures.contains_key(&page)
+            || matches!(
+                self.gpu_pdf.pages.get(&page),
+                Some(GpuPageState::Fallback(_) | GpuPageState::Failed(_))
+            );
+        mupdf_placeholder_allowed(
+            engine,
+            terminal_native_route,
+            self.gpu_pdf.fallback_grace_elapsed.contains(&page),
+        )
+    }
+
     pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
         self.gpu_pdf.motion_active = true;
         self.gpu_pdf.motion_deadline = Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
@@ -501,7 +663,7 @@ impl DocumentView {
     }
 
     pub(super) fn native_gpu_key_enabled(&self, key: RenderKey, engine: PdfRenderEngine) -> bool {
-        engine != PdfRenderEngine::MuPdf
+        engine.uses_native_reader()
             && self.format == DocumentFormat::Pdf
             && key.source_revision == 0
             && key.color_transform.is_none()
@@ -523,18 +685,33 @@ impl DocumentView {
             .pdf_render_engine;
         if engine == PdfRenderEngine::MuPdf {
             if self.gpu_pdf.is_active() {
+                self.restore_all_native_reader_links();
                 self.gpu_pdf.reset();
             }
             return None;
         }
 
-        // The current native slice is fixed-layout PDF only. Translated page
-        // revisions and document color transforms remain whole-page MuPDF
-        // routes until their semantics are implemented by the native graph.
+        let page = u32::try_from(key.page_idx).ok()?;
+        // The current native slice is fixed-layout PDF only. Strict mode
+        // surfaces these separate writer/color-transform gaps instead of
+        // silently rendering the revised page through MuPDF.
         if !self.native_gpu_key_enabled(key, engine) {
+            if engine.uses_native_reader() && self.format == DocumentFormat::Pdf {
+                let message = if key.source_revision != 0 {
+                    "native Glyphst rendering cannot display translated or rewritten PDF page revisions yet; the writer pipeline remains separate"
+                } else if key.color_transform.is_some() {
+                    "native Glyphst rendering cannot apply the reader color-transform pipeline yet"
+                } else {
+                    "native Glyphst rendering is unavailable for this page request"
+                };
+                self.gpu_pdf.surface_failures.insert(page, message.into());
+            }
             return None;
         }
         let visible_region = visible_gpu_region(key, image_bounds, viewport_bounds)?;
+        if engine == PdfRenderEngine::GlyphstFirst {
+            self.start_native_gpu_fallback_grace(page, cx);
+        }
 
         let document = match self.gpu_pdf.document.clone() {
             Some(document) => document,
@@ -588,7 +765,6 @@ impl DocumentView {
         }
         let renderer = self.gpu_pdf.renderer.clone()?;
 
-        let page = u32::try_from(key.page_idx).ok()?;
         let allow_motion_seed = !self.gpu_pdf.visible_pages.contains(&page);
         self.gpu_pdf.mark_page_used(page);
         let prepared = match self.gpu_pdf.pages.get(&page) {
@@ -610,6 +786,20 @@ impl DocumentView {
             }
         }?;
 
+        if engine.is_strict_native() && !self.gpu_pdf.reader_link_replacements.contains_key(&page) {
+            let Some(mapping) =
+                self.install_native_reader_links(key.page_idx, prepared.link_interactions())
+            else {
+                self.gpu_pdf.application_fallbacks.insert(
+                    page,
+                    Arc::from([GpuFallbackDiagnostic::application_link_geometry_mismatch()]),
+                );
+                return None;
+            };
+            self.gpu_pdf
+                .link_mappings
+                .insert(page, CachedLinkMapping::Valid(Arc::from(mapping)));
+        }
         let cached_link_mapping = self.gpu_pdf.link_mappings.get(&page);
         let link_geometry_valid = match cached_link_mapping {
             Some(CachedLinkMapping::Valid(_)) => true,
@@ -948,11 +1138,15 @@ impl DocumentView {
                 }
                 match result {
                     Ok(GpuPageRoute::Ready(prepared)) => {
+                        this.gpu_pdf.fallback_grace_tasks.remove(&page);
+                        this.gpu_pdf.fallback_grace_elapsed.remove(&page);
                         this.gpu_pdf
                             .pages
                             .insert(page, GpuPageState::Ready(prepared));
                     }
                     Ok(GpuPageRoute::Fallback(diagnostics)) => {
+                        this.gpu_pdf.fallback_grace_tasks.remove(&page);
+                        this.gpu_pdf.fallback_grace_elapsed.remove(&page);
                         for diagnostic in diagnostics.iter() {
                             eprintln!(
                                 "native PDF page {} fallback [{}:{}]: {}",
@@ -967,6 +1161,8 @@ impl DocumentView {
                             .insert(page, GpuPageState::Fallback(diagnostics));
                     }
                     Err(error) => {
+                        this.gpu_pdf.fallback_grace_tasks.remove(&page);
+                        this.gpu_pdf.fallback_grace_elapsed.remove(&page);
                         eprintln!(
                             "failed to prepare native PDF page {} for the GPU: {error}",
                             page + 1
@@ -1324,7 +1520,7 @@ impl DocumentView {
             .settings
             .document_view
             .pdf_render_engine;
-        if engine == PdfRenderEngine::MuPdf || self.format != DocumentFormat::Pdf {
+        if !engine.uses_native_reader() || self.format != DocumentFormat::Pdf {
             return None;
         }
         let (Some(page), Some(document), Some(renderer)) = (
@@ -1490,6 +1686,7 @@ impl DocumentView {
                 .iter()
                 .map(|(cold, deferred)| cold.resident_bytes.saturating_add(deferred.mesh_bytes))
                 .sum(),
+            resident_byte_limit: MAX_RETAINED_GPU_RESOURCE_BYTES,
             surface_count: self
                 .gpu_pdf
                 .rendered
@@ -1634,5 +1831,34 @@ mod tests {
         assert!(!should_start_surface_seed(false, false, true));
         assert!(should_start_surface_seed(false, true, true));
         assert!(should_start_surface_seed(true, false, true));
+    }
+
+    #[test]
+    fn backend_modes_keep_strict_pages_native_and_delay_compatibility_fallback() {
+        assert!(mupdf_placeholder_allowed(
+            PdfRenderEngine::MuPdf,
+            false,
+            false
+        ));
+        assert!(!mupdf_placeholder_allowed(
+            PdfRenderEngine::Glyphst,
+            true,
+            true
+        ));
+        assert!(!mupdf_placeholder_allowed(
+            PdfRenderEngine::GlyphstFirst,
+            false,
+            false
+        ));
+        assert!(mupdf_placeholder_allowed(
+            PdfRenderEngine::GlyphstFirst,
+            false,
+            true
+        ));
+        assert!(mupdf_placeholder_allowed(
+            PdfRenderEngine::GlyphstFirst,
+            true,
+            false
+        ));
     }
 }

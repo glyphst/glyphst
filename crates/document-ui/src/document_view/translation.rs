@@ -240,8 +240,8 @@ pub(super) fn replace_page_text_data(
 }
 
 impl DocumentView {
-    pub(super) fn can_translate_document(&self) -> bool {
-        self.format == DocumentFormat::Pdf && self.path.is_absolute()
+    pub(super) fn can_translate_document(&self, cx: &gpui::App) -> bool {
+        self.format == DocumentFormat::Pdf && self.path.is_absolute() && !self.strict_native_pdf(cx)
     }
 
     #[cfg(test)]
@@ -261,7 +261,7 @@ impl DocumentView {
     }
 
     pub(super) fn translate_document(&mut self, cx: &mut Context<Self>) {
-        if !self.can_translate_document() {
+        if !self.can_translate_document(cx) {
             return;
         }
         let source_path = self.path.clone();

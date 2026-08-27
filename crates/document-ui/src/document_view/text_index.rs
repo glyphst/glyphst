@@ -2,7 +2,8 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn start_text_indexing(&mut self, cx: &mut Context<Self>) {
-        if self.text_indexing_task.is_some()
+        if self.strict_native_pdf(cx)
+            || self.text_indexing_task.is_some()
             || self.pages.is_empty()
             || !self.text_index_state.begin()
         {

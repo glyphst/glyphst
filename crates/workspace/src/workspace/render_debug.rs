@@ -23,7 +23,7 @@ impl Workspace {
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
                     .continuous(false)
-                    .width(px(320.))
+                    .width(px(420.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
         }
@@ -115,7 +115,11 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         ))
         .child(reading(
             "GPU RESIDENT",
-            format_bytes(document.gpu_cache.resident_bytes),
+            format!(
+                "{} / {}",
+                format_bytes(document.gpu_cache.resident_bytes),
+                format_bytes(document.gpu_cache.resident_byte_limit)
+            ),
             FOREGROUND,
         ))
         .child(reading(
@@ -193,6 +197,8 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
     let (engine, engine_color) = match page.backend {
         PageRenderBackendDebug::MuPdf => ("MuPDF", FOREGROUND),
         PageRenderBackendDebug::GlyphstGpu => ("Glyphst GPU", GOOD),
+        PageRenderBackendDebug::GlyphstPending => ("Glyphst GPU · pending", WARN),
+        PageRenderBackendDebug::GlyphstFailed => ("Glyphst GPU · unavailable", BAD),
         PageRenderBackendDebug::MuPdfWhileGpuPending => ("Glyphst GPU · MuPDF placeholder", WARN),
         PageRenderBackendDebug::MuPdfFallback => ("MuPDF · GPU fallback", WARN),
     };

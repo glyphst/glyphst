@@ -146,8 +146,8 @@ fn pdf_render_engine_is_experimental_and_opt_in() {
 
     for (value, expected) in [
         ("mupdf", PdfRenderEngine::MuPdf),
-        ("glyphst-gpu", PdfRenderEngine::GlyphstGpu),
-        ("auto", PdfRenderEngine::Auto),
+        ("glyphst", PdfRenderEngine::Glyphst),
+        ("glyphst-first", PdfRenderEngine::GlyphstFirst),
     ] {
         let settings = parse_settings(&format!(
             "document_view {{\n    pdf_render_engine \"{value}\"\n}}\n"
@@ -175,6 +175,18 @@ document_view {
         invalid.document_view.pdf_render_engine,
         PdfRenderEngine::MuPdf
     );
+
+    for (legacy, expected) in [
+        ("glyphst-gpu", PdfRenderEngine::GlyphstFirst),
+        ("auto", PdfRenderEngine::GlyphstFirst),
+    ] {
+        let settings = parse_settings(&format!(
+            "document_view {{\n    pdf_render_engine \"{legacy}\"\n}}\n"
+        ))
+        .unwrap();
+        assert_eq!(settings.document_view.pdf_render_engine, expected);
+        assert!(settings.to_kdl_string().contains(expected.as_str()));
+    }
 }
 
 #[test]

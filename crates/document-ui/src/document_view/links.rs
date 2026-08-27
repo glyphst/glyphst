@@ -10,6 +10,97 @@ fn initially_collapsed_toc_entries(toc: &[TocEntry]) -> HashSet<usize> {
 }
 
 impl DocumentView {
+    pub(super) fn install_native_reader_links(
+        &mut self,
+        page_idx: usize,
+        interactions: &[GpuLinkInteraction],
+    ) -> Option<Vec<(usize, usize)>> {
+        let page = u32::try_from(page_idx).ok()?;
+        if self.gpu_pdf.reader_link_replacements.contains_key(&page) {
+            return Some(
+                self.links
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(link_ix, link)| {
+                        (link.page_idx == page_idx)
+                            .then_some(link.native_interaction_ix.map(|ix| (link_ix, ix)))?
+                    })
+                    .collect(),
+            );
+        }
+
+        let native_links = interactions
+            .iter()
+            .enumerate()
+            .map(|(interaction_ix, interaction)| {
+                let [x0, y0, x1, y1] = interaction.annotation_bounds;
+                let finite = [x0, y0, x1, y1]
+                    .into_iter()
+                    .all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX));
+                if !finite {
+                    return None;
+                }
+                let rect =
+                    Self::normalized_rect(Rect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32))?;
+                Some(DocumentLink {
+                    page_idx,
+                    rects: vec![rect],
+                    // Activation always executes the corresponding owned
+                    // native action. This inert same-page destination is only
+                    // a fail-closed placeholder if that interaction vanishes
+                    // during device recovery.
+                    target: LinkTarget::Internal {
+                        page_idx,
+                        target_top: None,
+                        target_left: None,
+                    },
+                    pdf_annotation: true,
+                    native_interaction_ix: Some(interaction_ix),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        self.gpu_pdf
+            .reader_original_links
+            .get_or_insert_with(|| self.links.clone());
+        let mut retained = Vec::with_capacity(self.links.len());
+        let mut replaced = Vec::new();
+        for (index, link) in std::mem::take(&mut self.links).into_iter().enumerate() {
+            if link.page_idx == page_idx {
+                replaced.push((index, link));
+            } else {
+                retained.push(link);
+            }
+        }
+        self.links = retained;
+        let first_native = self.links.len();
+        self.links.extend(native_links);
+        self.gpu_pdf.reader_link_replacements.insert(page, replaced);
+        // Link IDs are vector positions. Replacing one page can shift every
+        // later page, so rebuild cached mappings and pointer state.
+        self.gpu_pdf.invalidate_link_mappings();
+        self.pending_link = None;
+        self.hovered_link = None;
+        Some(
+            interactions
+                .iter()
+                .enumerate()
+                .map(|(interaction_ix, _)| (first_native + interaction_ix, interaction_ix))
+                .collect(),
+        )
+    }
+
+    pub(super) fn restore_all_native_reader_links(&mut self) {
+        let Some(original_links) = self.gpu_pdf.reader_original_links.take() else {
+            return;
+        };
+        self.links = original_links;
+        self.gpu_pdf.reader_link_replacements.clear();
+        self.gpu_pdf.invalidate_link_mappings();
+        self.pending_link = None;
+        self.hovered_link = None;
+    }
+
     pub(super) fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
         let mut entries = Vec::new();
         for outline in outlines {
@@ -210,6 +301,7 @@ impl DocumentView {
                 rects: vec![bounds],
                 target,
                 pdf_annotation: true,
+                native_interaction_ix: None,
             });
         }
 
@@ -273,6 +365,7 @@ impl DocumentView {
                     rects,
                     target: LinkTarget::External(url),
                     pdf_annotation: false,
+                    native_interaction_ix: None,
                 });
             }
 
@@ -499,6 +592,9 @@ impl DocumentView {
             return None;
         }
         let interactions = self.native_gpu_link_interactions(link.page_idx)?;
+        if let Some(interaction_ix) = link.native_interaction_ix {
+            return interactions.get(interaction_ix);
+        }
         let interaction_ix = self
             .cached_native_gpu_link_mapping(link.page_idx)
             .map(Cow::Borrowed)
@@ -584,6 +680,7 @@ mod tests {
             rects,
             target: LinkTarget::External("https://example.com".into()),
             pdf_annotation,
+            native_interaction_ix: None,
         }
     }
 

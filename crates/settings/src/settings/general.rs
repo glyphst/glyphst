@@ -113,30 +113,45 @@ impl DocumentProgressDisplay {
     }
 }
 
-/// PDF reader backend selection. The GPU modes remain experimental and must
-/// preserve whole-page fallback while the standalone engine is integrated.
+/// PDF reader backend selection. Native modes remain experimental while the
+/// standalone engine is integrated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PdfRenderEngine {
     #[default]
     MuPdf,
-    GlyphstGpu,
-    Auto,
+    /// Strict native-reader mode. It never substitutes MuPDF page pixels.
+    Glyphst,
+    /// Prefer the native reader, then permit whole-page MuPDF compatibility
+    /// after a short first-paint grace period or a terminal native diagnostic.
+    GlyphstFirst,
 }
 
 impl PdfRenderEngine {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MuPdf => "mupdf",
-            Self::GlyphstGpu => "glyphst-gpu",
-            Self::Auto => "auto",
+            Self::Glyphst => "glyphst",
+            Self::GlyphstFirst => "glyphst-first",
         }
+    }
+
+    #[must_use]
+    pub const fn uses_native_reader(self) -> bool {
+        !matches!(self, Self::MuPdf)
+    }
+
+    #[must_use]
+    pub const fn is_strict_native(self) -> bool {
+        matches!(self, Self::Glyphst)
     }
 
     pub(super) fn from_str(value: &str) -> Option<Self> {
         match value {
             "mupdf" => Some(Self::MuPdf),
-            "glyphst-gpu" => Some(Self::GlyphstGpu),
-            "auto" => Some(Self::Auto),
+            "glyphst" => Some(Self::Glyphst),
+            // Both legacy values described the old native-first route, which
+            // always retained whole-page MuPDF compatibility fallback.
+            "glyphst-first" | "glyphst-gpu" | "auto" => Some(Self::GlyphstFirst),
             _ => None,
         }
     }

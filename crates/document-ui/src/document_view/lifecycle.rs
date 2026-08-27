@@ -611,6 +611,7 @@ impl DocumentView {
 
         self.evict_previous_document(cx);
         self.text_indexing_task = None;
+        self.restore_all_native_reader_links();
         self.gpu_pdf.reset();
         self.pending_renders.clear();
         self.viewport_render_debug.clear();

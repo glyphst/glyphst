@@ -65,6 +65,18 @@ impl DocumentView {
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_inherited_target_language(window, cx);
+        let strict_native_pdf = self.strict_native_pdf(cx);
+        if strict_native_pdf {
+            if self.grid_overview_open {
+                self.set_grid_overview_open(false, cx);
+            }
+            self.region_tool_active = false;
+            self.region_drag = None;
+            self.selected_region = None;
+            self.context_menu_region = false;
+            self.selection = None;
+            self.pending_selection_anchor = None;
+        }
         if self.zoom_popup_visible
             && (self.grid_overview_open || self.is_presentation_mode() || self.search_bar.is_some())
         {
@@ -75,6 +87,38 @@ impl Render for DocumentView {
         let theme = cx.global::<SettingsStore>().resolved_theme;
         let ui_theme = cx.theme().colors;
         let reduce_motion = cx.global::<SettingsStore>().settings.behavior.reduce_motion;
+        let pdf_render_engine = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .pdf_render_engine;
+        let strict_native_error = (pdf_render_engine.is_strict_native()
+            && self.format == DocumentFormat::Pdf
+            && !self.grid_overview_open)
+            .then(|| {
+                let page = self
+                    .presentation_page
+                    .unwrap_or_else(|| self.page_index_for_scroll_y(self.scroll_y_doc))
+                    .min(self.last_page_index());
+                if let Some(error) = self.native_gpu_failure(page) {
+                    return Some(format!(
+                        "Glyphst could not render page {}: {error}. Strict mode did not substitute MuPDF.",
+                        page + 1
+                    ));
+                }
+                self.native_gpu_fallback_diagnostics(page)
+                    .and_then(|diagnostics| diagnostics.first())
+                    .map(|diagnostic| {
+                        format!(
+                            "Glyphst could not render page {} [{}:{}]: {}. Strict mode did not substitute MuPDF.",
+                            page + 1,
+                            diagnostic.feature,
+                            diagnostic.code,
+                            diagnostic.message
+                        )
+                    })
+            })
+            .flatten();
         let page_loading_indicators =
             self.page_loading_indicators(ui_theme.muted_foreground, reduce_motion);
         if !self.diff_flashes.is_empty() {
@@ -266,7 +310,7 @@ impl Render for DocumentView {
                     cx,
                 );
             }))
-            .when(self.can_translate_document(), |this| {
+            .when(self.can_translate_document(cx), |this| {
                 this.on_action(cx.listener(|this, _: &TranslateDocument, _, cx| {
                     this.translate_document(cx);
                 }))
@@ -437,7 +481,7 @@ impl Render for DocumentView {
                         return;
                     }
 
-                    if let Some(link_ix) = this.link_at_screen(event.position) {
+                    if let Some(link_ix) = this.link_at_screen(event.position, cx) {
                         this.selection = None;
                         this.selected_highlight = None;
                         this.pending_link = Some(link_ix);
@@ -457,7 +501,9 @@ impl Render for DocumentView {
                     }
 
                     let highlight_id = this.highlight_at_screen(event.position);
-                    let glyph_ix = this.nearby_glyph_at_screen(event.position);
+                    let glyph_ix = (!this.strict_native_pdf(cx))
+                        .then(|| this.nearby_glyph_at_screen(event.position))
+                        .flatten();
                     match primary_selection_press(highlight_id, glyph_ix, event.click_count) {
                         PrimarySelectionPress::Word(glyph_ix) => {
                             this.selected_highlight = None;
@@ -649,7 +695,7 @@ impl Render for DocumentView {
                     this.dragging = false;
                     this.pending_selection_anchor = None;
                     if let Some(link_ix) = pending_link {
-                        if this.link_at_screen(event.position) == Some(link_ix) {
+                        if this.link_at_screen(event.position, cx) == Some(link_ix) {
                             this.activate_link(link_ix, event.position, cx);
                             cx.stop_propagation();
                         }
@@ -943,6 +989,29 @@ impl Render for DocumentView {
                     }),
             )
             .children(page_loading_indicators)
+            .when_some(strict_native_error, |this, error| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(20.0))
+                        .left(px(24.0))
+                        .right(px(24.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .max_w(px(760.0))
+                                .p_3()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(ui_theme.danger.opacity(0.55))
+                                .bg(ui_theme.background.opacity(0.96))
+                                .text_color(ui_theme.foreground)
+                                .whitespace_normal()
+                                .child(error),
+                        ),
+                )
+            })
             .when(!self.is_presentation_mode(), |this| {
                 this.child(self.render_document_footer(ui_theme, cx))
             })

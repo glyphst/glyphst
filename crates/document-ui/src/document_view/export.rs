@@ -117,6 +117,10 @@ impl DocumentView {
     }
 
     pub(super) fn save_page_as_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.strict_native_pdf(cx) {
+            self.save_native_page_as_image(window, cx);
+            return;
+        }
         let Some(page_idx) = self.context_menu_page else {
             return;
         };
@@ -167,6 +171,59 @@ impl DocumentView {
 
                 if let Err(error) = result {
                     eprintln!("failed to save PDF page as image: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("failed to open save page image dialog: {error:#}"),
+            Ok(Ok(None)) | Err(_) => {}
+        })
+        .detach();
+    }
+
+    fn save_native_page_as_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(page_idx), Some(document)) = (self.context_menu_page, self.native_gpu_document())
+        else {
+            eprintln!("native PDF page export is unavailable while the document is opening");
+            return;
+        };
+        let Ok(page) = u32::try_from(page_idx) else {
+            eprintln!("native PDF page export index exceeds u32");
+            return;
+        };
+        let rotation = self.rotation;
+        let suggested_name = format!("page-{}.png", page_idx + 1);
+        let directory = dirs::picture_dir()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let dialog = prompt_for_new_path(
+            window,
+            cx,
+            SavePathOptions::new(
+                directory,
+                crate::fl!("pdf-context-save-page-as-image"),
+                suggested_name,
+            )
+            .required_extension("png"),
+        );
+
+        cx.spawn(async move |_, cx| match dialog.await {
+            Ok(Ok(Some(path))) => {
+                let result = cx
+                    .background_spawn(async move {
+                        let image = document.render_page_image(
+                            page,
+                            rotation,
+                            PAGE_EXPORT_SCALE,
+                            &GpuCancellationToken::new(),
+                        )?;
+                        RgbaImage::from_raw(image.width, image.height, image.rgba)
+                            .context("failed to create native PDF page image")?
+                            .save_with_format(&path, image::ImageFormat::Png)
+                            .with_context(|| format!("failed to save image to {}", path.display()))
+                    })
+                    .await;
+                if let Err(error) = result {
+                    eprintln!("failed to save native PDF page as image: {error:#}");
                 }
             }
             Ok(Err(error)) => eprintln!("failed to open save page image dialog: {error:#}"),
@@ -248,6 +305,12 @@ impl DocumentView {
     }
 
     pub(super) fn save_region(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.strict_native_pdf(cx) {
+            eprintln!(
+                "region image export is disabled in strict Glyphst mode until the native export backend is connected"
+            );
+            return;
+        }
         let Some(reference) = self.selected_region.clone() else {
             return;
         };

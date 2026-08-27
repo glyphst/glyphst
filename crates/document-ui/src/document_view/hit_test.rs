@@ -25,6 +25,9 @@ impl DocumentView {
         point: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<(usize, usize)> {
+        if self.strict_native_pdf(cx) {
+            return None;
+        }
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
         let display_list = match self.get_or_create_display_list(page_idx, cx) {
@@ -51,8 +54,14 @@ impl DocumentView {
             })
     }
 
-    pub(super) fn link_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
+    pub(super) fn link_at_screen(&self, point: GpuiPoint<Pixels>, cx: &gpui::App) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
+        if self.strict_native_pdf(cx)
+            && !u32::try_from(page_idx)
+                .is_ok_and(|page| self.gpu_pdf.reader_link_replacements.contains_key(&page))
+        {
+            return None;
+        }
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
         let native_interactions = self.native_gpu_link_interactions(page_idx);
         let native_mapping = self
@@ -164,7 +173,7 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         let link_ix = if should_hit_test_document_content(self.dragging, self.panning.is_some()) {
-            self.link_at_screen(position)
+            self.link_at_screen(position, cx)
         } else {
             None
         };

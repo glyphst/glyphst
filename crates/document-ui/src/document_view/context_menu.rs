@@ -24,13 +24,16 @@ impl DocumentView {
             self.image_at_screen(position, cx)
         };
         self.context_menu_position = Some(position);
+        let strict_native_pdf = self.strict_native_pdf(cx);
 
         let state = ContextMenuState {
             has_page: self.capabilities.page_export
                 && !self.context_menu_region
                 && self.context_menu_page.is_some(),
             has_image: !self.grid_overview_open && self.context_menu_image.is_some(),
-            has_selection: !self.grid_overview_open && self.selected_text().is_some(),
+            has_selection: !strict_native_pdf
+                && !self.grid_overview_open
+                && self.selected_text().is_some(),
             highlight_color: if self.grid_overview_open {
                 None
             } else {
@@ -38,8 +41,9 @@ impl DocumentView {
                     .and_then(|id| self.highlight_color_for_id(id))
             },
             has_note: !self.grid_overview_open && self.context_menu_note.is_some(),
-            has_region: self.context_menu_region,
+            has_region: self.context_menu_region && !strict_native_pdf,
             grid_overview: self.grid_overview_open,
+            allow_text_selection: !strict_native_pdf,
         };
         let document_theme = cx.global::<SettingsStore>().resolved_theme;
         let view = cx.entity();
@@ -480,7 +484,7 @@ impl DocumentView {
                 .separator();
         }
 
-        if !state.grid_overview {
+        if !state.grid_overview && state.allow_text_selection {
             menu = menu
                 .item(Self::context_menu_item(
                     crate::fl!("select-all"),

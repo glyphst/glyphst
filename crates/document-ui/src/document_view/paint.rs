@@ -199,20 +199,35 @@ impl DocumentView {
         self.viewport_render_keys.insert(key);
         self.update_render_cache_protection(cx);
 
-        for adjacent_page in [
-            page_idx.checked_sub(1),
-            (page_idx + 1 < self.pages.len()).then_some(page_idx + 1),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let scale = self.presentation_scale_for_page(adjacent_page);
-            let image_bounds =
-                self.presentation_image_bounds_for_page(adjacent_page, bounds, scale);
-            let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
-            let key = self.render_key(adjacent_page, image_bounds, scale_factor);
-            if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
-                self.request_render(key, cx);
+        let pdf_render_engine = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .pdf_render_engine;
+        let native_pdf =
+            self.format == DocumentFormat::Pdf && pdf_render_engine.uses_native_reader();
+        let strict_native_pdf =
+            self.format == DocumentFormat::Pdf && pdf_render_engine.is_strict_native();
+        if strict_native_pdf {
+            self.pending_renders.clear();
+        }
+
+        if !native_pdf {
+            for adjacent_page in [
+                page_idx.checked_sub(1),
+                (page_idx + 1 < self.pages.len()).then_some(page_idx + 1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let scale = self.presentation_scale_for_page(adjacent_page);
+                let image_bounds =
+                    self.presentation_image_bounds_for_page(adjacent_page, bounds, scale);
+                let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
+                let key = self.render_key(adjacent_page, image_bounds, scale_factor);
+                if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
+                    self.request_render(key, cx);
+                }
             }
         }
 
@@ -242,7 +257,9 @@ impl DocumentView {
                 cx,
             );
         }
-        let (image, displayed) = if gpu_texture.is_some() {
+        let mupdf_allowed = u32::try_from(page_idx)
+            .is_ok_and(|page| self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine));
+        let (image, displayed) = if gpu_texture.is_some() || !mupdf_allowed {
             (None, None)
         } else {
             self.cached_or_request_viewport_render(key, true, cx)
@@ -363,7 +380,21 @@ impl DocumentView {
             .extend(visible_page_renders.iter().map(|(_, _, key)| *key));
         self.update_render_cache_protection(cx);
 
-        if !self.dock_snapshot.layout_motion_active
+        let pdf_render_engine = cx
+            .global::<SettingsStore>()
+            .settings
+            .document_view
+            .pdf_render_engine;
+        let native_pdf =
+            self.format == DocumentFormat::Pdf && pdf_render_engine.uses_native_reader();
+        let strict_native_pdf =
+            self.format == DocumentFormat::Pdf && pdf_render_engine.is_strict_native();
+        if strict_native_pdf {
+            self.pending_renders.clear();
+        }
+
+        if !native_pdf
+            && !self.dock_snapshot.layout_motion_active
             && let (Some((first, _, _)), Some((last, _, _))) =
                 (visible_page_renders.first(), visible_page_renders.last())
         {
@@ -402,7 +433,10 @@ impl DocumentView {
                 window,
                 cx,
             );
-            let (image, fallback_key) = if gpu_texture.is_some() {
+            let mupdf_allowed = u32::try_from(page_idx).is_ok_and(|page| {
+                self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine)
+            });
+            let (image, fallback_key) = if gpu_texture.is_some() || !mupdf_allowed {
                 (None, None)
             } else {
                 self.cached_or_request_viewport_render(
@@ -438,7 +472,7 @@ impl DocumentView {
         // land safely. Add the actual fallback keys as well so cache pressure
         // from thumbnails or adjacent pages cannot blank the animated view.
         self.update_render_cache_protection(cx);
-        if has_rendered_page {
+        if has_rendered_page && !strict_native_pdf {
             self.start_text_indexing(cx);
         }
 

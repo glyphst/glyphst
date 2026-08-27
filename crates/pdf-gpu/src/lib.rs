@@ -13,9 +13,11 @@ use glyphst_pdf_engine::{
     Action as EngineAction, CompileError, CompileOptions, CompiledPage,
     Destination as EngineDestination, DestinationView as EngineDestinationView, DiagnosticSeverity,
     Document, DocumentSource, Engine, LayerConfiguration, LinkHighlightMode, OpenOptions,
-    OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, SupportDiagnostic, Transform,
+    OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, ResourceLimits, SupportDiagnostic,
+    Transform,
 };
 pub use glyphst_pdf_engine::{CancellationToken, FeatureId, Permissions as GpuPdfPermissions};
+use glyphst_pdf_render_cpu::{CpuRenderer, CpuViewportRequest};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
     IncrementalWorkPlan, PrepareError, RenderConfig, RenderError, RenderRequest,
@@ -346,6 +348,7 @@ pub struct GpuPdfDocument {
 
 struct GpuPdfDocumentInner {
     document: Document,
+    limits: ResourceLimits,
     navigation: GpuNavigationRoute,
     compiled: Mutex<CompiledPageCache>,
     content_bounds: Mutex<ContentBoundsCache>,
@@ -466,12 +469,14 @@ impl GpuPdfDocument {
                 .map(|password| Password::new(password.expose_secret())),
             ..OpenOptions::default()
         };
+        let limits = options.limits.clone();
         let document = Engine::open(DocumentSource::from_bytes(snapshot.shared_bytes()), options)
             .context("failed to open PDF with the native GPU engine")?;
         let navigation = compiled_document_navigation(&document);
         Ok(Self {
             inner: Arc::new(GpuPdfDocumentInner {
                 document,
+                limits,
                 navigation,
                 compiled: Mutex::new(CompiledPageCache::default()),
                 content_bounds: Mutex::new(ContentBoundsCache::default()),
@@ -571,6 +576,65 @@ impl GpuPdfDocument {
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
             .insert(page, compiled);
         Ok(compiled)
+    }
+
+    /// Deterministically renders a complete page through the native CPU
+    /// backend for export. This never reads GPU presentation pixels back.
+    pub fn render_page_image(
+        &self,
+        page: u32,
+        rotation: DocumentRotation,
+        pixels_per_point: f32,
+        cancellation: &CancellationToken,
+    ) -> Result<NativePageImage> {
+        if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+            bail!("native PDF export scale must be finite and positive");
+        }
+        let compiled = self.compile_page(page, cancellation)?;
+        if let Some(diagnostic) = compiled
+            .support()
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.severity == DiagnosticSeverity::Unsupported)
+        {
+            bail!(
+                "native PDF export is unsupported [{}:{}]: {}",
+                diagnostic.feature,
+                diagnostic.code,
+                diagnostic.message
+            );
+        }
+        let bounds = compiled.scene().page_bounds();
+        let (width, height) = if rotation.swaps_width_and_height() {
+            (bounds.height(), bounds.width())
+        } else {
+            (bounds.width(), bounds.height())
+        };
+        let output_dimension = |points: f64| -> Result<u32> {
+            let pixels = points * f64::from(pixels_per_point);
+            if !pixels.is_finite() || pixels <= 0.0 || pixels > f64::from(u32::MAX) {
+                bail!("native PDF export dimensions are invalid");
+            }
+            Ok(pixels.ceil() as u32)
+        };
+        let pixel_size = [output_dimension(width)?, output_dimension(height)?];
+        let page_to_device = page_transform(bounds, rotation, pixel_size)?;
+        let image = CpuRenderer::new(self.inner.limits.clone())
+            .render_viewport(
+                compiled.scene(),
+                CpuViewportRequest {
+                    page_to_device,
+                    pixel_size,
+                    background: [255; 4],
+                },
+                cancellation,
+            )
+            .context("failed to execute native PDF CPU export")?;
+        Ok(NativePageImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.rgba,
+        })
     }
 
     /// Resolves every FitB-family destination in an action tree while
@@ -737,6 +801,14 @@ impl GpuPdfDocument {
         }
         Ok(page)
     }
+}
+
+/// Straight sRGBA8 page export produced by the native CPU backend.
+#[derive(Clone, Debug)]
+pub struct NativePageImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 fn compiled_document_navigation(document: &Document) -> GpuNavigationRoute {
@@ -1168,7 +1240,10 @@ impl GpuPdfRenderer {
             Err(diagnostic) => return Ok(GpuPageRoute::Fallback(Arc::from([diagnostic]))),
         };
         let warnings = compiled_page_warnings(&compiled);
-        let gpu = match self.renderer.prepare_interactive(compiled.scene()) {
+        let gpu = match self
+            .renderer
+            .prepare_interactive_with_cancellation(compiled.scene(), cancellation)
+        {
             Ok(page) => page,
             Err(PrepareError::Unsupported(report)) => {
                 let diagnostics = report
@@ -2067,6 +2142,25 @@ trailer <</Root 1 0 R>>
             .expect("compile page");
         let second = document.compile_page(0, &cancellation).expect("reuse page");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn native_cpu_page_export_honors_reader_rotation_without_gpu_readback() {
+        let snapshot =
+            DocumentSnapshot::from_bytes("native-export.pdf", DocumentFormat::Pdf, minimal_pdf());
+        let document = GpuPdfDocument::open(&snapshot).expect("open native document");
+        let image = document
+            .render_page_image(
+                0,
+                DocumentRotation::Degrees90,
+                2.0,
+                &CancellationToken::new(),
+            )
+            .expect("render native page export");
+
+        assert_eq!([image.width, image.height], [400, 200]);
+        assert_eq!(image.rgba.len(), 400 * 200 * 4);
+        assert!(image.rgba.chunks_exact(4).all(|pixel| pixel == [255; 4]));
     }
 
     #[test]
