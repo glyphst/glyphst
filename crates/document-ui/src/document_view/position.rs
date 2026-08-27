@@ -6,6 +6,9 @@ impl DocumentView {
             && let Some(reflow) = position.semantic.as_ref()
         {
             self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+            self.target_zoom = self.zoom;
+            self.zoom_anchor = None;
+            self.last_animation_frame = None;
             let progress_scroll = reflow.progress.clamp(0.0, 1.0) * self.max_scroll_y_doc();
             if self.glyphs.is_empty() {
                 self.scroll_x_doc = 0.0;
@@ -38,6 +41,9 @@ impl DocumentView {
             return;
         }
         self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.target_zoom = self.zoom;
+        self.zoom_anchor = None;
+        self.last_animation_frame = None;
         self.scroll_x_doc = position.scroll_x_doc;
         self.scroll_y_doc = position.scroll_y_doc;
         self.target_scroll_x_doc = position.scroll_x_doc;

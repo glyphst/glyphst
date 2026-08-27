@@ -23,6 +23,7 @@ impl Workspace {
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
                     .continuous(false)
+                    .width(px(320.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
         }
@@ -640,6 +641,19 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 } else {
                     FOREGROUND
                 },
+            ))
+            .child(reading(
+                "FRAME POOL",
+                format!(
+                    "{} · {}",
+                    format_bytes(gpu.frame_pool_capacity_bytes),
+                    if gpu.frame_pool_grew {
+                        "grew this frame"
+                    } else {
+                        "stable"
+                    }
+                ),
+                if gpu.frame_pool_grew { WARN } else { GOOD },
             ));
     }
 

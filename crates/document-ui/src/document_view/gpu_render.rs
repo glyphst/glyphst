@@ -26,6 +26,7 @@ pub(super) struct GpuPdfState {
     presented_pages: HashSet<u32>,
     visible_pages: HashSet<u32>,
     application_fallbacks: HashMap<u32, Arc<[GpuFallbackDiagnostic]>>,
+    link_mappings: HashMap<u32, CachedLinkMapping>,
     surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
@@ -38,6 +39,7 @@ pub(super) struct GpuPdfState {
     render_generation: u64,
     motion_generation: u64,
     motion_active: bool,
+    motion_deadline: Option<Instant>,
     motion_settle_task: Option<Task<()>>,
     destination_generation: u64,
     destination_cancellation: Option<GpuCancellationToken>,
@@ -54,6 +56,11 @@ enum GpuPageState {
     Ready(Arc<PreparedGpuPage>),
     Fallback(Arc<[GpuFallbackDiagnostic]>),
     Failed(String),
+}
+
+enum CachedLinkMapping {
+    Valid(Arc<[(usize, usize)]>),
+    Invalid,
 }
 
 struct RenderedGpuPage {
@@ -93,6 +100,7 @@ impl GpuPdfState {
         self.presented_pages.clear();
         self.visible_pages.clear();
         self.application_fallbacks.clear();
+        self.link_mappings.clear();
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
@@ -105,6 +113,7 @@ impl GpuPdfState {
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
+        self.motion_deadline = None;
         self.motion_settle_task = None;
         self.destination_fallback = None;
     }
@@ -120,6 +129,7 @@ impl GpuPdfState {
         self.presented_pages.clear();
         self.visible_pages.clear();
         self.application_fallbacks.clear();
+        self.link_mappings.clear();
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
@@ -132,6 +142,7 @@ impl GpuPdfState {
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
+        self.motion_deadline = None;
         self.motion_settle_task = None;
         self.destination_fallback = None;
     }
@@ -209,6 +220,7 @@ impl GpuPdfState {
             self.rendered.remove(&page);
             self.presented_pages.remove(&page);
             self.application_fallbacks.remove(&page);
+            self.link_mappings.remove(&page);
             self.surface_failures.remove(&page);
         }
 
@@ -228,6 +240,8 @@ impl GpuPdfState {
         self.page_last_used
             .retain(|page, _| self.pages.contains_key(page));
         self.application_fallbacks
+            .retain(|page, _| self.pages.contains_key(page));
+        self.link_mappings
             .retain(|page, _| self.pages.contains_key(page));
         self.surface_failures
             .retain(|page, _| self.pages.contains_key(page));
@@ -273,6 +287,7 @@ impl GpuPdfState {
             self.rendered.remove(&page);
             self.presented_pages.remove(&page);
             self.application_fallbacks.remove(&page);
+            self.link_mappings.remove(&page);
             self.surface_failures.remove(&page);
         }
     }
@@ -339,6 +354,11 @@ impl GpuPdfState {
             })
             .count()
             < MAX_RETAINED_GPU_PAGES
+    }
+
+    pub(super) fn invalidate_link_mappings(&mut self) {
+        self.link_mappings.clear();
+        self.application_fallbacks.clear();
     }
 }
 
@@ -426,21 +446,40 @@ fn gpu_paint_texture(
 
 impl DocumentView {
     pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
-        self.gpu_pdf.motion_generation = self.gpu_pdf.motion_generation.wrapping_add(1).max(1);
         self.gpu_pdf.motion_active = true;
+        self.gpu_pdf.motion_deadline = Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
+        if self.gpu_pdf.motion_settle_task.is_some() {
+            return;
+        }
+        self.gpu_pdf.motion_generation = self.gpu_pdf.motion_generation.wrapping_add(1).max(1);
         let generation = self.gpu_pdf.motion_generation;
         self.gpu_pdf.motion_settle_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(GPU_MOTION_SETTLE_DELAY)
-                .await;
-            _ = this.update(cx, |this, cx| {
-                if this.gpu_pdf.motion_generation != generation {
-                    return;
-                }
-                this.gpu_pdf.motion_active = false;
-                this.gpu_pdf.motion_settle_task = None;
-                cx.notify();
-            });
+            let mut remaining = GPU_MOTION_SETTLE_DELAY;
+            loop {
+                cx.background_executor().timer(remaining).await;
+                let Ok(next) = this.update(cx, |this, cx| {
+                    if this.gpu_pdf.motion_generation != generation {
+                        return None;
+                    }
+                    let now = Instant::now();
+                    if let Some(deadline) = this.gpu_pdf.motion_deadline
+                        && now < deadline
+                    {
+                        return Some(deadline.duration_since(now));
+                    }
+                    this.gpu_pdf.motion_active = false;
+                    this.gpu_pdf.motion_deadline = None;
+                    this.gpu_pdf.motion_settle_task = None;
+                    cx.notify();
+                    None
+                }) else {
+                    break;
+                };
+                let Some(next) = next else {
+                    break;
+                };
+                remaining = next;
+            }
         }));
     }
 
@@ -553,9 +592,30 @@ impl DocumentView {
             }
         }?;
 
-        if Self::native_link_mapping(key.page_idx, &self.links, prepared.link_interactions())
-            .is_none()
-        {
+        let cached_link_mapping = self.gpu_pdf.link_mappings.get(&page);
+        let link_geometry_valid = match cached_link_mapping {
+            Some(CachedLinkMapping::Valid(_)) => true,
+            Some(CachedLinkMapping::Invalid) => false,
+            None => {
+                let mapping = Self::native_link_mapping(
+                    key.page_idx,
+                    &self.links,
+                    prepared.link_interactions(),
+                );
+                if !self.text_index_state.is_pending_or_indexing() {
+                    self.gpu_pdf.link_mappings.insert(
+                        page,
+                        mapping
+                            .as_ref()
+                            .map_or(CachedLinkMapping::Invalid, |mapping| {
+                                CachedLinkMapping::Valid(Arc::from(mapping.as_slice()))
+                            }),
+                    );
+                }
+                mapping.is_some()
+            }
+        };
+        if !link_geometry_valid {
             if !self.text_index_state.is_pending_or_indexing() {
                 self.gpu_pdf.application_fallbacks.insert(
                     page,
@@ -672,7 +732,8 @@ impl DocumentView {
             window.request_animation_frame();
             return Some(gpu_paint_texture(rendered.key, image_bounds, texture));
         }
-        let requested_surface_bytes = presentation.projected_byte_len(surface_region);
+        let requested_surface_bytes = presentation
+            .projected_byte_len(surface_region, work.kind == GpuIncrementalWorkKind::Direct);
         if let Err(required) = self.gpu_pdf.reserve_surface(page, requested_surface_bytes) {
             self.gpu_pdf.surface_failures.insert(
                 page,
@@ -1276,6 +1337,14 @@ impl DocumentView {
         match self.gpu_pdf.pages.get(&page)? {
             GpuPageState::Ready(prepared) => Some(prepared.link_interactions()),
             _ => None,
+        }
+    }
+
+    pub(super) fn cached_native_gpu_link_mapping(&self, page: usize) -> Option<&[(usize, usize)]> {
+        let page = u32::try_from(page).ok()?;
+        match self.gpu_pdf.link_mappings.get(&page)? {
+            CachedLinkMapping::Valid(mapping) => Some(mapping),
+            CachedLinkMapping::Invalid => None,
         }
     }
 

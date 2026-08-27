@@ -207,6 +207,9 @@ impl DocumentView {
             page_layout,
             page_gap,
             zoom: behavior.default_zoom,
+            target_zoom: behavior.default_zoom,
+            zoom_anchor: None,
+            last_animation_frame: None,
             zoom_popup_visible: false,
             zoom_popup_hovered: false,
             zoom_popup_generation: 0,
@@ -644,6 +647,7 @@ impl DocumentView {
         self.page_block_ranges = vec![0..0; self.pages.len()];
         self.replace_translation_document();
         self.links.clear();
+        self.gpu_pdf.invalidate_link_mappings();
         self.search.invalidate_search_text();
         self.search.clear_results(self.pages.len());
         self.selection = None;

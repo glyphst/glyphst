@@ -255,6 +255,7 @@ impl DocumentView {
         self.page_block_ranges = loaded.page_block_ranges;
         self.invalidate_translation_document();
         self.links = loaded.links;
+        self.gpu_pdf.invalidate_link_mappings();
         self.text_index_state.settle(true);
         self.hovered_link = None;
         self.pending_link = None;

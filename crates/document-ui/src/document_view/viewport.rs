@@ -183,17 +183,59 @@ impl DocumentView {
             .settings
             .behavior
             .smooth_scrolling;
+        let zoom_pending = (self.target_zoom - self.zoom).abs() > f32::EPSILON;
+        let scroll_pending = (self.target_scroll_x_doc - self.scroll_x_doc).abs() > f32::EPSILON
+            || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON;
+        if !zoom_pending && !scroll_pending {
+            self.last_animation_frame = None;
+            return;
+        }
+        let now = Instant::now();
+        let elapsed = self
+            .last_animation_frame
+            .replace(now)
+            .map_or(Duration::from_secs_f32(1.0 / 120.0), |previous| {
+                now.saturating_duration_since(previous)
+            });
+
+        let mut changed_zoom = false;
+        if zoom_pending {
+            const ZOOM_RESPONSE_PER_SECOND: f32 = 24.0;
+            const ZOOM_SNAP: f32 = 0.0005;
+            let elapsed_seconds = elapsed.min(Duration::from_millis(64)).as_secs_f32();
+            let factor = 1.0 - (-ZOOM_RESPONSE_PER_SECOND * elapsed_seconds).exp();
+            let delta = self.target_zoom - self.zoom;
+            let zoom = if delta.abs() <= ZOOM_SNAP {
+                self.target_zoom
+            } else {
+                self.zoom + delta * factor
+            };
+            let anchor = self.zoom_anchor.unwrap_or_else(|| {
+                self.zoom_anchor_at_viewport([
+                    self.viewport_width / 2.0,
+                    self.viewport_height / 2.0,
+                ])
+            });
+            self.apply_zoom_anchor(zoom, anchor);
+            changed_zoom = true;
+            if (self.target_zoom - self.zoom).abs() <= f32::EPSILON {
+                self.zoom_anchor = None;
+            }
+        }
+
         let changed_x = advance_toward(
             &mut self.scroll_x_doc,
             self.target_scroll_x_doc,
             smooth_scrolling,
+            elapsed,
         );
         let changed_y = advance_toward(
             &mut self.scroll_y_doc,
             self.target_scroll_y_doc,
             smooth_scrolling,
+            elapsed,
         );
-        if changed_x || changed_y {
+        if changed_zoom || changed_x || changed_y {
             self.mark_native_gpu_motion(cx);
             window.request_animation_frame();
         }

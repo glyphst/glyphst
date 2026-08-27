@@ -132,6 +132,8 @@ impl DocumentView {
             refinement_pending: stats.refinement_pending,
             selected_vector_lod: stats.selected_vector_lod,
             frame_pool_reused: stats.frame_pool_reused,
+            frame_pool_grew: stats.frame_pool_grew,
+            frame_pool_capacity_bytes: stats.frame_pool_capacity_bytes,
             clip_state_changes: stats.clip_state_changes,
             stencil_draws: stats.stencil_draws,
             compute_dispatches: stats.compute_dispatches,

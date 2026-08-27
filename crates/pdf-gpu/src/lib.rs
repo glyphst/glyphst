@@ -1308,10 +1308,11 @@ impl GpuPdfRenderer {
 
     /// Render a prepared complete page into a bounded three-surface ring.
     ///
-    /// The current presentation and the engine's retained exact source are
-    /// never selected as the destination. The ring and incremental state are
-    /// committed only after a successful submission, so callers can keep
-    /// presenting the previous texture when this method fails.
+    /// Reprojection and refinement select a destination distinct from their
+    /// source. A direct retained redraw samples no presentation pixels and may
+    /// reuse the current surface when its extent matches. The ring and
+    /// incremental state are committed only after a successful submission, so
+    /// callers can keep presenting the previous texture when this method fails.
     pub fn render_page(
         &self,
         page: &PreparedGpuPage,
@@ -1338,8 +1339,20 @@ impl GpuPdfRenderer {
         if width > limit || height > limit {
             bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
         }
-        let selection =
-            presentation.select_target(surface_region.size(), |size| self.create_surface(size));
+        let work = self
+            .renderer
+            .plan_incremental(
+                &page.gpu,
+                &presentation.incremental,
+                presentation.current_view(),
+                engine_request,
+            )
+            .map_err(render_error)?;
+        let selection = presentation.select_target(
+            surface_region.size(),
+            work.kind == GpuIncrementalWorkKind::Direct,
+            |size| self.create_surface(size),
+        );
         let target = selection.surface();
         let mut incremental = presentation.incremental.clone();
         let stats = self
@@ -1443,23 +1456,28 @@ impl GpuPageRegion {
         })
     }
 
-    fn with_gutter_aligned(self, page_size: [u32; 2], gutter: u32, alignment: u32) -> Result<Self> {
+    fn with_gutter_aligned(
+        self,
+        page_size: [u32; 2],
+        gutter: [u32; 2],
+        alignment: u32,
+    ) -> Result<Self> {
         if alignment == 0 {
             bail!("native PDF surface alignment must be non-zero");
         }
         let visible = self.clamp(page_size)?;
-        let x0 = visible.x.saturating_sub(gutter) / alignment * alignment;
-        let y0 = visible.y.saturating_sub(gutter) / alignment * alignment;
+        let x0 = visible.x.saturating_sub(gutter[0]) / alignment * alignment;
+        let y0 = visible.y.saturating_sub(gutter[1]) / alignment * alignment;
         let x1 = visible
             .right()
-            .saturating_add(gutter)
+            .saturating_add(gutter[0])
             .min(page_size[0])
             .div_ceil(alignment)
             .saturating_mul(alignment)
             .min(page_size[0]);
         let y1 = visible
             .bottom()
-            .saturating_add(gutter)
+            .saturating_add(gutter[1])
             .min(page_size[1])
             .div_ceil(alignment)
             .saturating_mul(alignment)
@@ -1486,11 +1504,12 @@ pub struct GpuPaintRequest {
 
 impl GpuPaintRequest {
     pub fn surface_region(self) -> Result<GpuPageRegion> {
-        self.visible_region.with_gutter_aligned(
-            self.page_size,
-            ANALYTIC_TILE_SIZE,
-            ANALYTIC_TILE_SIZE,
-        )
+        let gutter = [
+            (self.visible_region.width / 4).max(ANALYTIC_TILE_SIZE),
+            (self.visible_region.height / 4).max(ANALYTIC_TILE_SIZE),
+        ];
+        self.visible_region
+            .with_gutter_aligned(self.page_size, gutter, ANALYTIC_TILE_SIZE)
     }
 }
 
@@ -1553,7 +1572,7 @@ impl GpuPagePresentation {
             .map(|surface| surface.view.as_ref())
     }
 
-    fn target_slot(&self, size: [u32; 2]) -> SurfaceSlot {
+    fn target_slot(&self, size: [u32; 2], allow_current: bool) -> SurfaceSlot {
         let retained = self
             .surfaces
             .iter()
@@ -1562,15 +1581,22 @@ impl GpuPagePresentation {
         for (output, surface) in sizes.iter_mut().zip(&self.surfaces) {
             *output = surface.size;
         }
-        presentation_surface_slot(&sizes[..self.surfaces.len()], self.current, retained, size)
+        presentation_surface_slot(
+            &sizes[..self.surfaces.len()],
+            self.current,
+            retained,
+            size,
+            allow_current,
+        )
     }
 
     fn select_target(
         &self,
         size: [u32; 2],
+        allow_current: bool,
         create: impl FnOnce([u32; 2]) -> Arc<GpuPageSurface>,
     ) -> SurfaceSelection {
-        let slot = self.target_slot(size);
+        let slot = self.target_slot(size, allow_current);
         let surface = match slot {
             SurfaceSlot::Existing(index) => Arc::clone(&self.surfaces[index]),
             SurfaceSlot::Insert | SurfaceSlot::Replace(_) => create(size),
@@ -1615,13 +1641,13 @@ impl GpuPagePresentation {
     }
 
     #[must_use]
-    pub fn projected_byte_len(&self, region: GpuPageRegion) -> u64 {
+    pub fn projected_byte_len(&self, region: GpuPageRegion, allow_current: bool) -> u64 {
         let mut bytes = self
             .surfaces
             .iter()
             .map(|surface| surface_byte_len(surface.size))
             .sum::<u64>();
-        match self.target_slot(region.size()) {
+        match self.target_slot(region.size(), allow_current) {
             SurfaceSlot::Existing(_) => {}
             SurfaceSlot::Insert => bytes = bytes.saturating_add(region.byte_len()),
             SurfaceSlot::Replace(index) => {
@@ -1675,7 +1701,14 @@ fn presentation_surface_slot(
     current: Option<usize>,
     retained: Option<usize>,
     requested: [u32; 2],
+    allow_current: bool,
 ) -> SurfaceSlot {
+    if allow_current
+        && let Some(current) = current
+        && sizes.get(current) == Some(&requested)
+    {
+        return SurfaceSlot::Existing(current);
+    }
     let reusable = |index: usize| Some(index) != current && Some(index) != retained;
     if let Some(index) = sizes
         .iter()
@@ -2562,34 +2595,60 @@ trailer <</Root 1 0 R>>
             shifted.surface_region().unwrap(),
             request.surface_region().unwrap()
         );
+
+        let large = GpuPaintRequest {
+            page_size: [4_000, 4_000],
+            visible_region: GpuPageRegion {
+                x: 1_000,
+                y: 1_000,
+                width: 1_600,
+                height: 1_000,
+            },
+            ..request
+        };
+        assert_eq!(
+            large.surface_region().unwrap(),
+            GpuPageRegion {
+                x: 512,
+                y: 640,
+                width: 2_560,
+                height: 1_664,
+            },
+            "large viewports retain a 1.5x motion cache before tile alignment"
+        );
     }
 
     #[test]
     fn presentation_ring_never_selects_current_or_retained_source() {
         let size = [640, 896];
         assert_eq!(
-            presentation_surface_slot(&[], None, None, size),
+            presentation_surface_slot(&[], None, None, size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size], Some(0), Some(0), size),
+            presentation_surface_slot(&[size], Some(0), Some(0), size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size], Some(1), Some(0), size),
+            presentation_surface_slot(&[size, size], Some(1), Some(0), size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(1), Some(0), size),
+            presentation_surface_slot(&[size, size, size], Some(1), Some(0), size, false),
             SurfaceSlot::Existing(2)
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(2), Some(0), size),
+            presentation_surface_slot(&[size, size, size], Some(2), Some(0), size, false),
             SurfaceSlot::Existing(1)
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(2), Some(0), [768, 896]),
+            presentation_surface_slot(&[size, size, size], Some(2), Some(0), [768, 896], false,),
             SurfaceSlot::Replace(1)
+        );
+        assert_eq!(
+            presentation_surface_slot(&[size, size], Some(1), Some(0), size, true),
+            SurfaceSlot::Existing(1),
+            "direct redraw may overwrite the current matching surface"
         );
     }
 }

@@ -28,23 +28,62 @@ pub(super) fn zoom_for_fit_extent(
 }
 
 impl DocumentView {
-    pub(super) fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        if (zoom - self.zoom).abs() <= f32::EPSILON {
-            return;
+    pub(super) fn zoom_anchor_at_viewport(&self, viewport: [f32; 2]) -> ZoomAnchor {
+        let scale = self.effective_scale();
+        let horizontal_inset = (self.viewport_width - self.max_page_width * scale) / 2.0;
+        ZoomAnchor {
+            document: [
+                self.scroll_x_doc + (viewport[0] - horizontal_inset) / scale,
+                self.scroll_y_doc + viewport[1] / scale,
+            ],
+            viewport,
         }
+    }
 
-        let old_scale = self.effective_scale();
-        let center_doc = self.scroll_y_doc + self.viewport_height / (2.0 * old_scale);
-
-        self.zoom = zoom;
-        self.mark_native_gpu_motion(cx);
-
-        let new_scale = self.effective_scale();
-        self.scroll_y_doc = center_doc - self.viewport_height / (2.0 * new_scale);
+    pub(super) fn apply_zoom_anchor(&mut self, zoom: f32, anchor: ZoomAnchor) {
+        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let scale = self.effective_scale();
+        let horizontal_inset = (self.viewport_width - self.max_page_width * scale) / 2.0;
+        self.scroll_x_doc = anchor.document[0] - (anchor.viewport[0] - horizontal_inset) / scale;
+        self.scroll_y_doc = anchor.document[1] - anchor.viewport[1] / scale;
         self.target_scroll_x_doc = self.scroll_x_doc;
         self.target_scroll_y_doc = self.scroll_y_doc;
         self.clamp_scroll();
+    }
+
+    pub(super) fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (zoom - self.zoom).abs() <= f32::EPSILON
+            && (zoom - self.target_zoom).abs() <= f32::EPSILON
+        {
+            return;
+        }
+        let anchor =
+            self.zoom_anchor_at_viewport([self.viewport_width / 2.0, self.viewport_height / 2.0]);
+        self.apply_zoom_anchor(zoom, anchor);
+        self.target_zoom = zoom;
+        self.zoom_anchor = None;
+        self.last_animation_frame = None;
+        self.mark_native_gpu_motion(cx);
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.schedule_position_save(cx);
+        cx.notify();
+    }
+
+    fn set_zoom_target(&mut self, zoom: f32, viewport_anchor: [f32; 2], cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (zoom - self.target_zoom).abs() <= f32::EPSILON {
+            return;
+        }
+        let viewport_anchor = [
+            viewport_anchor[0].clamp(0.0, self.viewport_width.max(0.0)),
+            viewport_anchor[1].clamp(0.0, self.viewport_height.max(0.0)),
+        ];
+        self.target_zoom = zoom;
+        self.zoom_anchor = Some(self.zoom_anchor_at_viewport(viewport_anchor));
+        self.last_animation_frame = None;
+        self.mark_native_gpu_motion(cx);
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
@@ -192,7 +231,11 @@ impl DocumentView {
             return;
         }
 
-        self.set_zoom(self.zoom * zoom_step, cx);
+        self.set_zoom_target(
+            self.target_zoom * zoom_step,
+            [self.viewport_width / 2.0, self.viewport_height / 2.0],
+            cx,
+        );
         self.show_zoom_popup(cx);
     }
 
@@ -206,7 +249,11 @@ impl DocumentView {
             return;
         }
 
-        self.set_zoom(self.zoom / zoom_step, cx);
+        self.set_zoom_target(
+            self.target_zoom / zoom_step,
+            [self.viewport_width / 2.0, self.viewport_height / 2.0],
+            cx,
+        );
         self.show_zoom_popup(cx);
     }
 
@@ -216,7 +263,11 @@ impl DocumentView {
         }
 
         let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
-        self.set_zoom(default_zoom, cx);
+        self.set_zoom_target(
+            default_zoom,
+            [self.viewport_width / 2.0, self.viewport_height / 2.0],
+            cx,
+        );
         self.show_zoom_popup(cx);
     }
 
@@ -238,19 +289,11 @@ impl DocumentView {
     }
 
     pub(super) fn page_index_for_doc_y(&self, doc_y: f32) -> usize {
-        let mut current = 0;
-        let mut current_offset = f32::NEG_INFINITY;
-        for (idx, page) in self.pages.iter().enumerate() {
-            if doc_y >= page.offset_y && page.offset_y > current_offset {
-                current = idx;
-                current_offset = page.offset_y;
-            } else {
-                if page.offset_y > doc_y {
-                    break;
-                }
-            }
-        }
-
+        let current = self
+            .pages
+            .partition_point(|page| page.offset_y <= doc_y)
+            .saturating_sub(1)
+            .min(self.last_page_index());
         self.spread_start_page(current)
     }
 
@@ -591,7 +634,14 @@ impl DocumentView {
             if self.grid_overview_open {
                 self.set_grid_overview_zoom(self.grid_overview_zoom * factor, cx);
             } else if !self.is_presentation_mode() {
-                self.set_zoom(self.zoom * factor, cx);
+                self.set_zoom_target(
+                    self.target_zoom * factor,
+                    [
+                        (event.position.x - self.viewport_origin.x).as_f32(),
+                        (event.position.y - self.viewport_origin.y).as_f32(),
+                    ],
+                    cx,
+                );
                 self.show_zoom_popup(cx);
             }
         } else {

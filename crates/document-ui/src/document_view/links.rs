@@ -499,10 +499,15 @@ impl DocumentView {
             return None;
         }
         let interactions = self.native_gpu_link_interactions(link.page_idx)?;
-        let interaction_ix = Self::native_link_mapping(link.page_idx, &self.links, interactions)?
-            .into_iter()
+        let interaction_ix = self
+            .cached_native_gpu_link_mapping(link.page_idx)
+            .map(Cow::Borrowed)
+            .or_else(|| {
+                Self::native_link_mapping(link.page_idx, &self.links, interactions).map(Cow::Owned)
+            })?
+            .iter()
             .find_map(|(candidate_link_ix, interaction_ix)| {
-                (candidate_link_ix == link_ix).then_some(interaction_ix)
+                (*candidate_link_ix == link_ix).then_some(*interaction_ix)
             })?;
         interactions.get(interaction_ix)
     }

@@ -320,11 +320,16 @@ impl DocumentView {
         let viewport_top = bounds.origin.y.as_f32();
         let viewport_bottom = viewport_top + self.viewport_height;
 
-        for page_idx in 0..self.pages.len() {
+        let first_candidate = self.page_index_for_doc_y(self.scroll_y_doc);
+        for page_idx in first_candidate..self.pages.len() {
             let (image_bounds, _) =
                 self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
             let page_top = image_bounds.origin.y.as_f32();
             let page_bottom = page_top + image_bounds.size.height.as_f32();
+
+            if page_top > viewport_bottom {
+                break;
+            }
 
             if page_bottom >= viewport_top && page_top <= viewport_bottom {
                 self.page_image_bounds[page_idx] = Some(image_bounds);

@@ -541,6 +541,8 @@ pub struct GpuPageRenderDebugSnapshot {
     pub refinement_pending: bool,
     pub selected_vector_lod: u32,
     pub frame_pool_reused: bool,
+    pub frame_pool_grew: bool,
+    pub frame_pool_capacity_bytes: u64,
     pub clip_state_changes: u64,
     pub stencil_draws: u64,
     pub compute_dispatches: u64,
@@ -1990,6 +1992,12 @@ impl DocumentTranslationState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ZoomAnchor {
+    document: [f32; 2],
+    viewport: [f32; 2],
+}
+
 pub struct DocumentView {
     doc_id: u64,
     path: PathBuf,
@@ -2041,6 +2049,9 @@ pub struct DocumentView {
     page_layout: DocumentPageLayout,
     page_gap: f32,
     zoom: f32,
+    target_zoom: f32,
+    zoom_anchor: Option<ZoomAnchor>,
+    last_animation_frame: Option<Instant>,
     zoom_popup_visible: bool,
     zoom_popup_hovered: bool,
     zoom_popup_generation: u64,

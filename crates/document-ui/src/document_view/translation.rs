@@ -737,6 +737,7 @@ impl DocumentView {
         self.text_lines.clear();
         self.text_blocks.clear();
         self.links.clear();
+        self.gpu_pdf.invalidate_link_mappings();
         self.page_line_ranges = vec![0..0; self.pages.len()];
         self.page_block_ranges = vec![0..0; self.pages.len()];
         for page in &mut self.pages {

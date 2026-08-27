@@ -55,9 +55,14 @@ impl DocumentView {
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
         let native_interactions = self.native_gpu_link_interactions(page_idx);
-        let native_mapping = native_interactions.and_then(|interactions| {
-            Self::native_link_mapping(page_idx, &self.links, interactions)
-        });
+        let native_mapping = self
+            .cached_native_gpu_link_mapping(page_idx)
+            .map(Cow::Borrowed)
+            .or_else(|| {
+                native_interactions.and_then(|interactions| {
+                    Self::native_link_mapping(page_idx, &self.links, interactions).map(Cow::Owned)
+                })
+            });
 
         self.links.iter().enumerate().find_map(|(link_ix, link)| {
             if link.page_idx != page_idx {
