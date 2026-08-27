@@ -84,9 +84,11 @@ impl DocumentView {
             requested.is_some_and(|key| self.native_gpu_key_enabled(key, configured_engine));
         let strict_native =
             configured_engine.is_strict_native() && self.format == DocumentFormat::Pdf;
-        let native_gpu_render = self
-            .native_gpu_render(page_idx)
-            .filter(|(key, _)| requested.is_some_and(|requested| requested == *key));
+        // A retained native texture remains the displayed backend while a
+        // newer scale/viewport request is rendered asynchronously. Preserve
+        // its key and stats here so the HUD does not mislabel that interval as
+        // a MuPDF placeholder merely because the keys differ.
+        let native_gpu_render = self.native_gpu_render(page_idx);
         let displayed = native_gpu_render.map(|(key, _)| key).or(mupdf_displayed);
         let exact_pending = requested.is_some_and(|requested| {
             self.pending_renders
@@ -115,6 +117,8 @@ impl DocumentView {
 
         let gpu = native_gpu_render.map(|(_, stats)| GpuPageRenderDebugSnapshot {
             cpu_time: stats.cpu_time,
+            frame_pool_wait_time: stats.frame_pool_wait_time,
+            command_encoding_time: stats.command_encoding_time,
             gpu_time: stats.gpu_time,
             host_to_device_bytes: stats.host_to_device_bytes,
             passes_executed: stats.passes_executed,

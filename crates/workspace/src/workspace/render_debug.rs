@@ -23,7 +23,7 @@ impl Workspace {
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
                     .continuous(false)
-                    .width(px(420.))
+                    .width(px(540.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
         }
@@ -101,6 +101,24 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
+            "FRONTEND CACHE",
+            format!(
+                "{} fonts / {} · {}/{} hit/miss · {} evict · {} objects · {}/{} hit/miss · {} evict · {} reports / {} scans",
+                document.gpu_cache.frontend_outline_fonts,
+                format_bytes(document.gpu_cache.frontend_outline_font_bytes),
+                document.gpu_cache.frontend_outline_font_hits,
+                document.gpu_cache.frontend_outline_font_misses,
+                document.gpu_cache.frontend_outline_font_evictions,
+                document.gpu_cache.frontend_objects,
+                document.gpu_cache.frontend_object_hits,
+                document.gpu_cache.frontend_object_misses,
+                document.gpu_cache.frontend_object_evictions,
+                document.gpu_cache.frontend_preflight_reports,
+                document.gpu_cache.frontend_preflight_scans,
+            ),
+            FOREGROUND,
+        ))
+        .child(reading(
             "GPU SCENES",
             format!(
                 "{} / {} compiled · {} / {} bounds · {} / {} prepared",
@@ -135,8 +153,11 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU PIPELINE",
             format!(
-                "{} seed · {} refine · motion {}",
+                "{} active · {} submitted · {} done · {} coalesced · {} refine · motion {}",
                 document.gpu_cache.surface_seed_tasks,
+                document.gpu_cache.surface_renders_started,
+                document.gpu_cache.surface_renders_completed,
+                document.gpu_cache.surface_renders_coalesced,
                 document.gpu_cache.refinement_pages,
                 if document.gpu_cache.motion_active {
                     "active"
@@ -583,6 +604,19 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                     FOREGROUND
                 } else {
                     MUTED
+                },
+            ))
+            .child(reading(
+                "GPU HOST",
+                format!(
+                    "pool wait {} · encode {}",
+                    format_duration(gpu.frame_pool_wait_time),
+                    format_duration(gpu.command_encoding_time),
+                ),
+                if gpu.frame_pool_wait_time > Duration::from_millis(1) {
+                    WARN
+                } else {
+                    FOREGROUND
                 },
             ))
             .child(reading(

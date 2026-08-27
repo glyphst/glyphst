@@ -16,7 +16,10 @@ use glyphst_pdf_engine::{
     OutlineItem as EngineOutlineItem, PageIndex, Password, Rect, ResourceLimits, SupportDiagnostic,
     Transform,
 };
-pub use glyphst_pdf_engine::{CancellationToken, FeatureId, Permissions as GpuPdfPermissions};
+pub use glyphst_pdf_engine::{
+    CancellationToken, DocumentCacheStats as GpuDocumentCacheStats, FeatureId,
+    Permissions as GpuPdfPermissions,
+};
 use glyphst_pdf_render_cpu::{CpuRenderer, CpuViewportRequest};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
@@ -500,6 +503,12 @@ impl GpuPdfDocument {
     #[must_use]
     pub fn permissions(&self) -> GpuPdfPermissions {
         self.inner.document.permissions()
+    }
+
+    /// Current document-owned parser/interpreter cache statistics.
+    #[must_use]
+    pub fn frontend_cache_stats(&self) -> GpuDocumentCacheStats {
+        self.inner.document.cache_stats()
     }
 
     /// Current bounded CPU semantic-scene cache occupancy.

@@ -524,6 +524,8 @@ pub enum PageRenderBackendDebug {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuPageRenderDebugSnapshot {
     pub cpu_time: Duration,
+    pub frame_pool_wait_time: Duration,
+    pub command_encoding_time: Duration,
     pub gpu_time: Option<Duration>,
     pub host_to_device_bytes: u64,
     pub passes_executed: u64,
@@ -637,6 +639,17 @@ pub struct GpuPagePreparationDebugSnapshot {
 /// Bounded native reader/GPU cache occupancy for the current document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GpuCacheDebugSnapshot {
+    pub frontend_outline_fonts: usize,
+    pub frontend_outline_font_bytes: u64,
+    pub frontend_outline_font_hits: u64,
+    pub frontend_outline_font_misses: u64,
+    pub frontend_outline_font_evictions: u64,
+    pub frontend_objects: usize,
+    pub frontend_object_hits: u64,
+    pub frontend_object_misses: u64,
+    pub frontend_object_evictions: u64,
+    pub frontend_preflight_reports: usize,
+    pub frontend_preflight_scans: u64,
     pub compiled_pages: usize,
     pub compiled_page_limit: usize,
     pub content_bound_pages: usize,
@@ -649,6 +662,9 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_bytes: u64,
     pub surface_byte_limit: u64,
     pub surface_seed_tasks: usize,
+    pub surface_renders_started: u64,
+    pub surface_renders_completed: u64,
+    pub surface_renders_coalesced: u64,
     pub refinement_pages: usize,
     pub active_preparations: usize,
     pub queued_preparations: usize,

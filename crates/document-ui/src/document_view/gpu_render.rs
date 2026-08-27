@@ -3,11 +3,9 @@ use super::*;
 const MAX_RETAINED_GPU_PAGES: usize = 8;
 const MAX_RETAINED_GPU_DIAGNOSTICS: usize = 64;
 const MAX_CONCURRENT_GPU_PAGE_PREPARATIONS: usize = 2;
-const GPU_PREPARE_AHEAD_PAGES: usize = 3;
-const GPU_PREPARE_BEHIND_PAGES: usize = 1;
 const MAX_RETAINED_GPU_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_SURFACE_SEED_TASKS: usize = 2;
+const MAX_SURFACE_SEED_TASKS: usize = 1;
 
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const GPU_FIRST_PAINT_GRACE: Duration = Duration::from_millis(50);
@@ -49,6 +47,9 @@ pub(super) struct GpuPdfState {
     patch_lod_tasks: HashMap<u32, PatchLodTask>,
     surface_seed_generation: u64,
     surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
+    surface_render_started: u64,
+    surface_render_completed: u64,
+    surface_render_coalesced: u64,
     fallback_grace_generation: u64,
     fallback_grace_tasks: HashMap<u32, FallbackGraceTask>,
     fallback_grace_elapsed: HashSet<u32>,
@@ -111,6 +112,7 @@ struct SurfaceSeedTask {
     generation: u64,
     key: RenderKey,
     region: GpuPageRegion,
+    request: GpuPaintRequest,
     _task: Task<()>,
 }
 
@@ -154,6 +156,9 @@ impl GpuPdfState {
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
+        self.surface_render_started = 0;
+        self.surface_render_completed = 0;
+        self.surface_render_coalesced = 0;
         self.fallback_grace_generation = 0;
         self.fallback_grace_tasks.clear();
         self.fallback_grace_elapsed.clear();
@@ -192,6 +197,9 @@ impl GpuPdfState {
         self.patch_lod_tasks.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
+        self.surface_render_started = 0;
+        self.surface_render_completed = 0;
+        self.surface_render_coalesced = 0;
         self.fallback_grace_generation = 0;
         self.fallback_grace_tasks.clear();
         self.fallback_grace_elapsed.clear();
@@ -605,6 +613,7 @@ impl Drop for GpuPdfState {
 
 fn gpu_preparation_targets(
     visible: &HashSet<u32>,
+    target_viewport: &HashSet<u32>,
     page_count: u32,
     forward: bool,
 ) -> (Vec<GpuPreparationTarget>, Option<u32>) {
@@ -625,7 +634,30 @@ fn gpu_preparation_targets(
             speculative: false,
         })
         .collect::<Vec<_>>();
-    let speculative_budget = MAX_RETAINED_GPU_PAGES.saturating_sub(visible.len());
+    let target_center = target_viewport
+        .iter()
+        .min()
+        .copied()
+        .zip(target_viewport.iter().max().copied())
+        .map(|(first, last)| first.saturating_add(last).saturating_div(2))
+        .unwrap_or(center);
+    let mut target_pages = target_viewport
+        .iter()
+        .filter(|page| !visible.contains(page) && **page < page_count)
+        .copied()
+        .collect::<Vec<_>>();
+    target_pages.sort_unstable_by_key(|page| (page.abs_diff(target_center), *page));
+    target_pages.truncate(MAX_RETAINED_GPU_PAGES.saturating_sub(ordered.len()));
+    let target_priority = ordered.len();
+    ordered.extend(target_pages.into_iter().enumerate().map(|(offset, page)| {
+        GpuPreparationTarget {
+            page,
+            priority: target_priority.saturating_add(offset),
+            speculative: false,
+        }
+    }));
+
+    let speculative_budget = MAX_RETAINED_GPU_PAGES.saturating_sub(ordered.len());
     if speculative_budget == 0 {
         return (ordered, None);
     }
@@ -645,49 +677,74 @@ fn gpu_preparation_targets(
         }
     }
 
-    let mut speculative =
-        Vec::with_capacity(GPU_PREPARE_AHEAD_PAGES.saturating_add(GPU_PREPARE_BEHIND_PAGES));
+    let desired = ordered
+        .iter()
+        .map(|target| target.page)
+        .collect::<HashSet<_>>();
+    let primary_budget = speculative_budget.saturating_mul(3).div_ceil(4);
+    let secondary_budget = speculative_budget.saturating_sub(primary_budget);
+    let mut speculative = Vec::with_capacity(speculative_budget);
     if forward {
-        for distance in 1..=GPU_PREPARE_AHEAD_PAGES {
+        for distance in 1..page_count {
+            if speculative.len() >= primary_budget {
+                break;
+            }
             push_speculative(
                 &mut speculative,
-                visible,
+                &desired,
                 page_count,
-                u32::try_from(distance)
-                    .ok()
-                    .and_then(|distance| last.checked_add(distance)),
+                last.checked_add(distance),
             );
         }
-        for distance in 1..=GPU_PREPARE_BEHIND_PAGES {
+        let secondary_limit = speculative.len().saturating_add(secondary_budget);
+        for distance in 1..page_count {
+            if speculative.len() >= secondary_limit {
+                break;
+            }
             push_speculative(
                 &mut speculative,
-                visible,
+                &desired,
                 page_count,
-                u32::try_from(distance)
-                    .ok()
-                    .and_then(|distance| first.checked_sub(distance)),
+                first.checked_sub(distance),
             );
         }
     } else {
-        for distance in 1..=GPU_PREPARE_AHEAD_PAGES {
+        for distance in 1..page_count {
+            if speculative.len() >= primary_budget {
+                break;
+            }
             push_speculative(
                 &mut speculative,
-                visible,
+                &desired,
                 page_count,
-                u32::try_from(distance)
-                    .ok()
-                    .and_then(|distance| first.checked_sub(distance)),
+                first.checked_sub(distance),
             );
         }
-        for distance in 1..=GPU_PREPARE_BEHIND_PAGES {
+        let secondary_limit = speculative.len().saturating_add(secondary_budget);
+        for distance in 1..page_count {
+            if speculative.len() >= secondary_limit {
+                break;
+            }
             push_speculative(
                 &mut speculative,
-                visible,
+                &desired,
                 page_count,
-                u32::try_from(distance)
-                    .ok()
-                    .and_then(|distance| last.checked_add(distance)),
+                last.checked_add(distance),
             );
+        }
+    }
+    for distance in 1..page_count {
+        if speculative.len() >= speculative_budget {
+            break;
+        }
+        let (primary, secondary) = if forward {
+            (last.checked_add(distance), first.checked_sub(distance))
+        } else {
+            (first.checked_sub(distance), last.checked_add(distance))
+        };
+        push_speculative(&mut speculative, &desired, page_count, primary);
+        if speculative.len() < speculative_budget {
+            push_speculative(&mut speculative, &desired, page_count, secondary);
         }
     }
     speculative.truncate(speculative_budget);
@@ -798,6 +855,16 @@ fn adjacent_gpu_viewport_bounds(
 
 fn should_start_surface_seed(settled: bool, allow_motion_seed: bool, has_previous: bool) -> bool {
     settled || allow_motion_seed || !has_previous
+}
+
+fn same_gpu_paint_request(left: GpuPaintRequest, right: GpuPaintRequest) -> bool {
+    // `generation` identifies the requesting paint traversal. It does not
+    // change the pixels produced by an otherwise identical request.
+    left.page_size == right.page_size
+        && left.visible_region == right.visible_region
+        && left.rotation == right.rotation
+        && left.background == right.background
+        && left.settled == right.settled
 }
 
 fn mupdf_placeholder_allowed(
@@ -1204,7 +1271,6 @@ impl DocumentView {
             let rendered = self.gpu_pdf.rendered.get(&page)?;
             let texture = rendered.presentation.current_texture()?;
             self.gpu_pdf.presented_pages.insert(page);
-            window.request_animation_frame();
             return Some(gpu_paint_texture(rendered.key, image_bounds, texture));
         }
         let requested_surface_bytes = presentation
@@ -1219,75 +1285,38 @@ impl DocumentView {
             );
             return None;
         }
-        if work.kind == GpuIncrementalWorkKind::Full {
-            let previous = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
-                rendered
-                    .presentation
-                    .current_texture()
-                    .map(|texture| (rendered.key, texture))
-            });
-            // Motion may defer replacing an already usable native texture, but
-            // it must not starve a newly visible page behind a MuPDF
-            // placeholder. Adjacent warming normally makes this branch cheap;
-            // a cold jump still starts one bounded, visible-priority seed.
-            if should_start_surface_seed(settled, allow_motion_seed, previous.is_some()) {
-                self.start_native_gpu_surface_seed(
-                    page,
-                    key,
-                    Arc::clone(&prepared),
-                    Arc::clone(&renderer),
-                    request,
-                    surface_region,
-                    presentation,
-                    cx,
-                );
-            }
-            if let Some((rendered_key, texture)) = previous {
-                self.gpu_pdf.presented_pages.insert(page);
-                return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
-            }
-            return None;
-        }
         if work.kind == GpuIncrementalWorkKind::Refine {
             *refinement_budget = false;
         }
-        self.gpu_pdf.surface_failures.remove(&page);
-        match renderer.render_page(&prepared, request, &mut presentation) {
-            Ok((texture, stats)) => {
-                let refinement_pending = presentation.refinement_pending();
-                self.gpu_pdf.rendered.insert(
-                    page,
-                    RenderedGpuPage {
-                        key,
-                        presentation,
-                        stats,
-                    },
-                );
-                self.gpu_pdf.prune_surface_cache();
-                self.gpu_pdf.presented_pages.insert(page);
-                if refinement_pending {
-                    // Exact analytic and scope-free retained work is bounded
-                    // per settled frame. Keep the reprojected texture visible
-                    // and ask GPUI for the next paint until the engine reports
-                    // complete exact coverage.
-                    window.request_animation_frame();
-                }
-                Some(gpu_paint_texture(key, image_bounds, texture))
-            }
-            Err(error) => {
-                self.gpu_pdf
-                    .surface_failures
-                    .insert(page, format!("{error:#}"));
-                eprintln!(
-                    "failed to render native PDF page {} on the GPU: {error:#}",
-                    page + 1
-                );
-                if renderer.is_device_lost() {
-                    self.gpu_pdf.reset_device();
-                }
-                None
-            }
+        let previous = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
+            rendered
+                .presentation
+                .current_texture()
+                .map(|texture| (rendered.key, texture))
+        });
+        // GPU command recording and submission never run inside GPUI's paint
+        // traversal. Keep presenting the prior same-device texture while the
+        // single latest-request worker renders this update.
+        if work.kind != GpuIncrementalWorkKind::Full
+            || should_start_surface_seed(settled, allow_motion_seed, previous.is_some())
+        {
+            self.start_native_gpu_surface_seed(
+                page,
+                key,
+                Arc::clone(&prepared),
+                Arc::clone(&renderer),
+                request,
+                surface_region,
+                presentation,
+                cx,
+            );
         }
+        if let Some((rendered_key, texture)) = previous {
+            self.gpu_pdf.presented_pages.insert(page);
+            self.gpu_pdf.surface_failures.remove(&page);
+            return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+        }
+        None
     }
 
     fn start_native_gpu_document_open(&mut self, cx: &mut Context<Self>) {
@@ -1545,7 +1574,14 @@ impl DocumentView {
         mut presentation: GpuPagePresentation,
         cx: &mut Context<Self>,
     ) {
-        if self.gpu_pdf.surface_seed_tasks.contains_key(&page) {
+        if let Some(active) = self.gpu_pdf.surface_seed_tasks.get(&page) {
+            if active.key != key
+                || active.region != region
+                || !same_gpu_paint_request(active.request, request)
+            {
+                self.gpu_pdf.surface_render_coalesced =
+                    self.gpu_pdf.surface_render_coalesced.saturating_add(1);
+            }
             return;
         }
         if self.gpu_pdf.surface_seed_tasks.len() >= MAX_SURFACE_SEED_TASKS {
@@ -1558,10 +1594,16 @@ impl DocumentView {
                     .copied();
                 if let Some(offscreen) = offscreen {
                     self.gpu_pdf.surface_seed_tasks.remove(&offscreen);
+                    self.gpu_pdf.surface_render_coalesced =
+                        self.gpu_pdf.surface_render_coalesced.saturating_add(1);
                 } else {
+                    self.gpu_pdf.surface_render_coalesced =
+                        self.gpu_pdf.surface_render_coalesced.saturating_add(1);
                     return;
                 }
             } else {
+                self.gpu_pdf.surface_render_coalesced =
+                    self.gpu_pdf.surface_render_coalesced.saturating_add(1);
                 return;
             }
         }
@@ -1603,6 +1645,8 @@ impl DocumentView {
                     return;
                 }
                 this.gpu_pdf.surface_seed_tasks.remove(&page);
+                this.gpu_pdf.surface_render_completed =
+                    this.gpu_pdf.surface_render_completed.saturating_add(1);
                 match result {
                     Ok((presentation, stats)) => {
                         let bytes = presentation.byte_len();
@@ -1657,9 +1701,11 @@ impl DocumentView {
                 generation,
                 key,
                 region,
+                request,
                 _task: task,
             },
         );
+        self.gpu_pdf.surface_render_started = self.gpu_pdf.surface_render_started.saturating_add(1);
         cx.notify();
     }
 
@@ -1847,7 +1893,22 @@ impl DocumentView {
         }
         let forward = self.gpu_pdf.last_scroll_direction >= 0;
         let page_count = u32::try_from(self.pages.len()).unwrap_or(u32::MAX);
-        let (targets, nearest) = gpu_preparation_targets(&visible, page_count, forward);
+        let target_viewport = if self.is_presentation_mode() {
+            visible.clone()
+        } else {
+            let scale = self.effective_scale().max(f32::EPSILON);
+            let target_top = self.target_scroll_y_doc;
+            let target_bottom = target_top + self.viewport_height / scale;
+            let first = self.page_index_for_doc_y(target_top);
+            let last = self
+                .page_index_for_doc_y(target_bottom)
+                .min(self.last_page_index());
+            (first..=last)
+                .filter_map(|page| u32::try_from(page).ok())
+                .collect::<HashSet<_>>()
+        };
+        let (targets, nearest) =
+            gpu_preparation_targets(&visible, &target_viewport, page_count, forward);
         let retained = targets
             .iter()
             .map(|target| target.page)
@@ -1877,6 +1938,18 @@ impl DocumentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let visible_demand = self.gpu_pdf.visible_pages.iter().any(|page| {
+            self.gpu_pdf
+                .rendered
+                .get(page)
+                .is_none_or(|rendered| rendered.presentation.refinement_pending())
+        });
+        if self.native_gpu_preparation_motion_active()
+            || visible_demand
+            || !self.gpu_pdf.surface_seed_tasks.is_empty()
+        {
+            return;
+        }
         let Ok(page) = u32::try_from(key.page_idx) else {
             return;
         };
@@ -1998,6 +2071,12 @@ impl DocumentView {
     }
 
     pub(super) fn native_gpu_cache_debug(&self) -> GpuCacheDebugSnapshot {
+        let frontend = self
+            .gpu_pdf
+            .document
+            .as_ref()
+            .map(|document| document.frontend_cache_stats())
+            .unwrap_or_default();
         let prepared = self
             .gpu_pdf
             .pages
@@ -2010,6 +2089,17 @@ impl DocumentView {
             })
             .collect::<Vec<_>>();
         GpuCacheDebugSnapshot {
+            frontend_outline_fonts: frontend.outline_fonts,
+            frontend_outline_font_bytes: frontend.outline_font_bytes,
+            frontend_outline_font_hits: frontend.outline_font_hits,
+            frontend_outline_font_misses: frontend.outline_font_misses,
+            frontend_outline_font_evictions: frontend.outline_font_evictions,
+            frontend_objects: frontend.interpreter_objects,
+            frontend_object_hits: frontend.interpreter_object_hits,
+            frontend_object_misses: frontend.interpreter_object_misses,
+            frontend_object_evictions: frontend.interpreter_object_evictions,
+            frontend_preflight_reports: frontend.preflight_reports,
+            frontend_preflight_scans: frontend.completed_preflight_scans,
             compiled_pages: self
                 .gpu_pdf
                 .document
@@ -2038,6 +2128,9 @@ impl DocumentView {
             surface_bytes: self.gpu_pdf.surface_bytes(),
             surface_byte_limit: MAX_RETAINED_GPU_SURFACE_BYTES,
             surface_seed_tasks: self.gpu_pdf.surface_seed_tasks.len(),
+            surface_renders_started: self.gpu_pdf.surface_render_started,
+            surface_renders_completed: self.gpu_pdf.surface_render_completed,
+            surface_renders_coalesced: self.gpu_pdf.surface_render_coalesced,
             refinement_pages: self
                 .gpu_pdf
                 .rendered
@@ -2120,7 +2213,8 @@ mod tests {
     #[test]
     fn preparation_window_is_directional_and_deterministic() {
         let visible = [4, 5].into_iter().collect::<HashSet<_>>();
-        let (forward, nearest_forward) = gpu_preparation_targets(&visible, 10, true);
+        let (forward, nearest_forward) =
+            gpu_preparation_targets(&visible, &HashSet::new(), 10, true);
         assert_eq!(nearest_forward, Some(6));
         assert_eq!(
             forward
@@ -2133,11 +2227,14 @@ mod tests {
                 (6, true),
                 (7, true),
                 (8, true),
-                (3, true)
+                (9, true),
+                (3, true),
+                (2, true)
             ]
         );
 
-        let (backward, nearest_backward) = gpu_preparation_targets(&visible, 10, false);
+        let (backward, nearest_backward) =
+            gpu_preparation_targets(&visible, &HashSet::new(), 10, false);
         assert_eq!(nearest_backward, Some(3));
         assert_eq!(
             backward
@@ -2150,7 +2247,33 @@ mod tests {
                 (3, true),
                 (2, true),
                 (1, true),
-                (6, true)
+                (0, true),
+                (6, true),
+                (7, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn target_viewport_precedes_the_directional_scroll_corridor() {
+        let visible = [2].into_iter().collect::<HashSet<_>>();
+        let target = [6, 7].into_iter().collect::<HashSet<_>>();
+        let (targets, nearest) = gpu_preparation_targets(&visible, &target, 12, true);
+        assert_eq!(nearest, Some(3));
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.page, target.speculative))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, false),
+                (6, false),
+                (7, false),
+                (3, true),
+                (4, true),
+                (5, true),
+                (8, true),
+                (1, true),
             ]
         );
     }
@@ -2158,7 +2281,7 @@ mod tests {
     #[test]
     fn visible_pages_consume_the_speculative_cache_budget_first() {
         let visible = (0..MAX_RETAINED_GPU_PAGES as u32).collect::<HashSet<_>>();
-        let (targets, nearest) = gpu_preparation_targets(&visible, 20, true);
+        let (targets, nearest) = gpu_preparation_targets(&visible, &HashSet::new(), 20, true);
         assert_eq!(targets.len(), visible.len());
         assert!(targets.iter().all(|target| !target.speculative));
         assert_eq!(nearest, None);
@@ -2355,6 +2478,47 @@ mod tests {
         assert!(!should_start_surface_seed(false, false, true));
         assert!(should_start_surface_seed(false, true, true));
         assert!(should_start_surface_seed(true, false, true));
+    }
+
+    #[test]
+    fn render_request_coalescing_ignores_only_the_paint_generation() {
+        let request = GpuPaintRequest {
+            page_size: [1_000, 2_000],
+            visible_region: GpuPageRegion {
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 1_200,
+            },
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0, 1.0, 1.0, 1.0],
+            settled: false,
+            generation: 1,
+        };
+        assert!(same_gpu_paint_request(
+            request,
+            GpuPaintRequest {
+                generation: 2,
+                ..request
+            }
+        ));
+        assert!(!same_gpu_paint_request(
+            request,
+            GpuPaintRequest {
+                settled: true,
+                ..request
+            }
+        ));
+        assert!(!same_gpu_paint_request(
+            request,
+            GpuPaintRequest {
+                visible_region: GpuPageRegion {
+                    y: 21,
+                    ..request.visible_region
+                },
+                ..request
+            }
+        ));
     }
 
     #[test]
