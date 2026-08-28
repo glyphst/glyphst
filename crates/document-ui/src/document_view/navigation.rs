@@ -71,7 +71,12 @@ impl DocumentView {
         cx.notify();
     }
 
-    fn set_zoom_target(&mut self, zoom: f32, viewport_anchor: [f32; 2], cx: &mut Context<Self>) {
+    pub(super) fn set_zoom_target(
+        &mut self,
+        zoom: f32,
+        viewport_anchor: [f32; 2],
+        cx: &mut Context<Self>,
+    ) {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if (zoom - self.target_zoom).abs() <= f32::EPSILON {
             return;

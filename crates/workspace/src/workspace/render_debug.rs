@@ -1,6 +1,7 @@
 use glyphst_document_ui::document_view::{
     DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, PageRenderBackendDebug,
-    PageRenderDebugSnapshot, PageRenderDebugStatus, RenderCacheDebugSnapshot, TextIndexDebugState,
+    PageRenderDebugSnapshot, PageRenderDebugStatus, RenderCacheDebugSnapshot,
+    SynchronizedScrollDelta, SynchronizedScrollMode, TextIndexDebugState,
     render_cache_debug_snapshot,
 };
 use gpui::{
@@ -13,7 +14,12 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
 };
 use serde_json::{Map, Value, json};
-use std::time::{Duration, Instant};
+use std::{
+    fs, io,
+    io::Write as _,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use super::*;
 
@@ -25,6 +31,13 @@ const BAD: Hsla = hsla(0.00, 0.78, 0.67, 1.);
 const BORDER: Hsla = hsla(0., 0., 1., 0.14);
 const FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const MAX_RAW_FRAME_SAMPLES: usize = 4_096;
+const TRACE_WARMUP_READY_FRAMES: usize = 5;
+const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(15);
+const TRACE_SCROLL_FRAMES_PER_DIRECTION: usize = 120;
+const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
+const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
+const TRACE_SETTLING_FRAMES: usize = 30;
+const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 
 struct RenderDebugCaptureNotification;
 
@@ -32,16 +45,121 @@ pub(super) struct RenderDebugCapture {
     collector: FrameTimingCollector,
     window_id: WindowId,
     started_at: Instant,
+    measurement_started_at: Option<Instant>,
     captured_at: String,
     document: WeakEntity<DocumentView>,
     document_entity_id: u64,
     document_start: DocumentRenderDebugSnapshot,
     render_cache_start: RenderCacheDebugSnapshot,
+    trace: Option<RenderDebugTraceReport>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RenderDebugTraceKind {
+    Scroll,
+    Zoom,
+}
+
+impl RenderDebugTraceKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Scroll => "scroll",
+            Self::Zoom => "zoom",
+        }
+    }
+
+    fn frames_per_direction(self) -> usize {
+        match self {
+            Self::Scroll => TRACE_SCROLL_FRAMES_PER_DIRECTION,
+            Self::Zoom => TRACE_ZOOM_FRAMES_PER_DIRECTION,
+        }
+    }
+
+    fn planned_interaction_frames(self) -> usize {
+        self.frames_per_direction() * 2
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RenderDebugTracePhase {
+    Warmup,
+    Forward,
+    Reverse,
+    Settle,
+}
+
+impl RenderDebugTracePhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Warmup => "warmup",
+            Self::Forward => "forward",
+            Self::Reverse => "reverse",
+            Self::Settle => "settle",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RenderDebugTraceMarker {
+    phase: &'static str,
+    frame_index: usize,
+    offset: Duration,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderDebugTraceObservations {
+    unexpected_backend_frames: usize,
+    pending_backend_frames: usize,
+    failed_backend_frames: usize,
+    fallback_frames: usize,
+    gpu_failure_frames: usize,
+    max_pending_render_count: usize,
+    max_surface_render_pending: usize,
+    max_refinement_pages: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RenderDebugTraceReport {
+    kind: RenderDebugTraceKind,
+    planned_interaction_frames: usize,
+    completed_interaction_frames: usize,
+    planned_settling_frames: usize,
+    completed_settling_frames: usize,
+    warmup_duration: Duration,
+    markers: Vec<RenderDebugTraceMarker>,
+    cancelled: bool,
+    failure: Option<String>,
+    original_position: DocumentPosition,
+    final_position: Option<DocumentPosition>,
+    observations: RenderDebugTraceObservations,
+}
+
+pub(super) struct RenderDebugTrace {
+    generation: u64,
+    kind: RenderDebugTraceKind,
+    pub(super) phase: RenderDebugTracePhase,
+    phase_frame: usize,
+    ready_frames: usize,
+    started_at: Instant,
+    warmup_duration: Duration,
+    document: WeakEntity<DocumentView>,
+    document_entity_id: u64,
+    original_position: DocumentPosition,
+    scroll_pixels_per_frame: f32,
+    completed_interaction_frames: usize,
+    completed_settling_frames: usize,
+    markers: Vec<RenderDebugTraceMarker>,
+    observations: RenderDebugTraceObservations,
 }
 
 impl Workspace {
     pub(super) fn toggle_rendering_debug(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rendering_debug.is_some() {
+            if let Some(trace) = self.rendering_debug_trace.take() {
+                restore_render_debug_trace_position(&trace, cx);
+            }
+            self.rendering_debug_trace_generation =
+                self.rendering_debug_trace_generation.wrapping_add(1);
             self.rendering_debug = None;
             self.rendering_debug_capture = None;
         } else {
@@ -51,14 +169,14 @@ impl Workspace {
                     .capacity(240)
                     .frame_budget(FRAME_BUDGET)
                     .continuous(false)
-                    .width(px(540.))
+                    .width(px(620.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
         }
         cx.notify();
     }
 
-    fn active_render_debug_document(&self, cx: &App) -> Option<Entity<DocumentView>> {
+    pub(super) fn active_render_debug_document(&self, cx: &App) -> Option<Entity<DocumentView>> {
         (self.surface_mode == WorkspaceSurfaceMode::Panes)
             .then(|| self.active_pane.read(cx).active_document_view())
             .flatten()
@@ -69,7 +187,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.rendering_debug_capture.is_some() {
+        if self.rendering_debug_capture.is_some() || self.rendering_debug_trace.is_some() {
             return;
         }
         let Some(document) = self.active_render_debug_document(cx) else {
@@ -82,16 +200,301 @@ impl Workspace {
             return;
         };
         let document_start = document.read(cx).render_debug_snapshot(cx);
+        let started_at = Instant::now();
         self.rendering_debug_capture = Some(RenderDebugCapture {
             collector: FrameTimingCollector::new(),
             window_id: window.window_handle().window_id(),
-            started_at: Instant::now(),
+            started_at,
+            measurement_started_at: Some(started_at),
             captured_at: chrono::Utc::now().to_rfc3339(),
             document_entity_id: document.entity_id().as_u64(),
             document: document.downgrade(),
             document_start,
             render_cache_start: render_cache_debug_snapshot(cx),
+            trace: None,
         });
+        cx.notify();
+    }
+
+    pub(super) fn start_render_debug_trace(
+        &mut self,
+        kind: RenderDebugTraceKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rendering_debug_capture.is_some() || self.rendering_debug_trace.is_some() {
+            return;
+        }
+        let Some(document) = self.active_render_debug_document(cx) else {
+            render_debug_capture_warning(
+                window,
+                "Open a fixed-layout document before starting a scripted trace",
+                cx,
+            );
+            return;
+        };
+        let document_start = document.read(cx).render_debug_snapshot(cx);
+        let original_position = document.read(cx).current_document_position();
+        if let Some(reason) =
+            render_debug_trace_precondition(kind, &document_start, &original_position)
+        {
+            render_debug_capture_warning(window, reason, cx);
+            return;
+        }
+
+        let scroll_pixels_per_frame = if kind == RenderDebugTraceKind::Scroll {
+            let interaction = &document_start.interaction;
+            let scale = interaction.effective_scale.max(0.001);
+            let room_before = interaction.target_scroll_y_doc.max(0.0) * scale;
+            let room_after =
+                (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
+            if room_after >= room_before {
+                TRACE_SCROLL_PIXELS_PER_FRAME
+            } else {
+                -TRACE_SCROLL_PIXELS_PER_FRAME
+            }
+        } else {
+            0.0
+        };
+        let started_at = Instant::now();
+        self.rendering_debug_trace_generation =
+            self.rendering_debug_trace_generation.wrapping_add(1);
+        let generation = self.rendering_debug_trace_generation;
+        self.rendering_debug_capture = Some(RenderDebugCapture {
+            collector: FrameTimingCollector::new(),
+            window_id: window.window_handle().window_id(),
+            started_at,
+            measurement_started_at: None,
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            document_entity_id: document.entity_id().as_u64(),
+            document: document.downgrade(),
+            document_start,
+            render_cache_start: render_cache_debug_snapshot(cx),
+            trace: None,
+        });
+        self.rendering_debug_trace = Some(RenderDebugTrace {
+            generation,
+            kind,
+            phase: RenderDebugTracePhase::Warmup,
+            phase_frame: 0,
+            ready_frames: 0,
+            started_at,
+            warmup_duration: Duration::ZERO,
+            document: document.downgrade(),
+            document_entity_id: document.entity_id().as_u64(),
+            original_position,
+            scroll_pixels_per_frame,
+            completed_interaction_frames: 0,
+            completed_settling_frames: 0,
+            markers: vec![RenderDebugTraceMarker {
+                phase: RenderDebugTracePhase::Warmup.name(),
+                frame_index: 0,
+                offset: Duration::ZERO,
+            }],
+            observations: RenderDebugTraceObservations::default(),
+        });
+        schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        cx.notify();
+    }
+
+    fn step_render_debug_trace(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut trace) = self.rendering_debug_trace.take() else {
+            return;
+        };
+        if trace.generation != generation || self.rendering_debug_trace_generation != generation {
+            self.rendering_debug_trace = Some(trace);
+            return;
+        }
+        let active_document_id = self
+            .active_render_debug_document(cx)
+            .map(|document| document.entity_id().as_u64());
+        if active_document_id != Some(trace.document_entity_id) {
+            self.complete_render_debug_trace(
+                trace,
+                true,
+                Some("the active document changed during the trace".to_string()),
+                window,
+                cx,
+            );
+            return;
+        }
+        let Some(document) = trace.document.upgrade() else {
+            self.complete_render_debug_trace(
+                trace,
+                true,
+                Some("the traced document was closed".to_string()),
+                window,
+                cx,
+            );
+            return;
+        };
+        let snapshot = document.read(cx).render_debug_snapshot(cx);
+        let elapsed = Instant::now().saturating_duration_since(trace.started_at);
+
+        match trace.phase {
+            RenderDebugTracePhase::Warmup => {
+                if render_debug_trace_ready(&snapshot) {
+                    trace.ready_frames += 1;
+                } else {
+                    trace.ready_frames = 0;
+                }
+                if trace.ready_frames >= TRACE_WARMUP_READY_FRAMES {
+                    trace.warmup_duration = elapsed;
+                    trace.phase = RenderDebugTracePhase::Forward;
+                    trace.phase_frame = 0;
+                    trace.markers.push(RenderDebugTraceMarker {
+                        phase: RenderDebugTracePhase::Forward.name(),
+                        frame_index: 0,
+                        offset: elapsed,
+                    });
+                } else if elapsed >= TRACE_WARMUP_TIMEOUT {
+                    self.complete_render_debug_trace(
+                        trace,
+                        false,
+                        Some(format!(
+                            "warmup did not reach five consecutive ready frames within {} seconds",
+                            TRACE_WARMUP_TIMEOUT.as_secs()
+                        )),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            }
+            RenderDebugTracePhase::Forward | RenderDebugTracePhase::Reverse => {
+                if trace.completed_interaction_frames == 0
+                    && let Some(capture) = self.rendering_debug_capture.as_mut()
+                {
+                    capture.measurement_started_at = Some(Instant::now());
+                    capture.document_start = snapshot.clone();
+                    capture.render_cache_start = render_cache_debug_snapshot(cx);
+                }
+                observe_render_debug_trace(&mut trace.observations, &snapshot);
+                let forward = trace.phase == RenderDebugTracePhase::Forward;
+                let input_applied = match trace.kind {
+                    RenderDebugTraceKind::Scroll => {
+                        let y_pixels = if forward {
+                            trace.scroll_pixels_per_frame
+                        } else {
+                            -trace.scroll_pixels_per_frame
+                        };
+                        document.update(cx, |document, cx| {
+                            document.apply_synchronized_scroll_delta(
+                                SynchronizedScrollDelta {
+                                    x_pixels: 0.0,
+                                    y_pixels,
+                                    mode: SynchronizedScrollMode::Immediate,
+                                },
+                                cx,
+                            );
+                        });
+                        true
+                    }
+                    RenderDebugTraceKind::Zoom => {
+                        let factor = if forward {
+                            TRACE_ZOOM_FACTOR_PER_FRAME
+                        } else {
+                            TRACE_ZOOM_FACTOR_PER_FRAME.recip()
+                        };
+                        document.update(cx, |document, cx| {
+                            document.apply_render_debug_zoom_factor(factor, cx)
+                        })
+                    }
+                };
+                if !input_applied {
+                    self.complete_render_debug_trace(
+                        trace,
+                        false,
+                        Some("the scripted input reached a document limit".to_string()),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+                trace.phase_frame += 1;
+                trace.completed_interaction_frames += 1;
+                if trace.phase_frame == trace.kind.frames_per_direction() {
+                    trace.phase_frame = 0;
+                    trace.phase = if forward {
+                        RenderDebugTracePhase::Reverse
+                    } else {
+                        RenderDebugTracePhase::Settle
+                    };
+                    trace.markers.push(RenderDebugTraceMarker {
+                        phase: trace.phase.name(),
+                        frame_index: trace.completed_interaction_frames,
+                        offset: elapsed,
+                    });
+                }
+            }
+            RenderDebugTracePhase::Settle => {
+                observe_render_debug_trace(&mut trace.observations, &snapshot);
+                trace.phase_frame += 1;
+                trace.completed_settling_frames += 1;
+                if trace.phase_frame >= TRACE_SETTLING_FRAMES {
+                    let failure = render_debug_trace_settle_failure(&trace, &snapshot);
+                    trace.markers.push(RenderDebugTraceMarker {
+                        phase: "complete",
+                        frame_index: trace.completed_interaction_frames
+                            + trace.completed_settling_frames,
+                        offset: elapsed,
+                    });
+                    self.complete_render_debug_trace(trace, false, failure, window, cx);
+                    return;
+                }
+            }
+        }
+
+        self.rendering_debug_trace = Some(trace);
+        schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        cx.notify();
+    }
+
+    fn complete_render_debug_trace(
+        &mut self,
+        trace: RenderDebugTrace,
+        cancelled: bool,
+        failure: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rendering_debug_trace_generation =
+            self.rendering_debug_trace_generation.wrapping_add(1);
+        let final_position = trace
+            .document
+            .upgrade()
+            .map(|document| document.read(cx).current_document_position());
+        let warmup_duration = if trace.warmup_duration.is_zero() {
+            Instant::now().saturating_duration_since(trace.started_at)
+        } else {
+            trace.warmup_duration
+        };
+        if let Some(capture) = self.rendering_debug_capture.as_mut() {
+            if capture.measurement_started_at.is_none() {
+                capture.measurement_started_at = Some(Instant::now());
+            }
+            capture.trace = Some(RenderDebugTraceReport {
+                kind: trace.kind,
+                planned_interaction_frames: trace.kind.planned_interaction_frames(),
+                completed_interaction_frames: trace.completed_interaction_frames,
+                planned_settling_frames: TRACE_SETTLING_FRAMES,
+                completed_settling_frames: trace.completed_settling_frames,
+                warmup_duration,
+                markers: trace.markers.clone(),
+                cancelled,
+                failure,
+                original_position: trace.original_position.clone(),
+                final_position,
+                observations: trace.observations.clone(),
+            });
+        }
+        self.finish_render_debug_capture_inner(window, cx);
+        restore_render_debug_trace_position(&trace, cx);
         cx.notify();
     }
 
@@ -100,32 +503,69 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(trace) = self.rendering_debug_trace.take() {
+            self.complete_render_debug_trace(
+                trace,
+                true,
+                Some("cancelled from the rendering debug panel".to_string()),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.finish_render_debug_capture_inner(window, cx);
+    }
+
+    fn finish_render_debug_capture_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut capture) = self.rendering_debug_capture.take() else {
             return;
         };
+        let measurement_started_at = capture.measurement_started_at;
         let timings = capture
             .collector
             .collect_unseen()
             .into_iter()
-            .filter(|timing| timing.window_id == capture.window_id)
+            .filter(|timing| {
+                timing.window_id == capture.window_id
+                    && measurement_started_at
+                        .is_some_and(|started_at| timing.draw_start >= started_at)
+            })
             .collect::<Vec<_>>();
         let frame_count = timings.len();
         let report = capture_report(capture, timings, self, window, cx);
         match serde_json::to_string_pretty(&report) {
-            Ok(report) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(report));
-                let notification = if frame_count == 0 {
+            Ok(serialized) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(serialized.clone()));
+                #[cfg(not(test))]
+                let saved = persist_render_debug_report(&serialized, &report);
+                #[cfg(test)]
+                let saved: io::Result<Option<PathBuf>> = Ok(None);
+                let trace_failure = report["trace"]["failure"].as_str();
+                let notification = if let Some(failure) = trace_failure {
+                    Notification::warning(format!(
+                        "The rendering trace finished with a failure: {failure}"
+                    ))
+                } else if frame_count == 0 {
                     Notification::warning(
                         "The rendering report was copied, but it contains no drawn frames",
                     )
                 } else {
-                    Notification::success(format!(
-                        "Copied a rendering report with {frame_count} frame samples"
-                    ))
+                    match &saved {
+                        Ok(Some(path)) => Notification::success(format!(
+                            "Captured {frame_count} frames; copied the report and saved {}",
+                            path.display()
+                        )),
+                        Ok(None) => Notification::success(format!(
+                            "Copied a rendering report with {frame_count} frame samples"
+                        )),
+                        Err(error) => Notification::warning(format!(
+                            "Copied {frame_count} frame samples, but could not save the report: {error}"
+                        )),
+                    }
                 };
                 window.push_notification(
                     notification
-                        .title("Rendering capture copied")
+                        .title("Rendering capture finished")
                         .id::<RenderDebugCaptureNotification>(),
                     cx,
                 );
@@ -141,6 +581,290 @@ impl Workspace {
     }
 }
 
+fn render_debug_capture_warning(window: &mut Window, message: impl Into<String>, cx: &mut App) {
+    window.push_notification(
+        Notification::warning(message.into())
+            .title("Rendering trace unavailable")
+            .id::<RenderDebugCaptureNotification>(),
+        cx,
+    );
+}
+
+fn render_debug_trace_precondition(
+    kind: RenderDebugTraceKind,
+    snapshot: &DocumentRenderDebugSnapshot,
+    position: &DocumentPosition,
+) -> Option<String> {
+    if position.is_reflow() {
+        return Some("scripted traces require a fixed-layout document".to_string());
+    }
+    let interaction = &snapshot.interaction;
+    if interaction.grid_overview_open {
+        return Some("close the page grid before starting a scripted trace".to_string());
+    }
+    if snapshot.pages.is_empty() {
+        return Some("no visible page is available for a scripted trace".to_string());
+    }
+    if !matches!(
+        interaction.configured_engine.as_str(),
+        "mupdf" | "glyphst" | "glyphst-first"
+    ) {
+        return Some(format!(
+            "unsupported rendering engine '{}'",
+            interaction.configured_engine
+        ));
+    }
+    if !interaction.viewport_width.is_finite()
+        || !interaction.viewport_height.is_finite()
+        || interaction.viewport_width <= 0.0
+        || interaction.viewport_height <= 0.0
+    {
+        return Some("the document viewport has no measurable extent".to_string());
+    }
+    if kind == RenderDebugTraceKind::Scroll {
+        let scale = interaction.effective_scale.max(0.001);
+        let before = interaction.target_scroll_y_doc.max(0.0) * scale;
+        let after =
+            (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
+        let required = TRACE_SCROLL_FRAMES_PER_DIRECTION as f32 * TRACE_SCROLL_PIXELS_PER_FRAME;
+        if before.max(after) + 0.5 < required {
+            return Some(format!(
+                "the current position needs {required:.0} physical pixels of scroll room in one direction"
+            ));
+        }
+    }
+    None
+}
+
+fn render_debug_trace_ready(snapshot: &DocumentRenderDebugSnapshot) -> bool {
+    let interaction = &snapshot.interaction;
+    if interaction.grid_overview_open
+        || interaction.motion_active
+        || snapshot.pages.is_empty()
+        || snapshot.pending_render_count != 0
+        || snapshot.gpu_cache.surface_seed_tasks != 0
+        || snapshot.gpu_cache.surface_render_pending != 0
+        || snapshot.gpu_cache.refinement_pages != 0
+        || snapshot.gpu_cache.active_preparations != 0
+        || snapshot.gpu_cache.queued_preparations != 0
+    {
+        return false;
+    }
+
+    if interaction.configured_engine == "mupdf" {
+        return snapshot.pages.iter().all(|page| {
+            page.backend == PageRenderBackendDebug::MuPdf
+                && page.status == PageRenderDebugStatus::Exact
+        });
+    }
+
+    let all_exact = snapshot
+        .pages
+        .iter()
+        .all(|page| page.status == PageRenderDebugStatus::Exact);
+    let all_stable = snapshot.pages.iter().all(|page| {
+        page.backend == PageRenderBackendDebug::GlyphstGpu
+            && page.gpu_failure.is_none()
+            && page.gpu_fallbacks.is_empty()
+            && matches!(
+                page.status,
+                PageRenderDebugStatus::Exact
+                    | PageRenderDebugStatus::RetainedGpu {
+                        exact_pending: false
+                    }
+            )
+    });
+    all_stable && (all_exact || snapshot.gpu_cache.continuity_surface_count >= snapshot.pages.len())
+}
+
+fn observe_render_debug_trace(
+    observations: &mut RenderDebugTraceObservations,
+    snapshot: &DocumentRenderDebugSnapshot,
+) {
+    let native = snapshot.interaction.configured_engine != "mupdf";
+    let unexpected_backend = snapshot.pages.iter().any(|page| {
+        if native {
+            page.backend != PageRenderBackendDebug::GlyphstGpu
+        } else {
+            page.backend != PageRenderBackendDebug::MuPdf
+        }
+    });
+    observations.unexpected_backend_frames += usize::from(unexpected_backend);
+    observations.pending_backend_frames += usize::from(snapshot.pages.iter().any(|page| {
+        matches!(
+            page.backend,
+            PageRenderBackendDebug::GlyphstPending | PageRenderBackendDebug::MuPdfWhileGpuPending
+        ) || matches!(page.status, PageRenderDebugStatus::Pending)
+    }));
+    observations.failed_backend_frames += usize::from(snapshot.pages.iter().any(|page| {
+        page.backend == PageRenderBackendDebug::GlyphstFailed
+            || page.status == PageRenderDebugStatus::Failed
+    }));
+    observations.fallback_frames += usize::from(
+        snapshot.pages.iter().any(|page| {
+            page.backend == PageRenderBackendDebug::MuPdfFallback
+                || matches!(page.status, PageRenderDebugStatus::Fallback { .. })
+                || !page.gpu_fallbacks.is_empty()
+        }) || !snapshot.gpu_navigation_fallbacks.is_empty(),
+    );
+    observations.gpu_failure_frames +=
+        usize::from(snapshot.pages.iter().any(|page| page.gpu_failure.is_some()));
+    observations.max_pending_render_count = observations
+        .max_pending_render_count
+        .max(snapshot.pending_render_count);
+    observations.max_surface_render_pending = observations
+        .max_surface_render_pending
+        .max(snapshot.gpu_cache.surface_render_pending);
+    observations.max_refinement_pages = observations
+        .max_refinement_pages
+        .max(snapshot.gpu_cache.refinement_pages);
+}
+
+fn render_debug_trace_settle_failure(
+    trace: &RenderDebugTrace,
+    snapshot: &DocumentRenderDebugSnapshot,
+) -> Option<String> {
+    if trace.completed_interaction_frames != trace.kind.planned_interaction_frames() {
+        return Some("the scripted interaction did not complete every planned frame".to_string());
+    }
+    if snapshot.interaction.motion_active
+        || snapshot.pending_render_count != 0
+        || snapshot.gpu_cache.surface_seed_tasks != 0
+        || snapshot.gpu_cache.surface_render_pending != 0
+        || snapshot.gpu_cache.refinement_pages != 0
+        || snapshot.gpu_cache.active_preparations != 0
+        || snapshot.gpu_cache.queued_preparations != 0
+    {
+        return Some(format!(
+            "rendering did not settle within {TRACE_SETTLING_FRAMES} frames"
+        ));
+    }
+    if trace.observations.failed_backend_frames != 0 || trace.observations.gpu_failure_frames != 0 {
+        return Some("a renderer failure was observed during the trace".to_string());
+    }
+    let native = snapshot.interaction.configured_engine != "mupdf";
+    if native && trace.observations.fallback_frames != 0 {
+        return Some("a fallback was observed during the trace".to_string());
+    }
+    if trace.observations.unexpected_backend_frames != 0 {
+        return Some("an unexpected page backend was observed during the trace".to_string());
+    }
+    if snapshot.pages.iter().any(|page| {
+        page.status != PageRenderDebugStatus::Exact
+            || if native {
+                page.backend != PageRenderBackendDebug::GlyphstGpu
+            } else {
+                page.backend != PageRenderBackendDebug::MuPdf
+            }
+    }) {
+        return Some("the visible pages were not exact after settling".to_string());
+    }
+    None
+}
+
+fn restore_render_debug_trace_position(trace: &RenderDebugTrace, cx: &mut Context<Workspace>) {
+    if let Some(document) = trace.document.upgrade() {
+        let position = trace.original_position.clone();
+        document.update(cx, |document, cx| {
+            document.restore_render_debug_position(position, cx);
+        });
+    }
+}
+
+fn schedule_render_debug_trace_frame(
+    workspace: WeakEntity<Workspace>,
+    generation: u64,
+    window: &mut Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        if let Some(workspace) = workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.step_render_debug_trace(generation, window, cx);
+            });
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn persist_render_debug_report(serialized: &str, report: &Value) -> io::Result<Option<PathBuf>> {
+    let directory = glyphst_core::paths::state_dir().join("render-traces");
+    persist_render_debug_report_to(serialized, report, &directory).map(Some)
+}
+
+fn persist_render_debug_report_to(
+    serialized: &str,
+    report: &Value,
+    directory: &Path,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let timestamp = sanitize_report_file_component(
+        report["captured_at"].as_str().unwrap_or("capture"),
+        "capture",
+    );
+    let source = report["document"]["start"]["source_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("document");
+    let source = sanitize_report_file_component(source, "document");
+    let engine = sanitize_report_file_component(
+        report["document"]["start"]["configured_engine"]
+            .as_str()
+            .unwrap_or("engine"),
+        "engine",
+    );
+    let trace = sanitize_report_file_component(
+        report["trace"]["kind"].as_str().unwrap_or("manual"),
+        "manual",
+    );
+    let base = format!("{timestamp}-{source}-{engine}-{trace}");
+    for suffix in 0..1_000_u16 {
+        let suffix = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let path = directory.join(format!("{base}{suffix}.json"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(serialized.as_bytes())?;
+                file.write_all(b"\n")?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique rendering report file name",
+    ))
+}
+
+fn sanitize_report_file_component(value: &str, fallback: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn render_footer(
     workspace: WeakEntity<Workspace>,
     _window: &mut Window,
@@ -148,16 +872,20 @@ fn render_footer(
 ) -> AnyElement {
     let cache = render_cache_debug_snapshot(cx);
     let workspace_entity = workspace.upgrade();
-    let (active_document, capture_active) = workspace_entity
+    let (active_document, capture_active, trace_status) = workspace_entity
         .as_ref()
         .map(|workspace| {
             let workspace = workspace.read(cx);
             (
                 workspace.active_render_debug_document(cx),
                 workspace.rendering_debug_capture.is_some(),
+                workspace
+                    .rendering_debug_trace
+                    .as_ref()
+                    .map(|trace| format!("{} · {}", trace.kind.name(), trace.phase.name())),
             )
         })
-        .unwrap_or((None, false));
+        .unwrap_or((None, false, None));
     let document = active_document.map(|document| document.read(cx).render_debug_snapshot(cx));
 
     div()
@@ -171,6 +899,7 @@ fn render_footer(
             workspace,
             capture_active,
             document.is_some(),
+            trace_status,
         ))
         .child(section_label("RENDER CACHE"))
         .child(reading(
@@ -204,55 +933,123 @@ fn render_capture_controls(
     workspace: WeakEntity<Workspace>,
     capture_active: bool,
     document_available: bool,
+    trace_status: Option<String>,
 ) -> Div {
-    let label = if capture_active {
+    let trace_active = trace_status.is_some();
+    let label = if trace_active {
+        "Cancel & Copy"
+    } else if capture_active {
         "Stop & Copy"
     } else {
         "Start Capture"
     };
+    let manual_workspace = workspace.clone();
+    let scroll_workspace = workspace.clone();
+    let zoom_workspace = workspace;
     div()
         .flex()
+        .flex_col()
         .w_full()
-        .items_center()
-        .justify_between()
         .gap_2()
         .pb_1()
         .child(
             div()
-                .text_color(if capture_active { WARN } else { MUTED })
-                .child(if capture_active {
-                    "CAPTURING INTERACTION"
-                } else {
-                    "INTERACTION TRACE"
-                }),
+                .flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(if capture_active { WARN } else { MUTED })
+                        .child(trace_status.unwrap_or_else(|| {
+                            if capture_active {
+                                "manual · capturing".to_string()
+                            } else {
+                                "INTERACTION TRACE".to_string()
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("render-debug-capture")
+                        .xsmall()
+                        .compact()
+                        .map(|button| {
+                            if capture_active {
+                                button.warning()
+                            } else {
+                                button.secondary()
+                            }
+                        })
+                        .disabled(!capture_active && !document_available)
+                        .label(label)
+                        .debug_selector(|| "render-debug-capture".to_string())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let Some(workspace) = manual_workspace.upgrade() else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                if capture_active {
+                                    workspace.finish_render_debug_capture(window, cx);
+                                } else {
+                                    workspace.start_render_debug_capture(window, cx);
+                                }
+                            });
+                        }),
+                ),
         )
         .child(
-            Button::new("render-debug-capture")
-                .xsmall()
-                .compact()
-                .map(|button| {
-                    if capture_active {
-                        button.warning()
-                    } else {
-                        button.secondary()
-                    }
-                })
-                .disabled(!capture_active && !document_available)
-                .label(label)
-                .debug_selector(|| "render-debug-capture".to_string())
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let Some(workspace) = workspace.upgrade() else {
-                        return;
-                    };
-                    workspace.update(cx, |workspace, cx| {
-                        if capture_active {
-                            workspace.finish_render_debug_capture(window, cx);
-                        } else {
-                            workspace.start_render_debug_capture(window, cx);
-                        }
-                    });
-                }),
+            div()
+                .flex()
+                .w_full()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("render-debug-scroll-trace")
+                        .xsmall()
+                        .compact()
+                        .secondary()
+                        .disabled(capture_active || !document_available)
+                        .label("Run Scroll Trace")
+                        .debug_selector(|| "render-debug-scroll-trace".to_string())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let Some(workspace) = scroll_workspace.upgrade() else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.start_render_debug_trace(
+                                    RenderDebugTraceKind::Scroll,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("render-debug-zoom-trace")
+                        .xsmall()
+                        .compact()
+                        .secondary()
+                        .disabled(capture_active || !document_available)
+                        .label("Run Zoom Trace")
+                        .debug_selector(|| "render-debug-zoom-trace".to_string())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let Some(workspace) = zoom_workspace.upgrade() else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.start_render_debug_trace(
+                                    RenderDebugTraceKind::Zoom,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                ),
         )
 }
 
@@ -379,7 +1176,11 @@ fn capture_report(
     window: &Window,
     cx: &App,
 ) -> Value {
-    let capture_duration = Instant::now().saturating_duration_since(capture.started_at);
+    let finished_at = Instant::now();
+    let capture_duration = finished_at.saturating_duration_since(capture.started_at);
+    let measurement_duration = capture
+        .measurement_started_at
+        .map(|started_at| finished_at.saturating_duration_since(started_at));
     let samples = captured_frame_samples(&timings);
     let document_end = capture
         .document
@@ -390,13 +1191,16 @@ fn capture_report(
         .map(|document| document.entity_id().as_u64());
     let render_cache_end = render_cache_debug_snapshot(cx);
     let gpu_specs = window.gpu_specs();
+    let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
+        "measurement_duration_ms": measurement_duration.map(milliseconds),
         "frame_budget_ms": milliseconds(FRAME_BUDGET),
+        "trace": trace,
         "application": {
             "package": env!("CARGO_PKG_NAME"),
             "version": env!("CARGO_PKG_VERSION"),
@@ -523,6 +1327,7 @@ fn document_snapshot_json(document: &DocumentRenderDebugSnapshot) -> Value {
             "scroll_y_doc": finite_f32_json(interaction.scroll_y_doc),
             "target_scroll_x_doc": finite_f32_json(interaction.target_scroll_x_doc),
             "target_scroll_y_doc": finite_f32_json(interaction.target_scroll_y_doc),
+            "max_scroll_y_doc": finite_f32_json(interaction.max_scroll_y_doc),
             "motion_active": interaction.motion_active,
         },
         "pending_render_count": document.pending_render_count,
@@ -535,6 +1340,49 @@ fn document_snapshot_json(document: &DocumentRenderDebugSnapshot) -> Value {
             "message": fallback.message,
             "source": fallback.source,
         })).collect::<Vec<_>>(),
+    })
+}
+
+fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
+    json!({
+        "version": 1,
+        "kind": trace.kind.name(),
+        "planned_interaction_frames": trace.planned_interaction_frames,
+        "completed_interaction_frames": trace.completed_interaction_frames,
+        "planned_settling_frames": trace.planned_settling_frames,
+        "completed_settling_frames": trace.completed_settling_frames,
+        "warmup_ready_frames": TRACE_WARMUP_READY_FRAMES,
+        "warmup_timeout_ms": milliseconds(TRACE_WARMUP_TIMEOUT),
+        "warmup_ms": milliseconds(trace.warmup_duration),
+        "phase_markers": trace.markers.iter().map(|marker| json!({
+            "phase": marker.phase,
+            "frame_index": marker.frame_index,
+            "offset_ms": milliseconds(marker.offset),
+        })).collect::<Vec<_>>(),
+        "cancelled": trace.cancelled,
+        "failure": trace.failure,
+        "original_position": document_position_json(&trace.original_position),
+        "final_position": trace.final_position.as_ref().map(document_position_json),
+        "observations": {
+            "unexpected_backend_frames": trace.observations.unexpected_backend_frames,
+            "pending_backend_frames": trace.observations.pending_backend_frames,
+            "failed_backend_frames": trace.observations.failed_backend_frames,
+            "fallback_frames": trace.observations.fallback_frames,
+            "gpu_failure_frames": trace.observations.gpu_failure_frames,
+            "max_pending_render_count": trace.observations.max_pending_render_count,
+            "max_surface_render_pending": trace.observations.max_surface_render_pending,
+            "max_refinement_pages": trace.observations.max_refinement_pages,
+        },
+    })
+}
+
+fn document_position_json(position: &DocumentPosition) -> Value {
+    json!({
+        "scroll_x_doc": finite_f32_json(position.scroll_x_doc),
+        "scroll_y_doc": finite_f32_json(position.scroll_y_doc),
+        "zoom": finite_f32_json(position.zoom),
+        "page": position.page,
+        "reflow": position.semantic.is_some(),
     })
 }
 
@@ -1682,6 +2530,73 @@ fn format_draw_duration(duration: Duration, bands: Option<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scripted_trace_report_records_reproducible_workload_metadata() {
+        let report = render_debug_trace_report_json(&RenderDebugTraceReport {
+            kind: RenderDebugTraceKind::Zoom,
+            planned_interaction_frames: 120,
+            completed_interaction_frames: 120,
+            planned_settling_frames: 30,
+            completed_settling_frames: 30,
+            warmup_duration: Duration::from_millis(42),
+            markers: vec![RenderDebugTraceMarker {
+                phase: "forward",
+                frame_index: 0,
+                offset: Duration::from_millis(42),
+            }],
+            cancelled: false,
+            failure: None,
+            original_position: DocumentPosition::fixed(1.0, 2.0, 1.25, 3),
+            final_position: Some(DocumentPosition::fixed(1.0, 2.0, 1.25, 3)),
+            observations: RenderDebugTraceObservations::default(),
+        });
+
+        assert_eq!(report["version"], 1);
+        assert_eq!(report["kind"], "zoom");
+        assert_eq!(report["planned_interaction_frames"], 120);
+        assert_eq!(report["warmup_ms"], 42.0);
+        assert_eq!(report["phase_markers"][0]["phase"], "forward");
+        assert_eq!(report["original_position"]["page"], 3);
+        assert_eq!(report["observations"]["fallback_frames"], 0);
+    }
+
+    #[test]
+    fn rendering_reports_are_created_without_overwriting_an_existing_capture() {
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-render-trace-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let report = json!({
+            "captured_at": "2026-08-28T12:34:56Z",
+            "trace": { "kind": "zoom" },
+            "document": { "start": {
+                "source_path": "/tmp/a document.pdf",
+                "configured_engine": "glyphst"
+            }}
+        });
+        let first = persist_render_debug_report_to("{}", &report, &directory).unwrap();
+        let second = persist_render_debug_report_to("{}", &report, &directory).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(&first).unwrap(), "{}\n");
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("zoom")
+        );
+
+        fs::remove_file(first).unwrap();
+        fs::remove_file(second).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn debug_units_stay_compact() {

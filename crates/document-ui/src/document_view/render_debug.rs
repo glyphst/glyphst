@@ -81,6 +81,7 @@ impl DocumentView {
             scroll_y_doc: self.scroll_y_doc,
             target_scroll_x_doc: self.target_scroll_x_doc,
             target_scroll_y_doc: self.target_scroll_y_doc,
+            max_scroll_y_doc: self.max_scroll_y_doc(),
             motion_active: gpu_cache.motion_active
                 || self.dock_snapshot.layout_motion_active
                 || (self.target_zoom - self.zoom).abs() > f32::EPSILON
@@ -110,6 +111,39 @@ impl DocumentView {
                 .map(gpu_fallback_debug_snapshot)
                 .collect(),
         }
+    }
+
+    /// Applies one center-anchored zoom step for the developer interaction
+    /// trace runner. This deliberately enters the same animated zoom path as
+    /// wheel and keyboard input instead of mutating the rendered scale.
+    #[doc(hidden)]
+    pub fn apply_render_debug_zoom_factor(&mut self, factor: f32, cx: &mut Context<Self>) -> bool {
+        if !factor.is_finite() || factor <= 0.0 || self.grid_overview_open {
+            return false;
+        }
+        let previous = self.target_zoom;
+        self.set_zoom_target(
+            previous * factor,
+            [self.viewport_width / 2.0, self.viewport_height / 2.0],
+            cx,
+        );
+        (self.target_zoom - previous).abs() > f32::EPSILON
+    }
+
+    /// Restores the exact fixed-layout position saved before a developer
+    /// interaction trace without adding a jump-history entry.
+    #[doc(hidden)]
+    pub fn restore_render_debug_position(
+        &mut self,
+        position: DocumentPosition,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_position(position);
+        self.mark_native_gpu_motion(cx);
+        self.hovered_link = None;
+        self.pending_link = None;
+        self.schedule_position_save(cx);
+        cx.notify();
     }
 
     fn page_render_debug_snapshot(

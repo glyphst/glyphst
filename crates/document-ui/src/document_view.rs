@@ -761,6 +761,7 @@ pub struct DocumentInteractionDebugSnapshot {
     pub scroll_y_doc: f32,
     pub target_scroll_x_doc: f32,
     pub target_scroll_y_doc: f32,
+    pub max_scroll_y_doc: f32,
     pub motion_active: bool,
 }
 
