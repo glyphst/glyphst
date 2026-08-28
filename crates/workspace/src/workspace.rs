@@ -5278,7 +5278,7 @@ mod tests {
             .and_then(|clipboard| clipboard.text())
             .expect("rendering capture JSON on clipboard");
         let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["schema_version"], 2);
         assert_eq!(report["kind"], "glyphst-reader-interaction");
         assert_eq!(
             report["document"]["start"]["source_path"],

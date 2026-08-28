@@ -392,7 +392,7 @@ fn capture_report(
     let gpu_specs = window.gpu_specs();
 
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -567,6 +567,8 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
             "count": cache.surface_count,
             "bytes": cache.surface_bytes,
             "byte_limit": cache.surface_byte_limit,
+            "continuity_count": cache.continuity_surface_count,
+            "continuity_bytes": cache.continuity_surface_bytes,
             "seed_tasks": cache.surface_seed_tasks,
             "in_flight_bytes": cache.surface_in_flight_bytes,
             "render_pending": cache.surface_render_pending,
@@ -588,6 +590,11 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
             "warm_requests": cache.surface_warm_requests,
             "warm_hits": cache.surface_warm_hits,
             "warm_pages": cache.surface_warm_pages,
+            "continuity_requests": cache.surface_continuity_requests,
+            "continuity_completed": cache.surface_continuity_completed,
+            "continuity_hits": cache.surface_continuity_hits,
+            "partial_reuses": cache.surface_partial_reuses,
+            "presentation_gaps": cache.surface_presentation_gaps,
             "queue_latency_p95_ms": milliseconds(cache.surface_queue_latency_p95),
             "ready_latency_p95_ms": milliseconds(cache.surface_ready_latency_p95),
             "present_latency_p95_ms": milliseconds(cache.surface_present_latency_p95),
@@ -720,6 +727,11 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(surface_zoom_settled_upgrades);
     counter!(surface_warm_requests);
     counter!(surface_warm_hits);
+    counter!(surface_continuity_requests);
+    counter!(surface_continuity_completed);
+    counter!(surface_continuity_hits);
+    counter!(surface_partial_reuses);
+    counter!(surface_presentation_gaps);
     counter!(completed_preparations);
     counter!(cancelled_preparations);
     json!({
@@ -873,6 +885,26 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 format_bytes(document.gpu_cache.surface_in_flight_bytes),
             ),
             FOREGROUND,
+        ))
+        .child(reading(
+            "GPU CONTINUITY",
+            format!(
+                "{} surfaces / {} · {} requests · {} ready · {} hits · {} partial · {} gaps",
+                document.gpu_cache.continuity_surface_count,
+                format_bytes(document.gpu_cache.continuity_surface_bytes),
+                document.gpu_cache.surface_continuity_requests,
+                document.gpu_cache.surface_continuity_completed,
+                document.gpu_cache.surface_continuity_hits,
+                document.gpu_cache.surface_partial_reuses,
+                document.gpu_cache.surface_presentation_gaps,
+            ),
+            if document.gpu_cache.surface_presentation_gaps > 0 {
+                BAD
+            } else if document.gpu_cache.surface_continuity_hits > 0 {
+                GOOD
+            } else {
+                FOREGROUND
+            },
         ))
         .child(reading(
             "GPU PIPELINE",
@@ -1740,19 +1772,45 @@ mod tests {
     }
 
     #[test]
+    fn gpu_cache_report_includes_continuity_surfaces_and_gap_counters() {
+        let cache = GpuCacheDebugSnapshot {
+            continuity_surface_count: 2,
+            continuity_surface_bytes: 12_582_912,
+            surface_continuity_requests: 7,
+            surface_continuity_completed: 5,
+            surface_continuity_hits: 11,
+            surface_partial_reuses: 3,
+            surface_presentation_gaps: 1,
+            ..Default::default()
+        };
+
+        let report = gpu_cache_json(&cache);
+        assert_eq!(report["surfaces"]["continuity_count"], 2);
+        assert_eq!(report["surfaces"]["continuity_bytes"], 12_582_912);
+        assert_eq!(report["surfaces"]["continuity_requests"], 7);
+        assert_eq!(report["surfaces"]["continuity_completed"], 5);
+        assert_eq!(report["surfaces"]["continuity_hits"], 11);
+        assert_eq!(report["surfaces"]["partial_reuses"], 3);
+        assert_eq!(report["surfaces"]["presentation_gaps"], 1);
+    }
+
+    #[test]
     fn gpu_counter_delta_marks_resets_instead_of_inventing_progress() {
         let start = GpuCacheDebugSnapshot {
             surface_renders_started: 12,
             surface_zoom_reuses: 9,
+            surface_continuity_hits: 4,
             ..Default::default()
         };
         let end = GpuCacheDebugSnapshot {
             surface_renders_started: 15,
             surface_zoom_reuses: 2,
+            surface_continuity_hits: 10,
             ..Default::default()
         };
         let delta = gpu_counter_delta_json(&start, &end);
         assert_eq!(delta["counters"]["surface_renders_started"], 3);
+        assert_eq!(delta["counters"]["surface_continuity_hits"], 6);
         assert!(delta["counters"]["surface_zoom_reuses"].is_null());
         assert!(
             delta["reset_fields"]
