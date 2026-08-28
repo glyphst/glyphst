@@ -736,9 +736,31 @@ pub struct PageRenderDebugSnapshot {
     pub text_index_state: TextIndexDebugState,
 }
 
+/// Reader interaction state captured alongside rendering diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentInteractionDebugSnapshot {
+    pub source_path: PathBuf,
+    pub configured_engine: String,
+    pub document_layout: String,
+    pub page_layout: String,
+    pub rotation: String,
+    pub grid_overview_open: bool,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub zoom: f32,
+    pub target_zoom: f32,
+    pub effective_scale: f32,
+    pub scroll_x_doc: f32,
+    pub scroll_y_doc: f32,
+    pub target_scroll_x_doc: f32,
+    pub target_scroll_y_doc: f32,
+    pub motion_active: bool,
+}
+
 /// Rendering diagnostics for the active document viewport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentRenderDebugSnapshot {
+    pub interaction: DocumentInteractionDebugSnapshot,
     pub page_label: String,
     pub pages: Vec<PageRenderDebugSnapshot>,
     pub pending_render_count: usize,

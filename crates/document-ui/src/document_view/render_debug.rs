@@ -64,6 +64,29 @@ impl DocumentView {
             .settings
             .document_view
             .pdf_render_engine;
+        let gpu_cache = self.native_gpu_cache_debug();
+        let interaction = DocumentInteractionDebugSnapshot {
+            source_path: self.path.clone(),
+            configured_engine: configured_engine.as_str().to_string(),
+            document_layout: format!("{:?}", self.document_layout),
+            page_layout: format!("{:?}", self.page_layout),
+            rotation: format!("{:?}", self.rotation),
+            grid_overview_open: self.grid_overview_open,
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+            zoom: self.zoom,
+            target_zoom: self.target_zoom,
+            effective_scale: self.effective_scale(),
+            scroll_x_doc: self.scroll_x_doc,
+            scroll_y_doc: self.scroll_y_doc,
+            target_scroll_x_doc: self.target_scroll_x_doc,
+            target_scroll_y_doc: self.target_scroll_y_doc,
+            motion_active: gpu_cache.motion_active
+                || self.dock_snapshot.layout_motion_active
+                || (self.target_zoom - self.zoom).abs() > f32::EPSILON
+                || (self.target_scroll_x_doc - self.scroll_x_doc).abs() > f32::EPSILON
+                || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON,
+        };
         let pages = if self.grid_overview_open {
             Vec::new()
         } else {
@@ -74,11 +97,12 @@ impl DocumentView {
         };
 
         DocumentRenderDebugSnapshot {
+            interaction,
             page_label,
             pages,
             pending_render_count: self.pending_renders.len(),
             pending_render_limit: MAX_PENDING_PAGE_RENDERS,
-            gpu_cache: self.native_gpu_cache_debug(),
+            gpu_cache,
             gpu_navigation_fallbacks: self
                 .native_gpu_navigation_fallback_diagnostics()
                 .unwrap_or_default()

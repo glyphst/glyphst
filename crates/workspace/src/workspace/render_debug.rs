@@ -1,12 +1,19 @@
 use glyphst_document_ui::document_view::{
-    DocumentRenderDebugSnapshot, PageRenderBackendDebug, PageRenderDebugSnapshot,
-    PageRenderDebugStatus, TextIndexDebugState, render_cache_debug_snapshot,
+    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, PageRenderBackendDebug,
+    PageRenderDebugSnapshot, PageRenderDebugStatus, RenderCacheDebugSnapshot, TextIndexDebugState,
+    render_cache_debug_snapshot,
 };
 use gpui::{
-    AnyElement, App, Div, Hsla, IntoElement as _, ParentElement as _, Styled as _, WeakEntity,
-    Window, div, hsla, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClipboardItem, Div, FrameTiming, FrameTimingCollector, Hsla, IntoElement as _,
+    ParentElement as _, Styled as _, WeakEntity, Window, WindowId, div, hsla,
+    prelude::FluentBuilder as _, px,
 };
-use std::time::Duration;
+use gpui_component::{
+    Disableable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+};
+use serde_json::{Map, Value, json};
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -16,19 +23,119 @@ const GOOD: Hsla = hsla(0.39, 0.70, 0.62, 1.);
 const WARN: Hsla = hsla(0.12, 0.85, 0.62, 1.);
 const BAD: Hsla = hsla(0.00, 0.78, 0.67, 1.);
 const BORDER: Hsla = hsla(0., 0., 1., 0.14);
+const FRAME_BUDGET: Duration = Duration::from_micros(8_333);
+const MAX_RAW_FRAME_SAMPLES: usize = 4_096;
+
+struct RenderDebugCaptureNotification;
+
+pub(super) struct RenderDebugCapture {
+    collector: FrameTimingCollector,
+    window_id: WindowId,
+    started_at: Instant,
+    captured_at: String,
+    document: WeakEntity<DocumentView>,
+    document_entity_id: u64,
+    document_start: DocumentRenderDebugSnapshot,
+    render_cache_start: RenderCacheDebugSnapshot,
+}
 
 impl Workspace {
     pub(super) fn toggle_rendering_debug(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rendering_debug.take().is_none() {
+        if self.rendering_debug.is_some() {
+            self.rendering_debug = None;
+            self.rendering_debug_capture = None;
+        } else {
             let workspace = cx.weak_entity();
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
                     .capacity(240)
-                    .frame_budget(Duration::from_micros(8_333))
+                    .frame_budget(FRAME_BUDGET)
                     .continuous(false)
                     .width(px(540.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
+        }
+        cx.notify();
+    }
+
+    fn active_render_debug_document(&self, cx: &App) -> Option<Entity<DocumentView>> {
+        (self.surface_mode == WorkspaceSurfaceMode::Panes)
+            .then(|| self.active_pane.read(cx).active_document_view())
+            .flatten()
+    }
+
+    pub(super) fn start_render_debug_capture(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rendering_debug_capture.is_some() {
+            return;
+        }
+        let Some(document) = self.active_render_debug_document(cx) else {
+            window.push_notification(
+                Notification::warning("Open a document before capturing rendering performance")
+                    .title("Rendering capture unavailable")
+                    .id::<RenderDebugCaptureNotification>(),
+                cx,
+            );
+            return;
+        };
+        let document_start = document.read(cx).render_debug_snapshot(cx);
+        self.rendering_debug_capture = Some(RenderDebugCapture {
+            collector: FrameTimingCollector::new(),
+            window_id: window.window_handle().window_id(),
+            started_at: Instant::now(),
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            document_entity_id: document.entity_id().as_u64(),
+            document: document.downgrade(),
+            document_start,
+            render_cache_start: render_cache_debug_snapshot(cx),
+        });
+        cx.notify();
+    }
+
+    pub(super) fn finish_render_debug_capture(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut capture) = self.rendering_debug_capture.take() else {
+            return;
+        };
+        let timings = capture
+            .collector
+            .collect_unseen()
+            .into_iter()
+            .filter(|timing| timing.window_id == capture.window_id)
+            .collect::<Vec<_>>();
+        let frame_count = timings.len();
+        let report = capture_report(capture, timings, self, window, cx);
+        match serde_json::to_string_pretty(&report) {
+            Ok(report) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(report));
+                let notification = if frame_count == 0 {
+                    Notification::warning(
+                        "The rendering report was copied, but it contains no drawn frames",
+                    )
+                } else {
+                    Notification::success(format!(
+                        "Copied a rendering report with {frame_count} frame samples"
+                    ))
+                };
+                window.push_notification(
+                    notification
+                        .title("Rendering capture copied")
+                        .id::<RenderDebugCaptureNotification>(),
+                    cx,
+                );
+            }
+            Err(error) => window.push_notification(
+                Notification::error(format!("Failed to serialize rendering capture: {error}"))
+                    .title("Rendering capture failed")
+                    .id::<RenderDebugCaptureNotification>(),
+                cx,
+            ),
         }
         cx.notify();
     }
@@ -40,12 +147,17 @@ fn render_footer(
     cx: &mut App,
 ) -> AnyElement {
     let cache = render_cache_debug_snapshot(cx);
-    let active_document = workspace.upgrade().and_then(|workspace| {
-        let workspace = workspace.read(cx);
-        (workspace.surface_mode == WorkspaceSurfaceMode::Panes)
-            .then(|| workspace.active_pane.read(cx).active_document_view())
-            .flatten()
-    });
+    let workspace_entity = workspace.upgrade();
+    let (active_document, capture_active) = workspace_entity
+        .as_ref()
+        .map(|workspace| {
+            let workspace = workspace.read(cx);
+            (
+                workspace.active_render_debug_document(cx),
+                workspace.rendering_debug_capture.is_some(),
+            )
+        })
+        .unwrap_or((None, false));
     let document = active_document.map(|document| document.read(cx).render_debug_snapshot(cx));
 
     div()
@@ -55,6 +167,11 @@ fn render_footer(
         .border_color(BORDER)
         .flex()
         .flex_col()
+        .child(render_capture_controls(
+            workspace,
+            capture_active,
+            document.is_some(),
+        ))
         .child(section_label("RENDER CACHE"))
         .child(reading(
             "RGBA",
@@ -81,6 +198,609 @@ fn render_footer(
         ))
         .when_some(document, render_document)
         .into_any_element()
+}
+
+fn render_capture_controls(
+    workspace: WeakEntity<Workspace>,
+    capture_active: bool,
+    document_available: bool,
+) -> Div {
+    let label = if capture_active {
+        "Stop & Copy"
+    } else {
+        "Start Capture"
+    };
+    div()
+        .flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .pb_1()
+        .child(
+            div()
+                .text_color(if capture_active { WARN } else { MUTED })
+                .child(if capture_active {
+                    "CAPTURING INTERACTION"
+                } else {
+                    "INTERACTION TRACE"
+                }),
+        )
+        .child(
+            Button::new("render-debug-capture")
+                .xsmall()
+                .compact()
+                .map(|button| {
+                    if capture_active {
+                        button.warning()
+                    } else {
+                        button.secondary()
+                    }
+                })
+                .disabled(!capture_active && !document_available)
+                .label(label)
+                .debug_selector(|| "render-debug-capture".to_string())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    workspace.update(cx, |workspace, cx| {
+                        if capture_active {
+                            workspace.finish_render_debug_capture(window, cx);
+                        } else {
+                            workspace.start_render_debug_capture(window, cx);
+                        }
+                    });
+                }),
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CapturedFrameSample {
+    offset: Duration,
+    interval: Option<Duration>,
+    draw: Duration,
+    dirty_to_draw: Option<Duration>,
+    invalidations: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DurationStatistics {
+    count: usize,
+    mean_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    max_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CountStatistics {
+    count: usize,
+    total: u64,
+    mean: f64,
+    p50: u64,
+    p95: u64,
+    max: u64,
+}
+
+fn captured_frame_samples(timings: &[FrameTiming]) -> Vec<CapturedFrameSample> {
+    let Some(first) = timings.first().map(|timing| timing.draw_start) else {
+        return Vec::new();
+    };
+    let mut previous = None;
+    timings
+        .iter()
+        .map(|timing| {
+            let interval = previous.map(|previous| timing.draw_start.duration_since(previous));
+            previous = Some(timing.draw_start);
+            CapturedFrameSample {
+                offset: timing.draw_start.duration_since(first),
+                interval,
+                draw: timing.draw_duration(),
+                dirty_to_draw: timing.dirty_to_draw_duration(),
+                invalidations: timing.invalidations,
+            }
+        })
+        .collect()
+}
+
+fn nearest_rank_index(len: usize, percentile: usize) -> usize {
+    len.saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(len.saturating_sub(1))
+}
+
+fn duration_statistics(values: impl IntoIterator<Item = Duration>) -> Option<DurationStatistics> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    let mean_ms =
+        values.iter().map(|value| milliseconds(*value)).sum::<f64>() / values.len() as f64;
+    values.sort_unstable();
+    Some(DurationStatistics {
+        count: values.len(),
+        mean_ms,
+        p50_ms: milliseconds(values[nearest_rank_index(values.len(), 50)]),
+        p95_ms: milliseconds(values[nearest_rank_index(values.len(), 95)]),
+        max_ms: milliseconds(*values.last().expect("non-empty duration statistics")),
+    })
+}
+
+fn count_statistics(values: impl IntoIterator<Item = u64>) -> Option<CountStatistics> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    let total = values.iter().copied().fold(0_u64, u64::saturating_add);
+    let mean = total as f64 / values.len() as f64;
+    values.sort_unstable();
+    Some(CountStatistics {
+        count: values.len(),
+        total,
+        mean,
+        p50: values[nearest_rank_index(values.len(), 50)],
+        p95: values[nearest_rank_index(values.len(), 95)],
+        max: *values.last().expect("non-empty count statistics"),
+    })
+}
+
+fn duration_statistics_json(statistics: Option<DurationStatistics>) -> Value {
+    statistics.map_or(Value::Null, |statistics| {
+        json!({
+            "count": statistics.count,
+            "mean_ms": statistics.mean_ms,
+            "p50_ms": statistics.p50_ms,
+            "p95_ms": statistics.p95_ms,
+            "max_ms": statistics.max_ms,
+        })
+    })
+}
+
+fn count_statistics_json(statistics: Option<CountStatistics>) -> Value {
+    statistics.map_or(Value::Null, |statistics| {
+        json!({
+            "count": statistics.count,
+            "total": statistics.total,
+            "mean": statistics.mean,
+            "p50": statistics.p50,
+            "p95": statistics.p95,
+            "max": statistics.max,
+        })
+    })
+}
+
+fn capture_report(
+    capture: RenderDebugCapture,
+    timings: Vec<FrameTiming>,
+    workspace: &Workspace,
+    window: &Window,
+    cx: &App,
+) -> Value {
+    let capture_duration = Instant::now().saturating_duration_since(capture.started_at);
+    let samples = captured_frame_samples(&timings);
+    let document_end = capture
+        .document
+        .upgrade()
+        .map(|document| document.read(cx).render_debug_snapshot(cx));
+    let active_document_entity_id = workspace
+        .active_render_debug_document(cx)
+        .map(|document| document.entity_id().as_u64());
+    let render_cache_end = render_cache_debug_snapshot(cx);
+    let gpu_specs = window.gpu_specs();
+
+    json!({
+        "schema_version": 1,
+        "kind": "glyphst-reader-interaction",
+        "captured_at": capture.captured_at,
+        "capture_duration_ms": milliseconds(capture_duration),
+        "frame_budget_ms": milliseconds(FRAME_BUDGET),
+        "application": {
+            "package": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+        },
+        "window": {
+            "id": capture.window_id.as_u64(),
+            "gpu": gpu_specs.map(|gpu| json!({
+                "software_emulated": gpu.is_software_emulated,
+                "device": gpu.device_name,
+                "driver": gpu.driver_name,
+                "driver_info": gpu.driver_info,
+            })),
+        },
+        "frames": frame_report(&samples),
+        "render_cache": {
+            "start": render_cache_json(capture.render_cache_start),
+            "end": render_cache_json(render_cache_end),
+        },
+        "document": {
+            "entity_id": capture.document_entity_id,
+            "active_at_end": active_document_entity_id == Some(capture.document_entity_id),
+            "released_before_end": document_end.is_none(),
+            "start": document_snapshot_json(&capture.document_start),
+            "end": document_end.as_ref().map(document_snapshot_json),
+            "gpu_counter_delta": document_end.as_ref().map(|end| {
+                gpu_counter_delta_json(&capture.document_start.gpu_cache, &end.gpu_cache)
+            }),
+        },
+    })
+}
+
+fn frame_report(samples: &[CapturedFrameSample]) -> Value {
+    let intervals = samples.iter().filter_map(|sample| sample.interval);
+    let draws = samples.iter().map(|sample| sample.draw);
+    let dirty_to_draw = samples.iter().filter_map(|sample| sample.dirty_to_draw);
+    let frame_span = samples
+        .last()
+        .map(|sample| sample.offset)
+        .unwrap_or_default();
+    let effective_fps = (samples.len() >= 2 && !frame_span.is_zero())
+        .then(|| (samples.len() - 1) as f64 / frame_span.as_secs_f64());
+    let draw_over_budget = samples
+        .iter()
+        .filter(|sample| sample.draw > FRAME_BUDGET)
+        .count();
+    let interval_count = samples
+        .iter()
+        .filter(|sample| sample.interval.is_some())
+        .count();
+    let interval_over_budget = samples
+        .iter()
+        .filter(|sample| {
+            sample
+                .interval
+                .is_some_and(|interval| interval > FRAME_BUDGET)
+        })
+        .count();
+    let retained_start = samples.len().saturating_sub(MAX_RAW_FRAME_SAMPLES);
+    let raw_samples = samples[retained_start..]
+        .iter()
+        .map(|sample| {
+            json!({
+                "offset_ms": milliseconds(sample.offset),
+                "interval_ms": sample.interval.map(milliseconds),
+                "draw_ms": milliseconds(sample.draw),
+                "dirty_to_draw_ms": sample.dirty_to_draw.map(milliseconds),
+                "invalidations": sample.invalidations,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "total_frames": samples.len(),
+        "raw_samples_retained": raw_samples.len(),
+        "raw_samples_truncated": retained_start > 0,
+        "frame_span_ms": milliseconds(frame_span),
+        "effective_fps": effective_fps,
+        "draw": duration_statistics_json(duration_statistics(draws)),
+        "interval": duration_statistics_json(duration_statistics(intervals)),
+        "dirty_to_draw": duration_statistics_json(duration_statistics(dirty_to_draw)),
+        "invalidations": count_statistics_json(count_statistics(
+            samples.iter().map(|sample| sample.invalidations),
+        )),
+        "budget": {
+            "draw_overruns": draw_over_budget,
+            "draw_overrun_percent": percentage(draw_over_budget, samples.len()),
+            "interval_overruns": interval_over_budget,
+            "interval_overrun_percent": percentage(interval_over_budget, interval_count),
+        },
+        "samples": raw_samples,
+    })
+}
+
+fn render_cache_json(cache: RenderCacheDebugSnapshot) -> Value {
+    json!({
+        "raster_bytes": cache.raster_bytes,
+        "raster_count": cache.raster_count,
+        "raster_byte_limit": cache.raster_byte_limit,
+        "protected_raster_count": cache.protected_raster_count,
+        "display_list_count": cache.display_list_count,
+        "display_list_limit": cache.display_list_limit,
+    })
+}
+
+fn document_snapshot_json(document: &DocumentRenderDebugSnapshot) -> Value {
+    let interaction = &document.interaction;
+    json!({
+        "source_path": interaction.source_path.to_string_lossy(),
+        "configured_engine": interaction.configured_engine,
+        "page_label": document.page_label,
+        "view": {
+            "document_layout": interaction.document_layout,
+            "page_layout": interaction.page_layout,
+            "rotation": interaction.rotation,
+            "grid_overview_open": interaction.grid_overview_open,
+            "viewport_width": finite_f32_json(interaction.viewport_width),
+            "viewport_height": finite_f32_json(interaction.viewport_height),
+            "zoom": finite_f32_json(interaction.zoom),
+            "target_zoom": finite_f32_json(interaction.target_zoom),
+            "effective_scale": finite_f32_json(interaction.effective_scale),
+            "scroll_x_doc": finite_f32_json(interaction.scroll_x_doc),
+            "scroll_y_doc": finite_f32_json(interaction.scroll_y_doc),
+            "target_scroll_x_doc": finite_f32_json(interaction.target_scroll_x_doc),
+            "target_scroll_y_doc": finite_f32_json(interaction.target_scroll_y_doc),
+            "motion_active": interaction.motion_active,
+        },
+        "pending_render_count": document.pending_render_count,
+        "pending_render_limit": document.pending_render_limit,
+        "gpu_cache": gpu_cache_json(&document.gpu_cache),
+        "pages": document.pages.iter().map(page_snapshot_json).collect::<Vec<_>>(),
+        "navigation_fallbacks": document.gpu_navigation_fallbacks.iter().map(|fallback| json!({
+            "feature": fallback.feature,
+            "code": fallback.code,
+            "message": fallback.message,
+            "source": fallback.source,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
+    json!({
+        "frontend": {
+            "outline_fonts": cache.frontend_outline_fonts,
+            "outline_font_bytes": cache.frontend_outline_font_bytes,
+            "outline_font_hits": cache.frontend_outline_font_hits,
+            "outline_font_misses": cache.frontend_outline_font_misses,
+            "outline_font_evictions": cache.frontend_outline_font_evictions,
+            "objects": cache.frontend_objects,
+            "object_hits": cache.frontend_object_hits,
+            "object_misses": cache.frontend_object_misses,
+            "object_evictions": cache.frontend_object_evictions,
+            "preflight_reports": cache.frontend_preflight_reports,
+            "preflight_scans": cache.frontend_preflight_scans,
+        },
+        "scenes": {
+            "compiled_pages": cache.compiled_pages,
+            "compiled_page_limit": cache.compiled_page_limit,
+            "content_bound_pages": cache.content_bound_pages,
+            "content_bound_page_limit": cache.content_bound_page_limit,
+            "prepared_pages": cache.prepared_pages,
+            "prepared_page_limit": cache.prepared_page_limit,
+            "resident_bytes": cache.resident_bytes,
+            "resident_byte_limit": cache.resident_byte_limit,
+        },
+        "surfaces": {
+            "count": cache.surface_count,
+            "bytes": cache.surface_bytes,
+            "byte_limit": cache.surface_byte_limit,
+            "seed_tasks": cache.surface_seed_tasks,
+            "in_flight_bytes": cache.surface_in_flight_bytes,
+            "render_pending": cache.surface_render_pending,
+            "pending_peak": cache.surface_pending_peak,
+            "renders_started": cache.surface_renders_started,
+            "renders_completed": cache.surface_renders_completed,
+            "renders_coalesced": cache.surface_renders_coalesced,
+            "renders_superseded": cache.surface_renders_superseded,
+            "renders_deferred": cache.surface_renders_deferred,
+            "renders_discarded": cache.surface_renders_discarded,
+            "cache_pressure": cache.surface_render_cache_pressure,
+            "scroll_reuses": cache.surface_scroll_reuses,
+            "scroll_prefetches": cache.surface_scroll_prefetches,
+            "scroll_misses": cache.surface_scroll_misses,
+            "zoom_reuses": cache.surface_zoom_reuses,
+            "zoom_quality_refreshes": cache.surface_zoom_quality_refreshes,
+            "zoom_coverage_refreshes": cache.surface_zoom_coverage_refreshes,
+            "zoom_settled_upgrades": cache.surface_zoom_settled_upgrades,
+            "warm_requests": cache.surface_warm_requests,
+            "warm_hits": cache.surface_warm_hits,
+            "warm_pages": cache.surface_warm_pages,
+            "queue_latency_p95_ms": milliseconds(cache.surface_queue_latency_p95),
+            "ready_latency_p95_ms": milliseconds(cache.surface_ready_latency_p95),
+            "present_latency_p95_ms": milliseconds(cache.surface_present_latency_p95),
+            "refinement_pages": cache.refinement_pages,
+        },
+        "preparation": {
+            "active": cache.active_preparations,
+            "queued": cache.queued_preparations,
+            "speculative": cache.speculative_preparations,
+            "completed": cache.completed_preparations,
+            "cancelled": cache.cancelled_preparations,
+        },
+        "motion_active": cache.motion_active,
+    })
+}
+
+fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
+    json!({
+        "page_number": page.page_number,
+        "status": page_status_json(page.status),
+        "backend": page_backend_name(page.backend),
+        "requested_raster": page.requested_raster.map(raster_json),
+        "displayed_raster": page.displayed_raster.map(raster_json),
+        "cached_raster_bytes": page.cached_raster_bytes,
+        "cached_raster_variants": page.cached_raster_variants,
+        "source_revision": page.source_revision,
+        "latest_timing": page.latest_timing.map(|timing| json!({
+            "total_ms": milliseconds(timing.total),
+            "display_list_ms": timing.display_list.map(milliseconds),
+            "display_list_cached": timing.display_list_cached,
+            "raster_ms": timing.raster.map(milliseconds),
+            "mupdf_draw_ms": timing.mupdf_draw.map(milliseconds),
+            "raster_bands": timing.raster_bands,
+            "succeeded": timing.succeeded,
+        })),
+        "gpu": page.gpu.as_ref().map(|gpu| json!({
+            "cpu_ms": milliseconds(gpu.cpu_time),
+            "frame_pool_wait_ms": milliseconds(gpu.frame_pool_wait_time),
+            "command_encoding_ms": milliseconds(gpu.command_encoding_time),
+            "gpu_ms": gpu.gpu_time.map(milliseconds),
+            "host_to_device_bytes": gpu.host_to_device_bytes,
+            "passes": gpu.passes_executed,
+            "command_buffers": gpu.command_buffers,
+            "vector_batches": gpu.vector_batches,
+            "procedural_stroke_batches": gpu.procedural_stroke_batches,
+            "render_bundle_runs": gpu.render_bundle_runs,
+            "reprojected": gpu.reprojected_frame,
+            "reused_tiles": gpu.reused_tiles,
+            "rendered_tiles": gpu.rendered_tiles,
+            "dirty_tiles": gpu.dirty_tiles,
+            "refinement_pending": gpu.refinement_pending,
+            "selected_vector_lod": gpu.selected_vector_lod,
+            "frame_pool_reused": gpu.frame_pool_reused,
+            "frame_pool_grew": gpu.frame_pool_grew,
+            "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
+            "generation": gpu.generation,
+            "coverage_strategy": gpu.coverage_strategy,
+        })),
+        "gpu_preparation": page.gpu_preparation.as_ref().map(|preparation| json!({
+            "frontend_preflight_ms": milliseconds(preparation.frontend_preflight),
+            "compile_ms": milliseconds(preparation.compile),
+            "link_conversion_ms": milliseconds(preparation.link_conversion),
+            "gpu_prepare_ms": milliseconds(preparation.gpu_prepare),
+            "total_ms": milliseconds(preparation.total),
+            "compiled_cache_hit": preparation.compiled_cache_hit,
+            "elapsed_ms": milliseconds(preparation.elapsed),
+            "host_to_device_bytes": preparation.host_to_device_bytes,
+            "resident_bytes": preparation.resident_bytes,
+            "retained_operations": preparation.retained_operations,
+            "vector_batches": preparation.vector_batches,
+            "vector_lod_levels": preparation.vector_lod_levels,
+            "vector_bytes": preparation.vector_bytes,
+            "analytic_bytes": preparation.analytic_bytes,
+        })),
+        "gpu_fallbacks": page.gpu_fallbacks.iter().map(|fallback| json!({
+            "feature": fallback.feature,
+            "code": fallback.code,
+            "message": fallback.message,
+            "source": fallback.source,
+        })).collect::<Vec<_>>(),
+        "gpu_warnings": page.gpu_warnings.iter().map(|warning| json!({
+            "feature": warning.feature,
+            "code": warning.code,
+            "message": warning.message,
+        })).collect::<Vec<_>>(),
+        "gpu_failure": page.gpu_failure,
+        "text": {
+            "state": text_index_state_name(page.text_index_state),
+            "glyphs": page.glyph_count,
+            "lines": page.line_count,
+            "links": page.link_count,
+        },
+    })
+}
+
+fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnapshot) -> Value {
+    let mut counters = Map::new();
+    let mut resets = Vec::new();
+    macro_rules! counter {
+        ($field:ident) => {
+            insert_counter_delta(
+                &mut counters,
+                &mut resets,
+                stringify!($field),
+                start.$field,
+                end.$field,
+            );
+        };
+    }
+    counter!(frontend_outline_font_hits);
+    counter!(frontend_outline_font_misses);
+    counter!(frontend_outline_font_evictions);
+    counter!(frontend_object_hits);
+    counter!(frontend_object_misses);
+    counter!(frontend_object_evictions);
+    counter!(frontend_preflight_scans);
+    counter!(surface_renders_started);
+    counter!(surface_renders_completed);
+    counter!(surface_renders_coalesced);
+    counter!(surface_renders_superseded);
+    counter!(surface_renders_deferred);
+    counter!(surface_renders_discarded);
+    counter!(surface_render_cache_pressure);
+    counter!(surface_scroll_reuses);
+    counter!(surface_scroll_prefetches);
+    counter!(surface_scroll_misses);
+    counter!(surface_zoom_reuses);
+    counter!(surface_zoom_quality_refreshes);
+    counter!(surface_zoom_coverage_refreshes);
+    counter!(surface_zoom_settled_upgrades);
+    counter!(surface_warm_requests);
+    counter!(surface_warm_hits);
+    counter!(completed_preparations);
+    counter!(cancelled_preparations);
+    json!({
+        "counters": counters,
+        "reset_fields": resets,
+    })
+}
+
+fn insert_counter_delta(
+    counters: &mut Map<String, Value>,
+    resets: &mut Vec<&'static str>,
+    name: &'static str,
+    start: u64,
+    end: u64,
+) {
+    if let Some(delta) = end.checked_sub(start) {
+        counters.insert(name.to_string(), json!(delta));
+    } else {
+        counters.insert(name.to_string(), Value::Null);
+        resets.push(name);
+    }
+}
+
+fn raster_json(raster: glyphst_document_ui::document_view::RasterDebugSnapshot) -> Value {
+    json!({
+        "physical_width": raster.physical_width,
+        "physical_height": raster.physical_height,
+        "bytes": raster.bytes,
+        "scale": finite_f32_json(raster.scale),
+    })
+}
+
+fn page_status_json(status: PageRenderDebugStatus) -> Value {
+    match status {
+        PageRenderDebugStatus::Exact => json!({ "kind": "exact" }),
+        PageRenderDebugStatus::RetainedGpu { exact_pending } => {
+            json!({ "kind": "retained-gpu", "exact_pending": exact_pending })
+        }
+        PageRenderDebugStatus::Fallback { exact_pending } => {
+            json!({ "kind": "fallback", "exact_pending": exact_pending })
+        }
+        PageRenderDebugStatus::Pending => json!({ "kind": "pending" }),
+        PageRenderDebugStatus::Failed => json!({ "kind": "failed" }),
+        PageRenderDebugStatus::Unavailable => json!({ "kind": "unavailable" }),
+    }
+}
+
+fn page_backend_name(backend: PageRenderBackendDebug) -> &'static str {
+    match backend {
+        PageRenderBackendDebug::MuPdf => "mupdf",
+        PageRenderBackendDebug::GlyphstGpu => "glyphst-gpu",
+        PageRenderBackendDebug::GlyphstPending => "glyphst-pending",
+        PageRenderBackendDebug::GlyphstFailed => "glyphst-failed",
+        PageRenderBackendDebug::MuPdfWhileGpuPending => "mupdf-placeholder",
+        PageRenderBackendDebug::MuPdfFallback => "mupdf-fallback",
+    }
+}
+
+fn text_index_state_name(state: TextIndexDebugState) -> &'static str {
+    match state {
+        TextIndexDebugState::Pending => "pending",
+        TextIndexDebugState::Indexing => "indexing",
+        TextIndexDebugState::Ready => "ready",
+        TextIndexDebugState::Failed => "failed",
+    }
+}
+
+fn finite_f32_json(value: f32) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn percentage(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator > 0).then(|| numerator as f64 / denominator as f64 * 100.0)
 }
 
 fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
@@ -953,5 +1673,100 @@ mod tests {
             soft_wrap_value("text-extraction:text-font-metrics-unavailable"),
             "text-\u{200b}extraction:\u{200b}text-\u{200b}font-\u{200b}metrics-\u{200b}unavailable"
         );
+    }
+
+    #[test]
+    fn duration_statistics_use_nearest_rank_percentiles() {
+        let statistics = duration_statistics((1..=100).map(Duration::from_millis)).unwrap();
+        assert_eq!(statistics.count, 100);
+        assert_eq!(statistics.mean_ms, 50.5);
+        assert_eq!(statistics.p50_ms, 50.0);
+        assert_eq!(statistics.p95_ms, 95.0);
+        assert_eq!(statistics.max_ms, 100.0);
+    }
+
+    #[test]
+    fn frame_report_separates_draw_and_pacing_overruns() {
+        let samples = [
+            CapturedFrameSample {
+                offset: Duration::ZERO,
+                interval: None,
+                draw: Duration::from_millis(2),
+                dirty_to_draw: Some(Duration::from_millis(3)),
+                invalidations: 1,
+            },
+            CapturedFrameSample {
+                offset: Duration::from_millis(8),
+                interval: Some(Duration::from_millis(8)),
+                draw: Duration::from_millis(9),
+                dirty_to_draw: Some(Duration::from_millis(10)),
+                invalidations: 3,
+            },
+            CapturedFrameSample {
+                offset: Duration::from_millis(20),
+                interval: Some(Duration::from_millis(12)),
+                draw: Duration::from_millis(2),
+                dirty_to_draw: None,
+                invalidations: 2,
+            },
+        ];
+        let report = frame_report(&samples);
+        assert_eq!(report["total_frames"], 3);
+        assert_eq!(report["effective_fps"], 100.0);
+        assert_eq!(report["draw"]["p95_ms"], 9.0);
+        assert_eq!(report["interval"]["p95_ms"], 12.0);
+        assert_eq!(report["dirty_to_draw"]["count"], 2);
+        assert_eq!(report["invalidations"]["p95"], 3);
+        assert_eq!(report["budget"]["draw_overruns"], 1);
+        assert_eq!(report["budget"]["interval_overruns"], 1);
+    }
+
+    #[test]
+    fn frame_report_bounds_raw_samples_without_losing_aggregate_count() {
+        let samples = (0..MAX_RAW_FRAME_SAMPLES + 4)
+            .map(|index| CapturedFrameSample {
+                offset: Duration::from_millis(index as u64),
+                interval: (index > 0).then_some(Duration::from_millis(1)),
+                draw: Duration::from_micros(500),
+                dirty_to_draw: Some(Duration::from_micros(750)),
+                invalidations: 1,
+            })
+            .collect::<Vec<_>>();
+        let report = frame_report(&samples);
+        assert_eq!(report["total_frames"], MAX_RAW_FRAME_SAMPLES + 4);
+        assert_eq!(report["raw_samples_retained"], MAX_RAW_FRAME_SAMPLES);
+        assert_eq!(report["raw_samples_truncated"], true);
+        assert_eq!(report["samples"][0]["offset_ms"], 4.0);
+    }
+
+    #[test]
+    fn gpu_counter_delta_marks_resets_instead_of_inventing_progress() {
+        let start = GpuCacheDebugSnapshot {
+            surface_renders_started: 12,
+            surface_zoom_reuses: 9,
+            ..Default::default()
+        };
+        let end = GpuCacheDebugSnapshot {
+            surface_renders_started: 15,
+            surface_zoom_reuses: 2,
+            ..Default::default()
+        };
+        let delta = gpu_counter_delta_json(&start, &end);
+        assert_eq!(delta["counters"]["surface_renders_started"], 3);
+        assert!(delta["counters"]["surface_zoom_reuses"].is_null());
+        assert!(
+            delta["reset_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "surface_zoom_reuses")
+        );
+    }
+
+    #[test]
+    fn non_finite_interaction_values_are_json_null() {
+        assert!(finite_f32_json(f32::NAN).is_null());
+        assert!(finite_f32_json(f32::INFINITY).is_null());
+        assert_eq!(finite_f32_json(1.25), 1.25);
     }
 }

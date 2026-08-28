@@ -82,6 +82,7 @@ use crate::{
 use ai::WorkspaceAiContextProvider;
 use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 use docks::WorkspaceDockState;
+use render_debug::RenderDebugCapture;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WorkspaceSurfaceMode {
@@ -165,6 +166,7 @@ pub struct Workspace {
     transparency_enabled: bool,
     window_settings: WindowSettings,
     rendering_debug: Option<Entity<FpsMonitor>>,
+    rendering_debug_capture: Option<RenderDebugCapture>,
 }
 
 #[derive(Clone, Copy)]
@@ -474,6 +476,7 @@ impl Workspace {
             transparency_enabled,
             window_settings,
             rendering_debug: None,
+            rendering_debug_capture: None,
         };
 
         cx.subscribe_in(
@@ -5197,6 +5200,13 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert!(workspace.rendering_debug.is_some());
         });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.start_render_debug_capture(window, cx);
+            assert!(workspace.rendering_debug_capture.is_none());
+        });
+        cx.update(|window, cx| {
+            assert_eq!(window.notifications(cx).len(), 1);
+        });
 
         cx.update(|window, cx| {
             window.dispatch_action(Box::new(ToggleRenderingDebug), cx);
@@ -5208,6 +5218,97 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert!(workspace.rendering_debug.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext) {
+        let document_path = temporary_pdf_path("render-debug-capture");
+        write_minimal_pdf(&document_path);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+            cx.set_global(SettingsStore::memory());
+            cx.set_global(LibraryStore::memory());
+            cx.set_global(RenderCache::new());
+        });
+        let callbacks = WorkspaceCallbacks {
+            open_workspace_window: unavailable_workspace_window,
+            open_settings_window: ignore_settings_window,
+        };
+        let initial_path = document_path.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let workspace = cx
+                .new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
+            Root::new(workspace, window, cx)
+        });
+        let workspace = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<Workspace>().unwrap()
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_rendering_debug(window, cx);
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let capture_button = cx
+            .debug_bounds("render-debug-capture")
+            .expect("rendering capture control");
+        cx.simulate_click(capture_button.center(), Modifiers::default());
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.rendering_debug_capture.is_some());
+        });
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+        }
+        let capture_button = cx
+            .debug_bounds("render-debug-capture")
+            .expect("expanded rendering capture control");
+        cx.simulate_click(capture_button.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let report_text = cx
+            .read_from_clipboard()
+            .and_then(|clipboard| clipboard.text())
+            .expect("rendering capture JSON on clipboard");
+        let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["kind"], "glyphst-reader-interaction");
+        assert_eq!(
+            report["document"]["start"]["source_path"],
+            document_path.to_string_lossy().as_ref()
+        );
+        assert!(report["frames"]["total_frames"].as_u64().unwrap() >= 1);
+        assert!(report["document"]["gpu_counter_delta"].is_object());
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.rendering_debug_capture.is_none());
+        });
+        assert!(
+            cx.debug_bounds("render-debug-capture").is_some(),
+            "the capture control must stop the parent HUD click from collapsing it"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.start_render_debug_capture(window, cx);
+            assert!(workspace.rendering_debug_capture.is_some());
+            workspace.toggle_rendering_debug(window, cx);
+            assert!(workspace.rendering_debug_capture.is_none());
+            assert!(workspace.rendering_debug.is_none());
+        });
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|clipboard| clipboard.text())
+                .as_deref(),
+            Some(report_text.as_str())
+        );
+
+        fs::remove_file(document_path).unwrap();
     }
 
     #[gpui::test]
