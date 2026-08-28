@@ -1637,75 +1637,82 @@ fn document_position_json(position: &DocumentPosition) -> Value {
 }
 
 fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
+    let frontend = json!({
+        "outline_fonts": cache.frontend_outline_fonts,
+        "outline_font_bytes": cache.frontend_outline_font_bytes,
+        "outline_font_hits": cache.frontend_outline_font_hits,
+        "outline_font_misses": cache.frontend_outline_font_misses,
+        "outline_font_evictions": cache.frontend_outline_font_evictions,
+        "objects": cache.frontend_objects,
+        "object_hits": cache.frontend_object_hits,
+        "object_misses": cache.frontend_object_misses,
+        "object_evictions": cache.frontend_object_evictions,
+        "preflight_reports": cache.frontend_preflight_reports,
+        "preflight_scans": cache.frontend_preflight_scans,
+    });
+    let scenes = json!({
+        "compiled_pages": cache.compiled_pages,
+        "compiled_page_limit": cache.compiled_page_limit,
+        "content_bound_pages": cache.content_bound_pages,
+        "content_bound_page_limit": cache.content_bound_page_limit,
+        "prepared_pages": cache.prepared_pages,
+        "prepared_page_limit": cache.prepared_page_limit,
+        "resident_bytes": cache.resident_bytes,
+        "resident_byte_limit": cache.resident_byte_limit,
+    });
+    let surfaces = json!({
+        "count": cache.surface_count,
+        "bytes": cache.surface_bytes,
+        "byte_limit": cache.surface_byte_limit,
+        "continuity_count": cache.continuity_surface_count,
+        "continuity_bytes": cache.continuity_surface_bytes,
+        "seed_tasks": cache.surface_seed_tasks,
+        "in_flight_bytes": cache.surface_in_flight_bytes,
+        "render_pending": cache.surface_render_pending,
+        "pending_peak": cache.surface_pending_peak,
+        "renders_started": cache.surface_renders_started,
+        "renders_completed": cache.surface_renders_completed,
+        "renders_coalesced": cache.surface_renders_coalesced,
+        "renders_superseded": cache.surface_renders_superseded,
+        "renders_deferred": cache.surface_renders_deferred,
+        "renders_discarded": cache.surface_renders_discarded,
+        "cache_pressure": cache.surface_render_cache_pressure,
+        "scroll_reuses": cache.surface_scroll_reuses,
+        "scroll_prefetches": cache.surface_scroll_prefetches,
+        "scroll_misses": cache.surface_scroll_misses,
+        "zoom_reuses": cache.surface_zoom_reuses,
+        "zoom_quality_refreshes": cache.surface_zoom_quality_refreshes,
+        "zoom_coverage_refreshes": cache.surface_zoom_coverage_refreshes,
+        "zoom_settled_upgrades": cache.surface_zoom_settled_upgrades,
+        "warm_requests": cache.surface_warm_requests,
+        "warm_hits": cache.surface_warm_hits,
+        "warm_pages": cache.surface_warm_pages,
+        "continuity_requests": cache.surface_continuity_requests,
+        "continuity_completed": cache.surface_continuity_completed,
+        "continuity_hits": cache.surface_continuity_hits,
+        "partial_reuses": cache.surface_partial_reuses,
+        "presentation_gaps": cache.surface_presentation_gaps,
+        "incomplete_suppressed": cache.surface_incomplete_suppressed,
+        "refinement_submissions": cache.surface_refinement_submissions,
+        "atomic_swaps": cache.surface_atomic_swaps,
+        "queue_latency_p95_ms": milliseconds(cache.surface_queue_latency_p95),
+        "ready_latency_p95_ms": milliseconds(cache.surface_ready_latency_p95),
+        "present_latency_p95_ms": milliseconds(cache.surface_present_latency_p95),
+        "refinement_pages": cache.refinement_pages,
+        "retained_refinement_pages": cache.retained_refinement_pages,
+    });
+    let preparation = json!({
+        "active": cache.active_preparations,
+        "queued": cache.queued_preparations,
+        "speculative": cache.speculative_preparations,
+        "completed": cache.completed_preparations,
+        "cancelled": cache.cancelled_preparations,
+    });
     json!({
-        "frontend": {
-            "outline_fonts": cache.frontend_outline_fonts,
-            "outline_font_bytes": cache.frontend_outline_font_bytes,
-            "outline_font_hits": cache.frontend_outline_font_hits,
-            "outline_font_misses": cache.frontend_outline_font_misses,
-            "outline_font_evictions": cache.frontend_outline_font_evictions,
-            "objects": cache.frontend_objects,
-            "object_hits": cache.frontend_object_hits,
-            "object_misses": cache.frontend_object_misses,
-            "object_evictions": cache.frontend_object_evictions,
-            "preflight_reports": cache.frontend_preflight_reports,
-            "preflight_scans": cache.frontend_preflight_scans,
-        },
-        "scenes": {
-            "compiled_pages": cache.compiled_pages,
-            "compiled_page_limit": cache.compiled_page_limit,
-            "content_bound_pages": cache.content_bound_pages,
-            "content_bound_page_limit": cache.content_bound_page_limit,
-            "prepared_pages": cache.prepared_pages,
-            "prepared_page_limit": cache.prepared_page_limit,
-            "resident_bytes": cache.resident_bytes,
-            "resident_byte_limit": cache.resident_byte_limit,
-        },
-        "surfaces": {
-            "count": cache.surface_count,
-            "bytes": cache.surface_bytes,
-            "byte_limit": cache.surface_byte_limit,
-            "continuity_count": cache.continuity_surface_count,
-            "continuity_bytes": cache.continuity_surface_bytes,
-            "seed_tasks": cache.surface_seed_tasks,
-            "in_flight_bytes": cache.surface_in_flight_bytes,
-            "render_pending": cache.surface_render_pending,
-            "pending_peak": cache.surface_pending_peak,
-            "renders_started": cache.surface_renders_started,
-            "renders_completed": cache.surface_renders_completed,
-            "renders_coalesced": cache.surface_renders_coalesced,
-            "renders_superseded": cache.surface_renders_superseded,
-            "renders_deferred": cache.surface_renders_deferred,
-            "renders_discarded": cache.surface_renders_discarded,
-            "cache_pressure": cache.surface_render_cache_pressure,
-            "scroll_reuses": cache.surface_scroll_reuses,
-            "scroll_prefetches": cache.surface_scroll_prefetches,
-            "scroll_misses": cache.surface_scroll_misses,
-            "zoom_reuses": cache.surface_zoom_reuses,
-            "zoom_quality_refreshes": cache.surface_zoom_quality_refreshes,
-            "zoom_coverage_refreshes": cache.surface_zoom_coverage_refreshes,
-            "zoom_settled_upgrades": cache.surface_zoom_settled_upgrades,
-            "warm_requests": cache.surface_warm_requests,
-            "warm_hits": cache.surface_warm_hits,
-            "warm_pages": cache.surface_warm_pages,
-            "continuity_requests": cache.surface_continuity_requests,
-            "continuity_completed": cache.surface_continuity_completed,
-            "continuity_hits": cache.surface_continuity_hits,
-            "partial_reuses": cache.surface_partial_reuses,
-            "presentation_gaps": cache.surface_presentation_gaps,
-            "queue_latency_p95_ms": milliseconds(cache.surface_queue_latency_p95),
-            "ready_latency_p95_ms": milliseconds(cache.surface_ready_latency_p95),
-            "present_latency_p95_ms": milliseconds(cache.surface_present_latency_p95),
-            "refinement_pages": cache.refinement_pages,
-            "retained_refinement_pages": cache.retained_refinement_pages,
-        },
-        "preparation": {
-            "active": cache.active_preparations,
-            "queued": cache.queued_preparations,
-            "speculative": cache.speculative_preparations,
-            "completed": cache.completed_preparations,
-            "cancelled": cache.cancelled_preparations,
-        },
+        "frontend": frontend,
+        "scenes": scenes,
+        "surfaces": surfaces,
+        "preparation": preparation,
         "motion_active": cache.motion_active,
     })
 }
@@ -1745,6 +1752,9 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "rendered_tiles": gpu.rendered_tiles,
             "dirty_tiles": gpu.dirty_tiles,
             "refinement_pending": gpu.refinement_pending,
+            "presentation_quality": gpu.presentation_quality,
+            "scheduled_refinement_work": gpu.scheduled_refinement_work,
+            "refinement_work_budget": gpu.refinement_work_budget,
             "selected_vector_lod": gpu.selected_vector_lod,
             "frame_pool_reused": gpu.frame_pool_reused,
             "frame_pool_grew": gpu.frame_pool_grew,
@@ -1831,6 +1841,9 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(surface_continuity_hits);
     counter!(surface_partial_reuses);
     counter!(surface_presentation_gaps);
+    counter!(surface_incomplete_suppressed);
+    counter!(surface_refinement_submissions);
+    counter!(surface_atomic_swaps);
     counter!(completed_preparations);
     counter!(cancelled_preparations);
     json!({
@@ -2008,7 +2021,7 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU PIPELINE",
             format!(
-                "{} active · {}/{} pending/peak · {} submitted · {} done · {}/{} visible/retained refine · motion {}",
+                "{} active · {}/{} pending/peak · {} submitted · {} done · {}/{} visible/retained refine · {} hidden · {} swaps · motion {}",
                 document.gpu_cache.surface_seed_tasks,
                 document.gpu_cache.surface_render_pending,
                 document.gpu_cache.surface_pending_peak,
@@ -2016,6 +2029,8 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 document.gpu_cache.surface_renders_completed,
                 document.gpu_cache.refinement_pages,
                 document.gpu_cache.retained_refinement_pages,
+                document.gpu_cache.surface_incomplete_suppressed,
+                document.gpu_cache.surface_atomic_swaps,
                 if document.gpu_cache.motion_active {
                     "active"
                 } else {
@@ -2632,10 +2647,11 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "REUSE",
                 format!(
-                    "{} reused · {} rendered · {} dirty · source {} · refine {} · pool {} · {} clip · gen {}",
+                    "{} reused · {} rendered · {} dirty · {} · source {} · refine {} ({}/{}) · pool {} · {} clip · gen {}",
                     gpu.reused_tiles,
                     gpu.rendered_tiles,
                     gpu.dirty_tiles,
+                    gpu.presentation_quality,
                     if gpu.reprojected_frame {
                         "reprojected"
                     } else {
@@ -2646,6 +2662,8 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                     } else {
                         "exact"
                     },
+                    gpu.scheduled_refinement_work,
+                    gpu.refinement_work_budget,
                     if gpu.frame_pool_reused { "yes" } else { "no" },
                     gpu.clip_state_changes,
                     gpu.generation
@@ -2973,6 +2991,9 @@ mod tests {
             surface_continuity_hits: 11,
             surface_partial_reuses: 3,
             surface_presentation_gaps: 1,
+            surface_incomplete_suppressed: 13,
+            surface_refinement_submissions: 13,
+            surface_atomic_swaps: 2,
             refinement_pages: 1,
             retained_refinement_pages: 4,
             ..Default::default()
@@ -2986,6 +3007,9 @@ mod tests {
         assert_eq!(report["surfaces"]["continuity_hits"], 11);
         assert_eq!(report["surfaces"]["partial_reuses"], 3);
         assert_eq!(report["surfaces"]["presentation_gaps"], 1);
+        assert_eq!(report["surfaces"]["incomplete_suppressed"], 13);
+        assert_eq!(report["surfaces"]["refinement_submissions"], 13);
+        assert_eq!(report["surfaces"]["atomic_swaps"], 2);
         assert_eq!(report["surfaces"]["refinement_pages"], 1);
         assert_eq!(report["surfaces"]["retained_refinement_pages"], 4);
     }

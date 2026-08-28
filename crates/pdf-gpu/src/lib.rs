@@ -29,7 +29,8 @@ use glyphst_pdf_render_wgpu::{
 pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
     PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
-    PreparationStats as GpuPreparationStats, RenderStats as GpuRenderStats,
+    PreparationStats as GpuPreparationStats, PresentationQuality as GpuPresentationQuality,
+    RenderStats as GpuRenderStats,
 };
 use gpui::{ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle};
 use gpui_wgpu::{WgpuExternalContext, wgpu};
@@ -42,7 +43,7 @@ use std::{
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
-const MAX_PRESENTATION_SURFACES: usize = 3;
+const MAX_PRESENTATION_SURFACES: usize = 4;
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1181,8 +1182,12 @@ fn application_link_action_fallback(code: &str, message: &str) -> GpuFallbackDia
 // one allocator round trip to every interactive GPU submission.
 #[allow(clippy::large_enum_variant)]
 pub enum GpuPageRenderOutcome {
-    /// The newest request submitted successfully and advanced presentation state.
-    Rendered(GpuPageTexture, GpuRenderStats),
+    /// The newest request submitted successfully and advanced working state.
+    /// `presented` is absent while a bounded settled frame remains incomplete.
+    Rendered {
+        presented: Option<GpuPageTexture>,
+        stats: GpuRenderStats,
+    },
     /// Planning proved this request needs a full redraw that the caller asked
     /// to postpone until interaction settles. No target texture was allocated.
     Deferred,
@@ -1464,10 +1469,11 @@ impl GpuPdfRenderer {
             let surface_region = request.surface_region_for(region_mode)?;
             let (_, engine_request) =
                 self.engine_render_request_for_region(page, request, surface_region)?;
+            presentation.prepare_request(engine_request);
             match self.renderer.plan_incremental(
                 &page.gpu,
                 &presentation.incremental,
-                presentation.current_view(),
+                presentation.working_view(),
                 engine_request,
             ) {
                 Ok(work) => {
@@ -1485,7 +1491,7 @@ impl GpuPdfRenderer {
         }
     }
 
-    /// Render a prepared complete page into a bounded three-surface ring.
+    /// Render a prepared complete page into a bounded four-surface ring.
     ///
     /// Reprojection and refinement select a destination distinct from their
     /// source. A direct retained redraw samples no presentation pixels and may
@@ -1515,6 +1521,7 @@ impl GpuPdfRenderer {
             let surface_region = request.surface_region_for(region_mode)?;
             let (_, engine_request) =
                 self.engine_render_request_for_region(page, request, surface_region)?;
+            presentation.prepare_request(engine_request);
             let [width, height] = surface_region.size();
             if width == 0 || height == 0 {
                 bail!("native PDF render target must be non-empty");
@@ -1530,7 +1537,7 @@ impl GpuPdfRenderer {
             let work = match self.renderer.plan_incremental(
                 &page.gpu,
                 &presentation.incremental,
-                presentation.current_view(),
+                presentation.working_view(),
                 engine_request,
             ) {
                 Ok(work) => work,
@@ -1559,14 +1566,20 @@ impl GpuPdfRenderer {
             match self.renderer.render_incremental(
                 &page.gpu,
                 &mut incremental,
-                presentation.current_view(),
+                presentation.working_view(),
                 engine_request,
                 &target.view,
             ) {
                 Ok(stats) => {
                     presentation.region_mode = region_mode;
-                    let texture = presentation.commit(selection, surface_region, incremental);
-                    return Ok(GpuPageRenderOutcome::Rendered(texture, stats));
+                    let presented = presentation.commit(
+                        selection,
+                        surface_region,
+                        incremental,
+                        engine_request,
+                        stats.presentation_quality,
+                    );
+                    return Ok(GpuPageRenderOutcome::Rendered { presented, stats });
                 }
                 Err(RenderError::StaleRenderGeneration { .. }) => {
                     return Ok(GpuPageRenderOutcome::Superseded);
@@ -1795,14 +1808,22 @@ impl SurfaceSelection {
 
 /// Bounded same-device presentation state for one prepared page.
 ///
-/// At most three surfaces are retained: the currently displayed output, the
-/// stable exact reprojection source when distinct, and one writable target.
+/// Working state may advance through incomplete settled tiles while the last
+/// coherent surface remains immutable and displayable. At most four surfaces
+/// cover the coherent output, incremental source, and two ping-pong targets.
 #[derive(Clone, Default)]
 pub struct GpuPagePresentation {
     token: Option<ExternalGpuDeviceToken>,
     surfaces: Vec<Arc<GpuPageSurface>>,
     current: Option<usize>,
     current_region: Option<GpuPageRegion>,
+    working_request: Option<RenderRequest>,
+    working_quality: GpuPresentationQuality,
+    presented: Option<usize>,
+    presented_region: Option<GpuPageRegion>,
+    presented_request: Option<RenderRequest>,
+    presented_quality: Option<GpuPresentationQuality>,
+    presented_incremental: IncrementalRenderState,
     region_mode: SurfaceRegionMode,
     incremental: IncrementalRenderState,
 }
@@ -1813,8 +1834,12 @@ impl fmt::Debug for GpuPagePresentation {
             .debug_struct("GpuPagePresentation")
             .field("token", &self.token)
             .field("surfaces", &self.surfaces.len())
-            .field("current", &self.current)
-            .field("current_region", &self.current_region)
+            .field("working", &self.current)
+            .field("working_region", &self.current_region)
+            .field("working_quality", &self.working_quality)
+            .field("presented", &self.presented)
+            .field("presented_region", &self.presented_region)
+            .field("presented_quality", &self.presented_quality)
             .field("region_mode", &self.region_mode)
             .field("refinement_pending", &self.incremental.refinement_pending())
             .finish()
@@ -1828,17 +1853,38 @@ impl GpuPagePresentation {
         request.surface_region_for(self.region_mode)
     }
 
-    fn current_view(&self) -> Option<&wgpu::TextureView> {
+    fn working_view(&self) -> Option<&wgpu::TextureView> {
         self.current
             .and_then(|index| self.surfaces.get(index))
             .map(|surface| surface.view.as_ref())
     }
 
+    fn prepare_request(&mut self, request: RenderRequest) {
+        if self.working_quality == GpuPresentationQuality::Incomplete
+            && self
+                .working_request
+                .is_some_and(|working| !same_render_content(working, request))
+        {
+            self.current = self.presented;
+            self.current_region = self.presented_region;
+            self.working_request = self.presented_request;
+            self.working_quality = self
+                .presented_quality
+                .unwrap_or(GpuPresentationQuality::Incomplete);
+            self.incremental = self.presented_incremental.clone();
+        }
+    }
+
     fn target_slot(&self, size: [u32; 2], allow_current: bool) -> SurfaceSlot {
-        let retained = self
+        let working_retained = self
             .surfaces
             .iter()
             .position(|surface| self.incremental.references_texture(&surface.view));
+        let presented_retained = self
+            .surfaces
+            .iter()
+            .position(|surface| self.presented_incremental.references_texture(&surface.view));
+        let protected = [self.presented, working_retained, presented_retained];
         let mut sizes = [[0_u32; 2]; MAX_PRESENTATION_SURFACES];
         for (output, surface) in sizes.iter_mut().zip(&self.surfaces) {
             *output = surface.size;
@@ -1846,7 +1892,7 @@ impl GpuPagePresentation {
         presentation_surface_slot(
             &sizes[..self.surfaces.len()],
             self.current,
-            retained,
+            &protected,
             size,
             allow_current,
         )
@@ -1871,7 +1917,9 @@ impl GpuPagePresentation {
         selection: SurfaceSelection,
         region: GpuPageRegion,
         incremental: IncrementalRenderState,
-    ) -> GpuPageTexture {
+        request: RenderRequest,
+        quality: GpuPresentationQuality,
+    ) -> Option<GpuPageTexture> {
         let index = match selection.slot {
             SurfaceSlot::Existing(index) => index,
             SurfaceSlot::Insert => {
@@ -1886,20 +1934,40 @@ impl GpuPagePresentation {
         };
         self.current = Some(index);
         self.current_region = Some(region);
+        self.working_request = Some(request);
+        self.working_quality = quality;
         self.incremental = incremental;
-        GpuPageTexture {
+        if quality == GpuPresentationQuality::Incomplete {
+            return None;
+        }
+        self.presented = Some(index);
+        self.presented_region = Some(region);
+        self.presented_request = Some(request);
+        self.presented_quality = Some(quality);
+        self.presented_incremental = self.incremental.clone();
+        Some(GpuPageTexture {
             surface: selection.surface,
             region,
-        }
+        })
     }
 
     #[must_use]
     pub fn current_texture(&self) -> Option<GpuPageTexture> {
-        let surface = Arc::clone(self.surfaces.get(self.current?)?);
+        let surface = Arc::clone(self.surfaces.get(self.presented?)?);
         Some(GpuPageTexture {
             surface,
-            region: self.current_region?,
+            region: self.presented_region?,
         })
+    }
+
+    #[must_use]
+    pub const fn has_working_texture(&self) -> bool {
+        self.current.is_some()
+    }
+
+    #[must_use]
+    pub const fn presentation_quality(&self) -> Option<GpuPresentationQuality> {
+        self.presented_quality
     }
 
     #[must_use]
@@ -1918,13 +1986,15 @@ impl GpuPagePresentation {
                     .saturating_add(region.byte_len());
             }
         }
-        if self.incremental.retained_texture_bytes() > 0
-            && !self
-                .surfaces
-                .iter()
-                .any(|surface| self.incremental.references_texture(&surface.view))
-        {
-            bytes = bytes.saturating_add(self.incremental.retained_texture_bytes());
+        for incremental in [&self.incremental, &self.presented_incremental] {
+            if incremental.retained_texture_bytes() > 0
+                && !self
+                    .surfaces
+                    .iter()
+                    .any(|surface| incremental.references_texture(&surface.view))
+            {
+                bytes = bytes.saturating_add(incremental.retained_texture_bytes());
+            }
         }
         bytes
     }
@@ -1944,7 +2014,17 @@ impl GpuPagePresentation {
 
     #[must_use]
     pub fn retained_source_byte_len(&self) -> u64 {
-        self.incremental.retained_texture_bytes()
+        let working = self.incremental.retained_texture_bytes();
+        let presented = self.presented_incremental.retained_texture_bytes();
+        let shared = self.surfaces.iter().any(|surface| {
+            self.incremental.references_texture(&surface.view)
+                && self.presented_incremental.references_texture(&surface.view)
+        });
+        if shared {
+            working.max(presented)
+        } else {
+            working.saturating_add(presented)
+        }
     }
 
     #[must_use]
@@ -1961,17 +2041,19 @@ impl GpuPagePresentation {
 fn presentation_surface_slot(
     sizes: &[[u32; 2]],
     current: Option<usize>,
-    retained: Option<usize>,
+    protected: &[Option<usize>],
     requested: [u32; 2],
     allow_current: bool,
 ) -> SurfaceSlot {
+    let protected = |index: usize| protected.contains(&Some(index));
     if allow_current
         && let Some(current) = current
+        && !protected(current)
         && sizes.get(current) == Some(&requested)
     {
         return SurfaceSlot::Existing(current);
     }
-    let reusable = |index: usize| Some(index) != current && Some(index) != retained;
+    let reusable = |index: usize| Some(index) != current && !protected(index);
     if let Some(index) = sizes
         .iter()
         .enumerate()
@@ -1989,9 +2071,16 @@ fn presentation_surface_slot(
             return SurfaceSlot::Replace(index);
         }
     }
-    // The incremental renderer retains at most one source in addition to the
-    // current surface, so a three-entry ring always has a writable third slot.
+    // Presented and incremental retained sources overlap in normal operation;
+    // a four-entry ring therefore always has one writable surface.
     unreachable!("native PDF presentation ring has no writable surface")
+}
+
+fn same_render_content(left: RenderRequest, right: RenderRequest) -> bool {
+    left.root_transform == right.root_transform
+        && left.target_size == right.target_size
+        && left.background == right.background
+        && left.settled == right.settled
 }
 
 fn surface_byte_len(size: [u32; 2]) -> u64 {
@@ -2918,34 +3007,87 @@ trailer <</Root 1 0 R>>
     fn presentation_ring_never_selects_current_or_retained_source() {
         let size = [640, 896];
         assert_eq!(
-            presentation_surface_slot(&[], None, None, size, false),
+            presentation_surface_slot(&[], None, &[], size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size], Some(0), Some(0), size, false),
+            presentation_surface_slot(&[size], Some(0), &[Some(0)], size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size], Some(1), Some(0), size, false),
+            presentation_surface_slot(&[size, size], Some(1), &[Some(0)], size, false),
             SurfaceSlot::Insert
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(1), Some(0), size, false),
+            presentation_surface_slot(&[size, size, size], Some(1), &[Some(0)], size, false),
             SurfaceSlot::Existing(2)
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(2), Some(0), size, false),
+            presentation_surface_slot(&[size, size, size], Some(2), &[Some(0)], size, false),
             SurfaceSlot::Existing(1)
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size, size], Some(2), Some(0), [768, 896], false,),
-            SurfaceSlot::Replace(1)
+            presentation_surface_slot(
+                &[size, size, size, size],
+                Some(2),
+                &[Some(0)],
+                [768, 896],
+                false,
+            ),
+            SurfaceSlot::Replace(3)
         );
         assert_eq!(
-            presentation_surface_slot(&[size, size], Some(1), Some(0), size, true),
+            presentation_surface_slot(&[size, size], Some(1), &[Some(0)], size, true),
             SurfaceSlot::Existing(1),
             "direct redraw may overwrite the current matching surface"
         );
+        assert_eq!(
+            presentation_surface_slot(&[size, size], Some(1), &[Some(0), Some(1)], size, true),
+            SurfaceSlot::Insert,
+            "direct redraw must not overwrite the coherent presented surface"
+        );
+    }
+
+    #[test]
+    fn working_render_identity_ignores_priority_only_request_fields() {
+        let rect = |x0, y0, x1, y1| {
+            glyphst_pdf_engine::Rect::from_corners(
+                glyphst_pdf_engine::Point::new(x0, y0).unwrap(),
+                glyphst_pdf_engine::Point::new(x1, y1).unwrap(),
+            )
+            .unwrap()
+        };
+        let bounds = rect(0.0, 0.0, 100.0, 200.0);
+        let request = RenderRequest {
+            root_transform: Transform::IDENTITY,
+            viewport: bounds,
+            target_size: [100, 200],
+            background: [1.0; 4],
+            settled: true,
+            generation: 1,
+        };
+        assert!(same_render_content(
+            request,
+            RenderRequest {
+                viewport: rect(20.0, 30.0, 60.0, 80.0),
+                generation: 2,
+                ..request
+            }
+        ));
+        assert!(!same_render_content(
+            request,
+            RenderRequest {
+                settled: false,
+                ..request
+            }
+        ));
+        assert!(!same_render_content(
+            request,
+            RenderRequest {
+                target_size: [101, 200],
+                ..request
+            }
+        ));
     }
 
     #[test]
