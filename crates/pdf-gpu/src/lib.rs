@@ -1175,6 +1175,18 @@ fn application_link_action_fallback(code: &str, message: &str) -> GpuFallbackDia
     }
 }
 
+/// Result of one queued native-page render attempt.
+#[derive(Debug)]
+// Keep successful frame metrics inline: boxing this hot-path result would add
+// one allocator round trip to every interactive GPU submission.
+#[allow(clippy::large_enum_variant)]
+pub enum GpuPageRenderOutcome {
+    /// The newest request submitted successfully and advanced presentation state.
+    Rendered(GpuPageTexture, GpuRenderStats),
+    /// A newer request invalidated this attempt before queue submission.
+    Superseded,
+}
+
 /// Same-device PDF renderer tied to one GPUI recovery generation.
 pub struct GpuPdfRenderer {
     context: WgpuExternalContext,
@@ -1322,6 +1334,19 @@ impl GpuPdfRenderer {
             .map_err(render_error)
     }
 
+    /// Invalidates older queued or currently encoding requests for `page`.
+    pub fn supersede_page_render(&self, page: &PreparedGpuPage, generation: u64) -> Result<()> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        self.renderer
+            .supersede_render(&page.gpu, generation)
+            .map_err(render_error)
+    }
+
     /// Builds the exact patch mesh slot needed by `request`. This method is
     /// thread-safe and intended for the document view's cancellable worker.
     pub fn prepare_patch_lods(
@@ -1460,7 +1485,7 @@ impl GpuPdfRenderer {
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
         presentation: &mut GpuPagePresentation,
-    ) -> Result<(GpuPageTexture, GpuRenderStats)> {
+    ) -> Result<GpuPageRenderOutcome> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
         }
@@ -1522,7 +1547,10 @@ impl GpuPdfRenderer {
                 Ok(stats) => {
                     presentation.region_mode = region_mode;
                     let texture = presentation.commit(selection, surface_region, incremental);
-                    return Ok((texture, stats));
+                    return Ok(GpuPageRenderOutcome::Rendered(texture, stats));
+                }
+                Err(RenderError::StaleRenderGeneration { .. }) => {
+                    return Ok(GpuPageRenderOutcome::Superseded);
                 }
                 Err(error) if render_target_limit(&error) => {
                     let Some(tighter) = region_mode.tighter() else {

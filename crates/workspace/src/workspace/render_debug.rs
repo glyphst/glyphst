@@ -153,10 +153,12 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU PIPELINE",
             format!(
-                "{} active · {} submitted · {} done · {} coalesced · {} refine · motion {}",
+                "{} active · {} pending · {} submitted · {} done · {} superseded · {} coalesced · {} refine · motion {}",
                 document.gpu_cache.surface_seed_tasks,
+                document.gpu_cache.surface_render_pending,
                 document.gpu_cache.surface_renders_started,
                 document.gpu_cache.surface_renders_completed,
+                document.gpu_cache.surface_renders_superseded,
                 document.gpu_cache.surface_renders_coalesced,
                 document.gpu_cache.refinement_pages,
                 if document.gpu_cache.motion_active {
@@ -166,6 +168,7 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 }
             ),
             if document.gpu_cache.surface_seed_tasks > 0
+                || document.gpu_cache.surface_render_pending > 0
                 || document.gpu_cache.refinement_pages > 0
                 || document.gpu_cache.motion_active
             {
@@ -173,6 +176,15 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             } else {
                 GOOD
             },
+        ))
+        .child(reading(
+            "GPU LATENCY P95",
+            format!(
+                "{} queue · {} end-to-end",
+                format_duration(document.gpu_cache.surface_queue_latency_p95),
+                format_duration(document.gpu_cache.surface_total_latency_p95),
+            ),
+            FOREGROUND,
         ))
         .child(reading(
             "GPU PREP QUEUE",
