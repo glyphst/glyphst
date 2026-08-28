@@ -1,4 +1,11 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use futures::{StreamExt, channel::mpsc};
@@ -24,7 +31,9 @@ use glyphst_library::{
     ReaderWindowState,
 };
 use glyphst_pdf_translation_service::run_typst_worker_if_requested;
-use glyphst_settings::{RestoreOnStartup, SettingsStore, localize, sync_component_theme};
+use glyphst_settings::{
+    PdfRenderEngine, RestoreOnStartup, SettingsStore, localize, sync_component_theme,
+};
 use glyphst_translation::TranslationService;
 use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
@@ -32,13 +41,21 @@ use glyphst_ui::{
     assets,
 };
 use glyphst_workspace::{
-    NewTab, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle, WorkspaceWindowRequest,
+    AutomatedRenderTraceCompletion, AutomatedRenderTraceProgress, AutomatedRenderTraceStart,
+    NewTab, RenderDebugTraceKind, Workspace, WorkspaceCallbacks, WorkspaceWindowHandle,
+    WorkspaceWindowRequest,
 };
 
 const APP_ID: &str = "glyphst-reader";
 const READER_WINDOW_MIN_WIDTH: f32 = 900.0;
 const READER_WINDOW_MIN_HEIGHT: f32 = 600.0;
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+// Drive slightly faster than the 8.333 ms acceptance budget so ordinary timer
+// wake-up jitter does not turn a healthy 120 Hz application into a coin-flip
+// failure. The report still gates the observed p95 against the real budget.
+const AUTOMATED_TRACE_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const AUTOMATED_TRACE_START_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTOMATED_TRACE_TOTAL_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 struct ReaderSessionPersistence(Entity<ReaderSessionPersistenceState>);
@@ -95,23 +112,40 @@ fn main() {
         std::process::exit(exit_code);
     }
 
-    if let Err(error) = glyphst_core::paths::migrate_legacy_app_dirs() {
-        eprintln!("failed to migrate Glyphst Reader data: {error:#}");
-    }
+    let startup = match instance::parse_args() {
+        Ok(startup) => startup,
+        Err(error) => {
+            eprintln!("invalid Glyphst Reader arguments: {error:#}");
+            std::process::exit(2);
+        }
+    };
+    let request = startup.open;
+    let automated_trace = startup.trace;
+    let persistent_run = automated_trace.is_none();
 
-    let request = instance::parse_args();
-    match instance::try_forward(&request) {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => eprintln!("failed to forward open request: {error:#}"),
+    if persistent_run {
+        if let Err(error) = glyphst_core::paths::migrate_legacy_app_dirs() {
+            eprintln!("failed to migrate Glyphst Reader data: {error:#}");
+        }
+        match instance::try_forward(&request) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => eprintln!("failed to forward open request: {error:#}"),
+        }
     }
 
     let (open_tx, mut open_rx) = mpsc::unbounded();
-    if let Err(error) = instance::listen(open_tx) {
-        eprintln!("failed to start IPC listener: {error:#}");
-        return;
+    if persistent_run {
+        if let Err(error) = instance::listen(open_tx) {
+            eprintln!("failed to start IPC listener: {error:#}");
+            return;
+        }
+    } else {
+        drop(open_tx);
     }
 
+    let automated_exit = Arc::new(AtomicI32::new(if persistent_run { 0 } else { 3 }));
+    let run_exit = automated_exit.clone();
     ztracing::init();
 
     application()
@@ -124,7 +158,15 @@ fn main() {
             if let Err(error) = fonts::load_embedded_fonts(cx) {
                 eprintln!("failed to load embedded fonts: {error:#}");
             }
-            let settings_store = SettingsStore::load();
+            let mut settings_store = SettingsStore::load();
+            if let Some(trace) = automated_trace.as_ref() {
+                let mut settings = settings_store.settings.clone();
+                settings.document_view.pdf_render_engine = match trace.engine {
+                    instance::RenderTraceEngine::MuPdf => PdfRenderEngine::MuPdf,
+                    instance::RenderTraceEngine::Glyphst => PdfRenderEngine::Glyphst,
+                };
+                settings_store.set_settings_in_memory(settings);
+            }
             if let Err(error) = settings_store.install_theme_catalog(cx) {
                 eprintln!("failed to install theme catalog: {error:#}");
             }
@@ -145,41 +187,47 @@ fn main() {
             match TranslationService::new() {
                 Ok(service) => {
                     cx.set_global(TranslationServices::new(service.clone()));
-                    cx.spawn(async move |cx| {
-                        let result = cx
-                            .background_spawn(async move { service.initialize_persistent_cache() })
-                            .await;
-                        if let Err(error) = result {
-                            eprintln!(
-                                "failed to initialize persistent translation cache: {error:#}"
-                            );
-                        }
-                    })
-                    .detach();
+                    if persistent_run {
+                        cx.spawn(async move |cx| {
+                            let result = cx
+                                .background_spawn(
+                                    async move { service.initialize_persistent_cache() },
+                                )
+                                .await;
+                            if let Err(error) = result {
+                                eprintln!(
+                                    "failed to initialize persistent translation cache: {error:#}"
+                                );
+                            }
+                        })
+                        .detach();
+                    }
                 }
                 Err(error) => eprintln!("failed to initialize translation service: {error:#}"),
             }
-            cx.on_app_quit(|cx| {
-                if let Err(error) = persist_reader_session(cx) {
-                    eprintln!("failed to save reader session: {error:#}");
-                }
-                if let Err(error) = cx.global_mut::<SettingsStore>().save() {
-                    eprintln!("failed to save settings: {error:#}");
-                }
-                if let Err(error) = cx.global::<LibraryStore>().save() {
-                    eprintln!("failed to save PDF library: {error:#}");
-                }
-                if let Err(error) = instance::remove_socket_file() {
-                    eprintln!("failed to remove IPC socket: {error:#}");
-                }
-                async {}
-            })
-            .detach();
-            cx.on_window_closed(|cx, _| {
-                let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
-                persistence.update(cx, |persistence, cx| persistence.schedule_save(cx));
-            })
-            .detach();
+            if persistent_run {
+                cx.on_app_quit(|cx| {
+                    if let Err(error) = persist_reader_session(cx) {
+                        eprintln!("failed to save reader session: {error:#}");
+                    }
+                    if let Err(error) = cx.global_mut::<SettingsStore>().save() {
+                        eprintln!("failed to save settings: {error:#}");
+                    }
+                    if let Err(error) = cx.global::<LibraryStore>().save() {
+                        eprintln!("failed to save PDF library: {error:#}");
+                    }
+                    if let Err(error) = instance::remove_socket_file() {
+                        eprintln!("failed to remove IPC socket: {error:#}");
+                    }
+                    async {}
+                })
+                .detach();
+                cx.on_window_closed(|cx, _| {
+                    let persistence = cx.global::<ReaderSessionPersistence>().0.clone();
+                    persistence.update(cx, |persistence, cx| persistence.schedule_save(cx));
+                })
+                .detach();
+            }
 
             let (keymap_preset, keybinding_overrides) = {
                 let store = cx.global::<SettingsStore>();
@@ -190,21 +238,35 @@ fn main() {
             };
             keybindings::apply(cx, keymap_preset, &keybinding_overrides);
 
-            let restore_session = should_restore_reader_session(
-                &request,
-                cx.global::<SettingsStore>().settings.restore_on_startup,
-            );
+            let restore_session = persistent_run
+                && should_restore_reader_session(
+                    &request,
+                    cx.global::<SettingsStore>().settings.restore_on_startup,
+                );
             let restored = if restore_session {
                 cx.global::<LibraryStore>().reader_session().cloned()
             } else {
                 None
             };
-            let startup_result = if let Some(session) = restored
+            let (startup_result, trace_workspace) = if let Some(trace) = automated_trace.as_ref() {
+                let path = request
+                    .path
+                    .clone()
+                    .expect("validated automated trace document path");
+                match open_automated_trace_window(path, trace.window_width, trace.window_height, cx)
+                {
+                    Ok(workspace) => (Ok(0), Some(workspace)),
+                    Err(error) => (Err(error), None),
+                }
+            } else if let Some(session) = restored
                 && !session.windows.is_empty()
             {
-                restore_reader_session(session, cx)
+                (restore_reader_session(session, cx), None)
             } else {
-                open_workspace_window(request.path.clone(), cx).map(|_| 0)
+                (
+                    open_workspace_window(request.path.clone(), cx).map(|_| 0),
+                    None,
+                )
             };
             match startup_result {
                 Ok(missing_documents) => {
@@ -214,26 +276,232 @@ fn main() {
                 }
                 Err(error) => {
                     eprintln!("failed to open workspace window: {error:#}");
+                    if automated_trace.is_some() {
+                        run_exit.store(2, Ordering::Release);
+                        cx.quit();
+                        return;
+                    }
                     if let Err(fallback_error) = open_workspace_window(None, cx) {
                         eprintln!("failed to open fallback workspace window: {fallback_error:#}");
                         return;
                     }
                 }
             }
-            cx.global::<ReaderSessionPersistence>()
-                .0
-                .clone()
-                .update(cx, |persistence, cx| persistence.resume(cx));
+            if persistent_run {
+                cx.global::<ReaderSessionPersistence>()
+                    .0
+                    .clone()
+                    .update(cx, |persistence, cx| persistence.resume(cx));
+            }
 
             cx.activate(true);
 
-            cx.spawn(async move |cx| {
-                while let Some(request) = open_rx.next().await {
-                    cx.update(|cx| handle_open_request(request, cx));
-                }
-            })
-            .detach();
+            if let (Some(trace), Some(workspace)) = (automated_trace, trace_workspace) {
+                run_automated_render_trace(workspace, trace, run_exit.clone(), cx);
+            } else {
+                cx.spawn(async move |cx| {
+                    while let Some(request) = open_rx.next().await {
+                        cx.update(|cx| handle_open_request(request, cx));
+                    }
+                })
+                .detach();
+            }
         });
+
+    let exit_code = automated_exit.load(Ordering::Acquire);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+enum AutomatedTracePoll {
+    Waiting,
+    Started,
+    Running(Option<AutomatedRenderTraceProgress>),
+    Complete(AutomatedRenderTraceCompletion),
+    Failed(String),
+}
+
+fn run_automated_render_trace(
+    workspace: WorkspaceWindowHandle,
+    request: instance::RenderTraceRequest,
+    exit_status: Arc<AtomicI32>,
+    cx: &mut App,
+) {
+    let started_at = Instant::now();
+    cx.spawn(async move |cx| {
+        let mut trace_started = false;
+        let mut last_progress_log = Instant::now();
+        let mut next_frame_at = Instant::now();
+        loop {
+            next_frame_at += AUTOMATED_TRACE_FRAME_INTERVAL;
+            let now = Instant::now();
+            if next_frame_at > now {
+                cx.background_executor().timer(next_frame_at - now).await;
+            } else {
+                // Never burst through missed deadlines: a slow draw should be
+                // visible as a long interval, not followed by synthetic catch-up.
+                next_frame_at = now;
+            }
+            let elapsed = Instant::now().saturating_duration_since(started_at);
+            if (!trace_started && elapsed >= AUTOMATED_TRACE_START_TIMEOUT)
+                || elapsed >= AUTOMATED_TRACE_TOTAL_TIMEOUT
+            {
+                let stage = if trace_started {
+                    "completion"
+                } else {
+                    "startup"
+                };
+                let diagnostic = cx.update(|cx| {
+                    workspace.update(cx, |workspace, window, cx| {
+                        let progress = workspace.automated_render_debug_trace_progress();
+                        if trace_started {
+                            workspace.cancel_automated_render_debug_trace(
+                                format!(
+                                    "automated trace exceeded the {:.0} second total timeout",
+                                    AUTOMATED_TRACE_TOTAL_TIMEOUT.as_secs_f64()
+                                ),
+                                window,
+                                cx,
+                            );
+                        }
+                        let completion =
+                            workspace.take_automated_render_debug_trace_completion();
+                        (progress, completion)
+                    })
+                });
+                eprintln!(
+                    "automated rendering trace timed out during {stage} after {:.1} seconds",
+                    elapsed.as_secs_f64()
+                );
+                if let Ok((Some(progress), completion)) = diagnostic {
+                    eprintln!(
+                        "trace progress: {} frame {}, ready {}, interaction {}, settling {}",
+                        progress.phase,
+                        progress.phase_frame,
+                        progress.ready_frames,
+                        progress.completed_interaction_frames,
+                        progress.completed_settling_frames
+                    );
+                    if let Some(completion) = completion {
+                        eprintln!(
+                            "cancelled trace report saved {}",
+                            completion.output.display()
+                        );
+                    }
+                }
+                exit_status.store(3, Ordering::Release);
+                cx.update(|cx| cx.quit());
+                return;
+            }
+
+            let polled = cx.update(|cx| {
+                workspace.update(cx, |workspace, window, cx| {
+                    if let Some(completion) =
+                        workspace.take_automated_render_debug_trace_completion()
+                    {
+                        return AutomatedTracePoll::Complete(completion);
+                    }
+                    if trace_started {
+                        workspace.step_automated_render_debug_trace(window, cx);
+                        if let Some(completion) =
+                            workspace.take_automated_render_debug_trace_completion()
+                        {
+                            return AutomatedTracePoll::Complete(completion);
+                        }
+                        return AutomatedTracePoll::Running(
+                            workspace.automated_render_debug_trace_progress(),
+                        );
+                    }
+                    let kind = match request.kind {
+                        instance::RenderTraceKind::Scroll => RenderDebugTraceKind::Scroll,
+                        instance::RenderTraceKind::Zoom => RenderDebugTraceKind::Zoom,
+                    };
+                    match workspace.try_start_automated_render_debug_trace(
+                        kind,
+                        request.page,
+                        request.output.clone(),
+                        window,
+                        cx,
+                    ) {
+                        AutomatedRenderTraceStart::Waiting => AutomatedTracePoll::Waiting,
+                        AutomatedRenderTraceStart::Started => AutomatedTracePoll::Started,
+                        AutomatedRenderTraceStart::Failed(error) => {
+                            AutomatedTracePoll::Failed(error)
+                        }
+                    }
+                })
+            });
+            let poll = match polled {
+                Ok(poll) => poll,
+                Err(error) => AutomatedTracePoll::Failed(format!(
+                    "failed to update the automated trace window: {error:#}"
+                )),
+            };
+            if matches!(
+                poll,
+                AutomatedTracePoll::Started | AutomatedTracePoll::Running(_)
+            ) {
+                let drawn = cx.update(|cx| {
+                    cx.with_window(workspace.entity().entity_id(), |window, cx| {
+                        window.draw(cx).clear(cx);
+                    })
+                });
+                match drawn {
+                    Some(()) => {}
+                    None => {
+                        eprintln!("failed to locate the automated trace window for drawing");
+                        exit_status.store(3, Ordering::Release);
+                        cx.update(|cx| cx.quit());
+                        return;
+                    }
+                }
+            }
+            match poll {
+                AutomatedTracePoll::Waiting => {}
+                AutomatedTracePoll::Started => trace_started = true,
+                AutomatedTracePoll::Running(progress) => {
+                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                        if let Some(progress) = progress {
+                            eprintln!(
+                                "trace progress: {} frame {}, ready {}, interaction {}, settling {}",
+                                progress.phase,
+                                progress.phase_frame,
+                                progress.ready_frames,
+                                progress.completed_interaction_frames,
+                                progress.completed_settling_frames
+                            );
+                        }
+                        last_progress_log = Instant::now();
+                    }
+                }
+                AutomatedTracePoll::Complete(completion) => {
+                    if let Some(failure) = completion.failure {
+                        eprintln!(
+                            "automated rendering trace failed; report {}: {failure}",
+                            completion.output.display()
+                        );
+                        exit_status.store(3, Ordering::Release);
+                    } else {
+                        println!(
+                            "automated rendering trace saved {}",
+                            completion.output.display()
+                        );
+                        exit_status.store(0, Ordering::Release);
+                    }
+                    cx.update(|cx| cx.quit());
+                    return;
+                }
+                AutomatedTracePoll::Failed(error) => {
+                    eprintln!("failed to start automated rendering trace: {error}");
+                    exit_status.store(2, Ordering::Release);
+                    cx.update(|cx| cx.quit());
+                    return;
+                }
+            }
+        }
+    })
+    .detach();
 }
 
 fn handle_open_request(request: instance::OpenRequest, cx: &mut App) {
@@ -481,7 +749,7 @@ fn open_detached_workspace_window(
     request: WorkspaceWindowRequest,
     cx: &mut App,
 ) -> Result<WorkspaceWindowHandle> {
-    open_workspace_window_inner(None, None, Some(request.bounds), true, cx)
+    open_workspace_window_inner(None, None, Some(request.bounds), true, true, cx)
 }
 
 fn open_workspace_window_at_position(
@@ -490,7 +758,19 @@ fn open_workspace_window_at_position(
     bounds: Option<Bounds<Pixels>>,
     cx: &mut App,
 ) -> Result<WorkspaceWindowHandle> {
-    open_workspace_window_inner(path, initial_position, bounds, false, cx)
+    open_workspace_window_inner(path, initial_position, bounds, false, true, cx)
+}
+
+fn open_automated_trace_window(
+    path: PathBuf,
+    width: f32,
+    height: f32,
+    cx: &mut App,
+) -> Result<WorkspaceWindowHandle> {
+    let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+    let workspace = open_workspace_window_inner(Some(path), None, Some(bounds), false, false, cx)?;
+    workspace.update(cx, |_, window, _| window.activate_window())?;
+    Ok(workspace)
 }
 
 fn open_workspace_window_inner(
@@ -498,6 +778,7 @@ fn open_workspace_window_inner(
     initial_position: Option<DocumentPosition>,
     bounds: Option<Bounds<Pixels>>,
     empty: bool,
+    persistent: bool,
     cx: &mut App,
 ) -> Result<WorkspaceWindowHandle> {
     let window_size = if path.is_some() {
@@ -535,7 +816,9 @@ fn open_workspace_window_inner(
                     )
                 }
             });
-            observe_reader_workspace(&workspace, window, cx);
+            if persistent {
+                observe_reader_workspace(&workspace, window, cx);
+            }
             cx.new(|cx| Root::new(workspace, window, cx))
         },
     )?;

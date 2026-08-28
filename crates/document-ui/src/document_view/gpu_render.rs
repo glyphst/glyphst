@@ -18,6 +18,16 @@ fn same_patch_lod_request(existing: f32, required: f32) -> bool {
     existing.to_bits() == required.to_bits()
 }
 
+fn presented_refinement_page_count(
+    presented_pages: &HashSet<u32>,
+    pending_pages: impl IntoIterator<Item = u32>,
+) -> usize {
+    pending_pages
+        .into_iter()
+        .filter(|page| presented_pages.contains(page))
+        .count()
+}
+
 #[derive(Default)]
 pub(super) struct GpuPdfState {
     generation: u64,
@@ -3566,7 +3576,13 @@ impl DocumentView {
             surface_queue_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_queue_latency),
             surface_ready_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_ready_latency),
             surface_present_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_present_latency),
-            refinement_pages: self
+            refinement_pages: presented_refinement_page_count(
+                &self.gpu_pdf.presented_pages,
+                self.gpu_pdf.rendered.iter().filter_map(|(page, rendered)| {
+                    rendered.stats.refinement_pending.then_some(*page)
+                }),
+            ),
+            retained_refinement_pages: self
                 .gpu_pdf
                 .rendered
                 .values()
@@ -3637,6 +3653,13 @@ mod tests {
             physical_width: 1_000,
             physical_height: 2_000,
         }
+    }
+
+    #[test]
+    fn offscreen_retained_refinements_do_not_keep_the_visible_pipeline_pending() {
+        let presented = HashSet::from([2, 3]);
+        assert_eq!(presented_refinement_page_count(&presented, [1, 2, 4]), 1);
+        assert_eq!(presented_refinement_page_count(&presented, [1, 4]), 0);
     }
 
     #[test]

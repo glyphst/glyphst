@@ -38,11 +38,13 @@ const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
+const TRACE_REPORT_VERSION: u32 = 2;
 
 struct RenderDebugCaptureNotification;
 
 pub(super) struct RenderDebugCapture {
     collector: FrameTimingCollector,
+    owns_frame_trace: bool,
     window_id: WindowId,
     started_at: Instant,
     measurement_started_at: Option<Instant>,
@@ -52,12 +54,43 @@ pub(super) struct RenderDebugCapture {
     document_start: DocumentRenderDebugSnapshot,
     render_cache_start: RenderCacheDebugSnapshot,
     trace: Option<RenderDebugTraceReport>,
+    automated_output: Option<PathBuf>,
+}
+
+impl Drop for RenderDebugCapture {
+    fn drop(&mut self) {
+        if self.owns_frame_trace {
+            gpui::set_frame_trace_enabled(false);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RenderDebugTraceKind {
+pub enum RenderDebugTraceKind {
     Scroll,
     Zoom,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutomatedRenderTraceStart {
+    Waiting,
+    Started,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomatedRenderTraceCompletion {
+    pub output: PathBuf,
+    pub failure: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomatedRenderTraceProgress {
+    pub phase: String,
+    pub phase_frame: usize,
+    pub ready_frames: usize,
+    pub completed_interaction_frames: usize,
+    pub completed_settling_frames: usize,
 }
 
 impl RenderDebugTraceKind {
@@ -121,6 +154,7 @@ struct RenderDebugTraceObservations {
 #[derive(Clone, Debug)]
 struct RenderDebugTraceReport {
     kind: RenderDebugTraceKind,
+    automated: bool,
     planned_interaction_frames: usize,
     completed_interaction_frames: usize,
     planned_settling_frames: usize,
@@ -137,6 +171,7 @@ struct RenderDebugTraceReport {
 pub(super) struct RenderDebugTrace {
     generation: u64,
     kind: RenderDebugTraceKind,
+    automated: bool,
     pub(super) phase: RenderDebugTracePhase,
     phase_frame: usize,
     ready_frames: usize,
@@ -203,6 +238,7 @@ impl Workspace {
         let started_at = Instant::now();
         self.rendering_debug_capture = Some(RenderDebugCapture {
             collector: FrameTimingCollector::new(),
+            owns_frame_trace: false,
             window_id: window.window_handle().window_id(),
             started_at,
             measurement_started_at: Some(started_at),
@@ -212,6 +248,7 @@ impl Workspace {
             document_start,
             render_cache_start: render_cache_debug_snapshot(cx),
             trace: None,
+            automated_output: None,
         });
         cx.notify();
     }
@@ -222,24 +259,98 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(reason) = self.start_render_debug_trace_inner(kind, None, window, cx) {
+            render_debug_capture_warning(window, reason, cx);
+        }
+    }
+
+    pub fn try_start_automated_render_debug_trace(
+        &mut self,
+        kind: RenderDebugTraceKind,
+        page_number: usize,
+        output: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AutomatedRenderTraceStart {
         if self.rendering_debug_capture.is_some() || self.rendering_debug_trace.is_some() {
-            return;
+            return AutomatedRenderTraceStart::Failed(
+                "another rendering capture is already active".to_string(),
+            );
         }
         let Some(document) = self.active_render_debug_document(cx) else {
-            render_debug_capture_warning(
-                window,
-                "Open a fixed-layout document before starting a scripted trace",
-                cx,
+            return AutomatedRenderTraceStart::Waiting;
+        };
+        let page_count = document.read(cx).render_debug_page_count();
+        if page_count == 0 {
+            return AutomatedRenderTraceStart::Waiting;
+        }
+        let readiness = document.read(cx).render_debug_snapshot(cx);
+        if readiness.pages.is_empty()
+            || !readiness.interaction.viewport_width.is_finite()
+            || !readiness.interaction.viewport_height.is_finite()
+            || readiness.interaction.viewport_width <= 0.0
+            || readiness.interaction.viewport_height <= 0.0
+        {
+            return AutomatedRenderTraceStart::Waiting;
+        }
+        if !(1..=page_count).contains(&page_number) {
+            return AutomatedRenderTraceStart::Failed(format!(
+                "render page {page_number} is outside the document's 1..={page_count} range"
+            ));
+        }
+        let positioned = document.update(cx, |document, cx| {
+            document.prepare_render_debug_trace_position(page_number, 1.0, cx)
+        });
+        if !positioned {
+            return AutomatedRenderTraceStart::Failed(
+                "failed to establish the requested render trace position".to_string(),
             );
-            return;
+        }
+        match self.start_render_debug_trace_inner(kind, Some(output), window, cx) {
+            Ok(()) => AutomatedRenderTraceStart::Started,
+            Err(error) => AutomatedRenderTraceStart::Failed(error),
+        }
+    }
+
+    pub fn take_automated_render_debug_trace_completion(
+        &mut self,
+    ) -> Option<AutomatedRenderTraceCompletion> {
+        self.rendering_debug_trace_completion.take()
+    }
+
+    pub fn automated_render_debug_trace_progress(&self) -> Option<AutomatedRenderTraceProgress> {
+        self.rendering_debug_trace
+            .as_ref()
+            .map(|trace| AutomatedRenderTraceProgress {
+                phase: trace.phase.name().to_string(),
+                phase_frame: trace.phase_frame,
+                ready_frames: trace.ready_frames,
+                completed_interaction_frames: trace.completed_interaction_frames,
+                completed_settling_frames: trace.completed_settling_frames,
+            })
+    }
+
+    fn start_render_debug_trace_inner(
+        &mut self,
+        kind: RenderDebugTraceKind,
+        automated_output: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.rendering_debug_capture.is_some() || self.rendering_debug_trace.is_some() {
+            return Err("another rendering capture is already active".to_string());
+        }
+        let Some(document) = self.active_render_debug_document(cx) else {
+            return Err(
+                "open a fixed-layout document before starting a scripted trace".to_string(),
+            );
         };
         let document_start = document.read(cx).render_debug_snapshot(cx);
         let original_position = document.read(cx).current_document_position();
         if let Some(reason) =
             render_debug_trace_precondition(kind, &document_start, &original_position)
         {
-            render_debug_capture_warning(window, reason, cx);
-            return;
+            return Err(reason);
         }
 
         let scroll_pixels_per_frame = if kind == RenderDebugTraceKind::Scroll {
@@ -257,11 +368,15 @@ impl Workspace {
             0.0
         };
         let started_at = Instant::now();
+        let automated = automated_output.is_some();
+        let owns_frame_trace = automated && gpui::set_frame_trace_enabled(true);
         self.rendering_debug_trace_generation =
             self.rendering_debug_trace_generation.wrapping_add(1);
+        self.rendering_debug_trace_completion = None;
         let generation = self.rendering_debug_trace_generation;
         self.rendering_debug_capture = Some(RenderDebugCapture {
             collector: FrameTimingCollector::new(),
+            owns_frame_trace,
             window_id: window.window_handle().window_id(),
             started_at,
             measurement_started_at: None,
@@ -271,10 +386,12 @@ impl Workspace {
             document_start,
             render_cache_start: render_cache_debug_snapshot(cx),
             trace: None,
+            automated_output,
         });
         self.rendering_debug_trace = Some(RenderDebugTrace {
             generation,
             kind,
+            automated,
             phase: RenderDebugTracePhase::Warmup,
             phase_frame: 0,
             ready_frames: 0,
@@ -293,8 +410,32 @@ impl Workspace {
             }],
             observations: RenderDebugTraceObservations::default(),
         });
-        schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        if !automated {
+            schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        }
         cx.notify();
+        Ok(())
+    }
+
+    /// Advances a CLI-driven trace independently of compositor frame callbacks.
+    ///
+    /// Manual traces intentionally remain coupled to `on_next_frame`, while the
+    /// Reader benchmark supplies a fixed-deadline draw loop so an obscured or
+    /// unfocused Wayland window is not measured at the compositor's idle rate.
+    pub fn step_automated_render_debug_trace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(generation) = self
+            .rendering_debug_trace
+            .as_ref()
+            .filter(|trace| trace.automated)
+            .map(|trace| trace.generation)
+        else {
+            return;
+        };
+        self.step_render_debug_trace(generation, window, cx);
     }
 
     fn step_render_debug_trace(
@@ -423,6 +564,10 @@ impl Workspace {
                     trace.phase = if forward {
                         RenderDebugTracePhase::Reverse
                     } else {
+                        let position = trace.original_position.clone();
+                        document.update(cx, |document, cx| {
+                            document.restore_render_debug_position(position, cx);
+                        });
                         RenderDebugTracePhase::Settle
                     };
                     trace.markers.push(RenderDebugTraceMarker {
@@ -451,7 +596,13 @@ impl Workspace {
         }
 
         self.rendering_debug_trace = Some(trace);
-        schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        if !self
+            .rendering_debug_trace
+            .as_ref()
+            .is_some_and(|trace| trace.automated)
+        {
+            schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
+        }
         cx.notify();
     }
 
@@ -480,6 +631,7 @@ impl Workspace {
             }
             capture.trace = Some(RenderDebugTraceReport {
                 kind: trace.kind,
+                automated: trace.automated,
                 planned_interaction_frames: trace.kind.planned_interaction_frames(),
                 completed_interaction_frames: trace.completed_interaction_frames,
                 planned_settling_frames: TRACE_SETTLING_FRAMES,
@@ -516,10 +668,22 @@ impl Workspace {
         self.finish_render_debug_capture_inner(window, cx);
     }
 
+    pub fn cancel_automated_render_debug_trace(
+        &mut self,
+        reason: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(trace) = self.rendering_debug_trace.take() {
+            self.complete_render_debug_trace(trace, true, Some(reason), window, cx);
+        }
+    }
+
     fn finish_render_debug_capture_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut capture) = self.rendering_debug_capture.take() else {
             return;
         };
+        let automated_output = capture.automated_output.take();
         let measurement_started_at = capture.measurement_started_at;
         let timings = capture
             .collector
@@ -532,9 +696,27 @@ impl Workspace {
             })
             .collect::<Vec<_>>();
         let frame_count = timings.len();
-        let report = capture_report(capture, timings, self, window, cx);
+        let report = capture_report(&capture, timings, self, window, cx);
         match serde_json::to_string_pretty(&report) {
             Ok(serialized) => {
+                if let Some(output) = automated_output {
+                    let trace_failure = report["trace"]["failure"].as_str().map(str::to_string);
+                    let saved = persist_render_debug_report_explicit(&serialized, &output);
+                    let failure = match saved {
+                        Ok(()) if frame_count == 0 => {
+                            Some("the rendering trace produced no drawn frame samples".to_string())
+                        }
+                        Ok(()) => trace_failure,
+                        Err(error) => Some(format!(
+                            "failed to save automated rendering report {}: {error}",
+                            output.display()
+                        )),
+                    };
+                    self.rendering_debug_trace_completion =
+                        Some(AutomatedRenderTraceCompletion { output, failure });
+                    cx.notify();
+                    return;
+                }
                 cx.write_to_clipboard(ClipboardItem::new_string(serialized.clone()));
                 #[cfg(not(test))]
                 let saved = persist_render_debug_report(&serialized, &report);
@@ -570,12 +752,25 @@ impl Workspace {
                     cx,
                 );
             }
-            Err(error) => window.push_notification(
-                Notification::error(format!("Failed to serialize rendering capture: {error}"))
-                    .title("Rendering capture failed")
-                    .id::<RenderDebugCaptureNotification>(),
-                cx,
-            ),
+            Err(error) => {
+                if let Some(output) = automated_output {
+                    self.rendering_debug_trace_completion = Some(AutomatedRenderTraceCompletion {
+                        output,
+                        failure: Some(format!(
+                            "failed to serialize automated rendering report: {error}"
+                        )),
+                    });
+                } else {
+                    window.push_notification(
+                        Notification::error(format!(
+                            "Failed to serialize rendering capture: {error}"
+                        ))
+                        .title("Rendering capture failed")
+                        .id::<RenderDebugCaptureNotification>(),
+                        cx,
+                    );
+                }
+            }
         }
         cx.notify();
     }
@@ -842,6 +1037,60 @@ fn persist_render_debug_report_to(
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique rendering report file name",
+    ))
+}
+
+fn persist_render_debug_report_explicit(serialized: &str, path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "render report output path is empty",
+        ));
+    }
+    if path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", path.display()),
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("render-trace.json");
+    for suffix in 0..1_000_u16 {
+        let temporary = parent.join(format!(
+            ".{file_name}.partial-{}-{suffix}",
+            std::process::id()
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let write_result: io::Result<()> = (|| {
+            file.write_all(serialized.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::hard_link(&temporary, path)?;
+            Ok(())
+        })();
+        drop(file);
+        let cleanup_result = fs::remove_file(&temporary);
+        write_result?;
+        cleanup_result?;
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a temporary rendering report path",
     ))
 }
 
@@ -1170,7 +1419,7 @@ fn count_statistics_json(statistics: Option<CountStatistics>) -> Value {
 }
 
 fn capture_report(
-    capture: RenderDebugCapture,
+    capture: &RenderDebugCapture,
     timings: Vec<FrameTiming>,
     workspace: &Workspace,
     window: &Window,
@@ -1345,8 +1594,9 @@ fn document_snapshot_json(document: &DocumentRenderDebugSnapshot) -> Value {
 
 fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
     json!({
-        "version": 1,
+        "version": TRACE_REPORT_VERSION,
         "kind": trace.kind.name(),
+        "driver": if trace.automated { "fixed-deadline-draw" } else { "platform-frame" },
         "planned_interaction_frames": trace.planned_interaction_frames,
         "completed_interaction_frames": trace.completed_interaction_frames,
         "planned_settling_frames": trace.planned_settling_frames,
@@ -1447,6 +1697,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
             "ready_latency_p95_ms": milliseconds(cache.surface_ready_latency_p95),
             "present_latency_p95_ms": milliseconds(cache.surface_present_latency_p95),
             "refinement_pages": cache.refinement_pages,
+            "retained_refinement_pages": cache.retained_refinement_pages,
         },
         "preparation": {
             "active": cache.active_preparations,
@@ -1757,13 +2008,14 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU PIPELINE",
             format!(
-                "{} active · {}/{} pending/peak · {} submitted · {} done · {} refine · motion {}",
+                "{} active · {}/{} pending/peak · {} submitted · {} done · {}/{} visible/retained refine · motion {}",
                 document.gpu_cache.surface_seed_tasks,
                 document.gpu_cache.surface_render_pending,
                 document.gpu_cache.surface_pending_peak,
                 document.gpu_cache.surface_renders_started,
                 document.gpu_cache.surface_renders_completed,
                 document.gpu_cache.refinement_pages,
+                document.gpu_cache.retained_refinement_pages,
                 if document.gpu_cache.motion_active {
                     "active"
                 } else {
@@ -2535,6 +2787,7 @@ mod tests {
     fn scripted_trace_report_records_reproducible_workload_metadata() {
         let report = render_debug_trace_report_json(&RenderDebugTraceReport {
             kind: RenderDebugTraceKind::Zoom,
+            automated: true,
             planned_interaction_frames: 120,
             completed_interaction_frames: 120,
             planned_settling_frames: 30,
@@ -2552,8 +2805,9 @@ mod tests {
             observations: RenderDebugTraceObservations::default(),
         });
 
-        assert_eq!(report["version"], 1);
+        assert_eq!(report["version"], TRACE_REPORT_VERSION);
         assert_eq!(report["kind"], "zoom");
+        assert_eq!(report["driver"], "fixed-deadline-draw");
         assert_eq!(report["planned_interaction_frames"], 120);
         assert_eq!(report["warmup_ms"], 42.0);
         assert_eq!(report["phase_markers"][0]["phase"], "forward");
@@ -2595,6 +2849,29 @@ mod tests {
 
         fs::remove_file(first).unwrap();
         fs::remove_file(second).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn automated_rendering_report_uses_the_exact_output_once() {
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-automated-render-trace-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        let output = directory.join("nested").join("trace.json");
+        persist_render_debug_report_explicit("{\"schema\":3}", &output).unwrap();
+        assert_eq!(fs::read_to_string(&output).unwrap(), "{\"schema\":3}\n");
+
+        let error = persist_render_debug_report_explicit("different", &output).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&output).unwrap(), "{\"schema\":3}\n");
+
+        fs::remove_file(output).unwrap();
+        fs::remove_dir(directory.join("nested")).unwrap();
         fs::remove_dir(directory).unwrap();
     }
 
@@ -2696,6 +2973,8 @@ mod tests {
             surface_continuity_hits: 11,
             surface_partial_reuses: 3,
             surface_presentation_gaps: 1,
+            refinement_pages: 1,
+            retained_refinement_pages: 4,
             ..Default::default()
         };
 
@@ -2707,6 +2986,8 @@ mod tests {
         assert_eq!(report["surfaces"]["continuity_hits"], 11);
         assert_eq!(report["surfaces"]["partial_reuses"], 3);
         assert_eq!(report["surfaces"]["presentation_gaps"], 1);
+        assert_eq!(report["surfaces"]["refinement_pages"], 1);
+        assert_eq!(report["surfaces"]["retained_refinement_pages"], 4);
     }
 
     #[test]

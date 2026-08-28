@@ -50,6 +50,31 @@ pub fn render_cache_debug_snapshot(cx: &gpui::App) -> RenderCacheDebugSnapshot {
 }
 
 impl DocumentView {
+    /// Returns the loaded fixed-layout page count for an external performance
+    /// trace coordinator. A zero count means document loading has not produced
+    /// page geometry yet.
+    #[doc(hidden)]
+    pub fn render_debug_page_count(&self) -> usize {
+        self.page_count()
+    }
+
+    /// Places a developer performance trace at a deterministic page and zoom
+    /// without adding a jump-history entry.
+    #[doc(hidden)]
+    pub fn prepare_render_debug_trace_position(
+        &mut self,
+        page_number: usize,
+        zoom: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !(1..=self.page_count()).contains(&page_number) || !zoom.is_finite() || zoom <= 0.0 {
+            return false;
+        }
+        self.set_zoom(zoom, cx);
+        self.navigate_to_pdf_destination(page_number - 1, None, None, cx);
+        true
+    }
+
     /// Returns diagnostics for the page or spread at the viewport center.
     ///
     /// Grid overview deliberately has no page section: its many thumbnails do

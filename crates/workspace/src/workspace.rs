@@ -82,9 +82,13 @@ use crate::{
 use ai::WorkspaceAiContextProvider;
 use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 use docks::WorkspaceDockState;
-use render_debug::{RenderDebugCapture, RenderDebugTrace};
 #[cfg(test)]
-use render_debug::{RenderDebugTraceKind, RenderDebugTracePhase};
+use render_debug::RenderDebugTracePhase;
+pub use render_debug::{
+    AutomatedRenderTraceCompletion, AutomatedRenderTraceProgress, AutomatedRenderTraceStart,
+    RenderDebugTraceKind,
+};
+use render_debug::{RenderDebugCapture, RenderDebugTrace};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WorkspaceSurfaceMode {
@@ -171,6 +175,7 @@ pub struct Workspace {
     rendering_debug_capture: Option<RenderDebugCapture>,
     rendering_debug_trace: Option<RenderDebugTrace>,
     rendering_debug_trace_generation: u64,
+    rendering_debug_trace_completion: Option<AutomatedRenderTraceCompletion>,
 }
 
 #[derive(Clone, Copy)]
@@ -483,6 +488,7 @@ impl Workspace {
             rendering_debug_capture: None,
             rendering_debug_trace: None,
             rendering_debug_trace_generation: 0,
+            rendering_debug_trace_completion: None,
         };
 
         cx.subscribe_in(

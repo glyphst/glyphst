@@ -694,7 +694,10 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_queue_latency_p95: Duration,
     pub surface_ready_latency_p95: Duration,
     pub surface_present_latency_p95: Duration,
+    /// Presented pages whose latest visible render still requests refinement.
     pub refinement_pages: usize,
+    /// All retained pages with latent incremental tiles, including offscreen cache entries.
+    pub retained_refinement_pages: usize,
     pub active_preparations: usize,
     pub queued_preparations: usize,
     pub speculative_preparations: usize,

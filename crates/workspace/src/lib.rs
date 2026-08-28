@@ -36,8 +36,9 @@ pub use glyphst_settings::{self as settings, localize, theme};
 pub use glyphst_ui::{icons, picker, scrollbar, style};
 pub use new_tab::NewTab;
 pub use workspace::{
-    Workspace, WorkspaceCallbacks, WorkspaceSurfaceMode, WorkspaceWindowHandle,
-    WorkspaceWindowRequest,
+    AutomatedRenderTraceCompletion, AutomatedRenderTraceProgress, AutomatedRenderTraceStart,
+    RenderDebugTraceKind, Workspace, WorkspaceCallbacks, WorkspaceSurfaceMode,
+    WorkspaceWindowHandle, WorkspaceWindowRequest,
 };
 
 pub(crate) fn synchronized_group_color(
