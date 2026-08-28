@@ -211,6 +211,22 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
+            "GPU PAGE WARMING",
+            format!(
+                "{} requests · {} hits · {} ready",
+                document.gpu_cache.surface_warm_requests,
+                document.gpu_cache.surface_warm_hits,
+                document.gpu_cache.surface_warm_pages,
+            ),
+            if document.gpu_cache.surface_warm_pages > 0
+                || document.gpu_cache.surface_warm_hits > 0
+            {
+                GOOD
+            } else {
+                FOREGROUND
+            },
+        ))
+        .child(reading(
             "GPU LATENCY P95",
             format!(
                 "{} queue · {} ready · {} first paint",

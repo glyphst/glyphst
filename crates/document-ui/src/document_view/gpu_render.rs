@@ -28,6 +28,7 @@ pub(super) struct GpuPdfState {
     rendered: HashMap<u32, RenderedGpuPage>,
     presented_pages: HashSet<u32>,
     visible_pages: HashSet<u32>,
+    covered_pages: HashSet<u32>,
     application_fallbacks: HashMap<u32, Arc<[GpuFallbackDiagnostic]>>,
     link_mappings: HashMap<u32, CachedLinkMapping>,
     pub(super) reader_link_replacements: HashMap<u32, Vec<(usize, DocumentLink)>>,
@@ -59,6 +60,8 @@ pub(super) struct GpuPdfState {
     surface_scroll_reuses: u64,
     surface_scroll_prefetches: u64,
     surface_scroll_misses: u64,
+    surface_warm_requests: u64,
+    surface_warm_hits: u64,
     surface_pending_peak: usize,
     surface_queue_latency: VecDeque<Duration>,
     surface_ready_latency: VecDeque<Duration>,
@@ -116,6 +119,7 @@ struct RenderedGpuPage {
     stats: GpuRenderStats,
     enqueued_at: Instant,
     first_paint_recorded: bool,
+    prewarmed: bool,
 }
 
 struct PatchLodTask {
@@ -196,6 +200,7 @@ impl GpuPdfState {
         self.rendered.clear();
         self.presented_pages.clear();
         self.visible_pages.clear();
+        self.covered_pages.clear();
         self.application_fallbacks.clear();
         self.link_mappings.clear();
         self.reader_link_replacements.clear();
@@ -227,6 +232,8 @@ impl GpuPdfState {
         self.surface_scroll_reuses = 0;
         self.surface_scroll_prefetches = 0;
         self.surface_scroll_misses = 0;
+        self.surface_warm_requests = 0;
+        self.surface_warm_hits = 0;
         self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
         self.surface_ready_latency.clear();
@@ -252,6 +259,7 @@ impl GpuPdfState {
         self.rendered.clear();
         self.presented_pages.clear();
         self.visible_pages.clear();
+        self.covered_pages.clear();
         self.application_fallbacks.clear();
         self.link_mappings.clear();
         self.surface_failures.clear();
@@ -281,6 +289,8 @@ impl GpuPdfState {
         self.surface_scroll_reuses = 0;
         self.surface_scroll_prefetches = 0;
         self.surface_scroll_misses = 0;
+        self.surface_warm_requests = 0;
+        self.surface_warm_hits = 0;
         self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
         self.surface_ready_latency.clear();
@@ -361,6 +371,7 @@ impl GpuPdfState {
     fn prune(&mut self, visible: &HashSet<u32>, retained: &HashSet<u32>) {
         self.visible_pages.clone_from(visible);
         self.presented_pages.clear();
+        self.covered_pages.clear();
         let stale_patch_lods = self
             .patch_lod_tasks
             .keys()
@@ -971,6 +982,96 @@ fn adjacent_gpu_viewport_bounds(
     Bounds::new(point(viewport_bounds.origin.x, y), viewport_bounds.size)
 }
 
+impl GpuSurfaceIntent {
+    const fn is_speculative(self) -> bool {
+        matches!(self, Self::AdjacentWarm)
+    }
+}
+
+fn should_start_gpu_fallback_grace(engine: PdfRenderEngine, intent: GpuSurfaceIntent) -> bool {
+    engine == PdfRenderEngine::GlyphstFirst && intent == GpuSurfaceIntent::Visible
+}
+
+fn should_demand_missing_gpu_page(intent: GpuSurfaceIntent) -> bool {
+    intent == GpuSurfaceIntent::Visible
+}
+
+fn gpu_paint_request(
+    key: RenderKey,
+    visible_region: GpuPageRegion,
+    settled: bool,
+) -> GpuPaintRequest {
+    GpuPaintRequest {
+        page_size: [key.physical_width, key.physical_height],
+        visible_region,
+        rotation: key.rotation,
+        background: [1.0, 1.0, 1.0, 1.0],
+        settled,
+        // A render generation is assigned only after exact-cache and
+        // scheduler coalescing checks prove this is material new work.
+        generation: 0,
+    }
+}
+
+fn should_warm_adjacent_surface(
+    motion_active: bool,
+    all_visible_covered: bool,
+    visible_refinement_pending: bool,
+    visible_patch_lod_pending: bool,
+    surface_pipeline_idle: bool,
+    candidate_ready: bool,
+    budget_fits: bool,
+) -> bool {
+    all_visible_covered
+        && !visible_patch_lod_pending
+        && (motion_active || !visible_refinement_pending)
+        && surface_pipeline_idle
+        && candidate_ready
+        && budget_fits
+}
+
+fn speculative_surface_fits(protected_bytes: u64, target_bytes: u64, limit: u64) -> bool {
+    protected_bytes
+        .checked_add(target_bytes)
+        .is_some_and(|total| total <= limit)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceCachePressureAction {
+    PreserveDiagnostics,
+    ClearDiagnostics,
+    RouteToFallback,
+}
+
+fn surface_cache_pressure_action(
+    speculative: bool,
+    has_current: bool,
+) -> SurfaceCachePressureAction {
+    if has_current {
+        SurfaceCachePressureAction::ClearDiagnostics
+    } else if speculative {
+        SurfaceCachePressureAction::PreserveDiagnostics
+    } else {
+        SurfaceCachePressureAction::RouteToFallback
+    }
+}
+
+fn prewarmed_surface_covers(
+    prewarmed: bool,
+    rendered_key: RenderKey,
+    rendered_request: GpuPaintRequest,
+    rendered_region: GpuPageRegion,
+    requested_key: RenderKey,
+    requested_request: GpuPaintRequest,
+    same_device: bool,
+) -> bool {
+    prewarmed
+        && same_device
+        && rendered_key == requested_key
+        && same_gpu_surface_content(rendered_request, requested_request)
+        && gpu_region_contains(rendered_region, requested_request.visible_region)
+}
+
 fn should_start_surface_seed(settled: bool, allow_motion_seed: bool, has_previous: bool) -> bool {
     settled || allow_motion_seed || !has_previous
 }
@@ -1044,6 +1145,14 @@ fn can_coalesce_pending_surface_request(
     incoming_speculative: bool,
 ) -> bool {
     same_surface_request(pending, incoming) && (!pending_speculative || incoming_speculative)
+}
+
+fn can_reuse_active_surface_request(
+    same_request: bool,
+    active_speculative: bool,
+    incoming_speculative: bool,
+) -> bool {
+    same_request && (!active_speculative || incoming_speculative)
 }
 
 fn push_surface_latency(samples: &mut VecDeque<Duration>, sample: Duration) {
@@ -1233,6 +1342,7 @@ impl DocumentView {
         key: RenderKey,
         image_bounds: Bounds<Pixels>,
         viewport_bounds: Bounds<Pixels>,
+        intent: GpuSurfaceIntent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<GpuPaintTexture> {
@@ -1254,7 +1364,10 @@ impl DocumentView {
         // surfaces these separate writer/color-transform gaps instead of
         // silently rendering the revised page through MuPDF.
         if !self.native_gpu_key_enabled(key, engine) {
-            if engine.uses_native_reader() && self.format == DocumentFormat::Pdf {
+            if intent == GpuSurfaceIntent::Visible
+                && engine.uses_native_reader()
+                && self.format == DocumentFormat::Pdf
+            {
                 let message = if key.source_revision != 0 {
                     "native Glyphst rendering cannot display translated or rewritten PDF page revisions yet; the writer pipeline remains separate"
                 } else if key.color_transform.is_some() {
@@ -1267,7 +1380,7 @@ impl DocumentView {
             return None;
         }
         let visible_region = visible_gpu_region(key, image_bounds, viewport_bounds)?;
-        if engine == PdfRenderEngine::GlyphstFirst {
+        if should_start_gpu_fallback_grace(engine, intent) {
             self.start_native_gpu_fallback_grace(page, cx);
         }
 
@@ -1320,7 +1433,7 @@ impl DocumentView {
         }
         let renderer = self.gpu_pdf.renderer.clone()?;
 
-        let allow_motion_seed = !self.gpu_pdf.visible_pages.contains(&page);
+        let speculative = intent.is_speculative();
         self.gpu_pdf.mark_page_used(page);
         let prepared = match self.gpu_pdf.pages.get(&page) {
             Some(GpuPageState::Ready(page)) => Some(Arc::clone(page)),
@@ -1328,7 +1441,9 @@ impl DocumentView {
             | Some(GpuPageState::Fallback(_))
             | Some(GpuPageState::Failed(_)) => None,
             None => {
-                if self.gpu_pdf.terminal_pages.contains(&page) {
+                if self.gpu_pdf.terminal_pages.contains(&page)
+                    || !should_demand_missing_gpu_page(intent)
+                {
                     return None;
                 }
                 self.gpu_pdf.demand_page(page, false, 0);
@@ -1392,16 +1507,7 @@ impl DocumentView {
             && !self.gpu_pdf.motion_active
             && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= 0.01
             && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= 0.01;
-        let request = GpuPaintRequest {
-            page_size: [key.physical_width, key.physical_height],
-            visible_region,
-            rotation: key.rotation,
-            background: [1.0, 1.0, 1.0, 1.0],
-            settled,
-            // A render generation is assigned only after exact-cache and
-            // scheduler coalescing checks prove this is material new work.
-            generation: 0,
-        };
+        let request = gpu_paint_request(key, visible_region, settled);
         let presentation = self
             .gpu_pdf
             .rendered
@@ -1411,9 +1517,11 @@ impl DocumentView {
         let surface_region = match presentation.surface_region(request) {
             Ok(region) => region,
             Err(error) => {
-                self.gpu_pdf
-                    .surface_failures
-                    .insert(page, format!("{error:#}"));
+                if intent == GpuSurfaceIntent::Visible {
+                    self.gpu_pdf
+                        .surface_failures
+                        .insert(page, format!("{error:#}"));
+                }
                 return None;
             }
         };
@@ -1423,21 +1531,47 @@ impl DocumentView {
         let current_surface = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
             (rendered.key == key
                 && same_gpu_surface_content(rendered.request, request)
-                && rendered.presentation.token() == Some(renderer.token())
-                && (!settled || !rendered.presentation.refinement_pending()))
+                && rendered.presentation.token() == Some(renderer.token()))
             .then(|| {
                 rendered.presentation.current_texture().map(|texture| {
                     (
                         texture,
                         rendered.refresh_region,
                         rendered.request.visible_region,
+                        rendered.presentation.refinement_pending(),
+                        rendered.prewarmed,
+                        rendered.key,
+                        rendered.request,
                     )
                 })
             })
             .flatten()
         });
+        if intent == GpuSurfaceIntent::Visible
+            && let Some((texture, _, _, _, prewarmed, rendered_key, rendered_request)) =
+                current_surface.as_ref()
+            && gpu_region_contains(texture.region(), visible_region)
+        {
+            self.gpu_pdf.covered_pages.insert(page);
+            if prewarmed_surface_covers(
+                *prewarmed,
+                *rendered_key,
+                *rendered_request,
+                texture.region(),
+                key,
+                request,
+                true,
+            ) {
+                self.gpu_pdf.surface_warm_hits = self.gpu_pdf.surface_warm_hits.saturating_add(1);
+                if let Some(rendered) = self.gpu_pdf.rendered.get_mut(&page) {
+                    rendered.prewarmed = false;
+                }
+            }
+        }
+        let current_surface = current_surface
+            .filter(|(_, _, _, refinement_pending, _, _, _)| !settled || !refinement_pending);
         let refresh_kind = match current_surface {
-            Some((texture, refresh_region, seed_visible))
+            Some((texture, refresh_region, seed_visible, _, _, _, _))
                 if gpu_region_contains(texture.region(), visible_region) =>
             {
                 if gpu_region_contains(refresh_region, visible_region)
@@ -1447,9 +1581,17 @@ impl DocumentView {
                         self.gpu_pdf.surface_scroll_reuses =
                             self.gpu_pdf.surface_scroll_reuses.saturating_add(1);
                     }
-                    self.gpu_pdf.presented_pages.insert(page);
-                    self.gpu_pdf.surface_failures.remove(&page);
-                    return Some(self.tracked_gpu_paint_texture(page, key, image_bounds, texture));
+                    if intent == GpuSurfaceIntent::Visible {
+                        self.gpu_pdf.presented_pages.insert(page);
+                        self.gpu_pdf.surface_failures.remove(&page);
+                        return Some(self.tracked_gpu_paint_texture(
+                            page,
+                            key,
+                            image_bounds,
+                            texture,
+                        ));
+                    }
+                    return None;
                 }
                 SurfaceRefreshKind::Prefetch
             }
@@ -1460,9 +1602,11 @@ impl DocumentView {
         let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
             Ok(status) => status,
             Err(error) => {
-                self.gpu_pdf
-                    .surface_failures
-                    .insert(page, format!("{error:#}"));
+                if intent == GpuSurfaceIntent::Visible {
+                    self.gpu_pdf
+                        .surface_failures
+                        .insert(page, format!("{error:#}"));
+                }
                 return None;
             }
         };
@@ -1470,6 +1614,11 @@ impl DocumentView {
             if let Some(task) = self.gpu_pdf.patch_lod_tasks.remove(&page) {
                 task.cancellation.cancel();
             }
+        } else if speculative {
+            // Surface warming consumes only already-prepared GPU resources.
+            // It must not create patch-LOD work that can contend with visible
+            // pages or prolong a speculative page's lifetime.
+            return None;
         } else {
             self.start_native_gpu_patch_lod_prepare(
                 page,
@@ -1511,11 +1660,13 @@ impl DocumentView {
             Arc::clone(&renderer),
             request,
             surface_region,
-            allow_motion_seed,
+            speculative,
             refresh_kind,
             cx,
         );
-        if let Some((rendered_key, texture)) = previous {
+        if intent == GpuSurfaceIntent::Visible
+            && let Some((rendered_key, texture)) = previous
+        {
             self.gpu_pdf.presented_pages.insert(page);
             self.gpu_pdf.surface_failures.remove(&page);
             return Some(self.tracked_gpu_paint_texture(page, rendered_key, image_bounds, texture));
@@ -1803,16 +1954,24 @@ impl DocumentView {
                 ),
                 Arc::clone(&active.prepared),
                 Arc::clone(&active.renderer),
+                active.speculative,
             )
         });
-        if matches!(active_for_page, Some((true, _, _)))
-            && !self.gpu_pdf.surface_render_pending.contains_key(&page)
+        if matches!(
+            active_for_page,
+            Some((same_request, _, _, active_speculative))
+                if can_reuse_active_surface_request(
+                    same_request,
+                    active_speculative,
+                    speculative,
+                )
+        ) && !self.gpu_pdf.surface_render_pending.contains_key(&page)
         {
             return;
         }
 
         assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
-        if let Some((_, active_page, active_renderer)) = active_for_page {
+        if let Some((_, active_page, active_renderer, _)) = active_for_page {
             self.gpu_pdf.surface_render_coalesced =
                 self.gpu_pdf.surface_render_coalesced.saturating_add(1);
             if let Err(error) =
@@ -1848,6 +2007,10 @@ impl DocumentView {
                 self.gpu_pdf.surface_scroll_misses =
                     self.gpu_pdf.surface_scroll_misses.saturating_add(1);
             }
+        }
+        if speculative {
+            self.gpu_pdf.surface_warm_requests =
+                self.gpu_pdf.surface_warm_requests.saturating_add(1);
         }
         self.gpu_pdf.surface_render_pending.insert(
             page,
@@ -2107,21 +2270,47 @@ impl DocumentView {
                                     .saturating_add(1);
                                 this.gpu_pdf.surface_render_discarded =
                                     this.gpu_pdf.surface_render_discarded.saturating_add(1);
-                                if has_current {
-                                    // Cache pressure must not route a page with
-                                    // a valid retained texture back to MuPDF.
-                                    this.gpu_pdf.surface_failures.remove(&page);
-                                } else {
-                                    this.gpu_pdf.surface_failures.insert(
-                                        page,
-                                        format!(
-                                            "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
-                                            required, MAX_RETAINED_GPU_SURFACE_BYTES
-                                        ),
-                                    );
-                                    notify = true;
+                                match surface_cache_pressure_action(speculative, has_current) {
+                                    SurfaceCachePressureAction::PreserveDiagnostics => {}
+                                    SurfaceCachePressureAction::ClearDiagnostics => {
+                                        // Cache pressure must not route a page
+                                        // with a valid retained texture back
+                                        // to MuPDF.
+                                        this.gpu_pdf.surface_failures.remove(&page);
+                                    }
+                                    SurfaceCachePressureAction::RouteToFallback => {
+                                        this.gpu_pdf.surface_failures.insert(
+                                            page,
+                                            format!(
+                                                "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
+                                                required, MAX_RETAINED_GPU_SURFACE_BYTES
+                                            ),
+                                        );
+                                        notify = true;
+                                    }
                                 }
+                                // A speculative reservation failure neither
+                                // creates nor clears page-routing diagnostics.
                             } else {
+                                if speculative {
+                                    let stale_prewarmed = this
+                                        .gpu_pdf
+                                        .rendered
+                                        .iter()
+                                        .filter_map(|(candidate, rendered)| {
+                                            (*candidate != page
+                                                && rendered.prewarmed
+                                                && !this
+                                                    .gpu_pdf
+                                                    .visible_pages
+                                                    .contains(candidate))
+                                            .then_some(*candidate)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    for candidate in stale_prewarmed {
+                                        this.gpu_pdf.rendered.remove(&candidate);
+                                    }
+                                }
                                 this.gpu_pdf.rendered.insert(
                                     page,
                                     RenderedGpuPage {
@@ -2135,6 +2324,8 @@ impl DocumentView {
                                         stats,
                                         enqueued_at: completed_enqueued_at,
                                         first_paint_recorded: false,
+                                        prewarmed: speculative
+                                            && !this.gpu_pdf.visible_pages.contains(&page),
                                     },
                                 );
                                 this.gpu_pdf.surface_failures.remove(&page);
@@ -2436,22 +2627,29 @@ impl DocumentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let visible_demand = self.gpu_pdf.visible_pages.iter().any(|page| {
+        let motion_active = self.native_gpu_preparation_motion_active();
+        let all_visible_covered = !self.gpu_pdf.visible_pages.is_empty()
+            && self
+                .gpu_pdf
+                .visible_pages
+                .is_subset(&self.gpu_pdf.covered_pages);
+        let visible_refinement_pending = self.gpu_pdf.visible_pages.iter().any(|page| {
             self.gpu_pdf
                 .rendered
                 .get(page)
-                .is_none_or(|rendered| rendered.presentation.refinement_pending())
+                .is_some_and(|rendered| rendered.presentation.refinement_pending())
         });
-        if self.native_gpu_preparation_motion_active()
-            || visible_demand
-            || !self.gpu_pdf.surface_seed_tasks.is_empty()
-            || !self.gpu_pdf.surface_render_pending.is_empty()
-        {
-            return;
-        }
+        let visible_patch_lod_pending = self
+            .gpu_pdf
+            .patch_lod_tasks
+            .keys()
+            .any(|page| self.gpu_pdf.visible_pages.contains(page));
+        let surface_pipeline_idle = self.gpu_pdf.surface_seed_tasks.is_empty()
+            && self.gpu_pdf.surface_render_pending.is_empty();
         let Ok(page) = u32::try_from(key.page_idx) else {
             return;
         };
+        let candidate_ready = matches!(self.gpu_pdf.pages.get(&page), Some(GpuPageState::Ready(_)));
         if self.gpu_pdf.rendered.contains_key(&page)
             || self.gpu_pdf.surface_seed_tasks.contains_key(&page)
             || self.gpu_pdf.surface_render_pending.contains_key(&page)
@@ -2460,7 +2658,45 @@ impl DocumentView {
         }
         let predicted_viewport =
             adjacent_gpu_viewport_bounds(image_bounds, viewport_bounds, forward);
-        _ = self.native_gpu_texture(key, image_bounds, predicted_viewport, window, cx);
+        let Some(visible_region) = visible_gpu_region(key, image_bounds, predicted_viewport) else {
+            return;
+        };
+        let request = gpu_paint_request(key, visible_region, !motion_active);
+        let Ok(surface_region) = request.surface_region() else {
+            return;
+        };
+        let protected_visible_bytes = self
+            .gpu_pdf
+            .rendered
+            .iter()
+            .filter(|(candidate, _)| self.gpu_pdf.visible_pages.contains(candidate))
+            .map(|(_, rendered)| rendered.presentation.byte_len())
+            .fold(0_u64, u64::saturating_add);
+        let budget_fits = speculative_surface_fits(
+            protected_visible_bytes,
+            surface_region.byte_len(),
+            MAX_RETAINED_GPU_SURFACE_BYTES,
+        );
+        if !should_warm_adjacent_surface(
+            motion_active,
+            all_visible_covered,
+            visible_refinement_pending,
+            visible_patch_lod_pending,
+            surface_pipeline_idle,
+            candidate_ready,
+            budget_fits,
+        ) {
+            return;
+        }
+
+        _ = self.native_gpu_texture(
+            key,
+            image_bounds,
+            predicted_viewport,
+            GpuSurfaceIntent::AdjacentWarm,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn native_gpu_fallback_diagnostics(
@@ -2638,6 +2874,14 @@ impl DocumentView {
             surface_scroll_reuses: self.gpu_pdf.surface_scroll_reuses,
             surface_scroll_prefetches: self.gpu_pdf.surface_scroll_prefetches,
             surface_scroll_misses: self.gpu_pdf.surface_scroll_misses,
+            surface_warm_requests: self.gpu_pdf.surface_warm_requests,
+            surface_warm_hits: self.gpu_pdf.surface_warm_hits,
+            surface_warm_pages: self
+                .gpu_pdf
+                .rendered
+                .values()
+                .filter(|rendered| rendered.prewarmed)
+                .count(),
             surface_queue_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_queue_latency),
             surface_ready_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_ready_latency),
             surface_present_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_present_latency),
@@ -2981,6 +3225,175 @@ mod tests {
                 height: 1_200,
             })
         );
+    }
+
+    #[test]
+    fn adjacent_surface_intent_never_demands_preparation_or_starts_fallback_grace() {
+        assert!(should_demand_missing_gpu_page(GpuSurfaceIntent::Visible));
+        assert!(!should_demand_missing_gpu_page(
+            GpuSurfaceIntent::AdjacentWarm
+        ));
+        assert!(should_start_gpu_fallback_grace(
+            PdfRenderEngine::GlyphstFirst,
+            GpuSurfaceIntent::Visible,
+        ));
+        assert!(!should_start_gpu_fallback_grace(
+            PdfRenderEngine::GlyphstFirst,
+            GpuSurfaceIntent::AdjacentWarm,
+        ));
+        assert!(!should_start_gpu_fallback_grace(
+            PdfRenderEngine::Glyphst,
+            GpuSurfaceIntent::Visible,
+        ));
+    }
+
+    #[test]
+    fn adjacent_surface_warming_waits_for_visible_coverage_and_higher_priority_work() {
+        assert!(should_warm_adjacent_surface(
+            true, true, true, false, true, true, true,
+        ));
+        assert!(should_warm_adjacent_surface(
+            false, true, false, false, true, true, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            false, true, true, false, true, true, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            true, false, false, false, true, true, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            true, true, false, true, true, true, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            true, true, false, false, false, true, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            true, true, false, false, true, false, true,
+        ));
+        assert!(!should_warm_adjacent_surface(
+            true, true, false, false, true, true, false,
+        ));
+    }
+
+    #[test]
+    fn adjacent_warming_uses_motion_quality_then_exact_settled_quality() {
+        let key = render_key();
+        let visible_region = GpuPageRegion {
+            x: 0,
+            y: 0,
+            width: 1_000,
+            height: 1_000,
+        };
+        assert!(!gpu_paint_request(key, visible_region, false).settled);
+        assert!(gpu_paint_request(key, visible_region, true).settled);
+    }
+
+    #[test]
+    fn speculative_surface_budget_and_cache_pressure_never_poison_visible_routing() {
+        assert!(speculative_surface_fits(100, 25, 125));
+        assert!(!speculative_surface_fits(100, 26, 125));
+        assert!(!speculative_surface_fits(u64::MAX, 1, u64::MAX));
+
+        assert_eq!(
+            surface_cache_pressure_action(true, false),
+            SurfaceCachePressureAction::PreserveDiagnostics,
+        );
+        assert_eq!(
+            surface_cache_pressure_action(true, true),
+            SurfaceCachePressureAction::ClearDiagnostics,
+        );
+        assert_eq!(
+            surface_cache_pressure_action(false, true),
+            SurfaceCachePressureAction::ClearDiagnostics,
+        );
+        assert_eq!(
+            surface_cache_pressure_action(false, false),
+            SurfaceCachePressureAction::RouteToFallback,
+        );
+    }
+
+    #[test]
+    fn prewarmed_hit_requires_compatible_scale_content_and_coverage() {
+        let key = render_key();
+        let request = gpu_paint_request(
+            key,
+            GpuPageRegion {
+                x: 100,
+                y: 400,
+                width: 800,
+                height: 800,
+            },
+            false,
+        );
+        let surface = request.surface_region().expect("warm surface region");
+        assert!(prewarmed_surface_covers(
+            true, key, request, surface, key, request, true,
+        ));
+        assert!(!prewarmed_surface_covers(
+            false, key, request, surface, key, request, true,
+        ));
+        assert!(!prewarmed_surface_covers(
+            true, key, request, surface, key, request, false,
+        ));
+
+        let mut scaled_key = key;
+        scaled_key.physical_width = 2_000;
+        let scaled_request = gpu_paint_request(scaled_key, request.visible_region, false);
+        assert!(!prewarmed_surface_covers(
+            true,
+            key,
+            request,
+            surface,
+            scaled_key,
+            scaled_request,
+            true,
+        ));
+        assert!(!prewarmed_surface_covers(
+            true,
+            key,
+            request,
+            GpuPageRegion {
+                height: 128,
+                ..surface
+            },
+            key,
+            request,
+            true,
+        ));
+    }
+
+    #[test]
+    fn visible_surface_request_supersedes_matching_speculative_work() {
+        assert!(!can_reuse_active_surface_request(true, true, false));
+        assert!(can_reuse_active_surface_request(true, true, true));
+        assert!(can_reuse_active_surface_request(true, false, false));
+        assert!(can_reuse_active_surface_request(true, false, true));
+        assert!(!can_reuse_active_surface_request(false, false, false));
+    }
+
+    #[test]
+    fn sequential_surface_warming_keeps_exactly_one_page_of_lookahead() {
+        let page_count = 8_u32;
+        let mut prewarmed = None;
+        let mut hits = 0_u32;
+        let mut maximum_resident = 0_usize;
+
+        for visible in 0..page_count {
+            if prewarmed == Some(visible) {
+                hits += 1;
+                prewarmed = None;
+            }
+            if visible + 1 < page_count
+                && should_warm_adjacent_surface(true, true, true, false, true, true, true)
+            {
+                assert!(prewarmed.is_none());
+                prewarmed = Some(visible + 1);
+            }
+            maximum_resident = maximum_resident.max(usize::from(prewarmed.is_some()));
+        }
+
+        assert_eq!(hits, page_count - 1);
+        assert_eq!(maximum_resident, 1);
     }
 
     #[test]

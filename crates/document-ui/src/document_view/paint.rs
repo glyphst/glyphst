@@ -233,7 +233,14 @@ impl DocumentView {
 
         self.viewport_render_debug.clear();
         let adjacent_gpu_page = self.prune_native_gpu_pages(&[page_idx], cx);
-        let gpu_texture = self.native_gpu_texture(key, image_bounds, bounds, window, cx);
+        let gpu_texture = self.native_gpu_texture(
+            key,
+            image_bounds,
+            bounds,
+            GpuSurfaceIntent::Visible,
+            window,
+            cx,
+        );
         if let Some(adjacent_page) = adjacent_gpu_page {
             let adjacent_scale = self.presentation_scale_for_page(adjacent_page);
             let adjacent_bounds =
@@ -416,7 +423,14 @@ impl DocumentView {
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         for (page_idx, image_bounds, key) in visible_page_renders {
-            let gpu_texture = self.native_gpu_texture(key, image_bounds, bounds, window, cx);
+            let gpu_texture = self.native_gpu_texture(
+                key,
+                image_bounds,
+                bounds,
+                GpuSurfaceIntent::Visible,
+                window,
+                cx,
+            );
             let mupdf_allowed = u32::try_from(page_idx).is_ok_and(|page| {
                 self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine)
             });

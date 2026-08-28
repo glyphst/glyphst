@@ -676,6 +676,9 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_scroll_reuses: u64,
     pub surface_scroll_prefetches: u64,
     pub surface_scroll_misses: u64,
+    pub surface_warm_requests: u64,
+    pub surface_warm_hits: u64,
+    pub surface_warm_pages: usize,
     pub surface_queue_latency_p95: Duration,
     pub surface_ready_latency_p95: Duration,
     pub surface_present_latency_p95: Duration,
@@ -1135,6 +1138,12 @@ struct PaintPage {
 struct GpuPaintTexture {
     bounds: Bounds<Pixels>,
     texture: GpuPageTexture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GpuSurfaceIntent {
+    Visible,
+    AdjacentWarm,
 }
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
