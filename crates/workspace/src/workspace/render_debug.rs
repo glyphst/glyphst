@@ -6,6 +6,7 @@ use gpui::{
     AnyElement, App, Div, Hsla, IntoElement as _, ParentElement as _, Styled as _, WeakEntity,
     Window, div, hsla, prelude::FluentBuilder as _, px,
 };
+use std::time::Duration;
 
 use super::*;
 
@@ -22,6 +23,8 @@ impl Workspace {
             let workspace = cx.weak_entity();
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
+                    .capacity(240)
+                    .frame_budget(Duration::from_micros(8_333))
                     .continuous(false)
                     .width(px(540.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
@@ -143,23 +146,23 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU SURFACES",
             format!(
-                "{} / {}  ×{}",
+                "{} / {}  ×{} · {} in flight",
                 format_bytes(document.gpu_cache.surface_bytes),
                 format_bytes(document.gpu_cache.surface_byte_limit),
-                document.gpu_cache.surface_count
+                document.gpu_cache.surface_count,
+                format_bytes(document.gpu_cache.surface_in_flight_bytes),
             ),
             FOREGROUND,
         ))
         .child(reading(
             "GPU PIPELINE",
             format!(
-                "{} active · {} pending · {} submitted · {} done · {} superseded · {} coalesced · {} refine · motion {}",
+                "{} active · {}/{} pending/peak · {} submitted · {} done · {} refine · motion {}",
                 document.gpu_cache.surface_seed_tasks,
                 document.gpu_cache.surface_render_pending,
+                document.gpu_cache.surface_pending_peak,
                 document.gpu_cache.surface_renders_started,
                 document.gpu_cache.surface_renders_completed,
-                document.gpu_cache.surface_renders_superseded,
-                document.gpu_cache.surface_renders_coalesced,
                 document.gpu_cache.refinement_pages,
                 if document.gpu_cache.motion_active {
                     "active"
@@ -178,11 +181,28 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
+            "GPU OUTCOMES",
+            format!(
+                "{} deferred · {} superseded · {} discarded · {} coalesced · {} cache pressure",
+                document.gpu_cache.surface_renders_deferred,
+                document.gpu_cache.surface_renders_superseded,
+                document.gpu_cache.surface_renders_discarded,
+                document.gpu_cache.surface_renders_coalesced,
+                document.gpu_cache.surface_render_cache_pressure,
+            ),
+            if document.gpu_cache.surface_render_cache_pressure > 0 {
+                WARN
+            } else {
+                FOREGROUND
+            },
+        ))
+        .child(reading(
             "GPU LATENCY P95",
             format!(
-                "{} queue · {} end-to-end",
+                "{} queue · {} ready · {} first paint",
                 format_duration(document.gpu_cache.surface_queue_latency_p95),
-                format_duration(document.gpu_cache.surface_total_latency_p95),
+                format_duration(document.gpu_cache.surface_ready_latency_p95),
+                format_duration(document.gpu_cache.surface_present_latency_p95),
             ),
             FOREGROUND,
         ))

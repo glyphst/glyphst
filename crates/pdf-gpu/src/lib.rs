@@ -1183,8 +1183,20 @@ fn application_link_action_fallback(code: &str, message: &str) -> GpuFallbackDia
 pub enum GpuPageRenderOutcome {
     /// The newest request submitted successfully and advanced presentation state.
     Rendered(GpuPageTexture, GpuRenderStats),
+    /// Planning proved this request needs a full redraw that the caller asked
+    /// to postpone until interaction settles. No target texture was allocated.
+    Deferred,
     /// A newer request invalidated this attempt before queue submission.
     Superseded,
+}
+
+/// Policy for one queued native-page render attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuPageRenderOptions {
+    /// Return [`GpuPageRenderOutcome::Deferred`] when incremental planning
+    /// selects a full redraw. Direct redraws, reprojection, and refinement are
+    /// still allowed so retained presentation work remains responsive.
+    pub defer_full_render: bool,
 }
 
 /// Same-device PDF renderer tied to one GPUI recovery generation.
@@ -1484,6 +1496,7 @@ impl GpuPdfRenderer {
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
+        options: GpuPageRenderOptions,
         presentation: &mut GpuPagePresentation,
     ) -> Result<GpuPageRenderOutcome> {
         if self.is_device_lost() {
@@ -1530,6 +1543,12 @@ impl GpuPdfRenderer {
                 }
                 Err(error) => return Err(render_error(error)),
             };
+            if options.defer_full_render && work.kind == GpuIncrementalWorkKind::Full {
+                // Preserve a tighter mode learned while probing device/render
+                // target limits even though no presentation allocation occurs.
+                presentation.region_mode = region_mode;
+                return Ok(GpuPageRenderOutcome::Deferred);
+            }
             let selection = presentation.select_target(
                 surface_region.size(),
                 work.kind == GpuIncrementalWorkKind::Direct,
@@ -2068,6 +2087,17 @@ fn page_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_render_deferral_is_opt_in() {
+        assert!(!GpuPageRenderOptions::default().defer_full_render);
+        assert!(
+            GpuPageRenderOptions {
+                defer_full_render: true,
+            }
+            .defer_full_render
+        );
+    }
     use glyphst_core::DocumentFormat;
 
     fn minimal_pdf() -> Arc<[u8]> {

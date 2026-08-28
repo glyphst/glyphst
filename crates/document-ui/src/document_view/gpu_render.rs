@@ -53,8 +53,13 @@ pub(super) struct GpuPdfState {
     surface_render_completed: u64,
     surface_render_coalesced: u64,
     surface_render_superseded: u64,
+    surface_render_deferred: u64,
+    surface_render_discarded: u64,
+    surface_render_cache_pressure: u64,
+    surface_pending_peak: usize,
     surface_queue_latency: VecDeque<Duration>,
-    surface_total_latency: VecDeque<Duration>,
+    surface_ready_latency: VecDeque<Duration>,
+    surface_present_latency: VecDeque<Duration>,
     fallback_grace_generation: u64,
     fallback_grace_tasks: HashMap<u32, FallbackGraceTask>,
     fallback_grace_elapsed: HashSet<u32>,
@@ -105,6 +110,8 @@ struct RenderedGpuPage {
     request: GpuPaintRequest,
     presentation: GpuPagePresentation,
     stats: GpuRenderStats,
+    enqueued_at: Instant,
+    first_paint_recorded: bool,
 }
 
 struct PatchLodTask {
@@ -123,6 +130,7 @@ struct SurfaceSeedTask {
     superseded: bool,
     enqueued_at: Instant,
     started_at: Instant,
+    in_flight_bytes: u64,
     prepared: Arc<PreparedGpuPage>,
     renderer: Arc<GpuPdfRenderer>,
     _task: Task<()>,
@@ -184,8 +192,13 @@ impl GpuPdfState {
         self.surface_render_completed = 0;
         self.surface_render_coalesced = 0;
         self.surface_render_superseded = 0;
+        self.surface_render_deferred = 0;
+        self.surface_render_discarded = 0;
+        self.surface_render_cache_pressure = 0;
+        self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
-        self.surface_total_latency.clear();
+        self.surface_ready_latency.clear();
+        self.surface_present_latency.clear();
         self.fallback_grace_generation = 0;
         self.fallback_grace_tasks.clear();
         self.fallback_grace_elapsed.clear();
@@ -230,8 +243,13 @@ impl GpuPdfState {
         self.surface_render_completed = 0;
         self.surface_render_coalesced = 0;
         self.surface_render_superseded = 0;
+        self.surface_render_deferred = 0;
+        self.surface_render_discarded = 0;
+        self.surface_render_cache_pressure = 0;
+        self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
-        self.surface_total_latency.clear();
+        self.surface_ready_latency.clear();
+        self.surface_present_latency.clear();
         self.fallback_grace_generation = 0;
         self.fallback_grace_tasks.clear();
         self.fallback_grace_elapsed.clear();
@@ -296,9 +314,13 @@ impl GpuPdfState {
         self.page_last_used.insert(page, self.page_usage_clock);
     }
 
-    fn record_surface_latency(&mut self, queue: Duration, total: Duration) {
+    fn record_surface_latency(&mut self, queue: Duration, ready: Duration) {
         push_surface_latency(&mut self.surface_queue_latency, queue);
-        push_surface_latency(&mut self.surface_total_latency, total);
+        push_surface_latency(&mut self.surface_ready_latency, ready);
+    }
+
+    fn record_surface_present_latency(&mut self, present: Duration) {
+        push_surface_latency(&mut self.surface_present_latency, present);
     }
 
     fn prune(&mut self, visible: &HashSet<u32>, retained: &HashSet<u32>) {
@@ -918,6 +940,19 @@ fn should_start_surface_seed(settled: bool, allow_motion_seed: bool, has_previou
     settled || allow_motion_seed || !has_previous
 }
 
+fn should_defer_full_surface_render(
+    settled: bool,
+    allow_motion_seed: bool,
+    has_previous: bool,
+) -> bool {
+    !should_start_surface_seed(settled, allow_motion_seed, has_previous)
+}
+
+fn assign_surface_render_generation(counter: &mut u64, request: &mut GpuPaintRequest) {
+    *counter = counter.wrapping_add(1).max(1);
+    request.generation = *counter;
+}
+
 fn same_gpu_paint_request(left: GpuPaintRequest, right: GpuPaintRequest) -> bool {
     // `generation` identifies the requesting paint traversal. It does not
     // change the pixels produced by an otherwise identical request.
@@ -1108,6 +1143,29 @@ impl DocumentView {
             && key.color_transform.is_none()
     }
 
+    fn tracked_gpu_paint_texture(
+        &mut self,
+        page: u32,
+        key: RenderKey,
+        image_bounds: Bounds<Pixels>,
+        texture: GpuPageTexture,
+    ) -> GpuPaintTexture {
+        let enqueued_at = self.gpu_pdf.rendered.get_mut(&page).and_then(|rendered| {
+            if rendered.first_paint_recorded {
+                None
+            } else {
+                rendered.first_paint_recorded = true;
+                Some(rendered.enqueued_at)
+            }
+        });
+        if let Some(enqueued_at) = enqueued_at {
+            self.gpu_pdf.record_surface_present_latency(
+                Instant::now().saturating_duration_since(enqueued_at),
+            );
+        }
+        gpu_paint_texture(key, image_bounds, texture)
+    }
+
     pub(super) fn native_gpu_texture(
         &mut self,
         key: RenderKey,
@@ -1272,14 +1330,15 @@ impl DocumentView {
             && !self.gpu_pdf.motion_active
             && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= 0.01
             && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= 0.01;
-        self.gpu_pdf.render_generation = self.gpu_pdf.render_generation.wrapping_add(1).max(1);
         let request = GpuPaintRequest {
             page_size: [key.physical_width, key.physical_height],
             visible_region,
             rotation: key.rotation,
             background: [1.0, 1.0, 1.0, 1.0],
             settled,
-            generation: self.gpu_pdf.render_generation,
+            // A render generation is assigned only after exact-cache and
+            // scheduler coalescing checks prove this is material new work.
+            generation: 0,
         };
         let presentation = self
             .gpu_pdf
@@ -1296,6 +1355,24 @@ impl DocumentView {
                 return None;
             }
         };
+        // The common warm-frame path stops here. In particular, do not query
+        // or start patch-LOD work for a texture that already exactly satisfies
+        // this paint request.
+        let exact_texture = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
+            (rendered.key == key
+                && same_gpu_paint_request(rendered.request, request)
+                && rendered.presentation.token() == Some(renderer.token())
+                && (!settled || !rendered.presentation.refinement_pending()))
+            .then(|| rendered.presentation.current_texture())
+            .flatten()
+            .filter(|texture| texture.region() == surface_region)
+        });
+        if let Some(texture) = exact_texture {
+            self.gpu_pdf.presented_pages.insert(page);
+            self.gpu_pdf.surface_failures.remove(&page);
+            return Some(self.tracked_gpu_paint_texture(page, key, image_bounds, texture));
+        }
+
         let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
             Ok(status) => status,
             Err(error) => {
@@ -1323,26 +1400,15 @@ impl DocumentView {
                     let rendered_key = rendered.key;
                     let texture = rendered.presentation.current_texture()?;
                     self.gpu_pdf.presented_pages.insert(page);
-                    return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+                    return Some(self.tracked_gpu_paint_texture(
+                        page,
+                        rendered_key,
+                        image_bounds,
+                        texture,
+                    ));
                 }
                 return None;
             }
-        }
-
-        if let Some(rendered) = self.gpu_pdf.rendered.get(&page)
-            && rendered.key == key
-            && same_gpu_paint_request(rendered.request, request)
-            && rendered.presentation.token() == Some(renderer.token())
-            && rendered
-                .presentation
-                .current_texture()
-                .is_some_and(|texture| texture.region() == surface_region)
-            && (!settled || !rendered.presentation.refinement_pending())
-        {
-            let texture = rendered.presentation.current_texture()?;
-            self.gpu_pdf.presented_pages.insert(page);
-            self.gpu_pdf.surface_failures.remove(&page);
-            return Some(gpu_paint_texture(key, image_bounds, texture));
         }
 
         let previous = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
@@ -1366,7 +1432,7 @@ impl DocumentView {
         if let Some((rendered_key, texture)) = previous {
             self.gpu_pdf.presented_pages.insert(page);
             self.gpu_pdf.surface_failures.remove(&page);
-            return Some(gpu_paint_texture(rendered_key, image_bounds, texture));
+            return Some(self.tracked_gpu_paint_texture(page, rendered_key, image_bounds, texture));
         }
         None
     }
@@ -1621,7 +1687,7 @@ impl DocumentView {
         key: RenderKey,
         prepared: Arc<PreparedGpuPage>,
         renderer: Arc<GpuPdfRenderer>,
-        request: GpuPaintRequest,
+        mut request: GpuPaintRequest,
         speculative: bool,
         cx: &mut Context<Self>,
     ) {
@@ -1655,6 +1721,8 @@ impl DocumentView {
         {
             return;
         }
+
+        assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
         if let Some((_, active_page, active_renderer)) = active_for_page {
             self.gpu_pdf.surface_render_coalesced =
                 self.gpu_pdf.surface_render_coalesced.saturating_add(1);
@@ -1693,6 +1761,10 @@ impl DocumentView {
                 enqueued_at: Instant::now(),
             },
         );
+        self.gpu_pdf.surface_pending_peak = self
+            .gpu_pdf
+            .surface_pending_peak
+            .max(self.gpu_pdf.surface_render_pending.len());
 
         // A newly visible page outranks speculative adjacent-page work. The
         // engine observes this generation atomically and abandons the old
@@ -1771,39 +1843,12 @@ impl DocumentView {
                     self.gpu_pdf.surface_render_coalesced.saturating_add(1);
                 continue;
             }
-            if self.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
-                rendered.key == pending.key
-                    && same_gpu_paint_request(rendered.request, pending.request)
-                    && rendered.presentation.token() == Some(pending.renderer.token())
-                    && (!pending.request.settled || !rendered.presentation.refinement_pending())
-            }) {
-                self.gpu_pdf.surface_failures.remove(&page);
-                continue;
-            }
-
-            let mut presentation = self
+            let presentation = self
                 .gpu_pdf
                 .rendered
                 .get(&page)
                 .map(|rendered| rendered.presentation.clone())
                 .unwrap_or_default();
-            let work = match pending.renderer.plan_page(
-                &pending.prepared,
-                pending.request,
-                &mut presentation,
-            ) {
-                Ok(work) => work,
-                Err(error) => {
-                    self.gpu_pdf
-                        .surface_failures
-                        .insert(page, format!("{error:#}"));
-                    if pending.renderer.is_device_lost() {
-                        self.gpu_pdf.reset_device();
-                        return;
-                    }
-                    continue;
-                }
-            };
             let region = match presentation.surface_region(pending.request) {
                 Ok(region) => region,
                 Err(error) => {
@@ -1813,32 +1858,29 @@ impl DocumentView {
                     continue;
                 }
             };
+            if self.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
+                rendered.key == pending.key
+                    && same_gpu_paint_request(rendered.request, pending.request)
+                    && rendered.presentation.token() == Some(pending.renderer.token())
+                    && rendered
+                        .presentation
+                        .current_texture()
+                        .is_some_and(|texture| texture.region() == region)
+                    && (!pending.request.settled || !rendered.presentation.refinement_pending())
+            }) {
+                self.gpu_pdf.surface_failures.remove(&page);
+                continue;
+            }
             let has_previous = presentation.current_texture().is_some();
-            if work.kind == GpuIncrementalWorkKind::Full
-                && !should_start_surface_seed(
+            let options = GpuPageRenderOptions {
+                defer_full_render: should_defer_full_surface_render(
                     pending.request.settled,
                     pending.speculative,
                     has_previous,
-                )
-            {
-                self.gpu_pdf.surface_render_coalesced =
-                    self.gpu_pdf.surface_render_coalesced.saturating_add(1);
-                continue;
-            }
-            let requested_surface_bytes = presentation
-                .projected_byte_len(region, work.kind == GpuIncrementalWorkKind::Direct);
-            if let Err(required) = self.gpu_pdf.reserve_surface(page, requested_surface_bytes) {
-                self.gpu_pdf.surface_failures.insert(
-                    page,
-                    format!(
-                        "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
-                        required, MAX_RETAINED_GPU_SURFACE_BYTES
-                    ),
-                );
-                continue;
-            }
+                ),
+            };
 
-            self.start_native_gpu_surface_seed(page, pending, region, presentation, cx);
+            self.start_native_gpu_surface_seed(page, pending, region, options, presentation, cx);
             return;
         }
     }
@@ -1848,6 +1890,7 @@ impl DocumentView {
         page: u32,
         pending: PendingSurfaceRender,
         region: GpuPageRegion,
+        options: GpuPageRenderOptions,
         mut presentation: GpuPagePresentation,
         cx: &mut Context<Self>,
     ) {
@@ -1870,11 +1913,12 @@ impl DocumentView {
         let worker_renderer = Arc::clone(&renderer);
         let completion_page = Arc::clone(&prepared);
         let started_at = Instant::now();
+        let in_flight_bytes = region.byte_len();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     worker_renderer
-                        .render_page(&worker_page, request, &mut presentation)
+                        .render_page(&worker_page, request, options, &mut presentation)
                         .map(|outcome| (presentation, outcome))
                         .map_err(|error| format!("{error:#}"))
                 })
@@ -1895,11 +1939,12 @@ impl DocumentView {
                 let Some(completed_task) = this.gpu_pdf.surface_seed_tasks.remove(&page) else {
                     return;
                 };
+                let completed_enqueued_at = completed_task.enqueued_at;
                 this.gpu_pdf.record_surface_latency(
                     completed_task
                         .started_at
-                        .saturating_duration_since(completed_task.enqueued_at),
-                    finished_at.saturating_duration_since(completed_task.enqueued_at),
+                        .saturating_duration_since(completed_enqueued_at),
+                    finished_at.saturating_duration_since(completed_enqueued_at),
                 );
                 this.gpu_pdf.surface_render_completed =
                     this.gpu_pdf.surface_render_completed.saturating_add(1);
@@ -1914,8 +1959,9 @@ impl DocumentView {
                             if Arc::ptr_eq(current, &completion_page)
                     )
                 {
+                    this.gpu_pdf.surface_render_discarded =
+                        this.gpu_pdf.surface_render_discarded.saturating_add(1);
                     this.dispatch_native_gpu_surface_render(cx);
-                    cx.notify();
                     return;
                 }
                 let newer_pending = this
@@ -1925,21 +1971,38 @@ impl DocumentView {
                     .is_some_and(|pending| {
                         !same_surface_request(key, request, pending.key, pending.request)
                     });
+                let mut notify = false;
                 match result {
                     Ok((presentation, GpuPageRenderOutcome::Rendered(_, stats))) => {
                         let has_current = this.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
                             rendered.presentation.current_texture().is_some()
                         });
-                        if !newer_pending || !has_current {
+                        if newer_pending && has_current {
+                            this.gpu_pdf.surface_render_discarded =
+                                this.gpu_pdf.surface_render_discarded.saturating_add(1);
+                        } else {
                             let bytes = presentation.byte_len();
                             if let Err(required) = this.gpu_pdf.reserve_surface(page, bytes) {
-                                this.gpu_pdf.surface_failures.insert(
-                                    page,
-                                    format!(
-                                        "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
-                                        required, MAX_RETAINED_GPU_SURFACE_BYTES
-                                    ),
-                                );
+                                this.gpu_pdf.surface_render_cache_pressure = this
+                                    .gpu_pdf
+                                    .surface_render_cache_pressure
+                                    .saturating_add(1);
+                                this.gpu_pdf.surface_render_discarded =
+                                    this.gpu_pdf.surface_render_discarded.saturating_add(1);
+                                if has_current {
+                                    // Cache pressure must not route a page with
+                                    // a valid retained texture back to MuPDF.
+                                    this.gpu_pdf.surface_failures.remove(&page);
+                                } else {
+                                    this.gpu_pdf.surface_failures.insert(
+                                        page,
+                                        format!(
+                                            "visible native PDF surfaces require {} bytes, exceeding the {}-byte cache limit",
+                                            required, MAX_RETAINED_GPU_SURFACE_BYTES
+                                        ),
+                                    );
+                                    notify = true;
+                                }
                             } else {
                                 this.gpu_pdf.rendered.insert(
                                     page,
@@ -1948,12 +2011,25 @@ impl DocumentView {
                                         request,
                                         presentation,
                                         stats,
+                                        enqueued_at: completed_enqueued_at,
+                                        first_paint_recorded: false,
                                     },
                                 );
                                 this.gpu_pdf.surface_failures.remove(&page);
                                 this.gpu_pdf.prune_surface_cache();
+                                notify = true;
                             }
                         }
+                    }
+                    Ok((presentation, GpuPageRenderOutcome::Deferred)) => {
+                        this.gpu_pdf.surface_render_deferred =
+                            this.gpu_pdf.surface_render_deferred.saturating_add(1);
+                        // Retain a tighter safe region mode learned by the
+                        // background planner without replacing any pixels.
+                        if let Some(rendered) = this.gpu_pdf.rendered.get_mut(&page) {
+                            rendered.presentation = presentation;
+                        }
+                        this.gpu_pdf.surface_failures.remove(&page);
                     }
                     Ok((_, GpuPageRenderOutcome::Superseded)) => {
                         this.gpu_pdf.surface_render_superseded =
@@ -1967,17 +2043,21 @@ impl DocumentView {
                             .is_some_and(|renderer| renderer.is_device_lost())
                         {
                             this.gpu_pdf.reset_device();
+                            notify = true;
                         } else if !newer_pending {
                             eprintln!(
                                 "failed to seed native PDF page {} GPU surface: {error}",
                                 page + 1
                             );
                             this.gpu_pdf.surface_failures.insert(page, error);
+                            notify = true;
                         }
                     }
                 }
                 this.dispatch_native_gpu_surface_render(cx);
-                cx.notify();
+                if notify {
+                    cx.notify();
+                }
             });
             if let Err(error) = update_result
                 && error.to_string() != "entity released"
@@ -1996,13 +2076,13 @@ impl DocumentView {
                 superseded: false,
                 enqueued_at,
                 started_at,
+                in_flight_bytes,
                 prepared,
                 renderer,
                 _task: task,
             },
         );
         self.gpu_pdf.surface_render_started = self.gpu_pdf.surface_render_started.saturating_add(1);
-        cx.notify();
     }
 
     fn start_native_gpu_patch_lod_prepare(
@@ -2418,13 +2498,24 @@ impl DocumentView {
             surface_bytes: self.gpu_pdf.surface_bytes(),
             surface_byte_limit: MAX_RETAINED_GPU_SURFACE_BYTES,
             surface_seed_tasks: self.gpu_pdf.surface_seed_tasks.len(),
+            surface_in_flight_bytes: self
+                .gpu_pdf
+                .surface_seed_tasks
+                .values()
+                .map(|task| task.in_flight_bytes)
+                .fold(0_u64, u64::saturating_add),
             surface_render_pending: self.gpu_pdf.surface_render_pending.len(),
+            surface_pending_peak: self.gpu_pdf.surface_pending_peak,
             surface_renders_started: self.gpu_pdf.surface_render_started,
             surface_renders_completed: self.gpu_pdf.surface_render_completed,
             surface_renders_coalesced: self.gpu_pdf.surface_render_coalesced,
             surface_renders_superseded: self.gpu_pdf.surface_render_superseded,
+            surface_renders_deferred: self.gpu_pdf.surface_render_deferred,
+            surface_renders_discarded: self.gpu_pdf.surface_render_discarded,
+            surface_render_cache_pressure: self.gpu_pdf.surface_render_cache_pressure,
             surface_queue_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_queue_latency),
-            surface_total_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_total_latency),
+            surface_ready_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_ready_latency),
+            surface_present_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_present_latency),
             refinement_pages: self
                 .gpu_pdf
                 .rendered
@@ -2773,6 +2864,11 @@ mod tests {
         assert!(!should_start_surface_seed(false, false, true));
         assert!(should_start_surface_seed(false, true, true));
         assert!(should_start_surface_seed(true, false, true));
+
+        assert!(!should_defer_full_surface_render(false, false, false));
+        assert!(should_defer_full_surface_render(false, false, true));
+        assert!(!should_defer_full_surface_render(false, true, true));
+        assert!(!should_defer_full_surface_render(true, false, true));
     }
 
     #[test]
@@ -2830,6 +2926,33 @@ mod tests {
         assert!(!can_coalesce_pending_surface_request(
             key, request, true, key, request, false,
         ));
+    }
+
+    #[test]
+    fn material_surface_work_receives_the_next_nonzero_generation() {
+        let mut request = GpuPaintRequest {
+            page_size: [1_000, 2_000],
+            visible_region: GpuPageRegion {
+                x: 0,
+                y: 0,
+                width: 1_000,
+                height: 1_000,
+            },
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0, 1.0, 1.0, 1.0],
+            settled: false,
+            generation: 0,
+        };
+        let mut counter = 0;
+
+        assign_surface_render_generation(&mut counter, &mut request);
+        assert_eq!(counter, 1);
+        assert_eq!(request.generation, 1);
+
+        counter = u64::MAX;
+        assign_surface_render_generation(&mut counter, &mut request);
+        assert_eq!(counter, 1);
+        assert_eq!(request.generation, 1);
     }
 
     #[test]
