@@ -56,6 +56,9 @@ pub(super) struct GpuPdfState {
     surface_render_deferred: u64,
     surface_render_discarded: u64,
     surface_render_cache_pressure: u64,
+    surface_scroll_reuses: u64,
+    surface_scroll_prefetches: u64,
+    surface_scroll_misses: u64,
     surface_pending_peak: usize,
     surface_queue_latency: VecDeque<Duration>,
     surface_ready_latency: VecDeque<Duration>,
@@ -108,6 +111,7 @@ enum CachedLinkMapping {
 struct RenderedGpuPage {
     key: RenderKey,
     request: GpuPaintRequest,
+    refresh_region: GpuPageRegion,
     presentation: GpuPagePresentation,
     stats: GpuRenderStats,
     enqueued_at: Instant,
@@ -139,11 +143,36 @@ struct SurfaceSeedTask {
 struct PendingSurfaceRender {
     sequence: u64,
     key: RenderKey,
+    region: GpuPageRegion,
     prepared: Arc<PreparedGpuPage>,
     renderer: Arc<GpuPdfRenderer>,
     request: GpuPaintRequest,
     speculative: bool,
     enqueued_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceRefreshKind {
+    Initial,
+    Prefetch,
+    Urgent,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceRequestIdentity {
+    key: RenderKey,
+    request: GpuPaintRequest,
+    region: GpuPageRegion,
+}
+
+impl SurfaceRequestIdentity {
+    const fn new(key: RenderKey, request: GpuPaintRequest, region: GpuPageRegion) -> Self {
+        Self {
+            key,
+            request,
+            region,
+        }
+    }
 }
 
 struct FallbackGraceTask {
@@ -195,6 +224,9 @@ impl GpuPdfState {
         self.surface_render_deferred = 0;
         self.surface_render_discarded = 0;
         self.surface_render_cache_pressure = 0;
+        self.surface_scroll_reuses = 0;
+        self.surface_scroll_prefetches = 0;
+        self.surface_scroll_misses = 0;
         self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
         self.surface_ready_latency.clear();
@@ -246,6 +278,9 @@ impl GpuPdfState {
         self.surface_render_deferred = 0;
         self.surface_render_discarded = 0;
         self.surface_render_cache_pressure = 0;
+        self.surface_scroll_reuses = 0;
+        self.surface_scroll_prefetches = 0;
+        self.surface_scroll_misses = 0;
         self.surface_pending_peak = 0;
         self.surface_queue_latency.clear();
         self.surface_ready_latency.clear();
@@ -953,35 +988,62 @@ fn assign_surface_render_generation(counter: &mut u64, request: &mut GpuPaintReq
     request.generation = *counter;
 }
 
-fn same_gpu_paint_request(left: GpuPaintRequest, right: GpuPaintRequest) -> bool {
-    // `generation` identifies the requesting paint traversal. It does not
-    // change the pixels produced by an otherwise identical request.
+fn same_gpu_surface_content(left: GpuPaintRequest, right: GpuPaintRequest) -> bool {
+    // The visible region, motion quality, and request generation choose work;
+    // they do not change the identity of already-rendered page pixels.
     left.page_size == right.page_size
-        && left.visible_region == right.visible_region
         && left.rotation == right.rotation
         && left.background == right.background
-        && left.settled == right.settled
 }
 
-fn same_surface_request(
-    left_key: RenderKey,
-    left: GpuPaintRequest,
-    right_key: RenderKey,
-    right: GpuPaintRequest,
-) -> bool {
-    left_key == right_key && same_gpu_paint_request(left, right)
+fn same_gpu_surface_work(left: GpuPaintRequest, right: GpuPaintRequest) -> bool {
+    same_gpu_surface_content(left, right) && left.settled == right.settled
+}
+
+fn gpu_region_contains(outer: GpuPageRegion, inner: GpuPageRegion) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
+}
+
+/// Keeps the original visible region in the middle half of every available
+/// overscan margin. Crossing this guard starts the next surface while the
+/// current texture still covers the viewport.
+fn surface_refresh_guard(surface: GpuPageRegion, seed_visible: GpuPageRegion) -> GpuPageRegion {
+    if !gpu_region_contains(surface, seed_visible) {
+        return surface;
+    }
+
+    let left_margin = seed_visible.x.saturating_sub(surface.x);
+    let top_margin = seed_visible.y.saturating_sub(surface.y);
+    let right_margin = surface.right().saturating_sub(seed_visible.right());
+    let bottom_margin = surface.bottom().saturating_sub(seed_visible.bottom());
+    let x = surface.x.saturating_add(left_margin / 2);
+    let y = surface.y.saturating_add(top_margin / 2);
+    let right = surface.right().saturating_sub(right_margin / 2);
+    let bottom = surface.bottom().saturating_sub(bottom_margin / 2);
+    GpuPageRegion {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    }
+}
+
+fn same_surface_request(left: SurfaceRequestIdentity, right: SurfaceRequestIdentity) -> bool {
+    left.key == right.key
+        && left.region == right.region
+        && same_gpu_surface_work(left.request, right.request)
 }
 
 fn can_coalesce_pending_surface_request(
-    pending_key: RenderKey,
-    pending_request: GpuPaintRequest,
+    pending: SurfaceRequestIdentity,
     pending_speculative: bool,
-    incoming_key: RenderKey,
-    incoming_request: GpuPaintRequest,
+    incoming: SurfaceRequestIdentity,
     incoming_speculative: bool,
 ) -> bool {
-    same_surface_request(pending_key, pending_request, incoming_key, incoming_request)
-        && (!pending_speculative || incoming_speculative)
+    same_surface_request(pending, incoming) && (!pending_speculative || incoming_speculative)
 }
 
 fn push_surface_latency(samples: &mut VecDeque<Duration>, sample: Duration) {
@@ -1355,23 +1417,45 @@ impl DocumentView {
                 return None;
             }
         };
-        // The common warm-frame path stops here. In particular, do not query
-        // or start patch-LOD work for a texture that already exactly satisfies
-        // this paint request.
-        let exact_texture = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
+        // The common warm-scroll path stops here. A retained surface remains
+        // pixel-compatible as its visible window moves; its half-gutter guard
+        // starts replacement work early enough to keep the viewport covered.
+        let current_surface = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
             (rendered.key == key
-                && same_gpu_paint_request(rendered.request, request)
+                && same_gpu_surface_content(rendered.request, request)
                 && rendered.presentation.token() == Some(renderer.token())
                 && (!settled || !rendered.presentation.refinement_pending()))
-            .then(|| rendered.presentation.current_texture())
+            .then(|| {
+                rendered.presentation.current_texture().map(|texture| {
+                    (
+                        texture,
+                        rendered.refresh_region,
+                        rendered.request.visible_region,
+                    )
+                })
+            })
             .flatten()
-            .filter(|texture| texture.region() == surface_region)
         });
-        if let Some(texture) = exact_texture {
-            self.gpu_pdf.presented_pages.insert(page);
-            self.gpu_pdf.surface_failures.remove(&page);
-            return Some(self.tracked_gpu_paint_texture(page, key, image_bounds, texture));
-        }
+        let refresh_kind = match current_surface {
+            Some((texture, refresh_region, seed_visible))
+                if gpu_region_contains(texture.region(), visible_region) =>
+            {
+                if gpu_region_contains(refresh_region, visible_region)
+                    || texture.region() == surface_region
+                {
+                    if seed_visible != visible_region {
+                        self.gpu_pdf.surface_scroll_reuses =
+                            self.gpu_pdf.surface_scroll_reuses.saturating_add(1);
+                    }
+                    self.gpu_pdf.presented_pages.insert(page);
+                    self.gpu_pdf.surface_failures.remove(&page);
+                    return Some(self.tracked_gpu_paint_texture(page, key, image_bounds, texture));
+                }
+                SurfaceRefreshKind::Prefetch
+            }
+            Some(_) => SurfaceRefreshKind::Urgent,
+            None => SurfaceRefreshKind::Initial,
+        };
 
         let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
             Ok(status) => status,
@@ -1426,7 +1510,9 @@ impl DocumentView {
             Arc::clone(&prepared),
             Arc::clone(&renderer),
             request,
+            surface_region,
             allow_motion_seed,
+            refresh_kind,
             cx,
         );
         if let Some((rendered_key, texture)) = previous {
@@ -1688,7 +1774,9 @@ impl DocumentView {
         prepared: Arc<PreparedGpuPage>,
         renderer: Arc<GpuPdfRenderer>,
         mut request: GpuPaintRequest,
+        region: GpuPageRegion,
         speculative: bool,
+        refresh_kind: SurfaceRefreshKind,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -1697,11 +1785,9 @@ impl DocumentView {
             .get(&page)
             .is_some_and(|pending| {
                 can_coalesce_pending_surface_request(
-                    pending.key,
-                    pending.request,
+                    SurfaceRequestIdentity::new(pending.key, pending.request, pending.region),
                     pending.speculative,
-                    key,
-                    request,
+                    SurfaceRequestIdentity::new(key, request, region),
                     speculative,
                 )
             })
@@ -1711,7 +1797,10 @@ impl DocumentView {
 
         let active_for_page = self.gpu_pdf.surface_seed_tasks.get(&page).map(|active| {
             (
-                same_surface_request(active.key, active.request, key, request),
+                same_surface_request(
+                    SurfaceRequestIdentity::new(active.key, active.request, active.region),
+                    SurfaceRequestIdentity::new(key, request, region),
+                ),
                 Arc::clone(&active.prepared),
                 Arc::clone(&active.renderer),
             )
@@ -1749,11 +1838,23 @@ impl DocumentView {
         self.gpu_pdf.surface_render_sequence =
             self.gpu_pdf.surface_render_sequence.wrapping_add(1).max(1);
         let sequence = self.gpu_pdf.surface_render_sequence;
+        match refresh_kind {
+            SurfaceRefreshKind::Initial => {}
+            SurfaceRefreshKind::Prefetch => {
+                self.gpu_pdf.surface_scroll_prefetches =
+                    self.gpu_pdf.surface_scroll_prefetches.saturating_add(1);
+            }
+            SurfaceRefreshKind::Urgent => {
+                self.gpu_pdf.surface_scroll_misses =
+                    self.gpu_pdf.surface_scroll_misses.saturating_add(1);
+            }
+        }
         self.gpu_pdf.surface_render_pending.insert(
             page,
             PendingSurfaceRender {
                 sequence,
                 key,
+                region,
                 prepared,
                 renderer,
                 request,
@@ -1849,35 +1950,45 @@ impl DocumentView {
                 .get(&page)
                 .map(|rendered| rendered.presentation.clone())
                 .unwrap_or_default();
-            let region = match presentation.surface_region(pending.request) {
-                Ok(region) => region,
-                Err(error) => {
-                    self.gpu_pdf
-                        .surface_failures
-                        .insert(page, format!("{error:#}"));
-                    continue;
-                }
-            };
+            let region = pending.region;
             if self.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
-                rendered.key == pending.key
-                    && same_gpu_paint_request(rendered.request, pending.request)
+                rendered
+                    .presentation
+                    .current_texture()
+                    .is_some_and(|texture| {
+                        same_surface_request(
+                            SurfaceRequestIdentity::new(
+                                rendered.key,
+                                rendered.request,
+                                texture.region(),
+                            ),
+                            SurfaceRequestIdentity::new(pending.key, pending.request, region),
+                        )
+                    })
                     && rendered.presentation.token() == Some(pending.renderer.token())
-                    && rendered
-                        .presentation
-                        .current_texture()
-                        .is_some_and(|texture| texture.region() == region)
                     && (!pending.request.settled || !rendered.presentation.refinement_pending())
             }) {
                 self.gpu_pdf.surface_failures.remove(&page);
                 continue;
             }
             let has_previous = presentation.current_texture().is_some();
+            let can_defer_full_render = self.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
+                rendered.key == pending.key
+                    && same_gpu_surface_content(rendered.request, pending.request)
+                    && rendered.presentation.token() == Some(pending.renderer.token())
+                    && rendered
+                        .presentation
+                        .current_texture()
+                        .is_some_and(|texture| {
+                            gpu_region_contains(texture.region(), pending.request.visible_region)
+                        })
+            });
             let options = GpuPageRenderOptions {
                 defer_full_render: should_defer_full_surface_render(
                     pending.request.settled,
                     pending.speculative,
                     has_previous,
-                ),
+                ) && can_defer_full_render,
             };
 
             self.start_native_gpu_surface_seed(page, pending, region, options, presentation, cx);
@@ -1969,11 +2080,18 @@ impl DocumentView {
                     .surface_render_pending
                     .get(&page)
                     .is_some_and(|pending| {
-                        !same_surface_request(key, request, pending.key, pending.request)
+                        !same_surface_request(
+                            SurfaceRequestIdentity::new(key, request, region),
+                            SurfaceRequestIdentity::new(
+                                pending.key,
+                                pending.request,
+                                pending.region,
+                            ),
+                        )
                     });
                 let mut notify = false;
                 match result {
-                    Ok((presentation, GpuPageRenderOutcome::Rendered(_, stats))) => {
+                    Ok((presentation, GpuPageRenderOutcome::Rendered(texture, stats))) => {
                         let has_current = this.gpu_pdf.rendered.get(&page).is_some_and(|rendered| {
                             rendered.presentation.current_texture().is_some()
                         });
@@ -2009,6 +2127,10 @@ impl DocumentView {
                                     RenderedGpuPage {
                                         key,
                                         request,
+                                        refresh_region: surface_refresh_guard(
+                                            texture.region(),
+                                            request.visible_region,
+                                        ),
                                         presentation,
                                         stats,
                                         enqueued_at: completed_enqueued_at,
@@ -2513,6 +2635,9 @@ impl DocumentView {
             surface_renders_deferred: self.gpu_pdf.surface_render_deferred,
             surface_renders_discarded: self.gpu_pdf.surface_render_discarded,
             surface_render_cache_pressure: self.gpu_pdf.surface_render_cache_pressure,
+            surface_scroll_reuses: self.gpu_pdf.surface_scroll_reuses,
+            surface_scroll_prefetches: self.gpu_pdf.surface_scroll_prefetches,
+            surface_scroll_misses: self.gpu_pdf.surface_scroll_misses,
             surface_queue_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_queue_latency),
             surface_ready_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_ready_latency),
             surface_present_latency_p95: surface_latency_p95(&self.gpu_pdf.surface_present_latency),
@@ -2872,7 +2997,172 @@ mod tests {
     }
 
     #[test]
-    fn render_request_coalescing_ignores_only_the_paint_generation() {
+    fn surface_containment_is_edge_inclusive_and_overflow_safe() {
+        let surface = GpuPageRegion {
+            x: 100,
+            y: 200,
+            width: 400,
+            height: 600,
+        };
+        assert!(gpu_region_contains(surface, surface));
+        assert!(gpu_region_contains(
+            surface,
+            GpuPageRegion {
+                x: 150,
+                y: 250,
+                width: 300,
+                height: 500,
+            }
+        ));
+        assert!(!gpu_region_contains(
+            surface,
+            GpuPageRegion { x: 99, ..surface }
+        ));
+        assert!(!gpu_region_contains(
+            surface,
+            GpuPageRegion {
+                x: 450,
+                width: 51,
+                ..surface
+            }
+        ));
+
+        let overflow_edge = GpuPageRegion {
+            x: u32::MAX - 50,
+            y: u32::MAX - 50,
+            width: 100,
+            height: 100,
+        };
+        assert!(gpu_region_contains(
+            overflow_edge,
+            GpuPageRegion {
+                x: u32::MAX - 40,
+                y: u32::MAX - 40,
+                width: 20,
+                height: 20,
+            }
+        ));
+    }
+
+    #[test]
+    fn surface_refresh_guard_uses_half_of_each_available_margin() {
+        let surface = GpuPageRegion {
+            x: 100,
+            y: 200,
+            width: 1_000,
+            height: 800,
+        };
+        let visible = GpuPageRegion {
+            x: 300,
+            y: 300,
+            width: 400,
+            height: 400,
+        };
+        assert_eq!(
+            surface_refresh_guard(surface, visible),
+            GpuPageRegion {
+                x: 200,
+                y: 250,
+                width: 700,
+                height: 600,
+            }
+        );
+
+        let page_edge_surface = GpuPageRegion {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 900,
+        };
+        let page_edge_visible = GpuPageRegion {
+            x: 0,
+            y: 100,
+            width: 500,
+            height: 500,
+        };
+        assert_eq!(
+            surface_refresh_guard(page_edge_surface, page_edge_visible),
+            GpuPageRegion {
+                x: 0,
+                y: 50,
+                width: 650,
+                height: 700,
+            },
+            "page edges have no artificial margin to inset"
+        );
+        assert_eq!(
+            surface_refresh_guard(visible, visible),
+            visible,
+            "a budget-tight visible-only surface has a zero-width gutter"
+        );
+
+        let overflow_surface = GpuPageRegion {
+            x: u32::MAX - 100,
+            y: u32::MAX - 100,
+            width: 100,
+            height: 100,
+        };
+        let overflow_visible = GpuPageRegion {
+            x: u32::MAX - 80,
+            y: u32::MAX - 60,
+            width: 40,
+            height: 20,
+        };
+        assert_eq!(
+            surface_refresh_guard(overflow_surface, overflow_visible),
+            GpuPageRegion {
+                x: u32::MAX - 90,
+                y: u32::MAX - 80,
+                width: 70,
+                height: 60,
+            }
+        );
+    }
+
+    #[test]
+    fn overscan_refresh_trajectory_stays_covered_with_few_submissions() {
+        let mut request = GpuPaintRequest {
+            page_size: [1_000, 6_000],
+            visible_region: GpuPageRegion {
+                x: 0,
+                y: 500,
+                width: 1_000,
+                height: 800,
+            },
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0, 1.0, 1.0, 1.0],
+            settled: false,
+            generation: 1,
+        };
+        let mut surface = request.surface_region().expect("initial surface region");
+        let mut guard = surface_refresh_guard(surface, request.visible_region);
+        let mut submissions = 1_u32;
+        let mut uncovered_frames = 0_u32;
+
+        for frame in 1..=120_u32 {
+            request.visible_region.y = 500 + frame * 8;
+            if !gpu_region_contains(surface, request.visible_region) {
+                uncovered_frames += 1;
+            }
+            if !gpu_region_contains(guard, request.visible_region) {
+                let next_surface = request.surface_region().expect("shifted surface region");
+                if next_surface != surface {
+                    surface = next_surface;
+                    guard = surface_refresh_guard(surface, request.visible_region);
+                    submissions += 1;
+                }
+            }
+        }
+
+        assert_eq!(uncovered_frames, 0);
+        assert!(
+            submissions * 4 < 120,
+            "{submissions} submissions should remain below 25% of paint frames"
+        );
+    }
+
+    #[test]
+    fn surface_request_identity_tracks_content_quality_and_target_region() {
         let request = GpuPaintRequest {
             page_size: [1_000, 2_000],
             visible_region: GpuPageRegion {
@@ -2886,45 +3176,87 @@ mod tests {
             settled: false,
             generation: 1,
         };
-        assert!(same_gpu_paint_request(
+        let region = request.surface_region().expect("surface region");
+        let shifted_request = GpuPaintRequest {
+            visible_region: GpuPageRegion {
+                y: 21,
+                ..request.visible_region
+            },
+            generation: 2,
+            ..request
+        };
+        assert!(same_gpu_surface_content(
             request,
             GpuPaintRequest {
                 generation: 2,
                 ..request
             }
         ));
-        assert!(!same_gpu_paint_request(
+        assert!(same_gpu_surface_content(request, shifted_request));
+        assert!(same_gpu_surface_work(request, shifted_request));
+
+        let key = render_key();
+        let identity = SurfaceRequestIdentity::new(key, request, region);
+        let shifted_identity = SurfaceRequestIdentity::new(key, shifted_request, region);
+        assert!(same_surface_request(identity, shifted_identity,));
+        assert!(can_coalesce_pending_surface_request(
+            identity,
+            false,
+            shifted_identity,
+            false,
+        ));
+        assert!(!can_coalesce_pending_surface_request(
+            identity, true, identity, false,
+        ));
+        assert!(!same_surface_request(
+            identity,
+            SurfaceRequestIdentity::new(
+                key,
+                shifted_request,
+                GpuPageRegion {
+                    y: region.y + 128,
+                    ..region
+                },
+            ),
+        ));
+        assert!(!same_surface_request(
+            identity,
+            SurfaceRequestIdentity::new(
+                key,
+                GpuPaintRequest {
+                    settled: true,
+                    ..request
+                },
+                region,
+            ),
+        ));
+        assert!(!same_gpu_surface_content(
             request,
             GpuPaintRequest {
-                settled: true,
+                background: [0.0, 0.0, 0.0, 1.0],
                 ..request
             }
         ));
-        assert!(!same_gpu_paint_request(
+        assert!(!same_gpu_surface_content(
             request,
             GpuPaintRequest {
-                visible_region: GpuPageRegion {
-                    y: 21,
-                    ..request.visible_region
-                },
+                rotation: DocumentRotation::Degrees90,
                 ..request
             }
         ));
 
-        let key = render_key();
-        assert!(can_coalesce_pending_surface_request(
-            key,
-            request,
-            false,
-            key,
-            GpuPaintRequest {
-                generation: 2,
-                ..request
-            },
-            false,
-        ));
-        assert!(!can_coalesce_pending_surface_request(
-            key, request, true, key, request, false,
+        let mut scaled_key = key;
+        scaled_key.physical_width = 2_000;
+        assert!(!same_surface_request(
+            identity,
+            SurfaceRequestIdentity::new(
+                scaled_key,
+                GpuPaintRequest {
+                    page_size: [2_000, 2_000],
+                    ..request
+                },
+                region,
+            ),
         ));
     }
 

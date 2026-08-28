@@ -197,6 +197,20 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
+            "GPU SCROLL CACHE",
+            format!(
+                "{} overscan reuse · {} proactive refresh · {} uncovered refresh",
+                document.gpu_cache.surface_scroll_reuses,
+                document.gpu_cache.surface_scroll_prefetches,
+                document.gpu_cache.surface_scroll_misses,
+            ),
+            if document.gpu_cache.surface_scroll_misses > 0 {
+                WARN
+            } else {
+                GOOD
+            },
+        ))
+        .child(reading(
             "GPU LATENCY P95",
             format!(
                 "{} queue · {} ready · {} first paint",
