@@ -416,7 +416,7 @@ struct FileSignature {
     len: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct RenderKey {
     doc_id: u64,
     page_idx: usize,
@@ -469,6 +469,7 @@ pub struct RenderCacheDebugSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageRenderDebugStatus {
     Exact,
+    RetainedGpu { exact_pending: bool },
     Fallback { exact_pending: bool },
     Pending,
     Failed,
@@ -676,6 +677,10 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_scroll_reuses: u64,
     pub surface_scroll_prefetches: u64,
     pub surface_scroll_misses: u64,
+    pub surface_zoom_reuses: u64,
+    pub surface_zoom_quality_refreshes: u64,
+    pub surface_zoom_coverage_refreshes: u64,
+    pub surface_zoom_settled_upgrades: u64,
     pub surface_warm_requests: u64,
     pub surface_warm_hits: u64,
     pub surface_warm_pages: usize,

@@ -211,6 +211,21 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
+            "GPU ZOOM CACHE",
+            format!(
+                "{} retained reuse · {} quality refresh · {} coverage refresh · {} exact upgrade",
+                document.gpu_cache.surface_zoom_reuses,
+                document.gpu_cache.surface_zoom_quality_refreshes,
+                document.gpu_cache.surface_zoom_coverage_refreshes,
+                document.gpu_cache.surface_zoom_settled_upgrades,
+            ),
+            if document.gpu_cache.surface_zoom_reuses > 0 {
+                GOOD
+            } else {
+                FOREGROUND
+            },
+        ))
+        .child(reading(
             "GPU PAGE WARMING",
             format!(
                 "{} requests · {} hits · {} ready",
@@ -275,6 +290,12 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
 fn render_page(page: PageRenderDebugSnapshot) -> Div {
     let (status, status_color) = match page.status {
         PageRenderDebugStatus::Exact => ("exact", GOOD),
+        PageRenderDebugStatus::RetainedGpu {
+            exact_pending: true,
+        } => ("retained GPU → exact", WARN),
+        PageRenderDebugStatus::RetainedGpu {
+            exact_pending: false,
+        } => ("retained GPU", GOOD),
         PageRenderDebugStatus::Fallback {
             exact_pending: true,
         } => ("placeholder → native", WARN),

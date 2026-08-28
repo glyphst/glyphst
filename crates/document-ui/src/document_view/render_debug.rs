@@ -21,6 +21,27 @@ fn gpu_warning_debug_snapshot(diagnostic: &GpuWarningDiagnostic) -> GpuWarningDe
     }
 }
 
+fn page_render_debug_status(
+    requested: Option<RenderKey>,
+    displayed: Option<RenderKey>,
+    native_gpu_displayed: bool,
+    exact_pending: bool,
+    requested_failed: bool,
+) -> PageRenderDebugStatus {
+    match (requested, displayed) {
+        (Some(requested), Some(displayed)) if requested == displayed => {
+            PageRenderDebugStatus::Exact
+        }
+        (Some(_), Some(_)) if native_gpu_displayed => {
+            PageRenderDebugStatus::RetainedGpu { exact_pending }
+        }
+        (Some(_), Some(_)) => PageRenderDebugStatus::Fallback { exact_pending },
+        (Some(_), None) if exact_pending => PageRenderDebugStatus::Pending,
+        (Some(_), None) if requested_failed => PageRenderDebugStatus::Failed,
+        _ => PageRenderDebugStatus::Unavailable,
+    }
+}
+
 /// Returns a read-only process-wide cache snapshot without changing LRU order.
 pub fn render_cache_debug_snapshot(cx: &gpui::App) -> RenderCacheDebugSnapshot {
     cx.try_global::<RenderCache>()
@@ -100,20 +121,16 @@ impl DocumentView {
             .is_none()
             .then(|| self.page_render_debug.get(&page_idx).copied())
             .flatten();
-        let status = match (requested, displayed) {
-            (Some(requested), Some(displayed)) if requested == displayed => {
-                PageRenderDebugStatus::Exact
-            }
-            (Some(_), Some(_)) => PageRenderDebugStatus::Fallback { exact_pending },
-            (Some(_), None) if exact_pending => PageRenderDebugStatus::Pending,
-            (Some(requested), None)
-                if latest_attempt
-                    .is_some_and(|attempt| attempt.key == requested && !attempt.succeeded) =>
-            {
-                PageRenderDebugStatus::Failed
-            }
-            _ => PageRenderDebugStatus::Unavailable,
-        };
+        let requested_failed = requested.is_some_and(|requested| {
+            latest_attempt.is_some_and(|attempt| attempt.key == requested && !attempt.succeeded)
+        });
+        let status = page_render_debug_status(
+            requested,
+            displayed,
+            native_gpu_render.is_some(),
+            exact_pending,
+            requested_failed,
+        );
 
         let gpu = native_gpu_render.map(|(_, stats)| GpuPageRenderDebugSnapshot {
             cpu_time: stats.cpu_time,
@@ -343,5 +360,44 @@ impl DocumentView {
             bytes: key.byte_len(),
             scale: key.physical_width as f32 / page_width,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_key(width: u32) -> RenderKey {
+        RenderKey {
+            doc_id: 1,
+            page_idx: 0,
+            source_revision: 0,
+            rotation: DocumentRotation::Degrees0,
+            color_transform: None,
+            physical_width: width,
+            physical_height: width * 2,
+        }
+    }
+
+    #[test]
+    fn retained_native_density_is_not_reported_as_a_raster_fallback() {
+        let requested = render_key(1_100);
+        let retained = render_key(1_000);
+        assert_eq!(
+            page_render_debug_status(Some(requested), Some(retained), true, true, false,),
+            PageRenderDebugStatus::RetainedGpu {
+                exact_pending: true
+            }
+        );
+        assert_eq!(
+            page_render_debug_status(Some(requested), Some(retained), false, true, false,),
+            PageRenderDebugStatus::Fallback {
+                exact_pending: true
+            }
+        );
+        assert_eq!(
+            page_render_debug_status(Some(requested), Some(requested), true, false, false,),
+            PageRenderDebugStatus::Exact
+        );
     }
 }
