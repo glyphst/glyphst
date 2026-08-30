@@ -38,7 +38,7 @@ const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
-const TRACE_REPORT_VERSION: u32 = 2;
+const TRACE_REPORT_VERSION: u32 = 3;
 
 struct RenderDebugCaptureNotification;
 
@@ -1443,7 +1443,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1660,6 +1660,13 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "resident_bytes": cache.resident_bytes,
         "resident_byte_limit": cache.resident_byte_limit,
     });
+    let zoom_motion = json!({
+        "reprojections": cache.surface_zoom_motion_reprojections,
+        "refreshes_suppressed": cache.surface_zoom_motion_refreshes_suppressed,
+        "cancellations": cache.surface_zoom_motion_cancellations,
+        "emergency_renders": cache.surface_zoom_emergency_renders,
+        "active": cache.zoom_motion_active,
+    });
     let surfaces = json!({
         "count": cache.surface_count,
         "bytes": cache.surface_bytes,
@@ -1684,6 +1691,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "zoom_quality_refreshes": cache.surface_zoom_quality_refreshes,
         "zoom_coverage_refreshes": cache.surface_zoom_coverage_refreshes,
         "zoom_settled_upgrades": cache.surface_zoom_settled_upgrades,
+        "zoom_motion": zoom_motion,
         "warm_requests": cache.surface_warm_requests,
         "warm_hits": cache.surface_warm_hits,
         "warm_pages": cache.surface_warm_pages,
@@ -1834,6 +1842,10 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(surface_zoom_quality_refreshes);
     counter!(surface_zoom_coverage_refreshes);
     counter!(surface_zoom_settled_upgrades);
+    counter!(surface_zoom_motion_reprojections);
+    counter!(surface_zoom_motion_refreshes_suppressed);
+    counter!(surface_zoom_motion_cancellations);
+    counter!(surface_zoom_emergency_renders);
     counter!(surface_warm_requests);
     counter!(surface_warm_hits);
     counter!(surface_continuity_requests);
@@ -2087,6 +2099,25 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 document.gpu_cache.surface_zoom_settled_upgrades,
             ),
             if document.gpu_cache.surface_zoom_reuses > 0 {
+                GOOD
+            } else {
+                FOREGROUND
+            },
+        ))
+        .child(reading(
+            "GPU ZOOM MOTION",
+            format!(
+                "{} reprojected · {} redraws suppressed · {} stale canceled · {} emergency",
+                document.gpu_cache.surface_zoom_motion_reprojections,
+                document
+                    .gpu_cache
+                    .surface_zoom_motion_refreshes_suppressed,
+                document.gpu_cache.surface_zoom_motion_cancellations,
+                document.gpu_cache.surface_zoom_emergency_renders,
+            ),
+            if document.gpu_cache.surface_zoom_emergency_renders > 0 {
+                WARN
+            } else if document.gpu_cache.surface_zoom_motion_reprojections > 0 {
                 GOOD
             } else {
                 FOREGROUND
@@ -2994,6 +3025,11 @@ mod tests {
             surface_incomplete_suppressed: 13,
             surface_refinement_submissions: 13,
             surface_atomic_swaps: 2,
+            surface_zoom_motion_reprojections: 120,
+            surface_zoom_motion_refreshes_suppressed: 17,
+            surface_zoom_motion_cancellations: 2,
+            surface_zoom_emergency_renders: 0,
+            zoom_motion_active: true,
             refinement_pages: 1,
             retained_refinement_pages: 4,
             ..Default::default()
@@ -3010,6 +3046,14 @@ mod tests {
         assert_eq!(report["surfaces"]["incomplete_suppressed"], 13);
         assert_eq!(report["surfaces"]["refinement_submissions"], 13);
         assert_eq!(report["surfaces"]["atomic_swaps"], 2);
+        assert_eq!(report["surfaces"]["zoom_motion"]["reprojections"], 120);
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["refreshes_suppressed"],
+            17
+        );
+        assert_eq!(report["surfaces"]["zoom_motion"]["cancellations"], 2);
+        assert_eq!(report["surfaces"]["zoom_motion"]["emergency_renders"], 0);
+        assert_eq!(report["surfaces"]["zoom_motion"]["active"], true);
         assert_eq!(report["surfaces"]["refinement_pages"], 1);
         assert_eq!(report["surfaces"]["retained_refinement_pages"], 4);
     }

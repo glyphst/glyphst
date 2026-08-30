@@ -163,8 +163,13 @@ impl DocumentView {
         position: DocumentPosition,
         cx: &mut Context<Self>,
     ) {
+        let zoom_changed = (self.zoom - position.zoom).abs() > f32::EPSILON;
         self.restore_position(position);
-        self.mark_native_gpu_motion(cx);
+        if zoom_changed {
+            self.mark_native_gpu_zoom_motion(cx);
+        } else {
+            self.mark_native_gpu_motion(cx);
+        }
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);

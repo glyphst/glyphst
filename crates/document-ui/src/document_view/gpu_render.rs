@@ -7,7 +7,6 @@ const MAX_RETAINED_GPU_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RETAINED_GPU_SURFACE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SURFACE_LATENCY_SAMPLES: usize = 120;
 const GPU_CONTINUITY_LONG_EDGE: u32 = 2_048;
-const GPU_MOTION_BUCKETS_PER_OCTAVE: f64 = 8.0;
 const GPU_MOTION_MIN_DENSITY_NUMERATOR: u64 = 9;
 const GPU_MOTION_MIN_DENSITY_DENOMINATOR: u64 = 10;
 
@@ -80,6 +79,10 @@ pub(super) struct GpuPdfState {
     surface_zoom_quality_refreshes: u64,
     surface_zoom_coverage_refreshes: u64,
     surface_zoom_settled_upgrades: u64,
+    surface_zoom_motion_reprojections: u64,
+    surface_zoom_motion_refreshes_suppressed: u64,
+    surface_zoom_motion_cancellations: u64,
+    surface_zoom_emergency_renders: u64,
     surface_warm_requests: u64,
     surface_warm_hits: u64,
     surface_continuity_requests: u64,
@@ -100,6 +103,7 @@ pub(super) struct GpuPdfState {
     render_generation: u64,
     motion_generation: u64,
     motion_active: bool,
+    zoom_motion_active: bool,
     motion_deadline: Option<Instant>,
     motion_settle_task: Option<Task<()>>,
     destination_generation: u64,
@@ -219,8 +223,7 @@ enum SurfaceRefreshKind {
     Initial,
     Prefetch,
     Urgent,
-    MotionQuality,
-    MotionCoverage,
+    ZoomEmergency,
     SettledExact,
     RefinementContinuation,
 }
@@ -314,6 +317,10 @@ impl GpuPdfState {
         self.surface_zoom_quality_refreshes = 0;
         self.surface_zoom_coverage_refreshes = 0;
         self.surface_zoom_settled_upgrades = 0;
+        self.surface_zoom_motion_reprojections = 0;
+        self.surface_zoom_motion_refreshes_suppressed = 0;
+        self.surface_zoom_motion_cancellations = 0;
+        self.surface_zoom_emergency_renders = 0;
         self.surface_warm_requests = 0;
         self.surface_warm_hits = 0;
         self.surface_continuity_requests = 0;
@@ -334,6 +341,7 @@ impl GpuPdfState {
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
+        self.zoom_motion_active = false;
         self.motion_deadline = None;
         self.motion_settle_task = None;
         self.destination_fallback = None;
@@ -385,6 +393,10 @@ impl GpuPdfState {
         self.surface_zoom_quality_refreshes = 0;
         self.surface_zoom_coverage_refreshes = 0;
         self.surface_zoom_settled_upgrades = 0;
+        self.surface_zoom_motion_reprojections = 0;
+        self.surface_zoom_motion_refreshes_suppressed = 0;
+        self.surface_zoom_motion_cancellations = 0;
+        self.surface_zoom_emergency_renders = 0;
         self.surface_warm_requests = 0;
         self.surface_warm_hits = 0;
         self.surface_continuity_requests = 0;
@@ -405,6 +417,7 @@ impl GpuPdfState {
         self.render_generation = 0;
         self.motion_generation = self.motion_generation.wrapping_add(1).max(1);
         self.motion_active = false;
+        self.zoom_motion_active = false;
         self.motion_deadline = None;
         self.motion_settle_task = None;
         self.destination_fallback = None;
@@ -428,6 +441,79 @@ impl GpuPdfState {
         self.surface_seed_tasks.clear();
         self.surface_render_pending.clear();
         self.fallback_grace_tasks.clear();
+    }
+
+    fn begin_zoom_motion(&mut self) {
+        if self.zoom_motion_active {
+            return;
+        }
+        self.zoom_motion_active = true;
+
+        let coherent_pages = self
+            .rendered
+            .keys()
+            .chain(self.continuity_surfaces.keys())
+            .copied()
+            .collect::<HashSet<_>>();
+        let pending_before = self.surface_render_pending.len();
+        self.surface_render_pending.retain(|page, pending| {
+            !zoom_motion_cancels_surface_work(
+                coherent_pages.contains(page),
+                pending.role,
+                pending.speculative,
+            )
+        });
+        let cancelled_pending = pending_before.saturating_sub(self.surface_render_pending.len());
+
+        let stale_patch_lods = self
+            .patch_lod_tasks
+            .keys()
+            .filter(|page| coherent_pages.contains(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in stale_patch_lods {
+            if let Some(task) = self.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
+
+        let active = self
+            .surface_seed_tasks
+            .iter()
+            .filter(|(page, task)| {
+                !task.superseded
+                    && zoom_motion_cancels_surface_work(
+                        coherent_pages.contains(page),
+                        task.role,
+                        task.speculative,
+                    )
+            })
+            .map(|(page, task)| {
+                (
+                    *page,
+                    Arc::clone(&task.prepared),
+                    Arc::clone(&task.renderer),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut cancelled_active = 0_usize;
+        if !active.is_empty() {
+            self.render_generation = self.render_generation.wrapping_add(1).max(1);
+            for (page, prepared, renderer) in active {
+                if renderer
+                    .supersede_page_render(&prepared, self.render_generation)
+                    .is_ok()
+                {
+                    if let Some(task) = self.surface_seed_tasks.get_mut(&page) {
+                        task.superseded = true;
+                    }
+                    cancelled_active = cancelled_active.saturating_add(1);
+                }
+            }
+        }
+        self.surface_zoom_motion_cancellations = self
+            .surface_zoom_motion_cancellations
+            .saturating_add((cancelled_pending.saturating_add(cancelled_active)) as u64);
     }
 
     fn cancel_destination_task(&mut self) {
@@ -1338,75 +1424,6 @@ fn motion_surface_density_sufficient(rendered: RenderKey, requested: RenderKey) 
             >= u64::from(requested.physical_height).saturating_mul(GPU_MOTION_MIN_DENSITY_NUMERATOR)
 }
 
-/// Chooses a stable, aspect-preserving motion density. The dominant physical
-/// page edge is rounded up to one of eight logarithmic buckets per octave, so
-/// consecutive animation frames share a key while the admitted target is
-/// never lower resolution than the triggering layout request.
-fn motion_bucketed_render_key(exact: RenderKey, page_dimensions: [f32; 2]) -> RenderKey {
-    let page_width = f64::from(page_dimensions[0]);
-    let page_height = f64::from(page_dimensions[1]);
-    if !page_width.is_finite()
-        || !page_height.is_finite()
-        || page_width <= 0.0
-        || page_height <= 0.0
-    {
-        return exact;
-    }
-
-    let width_dominant = page_width >= page_height;
-    let exact_long = if width_dominant {
-        exact.physical_width
-    } else {
-        exact.physical_height
-    };
-    if exact_long >= MAX_RENDER_TEXTURE_DIMENSION {
-        return exact;
-    }
-
-    let bucket_exponent = ((f64::from(exact_long).log2() * GPU_MOTION_BUCKETS_PER_OCTAVE).ceil())
-        / GPU_MOTION_BUCKETS_PER_OCTAVE;
-    let bucket_long = 2_f64.powf(bucket_exponent).ceil().clamp(
-        f64::from(exact_long),
-        f64::from(MAX_RENDER_TEXTURE_DIMENSION),
-    );
-    let (long_points, short_points) = if width_dominant {
-        (page_width, page_height)
-    } else {
-        (page_height, page_width)
-    };
-    let bucket_short = (bucket_long * short_points / long_points)
-        .ceil()
-        .clamp(1.0, f64::from(MAX_RENDER_TEXTURE_DIMENSION));
-
-    let mut bucketed = exact;
-    if width_dominant {
-        bucketed.physical_width = bucket_long as u32;
-        bucketed.physical_height = (bucket_short as u32).max(exact.physical_height);
-    } else {
-        bucketed.physical_width = (bucket_short as u32).max(exact.physical_width);
-        bucketed.physical_height = bucket_long as u32;
-    }
-    bucketed
-}
-
-fn adaptive_motion_render_key(
-    exact: RenderKey,
-    current: Option<RenderKey>,
-    page_dimensions: [f32; 2],
-    settled: bool,
-) -> RenderKey {
-    let Some(current) = current else {
-        return exact;
-    };
-    if settled {
-        exact
-    } else if motion_surface_density_sufficient(current, exact) {
-        current
-    } else {
-        motion_bucketed_render_key(exact, page_dimensions)
-    }
-}
-
 fn gpu_region_contains(outer: GpuPageRegion, inner: GpuPageRegion) -> bool {
     inner.x >= outer.x
         && inner.y >= outer.y
@@ -1435,6 +1452,27 @@ fn presented_surface_kind(
     } else {
         None
     }
+}
+
+fn should_reproject_scale_motion(
+    settled: bool,
+    current_dimensions_exact: bool,
+    selected: Option<PresentedSurfaceKind>,
+) -> bool {
+    !settled
+        && !current_dimensions_exact
+        && matches!(
+            selected,
+            Some(PresentedSurfaceKind::Primary | PresentedSurfaceKind::Continuity)
+        )
+}
+
+fn zoom_motion_cancels_surface_work(
+    has_coherent_surface: bool,
+    role: SurfaceRenderRole,
+    speculative: bool,
+) -> bool {
+    speculative || role == SurfaceRenderRole::Continuity || has_coherent_surface
 }
 
 /// Keeps the original visible region in the middle half of every available
@@ -1634,6 +1672,7 @@ impl DocumentView {
                         return Some(deadline.duration_since(now));
                     }
                     this.gpu_pdf.motion_active = false;
+                    this.gpu_pdf.zoom_motion_active = false;
                     this.gpu_pdf.motion_deadline = None;
                     this.gpu_pdf.motion_settle_task = None;
                     this.dispatch_native_gpu_page_preparations(cx);
@@ -1648,6 +1687,11 @@ impl DocumentView {
                 remaining = next;
             }
         }));
+    }
+
+    pub(super) fn mark_native_gpu_zoom_motion(&mut self, cx: &mut Context<Self>) {
+        self.gpu_pdf.begin_zoom_motion();
+        self.mark_native_gpu_motion(cx);
     }
 
     pub(super) fn native_gpu_key_enabled(&self, key: RenderKey, engine: PdfRenderEngine) -> bool {
@@ -1999,7 +2043,7 @@ impl DocumentView {
         let current_dimensions_exact = current_surface
             .as_ref()
             .is_some_and(|current| same_gpu_page_dimensions(current.key, key));
-        if current_surface.is_some() {
+        if current_surface.is_some() && !self.gpu_pdf.zoom_motion_active {
             self.enqueue_native_gpu_continuity_surface(
                 page,
                 key,
@@ -2017,6 +2061,27 @@ impl DocumentView {
             renderer.token(),
             current_surface.as_ref(),
         );
+
+        let dimension_motion = !settled && !current_dimensions_exact;
+        if should_reproject_scale_motion(
+            settled,
+            current_dimensions_exact,
+            selected_surface.as_ref().map(|selected| selected.kind),
+        ) {
+            self.gpu_pdf.surface_zoom_reuses = self.gpu_pdf.surface_zoom_reuses.saturating_add(1);
+            if self.gpu_pdf.zoom_motion_active {
+                self.gpu_pdf.surface_zoom_motion_reprojections = self
+                    .gpu_pdf
+                    .surface_zoom_motion_reprojections
+                    .saturating_add(1);
+                self.gpu_pdf.surface_zoom_motion_refreshes_suppressed = self
+                    .gpu_pdf
+                    .surface_zoom_motion_refreshes_suppressed
+                    .saturating_add(1);
+            }
+            let selected = selected_surface.expect("coherent motion surface was selected");
+            return Some(self.present_gpu_surface(page, image_bounds, selected));
+        }
 
         if intent == GpuSurfaceIntent::Visible && current_covers {
             self.gpu_pdf.covered_pages.insert(page);
@@ -2037,10 +2102,9 @@ impl DocumentView {
             }
         }
 
-        // The common scroll and zoom path stops here. A surface can be used
-        // directly when it is exact at rest, or when motion quality remains
-        // within the declared density threshold. The half-gutter guard still
-        // starts replacement work before outer coverage is exhausted.
+        // Fixed-scale scrolling stops here while its overscan remains safe.
+        // Scale motion returned above whenever a coherent retained texture was
+        // available, leaving exact vector work until the motion deadline.
         let current_directly_reusable = current_surface.as_ref().is_some_and(|current| {
             current_covers
                 && (!settled || !current.refinement_pending)
@@ -2075,34 +2139,20 @@ impl DocumentView {
             return None;
         }
 
-        let (page_width, page_height) = self.page_dimensions(key.page_idx);
-        let adaptive_render_key = adaptive_motion_render_key(
-            key,
-            current_surface.as_ref().map(|current| current.key),
-            [page_width, page_height],
-            settled,
-        );
-        let (render_key, refresh_kind) = match current_surface.as_ref() {
-            Some(_) if settled && !current_dimensions_exact => {
-                (adaptive_render_key, SurfaceRefreshKind::SettledExact)
+        let render_key = key;
+        let refresh_kind = match current_surface.as_ref() {
+            Some(_) if settled && !current_dimensions_exact => SurfaceRefreshKind::SettledExact,
+            Some(_) if settled && current_covers => SurfaceRefreshKind::Prefetch,
+            Some(_) if settled => SurfaceRefreshKind::Urgent,
+            Some(_) if dimension_motion && self.gpu_pdf.zoom_motion_active => {
+                SurfaceRefreshKind::ZoomEmergency
             }
-            Some(_) if settled && current_covers => {
-                (adaptive_render_key, SurfaceRefreshKind::Prefetch)
-            }
-            Some(_) if settled => (adaptive_render_key, SurfaceRefreshKind::Urgent),
-            Some(_) if !current_quality => (adaptive_render_key, SurfaceRefreshKind::MotionQuality),
-            Some(_) if !current_dimensions_exact => {
-                (adaptive_render_key, SurfaceRefreshKind::MotionCoverage)
-            }
-            Some(_) if current_covers => (adaptive_render_key, SurfaceRefreshKind::Prefetch),
-            Some(_) => (adaptive_render_key, SurfaceRefreshKind::Urgent),
-            None => (adaptive_render_key, SurfaceRefreshKind::Initial),
+            Some(_) if dimension_motion => SurfaceRefreshKind::Urgent,
+            Some(_) if current_covers => SurfaceRefreshKind::Prefetch,
+            Some(_) => SurfaceRefreshKind::Urgent,
+            None => SurfaceRefreshKind::Initial,
         };
-        let visible_region = if render_key == key {
-            exact_visible_region
-        } else {
-            visible_gpu_region(render_key, image_bounds, viewport_bounds)?
-        };
+        let visible_region = exact_visible_region;
         let request = gpu_paint_request(render_key, visible_region, settled);
         let surface_region = match self.gpu_pdf.rendered.get(&page) {
             Some(rendered) => rendered.presentation.surface_region(request),
@@ -2573,16 +2623,10 @@ impl DocumentView {
                 self.gpu_pdf.surface_scroll_misses =
                     self.gpu_pdf.surface_scroll_misses.saturating_add(1);
             }
-            SurfaceRefreshKind::MotionQuality => {
-                self.gpu_pdf.surface_zoom_quality_refreshes = self
+            SurfaceRefreshKind::ZoomEmergency => {
+                self.gpu_pdf.surface_zoom_emergency_renders = self
                     .gpu_pdf
-                    .surface_zoom_quality_refreshes
-                    .saturating_add(1);
-            }
-            SurfaceRefreshKind::MotionCoverage => {
-                self.gpu_pdf.surface_zoom_coverage_refreshes = self
-                    .gpu_pdf
-                    .surface_zoom_coverage_refreshes
+                    .surface_zoom_emergency_renders
                     .saturating_add(1);
             }
             SurfaceRefreshKind::SettledExact => {
@@ -2863,6 +2907,23 @@ impl DocumentView {
                 {
                     this.gpu_pdf.surface_render_discarded =
                         this.gpu_pdf.surface_render_discarded.saturating_add(1);
+                    this.dispatch_native_gpu_surface_render(cx);
+                    return;
+                }
+                if completed_task.superseded {
+                    if matches!(
+                        &result,
+                        Ok((_, GpuPageRenderOutcome::Superseded))
+                    ) {
+                        this.gpu_pdf.surface_render_superseded =
+                            this.gpu_pdf.surface_render_superseded.saturating_add(1);
+                    } else {
+                        // Work that crossed its final cancellation checkpoint
+                        // may still finish on the GPU. Never publish those
+                        // stale pixels after a newer zoom gesture began.
+                        this.gpu_pdf.surface_render_discarded =
+                            this.gpu_pdf.surface_render_discarded.saturating_add(1);
+                    }
                     this.dispatch_native_gpu_surface_render(cx);
                     return;
                 }
@@ -3657,6 +3718,12 @@ impl DocumentView {
             surface_zoom_quality_refreshes: self.gpu_pdf.surface_zoom_quality_refreshes,
             surface_zoom_coverage_refreshes: self.gpu_pdf.surface_zoom_coverage_refreshes,
             surface_zoom_settled_upgrades: self.gpu_pdf.surface_zoom_settled_upgrades,
+            surface_zoom_motion_reprojections: self.gpu_pdf.surface_zoom_motion_reprojections,
+            surface_zoom_motion_refreshes_suppressed: self
+                .gpu_pdf
+                .surface_zoom_motion_refreshes_suppressed,
+            surface_zoom_motion_cancellations: self.gpu_pdf.surface_zoom_motion_cancellations,
+            surface_zoom_emergency_renders: self.gpu_pdf.surface_zoom_emergency_renders,
             surface_warm_requests: self.gpu_pdf.surface_warm_requests,
             surface_warm_hits: self.gpu_pdf.surface_warm_hits,
             surface_warm_pages: self
@@ -3704,6 +3771,7 @@ impl DocumentView {
             completed_preparations: self.gpu_pdf.preparation_completed,
             cancelled_preparations: self.gpu_pdf.preparation_cancelled,
             motion_active: self.gpu_pdf.motion_active,
+            zoom_motion_active: self.gpu_pdf.zoom_motion_active,
         }
     }
 
@@ -3862,103 +3930,57 @@ mod tests {
     }
 
     #[test]
-    fn motion_bucket_is_stable_aspect_preserving_and_capped() {
-        let exact = render_key();
-        let bucketed = motion_bucketed_render_key(exact, [500.0, 1_000.0]);
-        assert_eq!(bucketed.physical_width, 1_024);
-        assert_eq!(bucketed.physical_height, 2_048);
-
-        let nearby = RenderKey {
-            physical_width: 1_010,
-            physical_height: 2_020,
-            ..exact
-        };
-        assert_eq!(
-            motion_bucketed_render_key(nearby, [500.0, 1_000.0]),
-            bucketed
-        );
-
-        let capped = RenderKey {
-            physical_width: MAX_RENDER_TEXTURE_DIMENSION / 2,
-            physical_height: MAX_RENDER_TEXTURE_DIMENSION,
-            ..exact
-        };
-        assert_eq!(motion_bucketed_render_key(capped, [500.0, 1_000.0]), capped);
-        assert_eq!(motion_bucketed_render_key(exact, [0.0, 1.0]), exact);
+    fn scale_motion_reprojects_only_complete_coherent_surfaces() {
+        assert!(should_reproject_scale_motion(
+            false,
+            false,
+            Some(PresentedSurfaceKind::Primary),
+        ));
+        assert!(should_reproject_scale_motion(
+            false,
+            false,
+            Some(PresentedSurfaceKind::Continuity),
+        ));
+        assert!(!should_reproject_scale_motion(
+            false,
+            false,
+            Some(PresentedSurfaceKind::PartialPrimary),
+        ));
+        assert!(!should_reproject_scale_motion(false, false, None));
+        assert!(!should_reproject_scale_motion(
+            true,
+            false,
+            Some(PresentedSurfaceKind::Primary),
+        ));
+        assert!(!should_reproject_scale_motion(
+            false,
+            true,
+            Some(PresentedSurfaceKind::Primary),
+        ));
     }
 
     #[test]
-    fn adaptive_motion_key_keeps_scroll_exact_and_restores_settled_zoom() {
-        let current = render_key();
-        assert_eq!(
-            adaptive_motion_render_key(current, Some(current), [500.0, 1_000.0], false),
-            current,
-            "fixed-scale scrolling must retain the exact key"
-        );
-
-        let zoomed = RenderKey {
-            physical_width: 1_112,
-            physical_height: 2_224,
-            ..current
-        };
-        let motion = adaptive_motion_render_key(zoomed, Some(current), [500.0, 1_000.0], false);
-        assert_ne!(motion, current);
-        assert!(motion.physical_width >= zoomed.physical_width);
-        assert!(motion.physical_height >= zoomed.physical_height);
-        assert_eq!(
-            adaptive_motion_render_key(zoomed, Some(motion), [500.0, 1_000.0], true),
-            zoomed
-        );
-        assert_eq!(
-            adaptive_motion_render_key(zoomed, None, [500.0, 1_000.0], false),
-            zoomed,
-            "a cold visible page must render immediately at exact density"
-        );
-
-        let zoomed_out = RenderKey {
-            physical_width: 800,
-            physical_height: 1_600,
-            ..current
-        };
-        assert_eq!(
-            adaptive_motion_render_key(zoomed_out, Some(current), [500.0, 1_000.0], false,),
-            current,
-            "higher-resolution retained surfaces remain valid during zoom-out"
-        );
-    }
-
-    #[test]
-    fn one_to_two_x_zoom_admits_at_most_five_motion_densities() {
-        let mut current = render_key();
-        let mut admitted = Vec::new();
-        let mut final_exact = current;
-
-        for frame in 1..=120_u32 {
-            final_exact.physical_width = 1_000 + (1_000 * frame).div_ceil(120);
-            final_exact.physical_height = 2_000 + (2_000 * frame).div_ceil(120);
-            let next =
-                adaptive_motion_render_key(final_exact, Some(current), [500.0, 1_000.0], false);
-            if next != current {
-                assert!(next.physical_width >= final_exact.physical_width);
-                assert!(next.physical_height >= final_exact.physical_height);
-                admitted.push(next);
-                current = next;
-            }
-            assert!(motion_surface_density_sufficient(current, final_exact));
-        }
-
-        assert!(!admitted.is_empty());
-        assert!(
-            admitted.len() <= 5,
-            "{} motion densities were admitted",
-            admitted.len()
-        );
-        assert_ne!(current, final_exact);
-        assert_eq!(
-            adaptive_motion_render_key(final_exact, Some(current), [500.0, 1_000.0], true,),
-            final_exact,
-            "settling restores the exact layout density"
-        );
+    fn zoom_motion_cancels_only_replaceable_or_lower_priority_work() {
+        assert!(zoom_motion_cancels_surface_work(
+            true,
+            SurfaceRenderRole::Primary,
+            false,
+        ));
+        assert!(zoom_motion_cancels_surface_work(
+            false,
+            SurfaceRenderRole::Continuity,
+            false,
+        ));
+        assert!(zoom_motion_cancels_surface_work(
+            false,
+            SurfaceRenderRole::Primary,
+            true,
+        ));
+        assert!(!zoom_motion_cancels_surface_work(
+            false,
+            SurfaceRenderRole::Primary,
+            false,
+        ));
     }
 
     #[test]

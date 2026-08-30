@@ -1,5 +1,19 @@
 use super::*;
 
+const ZOOM_RESPONSE_PER_SECOND: f32 = 24.0;
+const ZOOM_SNAP: f32 = 0.0005;
+const MAX_ZOOM_FRAME_ELAPSED: Duration = Duration::from_micros(16_667);
+
+fn animated_zoom_step(current: f32, target: f32, elapsed: Duration) -> f32 {
+    let delta = target - current;
+    if delta.abs() <= ZOOM_SNAP {
+        return target;
+    }
+    let elapsed_seconds = elapsed.min(MAX_ZOOM_FRAME_ELAPSED).as_secs_f32();
+    let factor = 1.0 - (-ZOOM_RESPONSE_PER_SECOND * elapsed_seconds).exp();
+    current + delta * factor
+}
+
 impl DocumentView {
     pub(super) fn synchronized_document_delta(pixel_delta: f32, scale: f32) -> f32 {
         pixel_delta / scale.max(0.001)
@@ -200,16 +214,7 @@ impl DocumentView {
 
         let mut changed_zoom = false;
         if zoom_pending {
-            const ZOOM_RESPONSE_PER_SECOND: f32 = 24.0;
-            const ZOOM_SNAP: f32 = 0.0005;
-            let elapsed_seconds = elapsed.min(Duration::from_millis(64)).as_secs_f32();
-            let factor = 1.0 - (-ZOOM_RESPONSE_PER_SECOND * elapsed_seconds).exp();
-            let delta = self.target_zoom - self.zoom;
-            let zoom = if delta.abs() <= ZOOM_SNAP {
-                self.target_zoom
-            } else {
-                self.zoom + delta * factor
-            };
+            let zoom = animated_zoom_step(self.zoom, self.target_zoom, elapsed);
             let anchor = self.zoom_anchor.unwrap_or_else(|| {
                 self.zoom_anchor_at_viewport([
                     self.viewport_width / 2.0,
@@ -239,5 +244,32 @@ impl DocumentView {
             self.mark_native_gpu_motion(cx);
             window.request_animation_frame();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delayed_zoom_frames_extend_animation_instead_of_jumping() {
+        let delayed = animated_zoom_step(1.0, 2.0, Duration::from_millis(64));
+        let capped = animated_zoom_step(1.0, 2.0, MAX_ZOOM_FRAME_ELAPSED);
+        assert_eq!(delayed, capped);
+        assert!(delayed < 1.34, "delayed step jumped to {delayed}");
+    }
+
+    #[test]
+    fn capped_zoom_animation_still_converges_in_both_directions() {
+        let mut zoom = 1.0;
+        for _ in 0..100 {
+            zoom = animated_zoom_step(zoom, 2.0, Duration::from_millis(64));
+        }
+        assert_eq!(zoom, 2.0);
+
+        for _ in 0..100 {
+            zoom = animated_zoom_step(zoom, 1.0, Duration::from_millis(64));
+        }
+        assert_eq!(zoom, 1.0);
     }
 }

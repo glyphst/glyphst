@@ -64,7 +64,7 @@ impl DocumentView {
         self.target_zoom = zoom;
         self.zoom_anchor = None;
         self.last_animation_frame = None;
-        self.mark_native_gpu_motion(cx);
+        self.mark_native_gpu_zoom_motion(cx);
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
@@ -88,7 +88,7 @@ impl DocumentView {
         self.target_zoom = zoom;
         self.zoom_anchor = Some(self.zoom_anchor_at_viewport(viewport_anchor));
         self.last_animation_frame = None;
-        self.mark_native_gpu_motion(cx);
+        self.mark_native_gpu_zoom_motion(cx);
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
@@ -236,11 +236,7 @@ impl DocumentView {
             return;
         }
 
-        self.set_zoom_target(
-            self.target_zoom * zoom_step,
-            [self.viewport_width / 2.0, self.viewport_height / 2.0],
-            cx,
-        );
+        self.set_zoom(self.target_zoom * zoom_step, cx);
         self.show_zoom_popup(cx);
     }
 
@@ -254,11 +250,7 @@ impl DocumentView {
             return;
         }
 
-        self.set_zoom_target(
-            self.target_zoom / zoom_step,
-            [self.viewport_width / 2.0, self.viewport_height / 2.0],
-            cx,
-        );
+        self.set_zoom(self.target_zoom / zoom_step, cx);
         self.show_zoom_popup(cx);
     }
 
@@ -268,11 +260,7 @@ impl DocumentView {
         }
 
         let default_zoom = cx.global::<SettingsStore>().settings.behavior.default_zoom;
-        self.set_zoom_target(
-            default_zoom,
-            [self.viewport_width / 2.0, self.viewport_height / 2.0],
-            cx,
-        );
+        self.set_zoom(default_zoom, cx);
         self.show_zoom_popup(cx);
     }
 

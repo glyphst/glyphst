@@ -686,6 +686,10 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_zoom_quality_refreshes: u64,
     pub surface_zoom_coverage_refreshes: u64,
     pub surface_zoom_settled_upgrades: u64,
+    pub surface_zoom_motion_reprojections: u64,
+    pub surface_zoom_motion_refreshes_suppressed: u64,
+    pub surface_zoom_motion_cancellations: u64,
+    pub surface_zoom_emergency_renders: u64,
     pub surface_warm_requests: u64,
     pub surface_warm_hits: u64,
     pub surface_warm_pages: usize,
@@ -710,6 +714,7 @@ pub struct GpuCacheDebugSnapshot {
     pub completed_preparations: u64,
     pub cancelled_preparations: u64,
     pub motion_active: bool,
+    pub zoom_motion_active: bool,
 }
 
 /// One exact semantic or capability reason for routing the whole page to MuPDF.
