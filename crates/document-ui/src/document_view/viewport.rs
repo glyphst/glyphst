@@ -213,7 +213,8 @@ impl DocumentView {
             });
 
         let mut changed_zoom = false;
-        if zoom_pending {
+        let hold_zoom_for_gpu = zoom_pending && !self.native_gpu_zoom_frame_ready();
+        if zoom_pending && !hold_zoom_for_gpu {
             let zoom = animated_zoom_step(self.zoom, self.target_zoom, elapsed);
             let anchor = self.zoom_anchor.unwrap_or_else(|| {
                 self.zoom_anchor_at_viewport([
@@ -242,6 +243,8 @@ impl DocumentView {
         );
         if changed_zoom || changed_x || changed_y {
             self.mark_native_gpu_motion(cx);
+        }
+        if changed_zoom || changed_x || changed_y || hold_zoom_for_gpu {
             window.request_animation_frame();
         }
     }

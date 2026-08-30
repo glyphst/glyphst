@@ -690,6 +690,12 @@ pub struct GpuCacheDebugSnapshot {
     pub surface_zoom_motion_refreshes_suppressed: u64,
     pub surface_zoom_motion_cancellations: u64,
     pub surface_zoom_emergency_renders: u64,
+    pub surface_zoom_live_redraws: u64,
+    pub surface_zoom_live_failures: u64,
+    pub surface_zoom_gpu_holds: u64,
+    pub surface_zoom_scaled_presentations: u64,
+    pub surface_zoom_target_reuses: u64,
+    pub surface_zoom_target_allocations: u64,
     pub surface_warm_requests: u64,
     pub surface_warm_hits: u64,
     pub surface_warm_pages: usize,
@@ -1186,6 +1192,7 @@ struct PaintPage {
 #[derive(Clone)]
 struct GpuPaintTexture {
     bounds: Bounds<Pixels>,
+    source_bounds: Bounds<f32>,
     texture: GpuPageTexture,
 }
 

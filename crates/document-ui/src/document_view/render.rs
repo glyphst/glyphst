@@ -774,10 +774,7 @@ impl Render for DocumentView {
                                                     && let Err(error) =
                                                         window.paint_external_texture(
                                                             texture.bounds,
-                                                            Bounds::new(
-                                                                point(0.0, 0.0),
-                                                                size(1.0, 1.0),
-                                                            ),
+                                                            texture.source_bounds,
                                                             texture.texture.handle().clone(),
                                                             1.0,
                                                             ExternalTextureFilter::Linear,

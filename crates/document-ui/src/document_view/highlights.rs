@@ -106,10 +106,23 @@ impl DocumentView {
             .into_iter()
             .map(|rect| self.pdf_rect_to_screen(link.page_idx, rect, page.bounds))
             .filter_map(|bounds| Self::external_texture_subrect(texture.bounds, bounds))
-            .map(|(bounds, source_bounds)| LinkInvertOverlay {
-                bounds,
-                source_bounds,
-                texture: texture.texture.handle().clone(),
+            .map(|(bounds, relative)| {
+                let base = texture.source_bounds;
+                let source_bounds = Bounds::new(
+                    point(
+                        base.origin.x + relative.origin.x * base.size.width,
+                        base.origin.y + relative.origin.y * base.size.height,
+                    ),
+                    size(
+                        relative.size.width * base.size.width,
+                        relative.size.height * base.size.height,
+                    ),
+                );
+                LinkInvertOverlay {
+                    bounds,
+                    source_bounds,
+                    texture: texture.texture.handle().clone(),
+                }
             })
             .collect()
     }
