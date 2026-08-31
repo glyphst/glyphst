@@ -5,8 +5,8 @@ use glyphst_document_ui::document_view::{
     render_cache_debug_snapshot,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, FrameTiming, FrameTimingCollector, Hsla, IntoElement as _,
-    ParentElement as _, Styled as _, WeakEntity, Window, WindowId, div, hsla,
+    AnyElement, App, ClipboardItem, Div, FrameEvent, FrameTiming, FrameTimingCollector, Hsla,
+    IntoElement as _, ParentElement as _, Styled as _, WeakEntity, Window, WindowId, div, hsla,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -60,7 +60,7 @@ pub(super) struct RenderDebugCapture {
 impl Drop for RenderDebugCapture {
     fn drop(&mut self) {
         if self.owns_frame_trace {
-            gpui::set_frame_trace_enabled(false);
+            gpui::set_trace_enabled(false);
         }
     }
 }
@@ -373,7 +373,7 @@ impl Workspace {
         };
         let started_at = Instant::now();
         let automated = automated_output.is_some();
-        let owns_frame_trace = automated && gpui::set_frame_trace_enabled(true);
+        let owns_frame_trace = automated && gpui::set_trace_enabled(true);
         self.rendering_debug_trace_generation =
             self.rendering_debug_trace_generation.wrapping_add(1);
         self.rendering_debug_trace_completion = None;
@@ -693,10 +693,15 @@ impl Workspace {
             .collector
             .collect_unseen()
             .into_iter()
-            .filter(|timing| {
-                timing.window_id == capture.window_id
-                    && measurement_started_at
-                        .is_some_and(|started_at| timing.draw_start >= started_at)
+            .filter_map(|event| match event {
+                FrameEvent::Draw(timing)
+                    if timing.window_id == capture.window_id
+                        && measurement_started_at
+                            .is_some_and(|started_at| timing.draw_start >= started_at) =>
+                {
+                    Some(timing)
+                }
+                FrameEvent::Draw(_) | FrameEvent::Present(_) => None,
             })
             .collect::<Vec<_>>();
         let frame_count = timings.len();
@@ -1796,35 +1801,50 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "raster_bands": timing.raster_bands,
             "succeeded": timing.succeeded,
         })),
-        "gpu": page.gpu.as_ref().map(|gpu| json!({
-            "cpu_ms": milliseconds(gpu.cpu_time),
-            "frame_pool_wait_ms": milliseconds(gpu.frame_pool_wait_time),
-            "command_encoding_ms": milliseconds(gpu.command_encoding_time),
-            "gpu_ms": gpu.gpu_time.map(milliseconds),
-            "host_to_device_bytes": gpu.host_to_device_bytes,
-            "passes": gpu.passes_executed,
-            "command_buffers": gpu.command_buffers,
-            "vector_batches": gpu.vector_batches,
-            "procedural_stroke_batches": gpu.procedural_stroke_batches,
-            "render_bundle_runs": gpu.render_bundle_runs,
-            "reprojected": gpu.reprojected_frame,
-            "reused_tiles": gpu.reused_tiles,
-            "rendered_tiles": gpu.rendered_tiles,
-            "dirty_tiles": gpu.dirty_tiles,
-            "refinement_pending": gpu.refinement_pending,
-            "presentation_quality": gpu.presentation_quality,
-            "scheduled_refinement_work": gpu.scheduled_refinement_work,
-            "refinement_work_budget": gpu.refinement_work_budget,
-            "selected_vector_lod": gpu.selected_vector_lod,
-            "vector_lod_requested_scale": gpu.vector_lod_requested_scale,
-            "vector_lod_available_scale": gpu.vector_lod_available_scale,
-            "vector_lod_deferred": gpu.vector_lod_deferred,
-            "frame_pool_reused": gpu.frame_pool_reused,
-            "frame_pool_grew": gpu.frame_pool_grew,
-            "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
-            "generation": gpu.generation,
-            "coverage_strategy": gpu.coverage_strategy,
-        })),
+        "gpu": page.gpu.as_ref().map(|gpu| {
+            let retained_strokes = json!({
+                "candidate_references": gpu.retained_stroke_candidate_references,
+                "cull_dispatches": gpu.retained_stroke_cull_dispatches,
+                "indirect_draws": gpu.retained_stroke_indirect_draws,
+                "global_replay": gpu.retained_stroke_global_replay,
+                "motion_sample_mask": gpu.motion_stroke_sample_mask,
+            });
+            let culling = json!({
+                "ordered_operations": gpu.culled_operations,
+                "bundled_operations": gpu.culled_bundle_operations,
+                "retained_strokes": retained_strokes,
+            });
+            json!({
+                "cpu_ms": milliseconds(gpu.cpu_time),
+                "frame_pool_wait_ms": milliseconds(gpu.frame_pool_wait_time),
+                "command_encoding_ms": milliseconds(gpu.command_encoding_time),
+                "gpu_ms": gpu.gpu_time.map(milliseconds),
+                "host_to_device_bytes": gpu.host_to_device_bytes,
+                "passes": gpu.passes_executed,
+                "command_buffers": gpu.command_buffers,
+                "vector_batches": gpu.vector_batches,
+                "procedural_stroke_batches": gpu.procedural_stroke_batches,
+                "render_bundle_runs": gpu.render_bundle_runs,
+                "culling": culling,
+                "reprojected": gpu.reprojected_frame,
+                "reused_tiles": gpu.reused_tiles,
+                "rendered_tiles": gpu.rendered_tiles,
+                "dirty_tiles": gpu.dirty_tiles,
+                "refinement_pending": gpu.refinement_pending,
+                "presentation_quality": gpu.presentation_quality,
+                "scheduled_refinement_work": gpu.scheduled_refinement_work,
+                "refinement_work_budget": gpu.refinement_work_budget,
+                "selected_vector_lod": gpu.selected_vector_lod,
+                "vector_lod_requested_scale": gpu.vector_lod_requested_scale,
+                "vector_lod_available_scale": gpu.vector_lod_available_scale,
+                "vector_lod_deferred": gpu.vector_lod_deferred,
+                "frame_pool_reused": gpu.frame_pool_reused,
+                "frame_pool_grew": gpu.frame_pool_grew,
+                "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
+                "generation": gpu.generation,
+                "coverage_strategy": gpu.coverage_strategy,
+            })
+        }),
         "gpu_preparation": page.gpu_preparation.as_ref().map(|preparation| json!({
             "frontend_preflight_ms": milliseconds(preparation.frontend_preflight),
             "compile_ms": milliseconds(preparation.compile),
@@ -2736,6 +2756,21 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                     gpu.stencil_draws
                 ),
                 FOREGROUND,
+            ))
+            .child(reading(
+                "CULL",
+                format!(
+                    "{} ordered op · {} bundled op · {} stroke ref · {} indirect",
+                    gpu.culled_operations,
+                    gpu.culled_bundle_operations,
+                    gpu.retained_stroke_candidate_references,
+                    gpu.retained_stroke_indirect_draws,
+                ),
+                if gpu.culled_operations > 0 || gpu.retained_stroke_cull_dispatches > 0 {
+                    GOOD
+                } else {
+                    FOREGROUND
+                },
             ))
             .child(reading(
                 "VECTOR LOD",

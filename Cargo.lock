@@ -452,7 +452,7 @@ dependencies = [
  "futures-lite",
  "parking",
  "polling",
- "rustix 1.1.4",
+ "rustix",
  "slab",
  "windows-sys 0.61.2",
 ]
@@ -494,7 +494,7 @@ dependencies = [
  "cfg-if",
  "event-listener",
  "futures-lite",
- "rustix 1.1.4",
+ "rustix",
 ]
 
 [[package]]
@@ -520,7 +520,7 @@ dependencies = [
  "cfg-if",
  "futures-core",
  "futures-io",
- "rustix 1.1.4",
+ "rustix",
  "signal-hook-registry",
  "slab",
  "windows-sys 0.61.2",
@@ -697,7 +697,7 @@ checksum = "591eba69b7c085632e22ca03606f0bbea68d53bbe26c8962e2d549af20c6a561"
 dependencies = [
  "paste",
  "roman-numerals-rs",
- "strum",
+ "strum 0.27.2",
  "unic-langid",
  "unicode-normalization",
  "unscanny",
@@ -1007,7 +1007,7 @@ checksum = "4dbf9978365bac10f54d1d4b04f7ce4427e51f71d61f2fe15e3fed5166474df7"
 dependencies = [
  "bitflags 2.11.1",
  "polling",
- "rustix 1.1.4",
+ "rustix",
  "slab",
  "tracing",
 ]
@@ -1019,7 +1019,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138efcf0940a02ebf0cc8d1eff41a1682a46b431630f4c52450d6265876021fa"
 dependencies = [
  "calloop",
- "rustix 1.1.4",
+ "rustix",
  "wayland-backend",
  "wayland-client",
 ]
@@ -1312,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1845,7 +1845,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2766,7 +2766,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
- "rustix 1.1.4",
+ "rustix",
  "windows-link 0.2.1",
 ]
 
@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
@@ -3229,13 +3229,13 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
- "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
+ "hayro-interpret 0.7.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
  "kurbo 0.13.1",
  "smallvec",
 ]
@@ -3243,7 +3243,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-cpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
@@ -3256,7 +3256,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3272,7 +3272,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=5305982acbf121d9ee85bb33fd376dfc7ea455dd#5305982acbf121d9ee85bb33fd376dfc7ea455dd"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=5476a08547e94291881083bc6e01dd8c574fdb49#5476a08547e94291881083bc6e01dd8c574fdb49"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -3499,7 +3499,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3508,28 +3508,20 @@ dependencies = [
  "backtrace",
  "bindgen 0.71.1",
  "bitflags 2.11.1",
- "block",
- "cbindgen",
  "chrono",
- "cocoa 0.26.0",
- "cocoa-foundation 0.2.0",
  "collections",
- "core-foundation 0.10.0",
- "core-foundation-sys",
- "core-graphics 0.24.0",
- "core-text 21.0.0",
  "core-video",
  "ctor",
  "derive_more",
  "embed-resource",
  "etagere",
- "foreign-types",
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
  "gpui_macros",
  "gpui_shared_string",
  "gpui_util",
+ "hdrhistogram",
  "heapless",
  "http_client",
  "image",
@@ -3537,14 +3529,9 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "lyon",
- "mach2",
- "media",
- "metal",
  "num_cpus",
- "objc",
  "parking",
  "parking_lot",
- "pathfinder_geometry",
  "pin-project",
  "pollster 0.4.0",
  "postage",
@@ -3563,8 +3550,7 @@ dependencies = [
  "slotmap",
  "smallvec",
  "spin 0.10.0",
- "stacksafe",
- "strum",
+ "strum 0.28.0",
  "sum_tree",
  "taffy",
  "thiserror 2.0.18",
@@ -3590,11 +3576,15 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "futures",
  "gpui",
  "gpui_macros",
  "gpui_platform",
+ "html5ever",
  "instant",
  "lsp-types",
+ "markdown",
+ "markup5ever_rcdom",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -3621,19 +3611,16 @@ dependencies = [
  "chrono",
  "core-text 21.0.0",
  "enum-iterator",
- "futures",
  "gpui",
  "gpui-base",
  "gpui-component-assets",
  "gpui-component-macros",
  "gpui_macros",
- "html5ever",
  "instant",
  "itertools 0.13.0",
  "log",
  "lsp-types",
  "markdown",
- "markup5ever_rcdom",
  "notify",
  "num-traits",
  "objc2 0.6.4",
@@ -3685,6 +3672,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "instant",
+ "libc",
  "objc2-core-foundation",
  "objc2-io-kit",
  "sysinfo 0.37.2",
@@ -3692,9 +3680,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_apple"
+version = "0.1.0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
+dependencies = [
+ "anyhow",
+ "block",
+ "cbindgen",
+ "cocoa 0.26.0",
+ "collections",
+ "core-foundation 0.10.0",
+ "core-video",
+ "derive_more",
+ "etagere",
+ "foreign-types",
+ "gpui",
+ "image",
+ "log",
+ "metal",
+ "objc",
+ "parking_lot",
+]
+
+[[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3712,22 +3723,16 @@ dependencies = [
  "gpui_util",
  "gpui_wgpu",
  "http_client",
- "image",
- "itertools 0.14.0",
  "libc",
  "log",
  "notify-rust",
  "oo7",
  "open",
  "parking_lot",
- "pathfinder_geometry",
- "pollster 0.4.0",
- "profiling",
  "raw-window-handle",
  "smallvec",
  "smol",
- "strum",
- "swash",
+ "strum 0.28.0",
  "url",
  "uuid",
  "wayland-backend",
@@ -3746,7 +3751,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3754,21 +3759,18 @@ dependencies = [
  "async-task",
  "block",
  "block2 0.6.2",
- "cbindgen",
  "cocoa 0.26.0",
  "collections",
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "core-graphics 0.24.0",
  "core-text 21.0.0",
- "core-video",
  "ctor",
- "derive_more",
  "dispatch2",
- "etagere",
  "foreign-types",
  "futures",
  "gpui",
+ "gpui_apple",
  "gpui_util",
  "image",
  "itertools 0.14.0",
@@ -3787,7 +3789,7 @@ dependencies = [
  "raw-window-handle",
  "semver",
  "smallvec",
- "strum",
+ "strum 0.28.0",
  "uuid",
  "zed-font-kit",
 ]
@@ -3795,7 +3797,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3806,7 +3808,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3819,7 +3821,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "schemars",
  "serde",
@@ -3829,7 +3831,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "log",
@@ -3839,7 +3841,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3851,6 +3853,7 @@ dependencies = [
  "log",
  "parking_lot",
  "raw-window-handle",
+ "scheduler",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3862,7 +3865,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3872,18 +3875,14 @@ dependencies = [
  "gpui",
  "gpui_util",
  "itertools 0.14.0",
- "js-sys",
  "log",
  "parking_lot",
- "pollster 0.4.0",
  "profiling",
  "raw-window-handle",
  "smallvec",
  "swash",
  "unicode-bidi",
  "unicode-segmentation",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
  "zed-font-kit",
@@ -3892,7 +3891,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3926,12 +3925,6 @@ dependencies = [
  "arraydeque",
  "smallvec",
 ]
-
-[[package]]
-name = "grid"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
 name = "guillotiere"
@@ -4078,7 +4071,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-ccitt"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 
 [[package]]
 name = "hayro-cmap"
@@ -4092,10 +4085,10 @@ dependencies = [
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 dependencies = [
  "brotli",
- "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
+ "hayro-postscript 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
 ]
 
 [[package]]
@@ -4120,11 +4113,11 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 dependencies = [
  "bitflags 2.11.1",
- "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
- "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
+ "hayro-cmap 0.1.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
+ "hayro-syntax 0.7.2 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
  "kurbo 0.13.1",
  "moxcms",
  "phf 0.13.1",
@@ -4148,10 +4141,10 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 dependencies = [
  "fearless_simd 0.6.0",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
 ]
 
 [[package]]
@@ -4166,7 +4159,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.4.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 dependencies = [
  "fearless_simd 0.6.0",
 ]
@@ -4180,7 +4173,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 
 [[package]]
 name = "hayro-svg"
@@ -4215,11 +4208,11 @@ dependencies = [
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4#54585cf4439f3ac53d78feaefbafdea9426ec2f4"
+source = "git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b#8e5e03632c900246aa356e1ad549f0ec36e2f46b"
 dependencies = [
  "flate2",
- "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
- "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=54585cf4439f3ac53d78feaefbafdea9426ec2f4)",
+ "hayro-ccitt 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
+ "hayro-jbig2 0.3.0 (git+https://github.com/glyphst/hayro.git?rev=8e5e03632c900246aa356e1ad549f0ec36e2f46b)",
  "hayro-jpeg2000 0.4.0",
  "memchr",
  "rustc-hash 2.1.2",
@@ -4237,6 +4230,16 @@ dependencies = [
  "flate2",
  "hayro-syntax 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "pdf-writer",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
@@ -4295,15 +4298,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "home"
-version = "0.5.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
-dependencies = [
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4369,7 +4363,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5336,12 +5330,6 @@ checksum = "7e57c38c1e860fd37c604281cdfb1dd2216977fd76a50f85ba2f388ef3219616"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-
-[[package]]
-name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
@@ -5663,13 +5651,12 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
  "core-foundation 0.10.0",
  "core-video",
- "ctor",
  "foreign-types",
  "metal",
  "objc",
@@ -6751,7 +6738,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "collections",
  "serde",
@@ -7044,7 +7031,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi",
  "pin-project-lite",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -7801,7 +7788,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "derive_refineable",
 ]
@@ -8132,19 +8119,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.11.1",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -8152,7 +8126,7 @@ dependencies = [
  "bitflags 2.11.1",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.52.0",
 ]
 
@@ -8290,7 +8264,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8299,6 +8273,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand 0.9.4",
+ "wasm_thread",
  "web-time",
 ]
 
@@ -8829,27 +8804,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stacksafe"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9c1172965d317e87ddb6d364a040d958b40a1db82b6ef97da26253a8b3d090"
-dependencies = [
- "stacker",
- "stacksafe-macro",
-]
-
-[[package]]
-name = "stacksafe-macro"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "172175341049678163e979d9107ca3508046d4d2a7c6682bee46ac541b17db69"
-dependencies = [
- "proc-macro-error2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8913,7 +8867,16 @@ version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.27.2",
+]
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
 ]
 
 [[package]]
@@ -8921,6 +8884,18 @@ name = "strum_macros"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -8949,7 +8924,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "heapless",
  "log",
@@ -9227,14 +9202,14 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.12.2"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "340a09581f29809fc0df82a3955501dc7f2a21f887e5d1c13dbe288fe1c0bef4"
+checksum = "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f"
 dependencies = [
  "arrayvec",
- "grid",
  "serde",
  "slotmap",
+ "smallvec",
 ]
 
 [[package]]
@@ -9269,7 +9244,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.52.0",
 ]
 
@@ -10520,7 +10495,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "perf",
  "quote",
@@ -10891,7 +10866,7 @@ checksum = "2857dd20b54e916ec7253b3d6b4d5c4d7d4ca2c33c2e11c6c76a99bd8744755d"
 dependencies = [
  "cc",
  "downcast-rs",
- "rustix 1.1.4",
+ "rustix",
  "scoped-tls",
  "smallvec",
  "wayland-sys",
@@ -10904,7 +10879,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "645c7c96bb74690c3189b5c9cb4ca1627062bb23693a4fad9d8c3de958260144"
 dependencies = [
  "bitflags 2.11.1",
- "rustix 1.1.4",
+ "rustix",
  "wayland-backend",
  "wayland-scanner",
 ]
@@ -10915,7 +10890,7 @@ version = "0.31.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a52d18780be9b1314328a3de5f930b73d2200112e3849ca6cb11822793fb34d"
 dependencies = [
- "rustix 1.1.4",
+ "rustix",
  "wayland-client",
  "xcursor",
 ]
@@ -11196,14 +11171,11 @@ dependencies = [
 
 [[package]]
 name = "which"
-version = "6.0.3"
+version = "8.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
 dependencies = [
- "either",
- "home",
- "rustix 0.38.44",
- "winsafe",
+ "libc",
 ]
 
 [[package]]
@@ -11801,12 +11773,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winsafe"
-version = "0.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
-
-[[package]]
 name = "wio"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11918,7 +11884,7 @@ dependencies = [
  "libc",
  "log",
  "os_pipe",
- "rustix 1.1.4",
+ "rustix",
  "thiserror 2.0.18",
  "tree_magic_mini",
  "wayland-backend",
@@ -11987,7 +11953,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
- "rustix 1.1.4",
+ "rustix",
  "x11rb-protocol",
  "xcursor",
 ]
@@ -12156,7 +12122,7 @@ dependencies = [
  "hex",
  "libc",
  "ordered-stream",
- "rustix 1.1.4",
+ "rustix",
  "serde",
  "serde_repr",
  "tracing",
@@ -12463,7 +12429,7 @@ checksum = "b142a20ec14a91d5bc708c1dc21b080c550113d8aa77afa29635673a65dd02c5"
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12480,7 +12446,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -12493,7 +12459,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/zed?rev=0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0#0817dc8a211a490266c3f0f8f9f3952cb0b5c5f0"
+source = "git+https://github.com/glyphst/zed?rev=3457da875bf11c023ab8d32e8ba5a84b9d47aa65#3457da875bf11c023ab8d32e8ba5a84b9d47aa65"
 
 [[package]]
 name = "zune-core"
