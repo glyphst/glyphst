@@ -62,10 +62,10 @@ use glyphst_pdf::{
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
-    GpuLinkHighlightMode, GpuLinkInteraction, GpuMotionTargetReservation, GpuNamedAction,
-    GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation,
-    GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
+    GpuLinkHighlightMode, GpuLinkInteraction, GpuMotionRenderMode, GpuMotionTargetReservation,
+    GpuNamedAction, GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings,
+    GpuPagePresentation, GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute,
+    GpuPageTexture, GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
     GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
@@ -577,6 +577,7 @@ pub struct GpuPageRenderDebugSnapshot {
     pub generation: u64,
     pub coverage_strategy: String,
     pub retained_stroke_strategy: String,
+    pub motion_render_mode: String,
 }
 
 /// One page's retained preparation and residency accounting.
@@ -628,8 +629,14 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub procedural_stroke_primitives: u64,
     pub procedural_stroke_draws: u64,
     pub procedural_stroke_bytes: u64,
+    pub motion_stroke_lod_levels: u64,
+    pub motion_stroke_coarsest_segments: u64,
+    pub motion_stroke_lod_segments: u64,
+    pub exact_stroke_segments: u64,
     pub render_bundle_runs: u64,
     pub render_bundle_operations: u64,
+    pub camera_program_partitions: u64,
+    pub camera_program_operations: u64,
     pub retained_operations: u64,
     pub flattened_opaque_knockout_groups: u64,
     pub retained_form_resources: u64,
@@ -722,6 +729,11 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_jobs_pending: usize,
     pub motion_render_jobs_peak: usize,
     pub motion_render_detached_target_reuses: u64,
+    pub motion_render_inline_frames: u64,
+    pub motion_render_inline_failures: u64,
+    pub motion_render_camera_serial: u64,
+    pub motion_render_presented_camera_serial: u64,
+    pub motion_render_camera_serial_mismatches: u64,
     pub motion_target_reservations_started: u64,
     pub motion_target_reservations_consumed: u64,
     pub motion_target_reservations_released: u64,

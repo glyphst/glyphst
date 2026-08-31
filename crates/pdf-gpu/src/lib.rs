@@ -28,6 +28,7 @@ use glyphst_pdf_render_wgpu::{
 };
 pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
+    MotionRenderMode as GpuMotionRenderMode,
     PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
     PreparationStats as GpuPreparationStats, PresentationQuality as GpuPresentationQuality,
     RenderStats as GpuRenderStats, VectorLodStatus as GpuVectorLodStatus,
@@ -945,6 +946,11 @@ impl PreparedGpuPage {
 
     pub fn preparation_stats(&self) -> GpuPreparationStats {
         self.gpu.preparation_stats()
+    }
+
+    /// Interactive presentation path selected by the retained renderer.
+    pub fn motion_render_mode(&self) -> GpuMotionRenderMode {
+        self.gpu.motion_render_mode()
     }
 
     pub const fn preparation_timings(&self) -> GpuPagePreparationTimings {

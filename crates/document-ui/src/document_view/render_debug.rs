@@ -271,6 +271,7 @@ impl DocumentView {
             generation: stats.generation,
             coverage_strategy: format!("{:?}", stats.coverage_strategy),
             retained_stroke_strategy: format!("{:?}", stats.retained_stroke_strategy),
+            motion_render_mode: format!("{:?}", stats.motion_render_mode),
         });
         let patch_lod_preparation = self
             .native_gpu_patch_lod_preparation_stats(page_idx)
@@ -326,8 +327,14 @@ impl DocumentView {
                 procedural_stroke_primitives: stats.procedural_stroke_primitives,
                 procedural_stroke_draws: stats.procedural_stroke_draws,
                 procedural_stroke_bytes: stats.procedural_stroke_bytes,
+                motion_stroke_lod_levels: stats.motion_stroke_lod_levels,
+                motion_stroke_coarsest_segments: stats.motion_stroke_coarsest_segments,
+                motion_stroke_lod_segments: stats.motion_stroke_lod_segments,
+                exact_stroke_segments: stats.exact_stroke_segments,
                 render_bundle_runs: stats.render_bundle_runs,
                 render_bundle_operations: stats.render_bundle_operations,
+                camera_program_partitions: stats.camera_program_partitions,
+                camera_program_operations: stats.camera_program_operations,
                 retained_operations: stats.retained_operations,
                 flattened_opaque_knockout_groups: stats.flattened_opaque_knockout_groups,
                 retained_form_resources: stats.retained_form_resources,

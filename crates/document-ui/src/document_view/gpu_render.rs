@@ -107,6 +107,11 @@ pub(super) struct GpuPdfState {
     motion_render_completed: u64,
     motion_render_superseded: u64,
     motion_render_detached_reuses: u64,
+    motion_render_inline_frames: u64,
+    motion_render_inline_failures: u64,
+    motion_camera_serial: u64,
+    motion_presented_camera_serial: u64,
+    motion_camera_serial_mismatches: u64,
     motion_render_peak: usize,
     motion_reservations_started: u64,
     motion_reservations_consumed: u64,
@@ -409,6 +414,11 @@ impl GpuPdfState {
         self.motion_render_completed = 0;
         self.motion_render_superseded = 0;
         self.motion_render_detached_reuses = 0;
+        self.motion_render_inline_frames = 0;
+        self.motion_render_inline_failures = 0;
+        self.motion_camera_serial = 0;
+        self.motion_presented_camera_serial = 0;
+        self.motion_camera_serial_mismatches = 0;
         self.motion_render_peak = 0;
         self.motion_reservations_started = 0;
         self.motion_reservations_consumed = 0;
@@ -516,6 +526,11 @@ impl GpuPdfState {
         self.motion_render_completed = 0;
         self.motion_render_superseded = 0;
         self.motion_render_detached_reuses = 0;
+        self.motion_render_inline_frames = 0;
+        self.motion_render_inline_failures = 0;
+        self.motion_camera_serial = 0;
+        self.motion_presented_camera_serial = 0;
+        self.motion_camera_serial_mismatches = 0;
         self.motion_render_peak = 0;
         self.motion_reservations_started = 0;
         self.motion_reservations_consumed = 0;
@@ -2272,6 +2287,8 @@ impl DocumentView {
         if self.gpu_pdf.renderer.is_some() && self.gpu_pdf.zoom_motion_active {
             self.gpu_pdf.surface_zoom_animation_steps =
                 self.gpu_pdf.surface_zoom_animation_steps.saturating_add(1);
+            self.gpu_pdf.motion_camera_serial =
+                self.gpu_pdf.motion_camera_serial.wrapping_add(1).max(1);
         }
     }
 
@@ -2446,6 +2463,146 @@ impl DocumentView {
                 .saturating_add(1);
         }
         held
+    }
+
+    fn reuse_current_camera_gpu_texture(&mut self, page: u32) -> Option<GpuPaintTexture> {
+        let reused = self
+            .gpu_pdf
+            .rendered
+            .get(&page)
+            .and_then(|rendered| rendered.last_paint.clone());
+        if reused.is_some() {
+            self.gpu_pdf.presented_pages.insert(page);
+            self.gpu_pdf.presented_continuity_pages.remove(&page);
+            self.gpu_pdf.surface_failures.remove(&page);
+        }
+        reused
+    }
+
+    fn render_native_gpu_zoom_frame_inline(
+        &mut self,
+        page: u32,
+        key: RenderKey,
+        image_bounds: Bounds<Pixels>,
+        prepared: &PreparedGpuPage,
+        renderer: &GpuPdfRenderer,
+        mut request: GpuPaintRequest,
+    ) -> Result<Option<GpuPaintTexture>, String> {
+        let camera_serial = self.gpu_pdf.motion_camera_serial;
+        let result = (|| {
+            let mut presentation = self
+                .gpu_pdf
+                .rendered
+                .get(&page)
+                .map(|rendered| rendered.presentation.clone())
+                .ok_or_else(|| {
+                    "inline native PDF zoom redraw has no retained presentation".to_string()
+                })?;
+            let reservation = self
+                .gpu_pdf
+                .motion_target_reservations
+                .remove(&page)
+                .ok_or_else(|| {
+                    "inline native PDF zoom redraw has no reserved target".to_string()
+                })?;
+            assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
+            if let Err(error) = renderer.supersede_page_render(prepared, request.generation) {
+                self.gpu_pdf.motion_reservations_released =
+                    self.gpu_pdf.motion_reservations_released.saturating_add(1);
+                return Err(format!("{error:#}"));
+            }
+            self.gpu_pdf.motion_reservations_consumed =
+                self.gpu_pdf.motion_reservations_consumed.saturating_add(1);
+            let started = Instant::now();
+            let outcome = renderer
+                .render_motion_page(prepared, request, reservation, &mut presentation)
+                .map_err(|error| format!("{error:#}"))?;
+            let (texture, stats) = match outcome {
+                GpuPageRenderOutcome::Rendered {
+                    presented: Some(texture),
+                    stats,
+                } => (texture, stats),
+                GpuPageRenderOutcome::Rendered {
+                    presented: None, ..
+                } => {
+                    return Err("inline native PDF zoom redraw produced no coherent texture".into());
+                }
+                GpuPageRenderOutcome::Deferred => {
+                    return Err("inline native PDF zoom redraw was unexpectedly deferred".into());
+                }
+                GpuPageRenderOutcome::Superseded => {
+                    return Err("inline native PDF zoom redraw was unexpectedly superseded".into());
+                }
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_millis(8) {
+                eprintln!(
+                    "slow inline native PDF zoom redraw on page {}: total {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
+                    page + 1,
+                    elapsed.as_secs_f64() * 1_000.0,
+                    stats.cpu_time.as_secs_f64() * 1_000.0,
+                    stats.command_encoding_time.as_secs_f64() * 1_000.0,
+                    stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
+                    stats.transient_pool_reuses,
+                    stats.offscreen_passes,
+                    stats.transient_peak_bytes as f64 / (1024.0 * 1024.0),
+                    stats.transient_resident_bytes as f64 / (1024.0 * 1024.0),
+                    stats.selected_vector_lod,
+                    request
+                        .motion_target_capacity
+                        .map_or(request.visible_region.width, |size| size[0],),
+                    request
+                        .motion_target_capacity
+                        .map_or(request.visible_region.height, |size| size[1],),
+                );
+            }
+            let bytes = presentation.byte_len();
+            self.gpu_pdf
+                .reserve_surface(page, bytes)
+                .map_err(|required| {
+                    format!(
+                        "inline native PDF zoom surfaces require {required} bytes, exceeding the {MAX_RETAINED_GPU_SURFACE_BYTES}-byte cache limit"
+                    )
+                })?;
+            let rendered = self
+                .gpu_pdf
+                .rendered
+                .get_mut(&page)
+                .ok_or_else(|| "inline native PDF zoom page was evicted".to_string())?;
+            rendered.key = key;
+            rendered.request = request;
+            rendered.refresh_region =
+                surface_refresh_guard(texture.region(), request.visible_region);
+            rendered.presentation = presentation;
+            rendered.latest_stats = stats;
+            rendered.prewarmed = false;
+            self.gpu_pdf.surface_zoom_live_redraws =
+                self.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
+            self.gpu_pdf.surface_zoom_target_reuses =
+                self.gpu_pdf.surface_zoom_target_reuses.saturating_add(1);
+            self.gpu_pdf.motion_render_inline_frames =
+                self.gpu_pdf.motion_render_inline_frames.saturating_add(1);
+            if self.gpu_pdf.motion_camera_serial != camera_serial {
+                self.gpu_pdf.motion_camera_serial_mismatches = self
+                    .gpu_pdf
+                    .motion_camera_serial_mismatches
+                    .saturating_add(1);
+            }
+            self.gpu_pdf.motion_presented_camera_serial = camera_serial;
+            self.gpu_pdf.surface_failures.remove(&page);
+            self.gpu_pdf.motion_deadline = Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
+            let selected = SelectedGpuSurface {
+                key,
+                texture,
+                kind: PresentedSurfaceKind::Primary,
+            };
+            Ok(Some(self.present_gpu_surface(page, image_bounds, selected)))
+        })();
+        if result.is_err() {
+            self.gpu_pdf.motion_render_inline_failures =
+                self.gpu_pdf.motion_render_inline_failures.saturating_add(1);
+        }
+        result
     }
 
     fn start_native_gpu_zoom_frame(
@@ -3038,6 +3195,39 @@ impl DocumentView {
                 target_capacity,
                 motion_target_capacity,
             );
+            if prepared.motion_render_mode() == GpuMotionRenderMode::OrderedCameraProgram {
+                if !self.gpu_pdf.motion_target_reservations.contains_key(&page) {
+                    if self.gpu_pdf.motion_presented_camera_serial
+                        == self.gpu_pdf.motion_camera_serial
+                    {
+                        return self.reuse_current_camera_gpu_texture(page);
+                    }
+                    return self.hold_last_sharp_gpu_texture(page);
+                }
+                match self.render_native_gpu_zoom_frame_inline(
+                    page,
+                    key,
+                    image_bounds,
+                    &prepared,
+                    &renderer,
+                    request,
+                ) {
+                    Ok(texture) => return texture,
+                    Err(error) => {
+                        self.gpu_pdf.surface_zoom_live_failures =
+                            self.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
+                        if renderer.is_device_lost() {
+                            self.gpu_pdf.reset_device();
+                            return None;
+                        }
+                        eprintln!(
+                            "failed to render inline native PDF page {} during zoom: {error}",
+                            page + 1
+                        );
+                        return self.hold_last_sharp_gpu_texture(page);
+                    }
+                }
+            }
             match self.start_native_gpu_zoom_frame(
                 page,
                 key,
@@ -4981,6 +5171,11 @@ impl DocumentView {
             ),
             motion_render_jobs_peak: self.gpu_pdf.motion_render_peak,
             motion_render_detached_target_reuses: self.gpu_pdf.motion_render_detached_reuses,
+            motion_render_inline_frames: self.gpu_pdf.motion_render_inline_frames,
+            motion_render_inline_failures: self.gpu_pdf.motion_render_inline_failures,
+            motion_render_camera_serial: self.gpu_pdf.motion_camera_serial,
+            motion_render_presented_camera_serial: self.gpu_pdf.motion_presented_camera_serial,
+            motion_render_camera_serial_mismatches: self.gpu_pdf.motion_camera_serial_mismatches,
             motion_target_reservations_started: self.gpu_pdf.motion_reservations_started,
             motion_target_reservations_consumed: self.gpu_pdf.motion_reservations_consumed,
             motion_target_reservations_released: self.gpu_pdf.motion_reservations_released,

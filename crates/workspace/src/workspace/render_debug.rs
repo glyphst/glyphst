@@ -36,13 +36,13 @@ const TRACE_WARMUP_READY_FRAMES: usize = 5;
 // cold compile before producing their first surface. Keep that observable as
 // cold preparation rather than aborting the interaction trace before it can
 // measure any zoom frames.
-const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(45);
+const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRACE_SCROLL_FRAMES_PER_DIRECTION: usize = 120;
 const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
-const TRACE_REPORT_VERSION: u32 = 6;
+const TRACE_REPORT_VERSION: u32 = 7;
 
 struct RenderDebugCaptureNotification;
 
@@ -1478,7 +1478,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1722,6 +1722,11 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "jobs_pending": cache.motion_render_jobs_pending,
         "jobs_peak": cache.motion_render_jobs_peak,
         "detached_target_reuses": cache.motion_render_detached_target_reuses,
+        "inline_frames": cache.motion_render_inline_frames,
+        "inline_failures": cache.motion_render_inline_failures,
+        "camera_serial": cache.motion_render_camera_serial,
+        "presented_camera_serial": cache.motion_render_presented_camera_serial,
+        "camera_serial_mismatches": cache.motion_render_camera_serial_mismatches,
         "reservations_started": cache.motion_target_reservations_started,
         "reservations_consumed": cache.motion_target_reservations_consumed,
         "reservations_released": cache.motion_target_reservations_released,
@@ -1848,6 +1853,7 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
                 "generation": gpu.generation,
                 "coverage_strategy": gpu.coverage_strategy,
                 "retained_stroke_strategy": gpu.retained_stroke_strategy,
+                "motion_render_mode": gpu.motion_render_mode,
             })
         }),
         "gpu_preparation": page.gpu_preparation.as_ref().map(|preparation| json!({
@@ -1864,6 +1870,12 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "vector_batches": preparation.vector_batches,
             "vector_lod_levels": preparation.vector_lod_levels,
             "vector_bytes": preparation.vector_bytes,
+            "motion_stroke_lod_levels": preparation.motion_stroke_lod_levels,
+            "motion_stroke_coarsest_segments": preparation.motion_stroke_coarsest_segments,
+            "motion_stroke_lod_segments": preparation.motion_stroke_lod_segments,
+            "exact_stroke_segments": preparation.exact_stroke_segments,
+            "camera_program_partitions": preparation.camera_program_partitions,
+            "camera_program_operations": preparation.camera_program_operations,
             "analytic_bytes": preparation.analytic_bytes,
         })),
         "gpu_fallbacks": page.gpu_fallbacks.iter().map(|fallback| json!({
@@ -1943,6 +1955,9 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(motion_render_jobs_completed);
     counter!(motion_render_jobs_superseded);
     counter!(motion_render_detached_target_reuses);
+    counter!(motion_render_inline_frames);
+    counter!(motion_render_inline_failures);
+    counter!(motion_render_camera_serial_mismatches);
     counter!(motion_target_reservations_started);
     counter!(motion_target_reservations_consumed);
     counter!(motion_target_reservations_released);
@@ -2207,9 +2222,10 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU ZOOM MOTION",
             format!(
-                "{} live redraw / {} animation steps · {} cached sharp · {} detached reuse · {}/{} pending/peak · {} admission hold · {} scaled · {} failed",
+                "{} live redraw / {} animation steps · {} inline / {} cached sharp · {} detached reuse · {}/{} pending/peak · {} admission hold · {} scaled · {} failed",
                 document.gpu_cache.surface_zoom_live_redraws,
                 document.gpu_cache.surface_zoom_animation_steps,
+                document.gpu_cache.motion_render_inline_frames,
                 document.gpu_cache.surface_zoom_cached_sharp_presentations,
                 document.gpu_cache.motion_render_detached_target_reuses,
                 document.gpu_cache.motion_render_jobs_pending,
@@ -2231,10 +2247,13 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU ZOOM CONTROL",
             format!(
-                "{} worker / {} sample / {} presentation holds · {} reservations ({}/{} consumed/released, {} pending) · {} stale canceled · {} motion allocation · {} legacy emergency",
+                "{} worker / {} sample / {} presentation holds · camera {}/{} ({} mismatches) · {} reservations ({}/{} consumed/released, {} pending) · {} stale canceled · {} motion allocation · {} legacy emergency",
                 document.gpu_cache.surface_zoom_worker_holds,
                 document.gpu_cache.surface_zoom_sample_holds,
                 document.gpu_cache.surface_zoom_presentation_holds,
+                document.gpu_cache.motion_render_presented_camera_serial,
+                document.gpu_cache.motion_render_camera_serial,
+                document.gpu_cache.motion_render_camera_serial_mismatches,
                 document.gpu_cache.motion_target_reservations_started,
                 document.gpu_cache.motion_target_reservations_consumed,
                 document.gpu_cache.motion_target_reservations_released,
@@ -3208,6 +3227,8 @@ mod tests {
             motion_render_jobs_pending: 0,
             motion_render_jobs_peak: 1,
             motion_render_detached_target_reuses: 119,
+            motion_render_inline_frames: 118,
+            motion_render_inline_failures: 0,
             motion_target_reservations_started: 120,
             motion_target_reservations_consumed: 119,
             motion_target_reservations_released: 1,
