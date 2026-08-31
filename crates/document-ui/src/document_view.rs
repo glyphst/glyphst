@@ -576,6 +576,7 @@ pub struct GpuPageRenderDebugSnapshot {
     pub transient_pool_reuses: u64,
     pub generation: u64,
     pub coverage_strategy: String,
+    pub retained_stroke_strategy: String,
 }
 
 /// One page's retained preparation and residency accounting.

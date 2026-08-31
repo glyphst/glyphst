@@ -1843,6 +1843,7 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
                 "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
                 "generation": gpu.generation,
                 "coverage_strategy": gpu.coverage_strategy,
+                "retained_stroke_strategy": gpu.retained_stroke_strategy,
             })
         }),
         "gpu_preparation": page.gpu_preparation.as_ref().map(|preparation| json!({
@@ -2749,8 +2750,9 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "COVERAGE",
                 format!(
-                    "{} · LOD {} · {} compute · {} stencil",
+                    "{} · {} strokes · LOD {} · {} compute · {} stencil",
                     gpu.coverage_strategy,
+                    gpu.retained_stroke_strategy,
                     gpu.selected_vector_lod,
                     gpu.compute_dispatches,
                     gpu.stencil_draws

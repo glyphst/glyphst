@@ -24,7 +24,7 @@ use glyphst_pdf_render_cpu::{CpuRenderer, CpuViewportRequest};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
     IncrementalWorkPlan, PrepareError, RenderConfig, RenderError, RenderRequest,
-    RenderSupportIssue, RenderTargetExtentPolicy, RendererInitError,
+    RenderSupportIssue, RenderTargetExtentPolicy, RendererInitError, RetainedStrokeStrategy,
 };
 pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
@@ -1244,6 +1244,7 @@ impl GpuPdfRenderer {
             .max_render_dimension
             .min(context.device().limits().max_texture_dimension_2d);
         config.render_target_extent = RenderTargetExtentPolicy::RequestBounded;
+        config.retained_strokes = RetainedStrokeStrategy::CameraAdaptive;
         let output_format = config.output_format;
         let token = context.token();
         let renderer = GpuRenderer::new(

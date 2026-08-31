@@ -270,6 +270,7 @@ impl DocumentView {
             transient_pool_reuses: stats.transient_pool_reuses,
             generation: stats.generation,
             coverage_strategy: format!("{:?}", stats.coverage_strategy),
+            retained_stroke_strategy: format!("{:?}", stats.retained_stroke_strategy),
         });
         let patch_lod_preparation = self
             .native_gpu_patch_lod_preparation_stats(page_idx)
