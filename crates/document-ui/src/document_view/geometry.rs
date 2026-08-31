@@ -75,6 +75,24 @@ impl DocumentView {
         }
     }
 
+    /// Returns the virtual device-pixel extent used by viewport-bounded native
+    /// GPU rendering. Unlike a MuPDF raster key, this extent is not an
+    /// allocation request and must not be clamped to one texture dimension:
+    /// the retained renderer allocates only the visible crop. Keeping the full
+    /// extent preserves one source pixel per device pixel at arbitrary camera
+    /// zoom instead of magnifying an 8,192-pixel page texture.
+    pub(super) fn native_gpu_render_key(
+        &self,
+        page_idx: usize,
+        image_bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> RenderKey {
+        let mut key = self.render_key(page_idx, image_bounds, scale_factor);
+        [key.physical_width, key.physical_height] =
+            native_gpu_virtual_page_extent(image_bounds, scale_factor);
+        key
+    }
+
     pub(super) fn pixel_aligned_image_bounds(
         image_bounds: Bounds<Pixels>,
         scale_factor: f32,
@@ -195,5 +213,28 @@ impl DocumentView {
             (tx - a * page_bounds.x0 - c * page_bounds.y0 - view_origin.x) * scale_x,
             (ty - b * page_bounds.x0 - d * page_bounds.y0 - view_origin.y) * scale_y,
         )
+    }
+}
+
+fn native_gpu_virtual_page_extent(image_bounds: Bounds<Pixels>, scale_factor: f32) -> [u32; 2] {
+    let scale_factor = f64::from(scale_factor.max(0.001));
+    [image_bounds.size.width, image_bounds.size.height].map(|dimension| {
+        (f64::from(dimension.as_f32()) * scale_factor)
+            .ceil()
+            .clamp(1.0, f64::from(u32::MAX)) as u32
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_gpu_virtual_extent_is_not_a_texture_allocation_limit() {
+        let image_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(20_000.0), px(10_000.0)));
+        assert_eq!(
+            native_gpu_virtual_page_extent(image_bounds, 2.0),
+            [40_000, 20_000]
+        );
     }
 }

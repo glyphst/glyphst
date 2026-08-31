@@ -32,7 +32,11 @@ const BORDER: Hsla = hsla(0., 0., 1., 0.14);
 const FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const MAX_RAW_FRAME_SAMPLES: usize = 4_096;
 const TRACE_WARMUP_READY_FRAMES: usize = 5;
-const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(15);
+// Dense retained CAD pages can spend more than 15 seconds in a debug-profile
+// cold compile before producing their first surface. Keep that observable as
+// cold preparation rather than aborting the interaction trace before it can
+// measure any zoom frames.
+const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(45);
 const TRACE_SCROLL_FRAMES_PER_DIRECTION: usize = 120;
 const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;

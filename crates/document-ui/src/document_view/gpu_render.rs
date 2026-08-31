@@ -1530,25 +1530,27 @@ fn visible_gpu_region(
     image_bounds: Bounds<Pixels>,
     viewport_bounds: Bounds<Pixels>,
 ) -> Option<GpuPageRegion> {
-    let image_x0 = image_bounds.origin.x.as_f32();
-    let image_y0 = image_bounds.origin.y.as_f32();
-    let image_width = image_bounds.size.width.as_f32();
-    let image_height = image_bounds.size.height.as_f32();
+    let image_x0 = f64::from(image_bounds.origin.x.as_f32());
+    let image_y0 = f64::from(image_bounds.origin.y.as_f32());
+    let image_width = f64::from(image_bounds.size.width.as_f32());
+    let image_height = f64::from(image_bounds.size.height.as_f32());
     if image_width <= 0.0 || image_height <= 0.0 {
         return None;
     }
-    let x0 = image_x0.max(viewport_bounds.origin.x.as_f32());
-    let y0 = image_y0.max(viewport_bounds.origin.y.as_f32());
-    let x1 = (image_x0 + image_width)
-        .min(viewport_bounds.origin.x.as_f32() + viewport_bounds.size.width.as_f32());
-    let y1 = (image_y0 + image_height)
-        .min(viewport_bounds.origin.y.as_f32() + viewport_bounds.size.height.as_f32());
+    let viewport_x0 = f64::from(viewport_bounds.origin.x.as_f32());
+    let viewport_y0 = f64::from(viewport_bounds.origin.y.as_f32());
+    let viewport_width = f64::from(viewport_bounds.size.width.as_f32());
+    let viewport_height = f64::from(viewport_bounds.size.height.as_f32());
+    let x0 = image_x0.max(viewport_x0);
+    let y0 = image_y0.max(viewport_y0);
+    let x1 = (image_x0 + image_width).min(viewport_x0 + viewport_width);
+    let y1 = (image_y0 + image_height).min(viewport_y0 + viewport_height);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
 
-    let page_width = key.physical_width as f32;
-    let page_height = key.physical_height as f32;
+    let page_width = f64::from(key.physical_width);
+    let page_height = f64::from(key.physical_height);
     let physical_x0 = (((x0 - image_x0) / image_width) * page_width)
         .floor()
         .clamp(0.0, page_width) as u32;
@@ -1574,18 +1576,18 @@ fn gpu_surface_bounds(
     image_bounds: Bounds<Pixels>,
     region: GpuPageRegion,
 ) -> Bounds<Pixels> {
-    let page_width = key.physical_width.max(1) as f32;
-    let page_height = key.physical_height.max(1) as f32;
-    let logical_width = image_bounds.size.width.as_f32();
-    let logical_height = image_bounds.size.height.as_f32();
+    let page_width = f64::from(key.physical_width.max(1));
+    let page_height = f64::from(key.physical_height.max(1));
+    let logical_width = f64::from(image_bounds.size.width.as_f32());
+    let logical_height = f64::from(image_bounds.size.height.as_f32());
     Bounds::new(
         point(
-            image_bounds.origin.x + px(region.x as f32 / page_width * logical_width),
-            image_bounds.origin.y + px(region.y as f32 / page_height * logical_height),
+            image_bounds.origin.x + px((f64::from(region.x) / page_width * logical_width) as f32),
+            image_bounds.origin.y + px((f64::from(region.y) / page_height * logical_height) as f32),
         ),
         size(
-            px(region.width as f32 / page_width * logical_width),
-            px(region.height as f32 / page_height * logical_height),
+            px((f64::from(region.width) / page_width * logical_width) as f32),
+            px((f64::from(region.height) / page_height * logical_height) as f32),
         ),
     )
 }
@@ -2540,7 +2542,12 @@ impl DocumentView {
                     let queue_wait = enqueued_at.elapsed();
                     let execution_started = Instant::now();
                     worker_renderer
-                        .render_motion_page(&worker_page, request, reservation, &mut presentation)
+                        .render_motion_page(
+                            &worker_page,
+                            request,
+                            reservation,
+                            &mut presentation,
+                        )
                         .map(|outcome| {
                             (
                                 presentation,
@@ -5157,6 +5164,46 @@ mod tests {
             continuity_render_key(small),
             small,
             "continuity rendering must never upscale beyond the exact display key"
+        );
+    }
+
+    #[test]
+    fn viewport_crop_keeps_device_density_above_the_raster_dimension_limit() {
+        let key = RenderKey {
+            physical_width: 40_000,
+            physical_height: 20_000,
+            ..render_key()
+        };
+        let image = Bounds::new(point(px(0.0), px(0.0)), size(px(20_000.0), px(10_000.0)));
+        let viewport = Bounds::new(
+            point(px(10_000.0), px(5_000.0)),
+            size(px(1_000.0), px(800.0)),
+        );
+        let region = visible_gpu_region(key, image, viewport).expect("visible virtual crop");
+        assert_eq!(
+            region,
+            GpuPageRegion {
+                x: 20_000,
+                y: 10_000,
+                width: 2_000,
+                height: 1_600,
+            }
+        );
+        assert_eq!(
+            physical_gpu_viewport_size(key, image, viewport),
+            Some([2_000, 1_600])
+        );
+        assert_eq!(gpu_surface_bounds(key, image, region), viewport);
+
+        let capped = RenderKey {
+            physical_width: 8_192,
+            physical_height: 4_096,
+            ..key
+        };
+        assert_eq!(
+            physical_gpu_viewport_size(capped, image, viewport),
+            Some([410, 328]),
+            "the former raster-sized page space undersampled the visible viewport"
         );
     }
 

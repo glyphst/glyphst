@@ -206,6 +206,11 @@ impl DocumentView {
             .pdf_render_engine;
         let native_pdf =
             self.format == DocumentFormat::Pdf && pdf_render_engine.uses_native_reader();
+        let native_key = if native_pdf {
+            self.native_gpu_render_key(page_idx, image_bounds, scale_factor)
+        } else {
+            key
+        };
         let strict_native_pdf =
             self.format == DocumentFormat::Pdf && pdf_render_engine.is_strict_native();
         if strict_native_pdf {
@@ -234,7 +239,7 @@ impl DocumentView {
         self.viewport_render_debug.clear();
         let adjacent_gpu_page = self.prune_native_gpu_pages(&[page_idx], cx);
         let gpu_texture = self.native_gpu_texture(
-            key,
+            native_key,
             image_bounds,
             bounds,
             GpuSurfaceIntent::Visible,
@@ -246,7 +251,8 @@ impl DocumentView {
             let adjacent_bounds =
                 self.presentation_image_bounds_for_page(adjacent_page, bounds, adjacent_scale);
             let adjacent_bounds = Self::pixel_aligned_image_bounds(adjacent_bounds, scale_factor);
-            let adjacent_key = self.render_key(adjacent_page, adjacent_bounds, scale_factor);
+            let adjacent_key =
+                self.native_gpu_render_key(adjacent_page, adjacent_bounds, scale_factor);
             self.warm_native_gpu_surface(
                 adjacent_key,
                 adjacent_bounds,
@@ -266,7 +272,7 @@ impl DocumentView {
         self.viewport_render_debug.insert(
             page_idx,
             ViewportPageRenderDebug {
-                requested: key,
+                requested: native_key,
                 displayed,
             },
         );
@@ -423,8 +429,13 @@ impl DocumentView {
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         for (page_idx, image_bounds, key) in visible_page_renders {
+            let native_key = if native_pdf {
+                self.native_gpu_render_key(page_idx, image_bounds, scale_factor)
+            } else {
+                key
+            };
             let gpu_texture = self.native_gpu_texture(
-                key,
+                native_key,
                 image_bounds,
                 bounds,
                 GpuSurfaceIntent::Visible,
@@ -446,7 +457,7 @@ impl DocumentView {
             self.viewport_render_debug.insert(
                 page_idx,
                 ViewportPageRenderDebug {
-                    requested: key,
+                    requested: native_key,
                     displayed: fallback_key,
                 },
             );
@@ -464,7 +475,8 @@ impl DocumentView {
             });
         }
         if let Some((key, image_bounds, forward)) = adjacent_gpu_render {
-            self.warm_native_gpu_surface(key, image_bounds, bounds, forward, window, cx);
+            let native_key = self.native_gpu_render_key(key.page_idx, image_bounds, scale_factor);
+            self.warm_native_gpu_surface(native_key, image_bounds, bounds, forward, window, cx);
         }
         // Desired keys were protected before resolution so a final render can
         // land safely. Add the actual fallback keys as well so cache pressure
