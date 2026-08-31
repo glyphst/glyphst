@@ -11,8 +11,6 @@ const GPU_CONTINUITY_LONG_EDGE: u32 = 2_048;
 const GPU_TARGET_ALIGNMENT: u32 = 128;
 const GPU_MOTION_MIN_DENSITY_NUMERATOR: u64 = 9;
 const GPU_MOTION_MIN_DENSITY_DENOMINATOR: u64 = 10;
-const MAX_QUEUED_GPU_MOTION_RENDERS_PER_PAGE: usize = 2;
-const MAX_GPU_MOTION_RENDER_PIPELINE_DEPTH: usize = MAX_QUEUED_GPU_MOTION_RENDERS_PER_PAGE + 1;
 
 const GPU_MOTION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const GPU_SPECULATIVE_RESUME_DELAY: Duration = Duration::from_millis(400);
@@ -20,6 +18,28 @@ const GPU_FIRST_PAINT_GRACE: Duration = Duration::from_millis(50);
 
 fn same_patch_lod_request(existing: f32, required: f32) -> bool {
     existing.to_bits() == required.to_bits()
+}
+
+fn next_vector_lod_scale(available: f32, requested: f64) -> Option<f32> {
+    if !available.is_finite()
+        || available < 1.0
+        || !requested.is_finite()
+        || requested <= f64::from(available) * 1.000_001
+    {
+        return None;
+    }
+    // Reader zoom is capped independently, but the page-to-device transform
+    // also includes fit scale and display density. Refinement must therefore
+    // follow the measured device scale instead of clipping it to the camera
+    // zoom limit.
+    let requested = requested.min(f64::from(f32::MAX)) as f32;
+    let doubled = available * 2.0;
+    let next = if doubled.is_finite() {
+        doubled.min(requested)
+    } else {
+        requested
+    };
+    (next.is_finite() && next > available).then_some(next)
 }
 
 fn presented_refinement_page_count(
@@ -30,6 +50,13 @@ fn presented_refinement_page_count(
         .into_iter()
         .filter(|page| presented_pages.contains(page))
         .count()
+}
+
+fn replace_queued_motion<T>(queued: &mut VecDeque<T>, latest: T) -> usize {
+    let replaced = queued.len();
+    queued.clear();
+    queued.push_back(latest);
+    replaced
 }
 
 #[derive(Default)]
@@ -67,6 +94,9 @@ pub(super) struct GpuPdfState {
     terminal_pages: HashSet<u32>,
     patch_lod_generation: u64,
     patch_lod_tasks: HashMap<u32, PatchLodTask>,
+    vector_lod_generation: u64,
+    vector_lod_tasks: HashMap<u32, VectorLodTask>,
+    vector_lod_failures: HashMap<u32, VectorLodFailure>,
     surface_seed_generation: u64,
     surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
     motion_prewarm_generation: u64,
@@ -224,6 +254,18 @@ struct PatchLodTask {
     _task: Task<()>,
 }
 
+struct VectorLodTask {
+    generation: u64,
+    required_scale: f32,
+    cancellation: GpuCancellationToken,
+    _task: Task<()>,
+}
+
+struct VectorLodFailure {
+    required_scale: f32,
+    message: String,
+}
+
 struct SurfaceSeedTask {
     generation: u64,
     key: RenderKey,
@@ -363,6 +405,9 @@ impl GpuPdfState {
         self.terminal_pages.clear();
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
+        self.vector_lod_generation = 0;
+        self.vector_lod_tasks.clear();
+        self.vector_lod_failures.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
         self.motion_prewarm_generation = 0;
@@ -469,6 +514,9 @@ impl GpuPdfState {
         self.terminal_pages.clear();
         self.patch_lod_generation = 0;
         self.patch_lod_tasks.clear();
+        self.vector_lod_generation = 0;
+        self.vector_lod_tasks.clear();
+        self.vector_lod_failures.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
         self.motion_prewarm_generation = 0;
@@ -555,6 +603,11 @@ impl GpuPdfState {
         for task in self.patch_lod_tasks.values() {
             task.cancellation.cancel();
         }
+        for task in self.vector_lod_tasks.values() {
+            task.cancellation.cancel();
+        }
+        self.patch_lod_tasks.clear();
+        self.vector_lod_tasks.clear();
         self.render_generation = self.render_generation.wrapping_add(1).max(1);
         for task in self.surface_seed_tasks.values() {
             _ = task
@@ -719,6 +772,17 @@ impl GpuPdfState {
                 task.cancellation.cancel();
             }
         }
+        let stale_vector_lods = self
+            .vector_lod_tasks
+            .keys()
+            .filter(|page| coherent_pages.contains(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in stale_vector_lods {
+            if let Some(task) = self.vector_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
 
         let active = self
             .surface_seed_tasks
@@ -782,6 +846,7 @@ impl GpuPdfState {
             || self.destination_fallback.is_some()
             || self.reader_original_links.is_some()
             || !self.patch_lod_tasks.is_empty()
+            || !self.vector_lod_tasks.is_empty()
             || !self.surface_seed_tasks.is_empty()
             || self.motion_prewarm_task.is_some()
             || !self.motion_render_tasks.is_empty()
@@ -823,6 +888,17 @@ impl GpuPdfState {
             .collect::<Vec<_>>();
         for page in stale_patch_lods {
             if let Some(task) = self.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
+        let stale_vector_lods = self
+            .vector_lod_tasks
+            .keys()
+            .filter(|page| !visible.contains(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in stale_vector_lods {
+            if let Some(task) = self.vector_lod_tasks.remove(&page) {
                 task.cancellation.cancel();
             }
         }
@@ -869,6 +945,7 @@ impl GpuPdfState {
             self.application_fallbacks.remove(&page);
             self.link_mappings.remove(&page);
             self.surface_failures.remove(&page);
+            self.vector_lod_failures.remove(&page);
         }
 
         // Reserve capacity only for pages that must be painted now. Merely
@@ -900,6 +977,8 @@ impl GpuPdfState {
             .retain(|page, _| self.pages.contains_key(page));
         self.surface_failures
             .retain(|page, _| self.pages.contains_key(page));
+        self.vector_lod_failures
+            .retain(|page, _| self.pages.contains_key(page));
         let evicted_patch_lods = self
             .patch_lod_tasks
             .keys()
@@ -908,6 +987,17 @@ impl GpuPdfState {
             .collect::<Vec<_>>();
         for page in evicted_patch_lods {
             if let Some(task) = self.patch_lod_tasks.remove(&page) {
+                task.cancellation.cancel();
+            }
+        }
+        let evicted_vector_lods = self
+            .vector_lod_tasks
+            .keys()
+            .filter(|page| !self.pages.contains_key(page))
+            .copied()
+            .collect::<Vec<_>>();
+        for page in evicted_vector_lods {
+            if let Some(task) = self.vector_lod_tasks.remove(&page) {
                 task.cancellation.cancel();
             }
         }
@@ -945,6 +1035,7 @@ impl GpuPdfState {
             self.application_fallbacks.remove(&page);
             self.link_mappings.remove(&page);
             self.surface_failures.remove(&page);
+            self.vector_lod_failures.remove(&page);
         }
     }
 
@@ -2149,25 +2240,6 @@ impl DocumentView {
             })
             .copied()
             .collect::<Vec<_>>();
-        let pipeline_full = pages_requiring_targets.iter().any(|page| {
-            usize::from(self.gpu_pdf.motion_render_tasks.contains_key(page))
-                + self
-                    .gpu_pdf
-                    .motion_render_queued
-                    .get(page)
-                    .map_or(0, VecDeque::len)
-                >= MAX_GPU_MOTION_RENDER_PIPELINE_DEPTH
-        });
-        if pipeline_full {
-            self.gpu_pdf.surface_zoom_worker_holds =
-                self.gpu_pdf.surface_zoom_worker_holds.saturating_add(1);
-            self.gpu_pdf.surface_zoom_admission_holds =
-                self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
-            self.gpu_pdf.surface_zoom_gpu_holds =
-                self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
-            return false;
-        }
-
         let reservations_match = self.gpu_pdf.motion_target_reservations.len()
             == pages_requiring_targets.len()
             && pages_requiring_targets
@@ -2420,14 +2492,6 @@ impl DocumentView {
         request: GpuPaintRequest,
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
-        if self
-            .gpu_pdf
-            .motion_render_queued
-            .get(&page)
-            .is_some_and(|queued| queued.len() >= MAX_QUEUED_GPU_MOTION_RENDERS_PER_PAGE)
-        {
-            return Ok(false);
-        }
         let presentation = self
             .gpu_pdf
             .rendered
@@ -2457,7 +2521,15 @@ impl DocumentView {
         };
         if self.gpu_pdf.motion_render_tasks.contains_key(&page) {
             let queued = self.gpu_pdf.motion_render_queued.entry(page).or_default();
-            queued.push_back(queued_frame);
+            let replaced = replace_queued_motion(queued, queued_frame);
+            self.gpu_pdf.motion_reservations_released = self
+                .gpu_pdf
+                .motion_reservations_released
+                .saturating_add(replaced as u64);
+            self.gpu_pdf.motion_render_superseded = self
+                .gpu_pdf
+                .motion_render_superseded
+                .saturating_add(replaced as u64);
             self.gpu_pdf.motion_render_peak = self
                 .gpu_pdf
                 .motion_render_peak
@@ -2502,9 +2574,18 @@ impl DocumentView {
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    let queue_wait = enqueued_at.elapsed();
+                    let execution_started = Instant::now();
                     worker_renderer
                         .render_motion_page(&worker_page, request, reservation, &mut presentation)
-                        .map(|outcome| (presentation, outcome, enqueued_at.elapsed()))
+                        .map(|outcome| {
+                            (
+                                presentation,
+                                outcome,
+                                queue_wait,
+                                execution_started.elapsed(),
+                            )
+                        })
                         .map_err(|error| format!("{error:#}"))
                 })
                 .await;
@@ -2545,15 +2626,23 @@ impl DocumentView {
                     return;
                 }
                 match result {
-                    Ok((presentation, GpuPageRenderOutcome::Rendered {
-                        presented: Some(texture),
-                        stats,
-                    }, elapsed)) => {
+                    Ok((
+                        presentation,
+                        GpuPageRenderOutcome::Rendered {
+                            presented: Some(texture),
+                            stats,
+                        },
+                        queue_wait,
+                        execution,
+                    )) => {
+                        let elapsed = queue_wait.saturating_add(execution);
                         if elapsed >= Duration::from_millis(8) {
                             eprintln!(
-                                "slow detached native PDF zoom redraw on page {}: total {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, pool grew {}, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
+                                "slow detached native PDF zoom redraw on page {}: total {:.3} ms, worker queue {:.3} ms, execution {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, pool grew {}, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
                                 page + 1,
                                 elapsed.as_secs_f64() * 1_000.0,
+                                queue_wait.as_secs_f64() * 1_000.0,
+                                execution.as_secs_f64() * 1_000.0,
                                 stats.cpu_time.as_secs_f64() * 1_000.0,
                                 stats.command_encoding_time.as_secs_f64() * 1_000.0,
                                 stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
@@ -2607,12 +2696,17 @@ impl DocumentView {
                                 this.gpu_pdf.motion_render_superseded.saturating_add(1);
                         }
                     }
-                    Ok((_, GpuPageRenderOutcome::Superseded, _)) => {
+                    Ok((_, GpuPageRenderOutcome::Superseded, _, _)) => {
                         this.gpu_pdf.motion_render_superseded =
                             this.gpu_pdf.motion_render_superseded.saturating_add(1);
                     }
-                    Ok((_, GpuPageRenderOutcome::Rendered { presented: None, .. }, _))
-                    | Ok((_, GpuPageRenderOutcome::Deferred, _)) => {
+                    Ok((
+                        _,
+                        GpuPageRenderOutcome::Rendered { presented: None, .. },
+                        _,
+                        _,
+                    ))
+                    | Ok((_, GpuPageRenderOutcome::Deferred, _, _)) => {
                         this.gpu_pdf.surface_zoom_live_failures =
                             this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
                     }
@@ -3175,7 +3269,7 @@ impl DocumentView {
             }
         };
 
-        let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
+        let vector_lod_status = match renderer.vector_lod_status(&prepared, request) {
             Ok(status) => status,
             Err(error) => {
                 if intent == GpuSurfaceIntent::Visible {
@@ -3186,26 +3280,74 @@ impl DocumentView {
                 return self.present_selected_or_record_gap(page, image_bounds, selected_surface);
             }
         };
-        if patch_lod_status.ready {
-            if let Some(task) = self.gpu_pdf.patch_lod_tasks.remove(&page) {
+        if vector_lod_status.ready {
+            if let Some(task) = self.gpu_pdf.vector_lod_tasks.remove(&page) {
                 task.cancellation.cancel();
             }
-        } else if speculative {
-            // Surface warming consumes only already-prepared GPU resources.
-            // It must not create patch-LOD work that can contend with visible
-            // pages or prolong a speculative page's lifetime.
-            return None;
+            self.gpu_pdf.vector_lod_failures.remove(&page);
         } else {
-            self.start_native_gpu_patch_lod_prepare(
-                page,
-                Arc::clone(&prepared),
-                Arc::clone(&renderer),
-                request,
-                patch_lod_status.required_scale,
-                cx,
-            );
+            if speculative {
+                // Speculative work consumes only existing retained resources.
+                return None;
+            }
             if settled {
+                if let Some(required_scale) = next_vector_lod_scale(
+                    vector_lod_status.available_scale,
+                    vector_lod_status.requested_scale,
+                ) {
+                    self.start_native_gpu_vector_lod_prepare(
+                        page,
+                        Arc::clone(&prepared),
+                        Arc::clone(&renderer),
+                        required_scale,
+                        cx,
+                    );
+                }
                 return self.present_selected_or_record_gap(page, image_bounds, selected_surface);
+            }
+        }
+
+        if vector_lod_status.ready {
+            let patch_lod_status = match renderer.patch_lod_status(&prepared, request) {
+                Ok(status) => status,
+                Err(error) => {
+                    if intent == GpuSurfaceIntent::Visible {
+                        self.gpu_pdf
+                            .surface_failures
+                            .insert(page, format!("{error:#}"));
+                    }
+                    return self.present_selected_or_record_gap(
+                        page,
+                        image_bounds,
+                        selected_surface,
+                    );
+                }
+            };
+            if patch_lod_status.ready {
+                if let Some(task) = self.gpu_pdf.patch_lod_tasks.remove(&page) {
+                    task.cancellation.cancel();
+                }
+            } else if speculative {
+                // Surface warming consumes only already-prepared GPU resources.
+                // It must not create patch-LOD work that can contend with visible
+                // pages or prolong a speculative page's lifetime.
+                return None;
+            } else {
+                self.start_native_gpu_patch_lod_prepare(
+                    page,
+                    Arc::clone(&prepared),
+                    Arc::clone(&renderer),
+                    request,
+                    patch_lod_status.required_scale,
+                    cx,
+                );
+                if settled {
+                    return self.present_selected_or_record_gap(
+                        page,
+                        image_bounds,
+                        selected_surface,
+                    );
+                }
             }
         }
 
@@ -3731,6 +3873,7 @@ impl DocumentView {
             || self.gpu_pdf.queued_required_preparations() != 0
             || self.gpu_pdf.active_speculative_preparations() != 0
             || !self.gpu_pdf.patch_lod_tasks.is_empty()
+            || !self.gpu_pdf.vector_lod_tasks.is_empty()
         {
             return;
         }
@@ -3884,6 +4027,7 @@ impl DocumentView {
             || !self.gpu_pdf.motion_render_queued.is_empty()
             || self.gpu_pdf.motion_prewarm_task.is_some()
             || !self.gpu_pdf.surface_seed_tasks.is_empty()
+            || !self.gpu_pdf.vector_lod_tasks.is_empty()
         {
             return;
         }
@@ -4403,6 +4547,133 @@ impl DocumentView {
             },
         );
         self.gpu_pdf.surface_render_started = self.gpu_pdf.surface_render_started.saturating_add(1);
+    }
+
+    fn start_native_gpu_vector_lod_prepare(
+        &mut self,
+        page: u32,
+        prepared: Arc<PreparedGpuPage>,
+        renderer: Arc<GpuPdfRenderer>,
+        required_scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .gpu_pdf
+            .vector_lod_tasks
+            .get(&page)
+            .is_some_and(|task| same_patch_lod_request(task.required_scale, required_scale))
+            || self
+                .gpu_pdf
+                .vector_lod_failures
+                .get(&page)
+                .is_some_and(|failure| {
+                    same_patch_lod_request(failure.required_scale, required_scale)
+                })
+        {
+            return;
+        }
+        if let Some(existing) = self.gpu_pdf.vector_lod_tasks.remove(&page) {
+            existing.cancellation.cancel();
+        }
+        self.gpu_pdf.vector_lod_failures.remove(&page);
+        self.gpu_pdf.surface_render_pending.remove(&page);
+        if let Some(active) = self.gpu_pdf.surface_seed_tasks.get_mut(&page)
+            && !active.superseded
+        {
+            self.gpu_pdf.render_generation = self.gpu_pdf.render_generation.wrapping_add(1).max(1);
+            if active
+                .renderer
+                .supersede_page_render(&active.prepared, self.gpu_pdf.render_generation)
+                .is_ok()
+            {
+                active.superseded = true;
+            }
+        }
+        let cancellation = GpuCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let worker_page = Arc::clone(&prepared);
+        let worker_renderer = Arc::clone(&renderer);
+        let document_generation = self.gpu_pdf.generation;
+        self.gpu_pdf.vector_lod_generation =
+            self.gpu_pdf.vector_lod_generation.wrapping_add(1).max(1);
+        let generation = self.gpu_pdf.vector_lod_generation;
+        let token = renderer.token();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    worker_renderer
+                        .prepare_vector_lod(&worker_page, required_scale, &worker_cancellation)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            let update_result = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || !matches!(
+                        this.gpu_pdf.vector_lod_tasks.get(&page),
+                        Some(task) if task.generation == generation
+                    )
+                    || this
+                        .gpu_pdf
+                        .renderer
+                        .as_ref()
+                        .is_none_or(|renderer| renderer.token() != token)
+                    || !matches!(
+                        this.gpu_pdf.pages.get(&page),
+                        Some(GpuPageState::Ready(current)) if Arc::ptr_eq(current, &prepared)
+                    )
+                {
+                    return;
+                }
+                this.gpu_pdf.vector_lod_tasks.remove(&page);
+                match result {
+                    Ok(refined) => {
+                        if let Some(task) = this.gpu_pdf.patch_lod_tasks.remove(&page) {
+                            task.cancellation.cancel();
+                        }
+                        this.gpu_pdf
+                            .pages
+                            .insert(page, GpuPageState::Ready(refined));
+                        this.gpu_pdf.vector_lod_failures.remove(&page);
+                        this.gpu_pdf.surface_failures.remove(&page);
+                        if let Some(rendered) = this.gpu_pdf.rendered.get_mut(&page) {
+                            rendered.motion_prewarmed = false;
+                        }
+                        this.gpu_pdf
+                            .prune_prepared_resource_cache(&this.gpu_pdf.visible_pages.clone());
+                    }
+                    Err(message) => {
+                        eprintln!(
+                            "failed to refine native PDF page {} vector LOD to {:.3}: {}",
+                            page + 1,
+                            required_scale,
+                            message
+                        );
+                        this.gpu_pdf.vector_lod_failures.insert(
+                            page,
+                            VectorLodFailure {
+                                required_scale,
+                                message,
+                            },
+                        );
+                    }
+                }
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to install native PDF vector LOD: {error:#}");
+            }
+        });
+        self.gpu_pdf.vector_lod_tasks.insert(
+            page,
+            VectorLodTask {
+                generation,
+                required_scale,
+                cancellation,
+                _task: task,
+            },
+        );
     }
 
     fn start_native_gpu_patch_lod_prepare(
@@ -5057,6 +5328,14 @@ impl DocumentView {
         }
     }
 
+    pub(super) fn native_gpu_vector_lod_failure(&self, page: usize) -> Option<&str> {
+        let page = u32::try_from(page).ok()?;
+        self.gpu_pdf
+            .vector_lod_failures
+            .get(&page)
+            .map(|failure| failure.message.as_str())
+    }
+
     pub(super) fn native_gpu_pending(&self, page: usize) -> bool {
         let Some(page) = u32::try_from(page).ok() else {
             return false;
@@ -5068,6 +5347,7 @@ impl DocumentView {
                 Some(GpuPageState::Preparing { .. })
             )
             || self.gpu_pdf.patch_lod_tasks.contains_key(&page)
+            || self.gpu_pdf.vector_lod_tasks.contains_key(&page)
             || self.gpu_pdf.surface_seed_tasks.contains_key(&page)
             || self
                 .gpu_pdf
@@ -5097,6 +5377,22 @@ mod tests {
             physical_width: 1_000,
             physical_height: 2_000,
         }
+    }
+
+    #[test]
+    fn vector_refinement_advances_in_bounded_stages_to_the_reader_limit() {
+        assert_eq!(next_vector_lod_scale(8.0, 11.264), Some(11.264));
+        assert_eq!(next_vector_lod_scale(8.0, 8_192.0), Some(16.0));
+        assert_eq!(next_vector_lod_scale(4_096.0, 8_192.0), Some(8_192.0));
+        assert_eq!(next_vector_lod_scale(8.0, 8.0), None);
+        assert_eq!(next_vector_lod_scale(8_192.0, 16_384.0), Some(16_384.0));
+    }
+
+    #[test]
+    fn motion_queue_keeps_only_the_latest_camera_request() {
+        let mut queued = VecDeque::from([1_u32, 2]);
+        assert_eq!(replace_queued_motion(&mut queued, 3), 2);
+        assert_eq!(queued, VecDeque::from([3]));
     }
 
     #[test]

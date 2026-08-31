@@ -23,7 +23,7 @@ pub const DEFAULT_UI_FONT_SIZE: f32 = 13.0;
 pub const DEFAULT_UI_FONT_WEIGHT: f32 = 400.0;
 
 const MIN_ZOOM_SETTING: f32 = 0.25;
-const MAX_ZOOM_SETTING: f32 = 8.0;
+const MAX_ZOOM_SETTING: f32 = 8_192.0;
 const MIN_ZOOM_STEP: f32 = 1.01;
 const MAX_ZOOM_STEP: f32 = 4.0;
 const MIN_UI_FONT_SIZE: f32 = 6.0;

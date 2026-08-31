@@ -1816,6 +1816,9 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "scheduled_refinement_work": gpu.scheduled_refinement_work,
             "refinement_work_budget": gpu.refinement_work_budget,
             "selected_vector_lod": gpu.selected_vector_lod,
+            "vector_lod_requested_scale": gpu.vector_lod_requested_scale,
+            "vector_lod_available_scale": gpu.vector_lod_available_scale,
+            "vector_lod_deferred": gpu.vector_lod_deferred,
             "frame_pool_reused": gpu.frame_pool_reused,
             "frame_pool_grew": gpu.frame_pool_grew,
             "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
@@ -1850,6 +1853,7 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "message": warning.message,
         })).collect::<Vec<_>>(),
         "gpu_failure": page.gpu_failure,
+        "gpu_refinement_failure": page.gpu_refinement_failure,
         "text": {
             "state": text_index_state_name(page.text_index_state),
             "glyphs": page.glyph_count,
@@ -2733,6 +2737,20 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
                 ),
                 FOREGROUND,
             ))
+            .child(reading(
+                "VECTOR LOD",
+                format!(
+                    "requested {} · available {} · {}",
+                    gpu.vector_lod_requested_scale,
+                    gpu.vector_lod_available_scale,
+                    if gpu.vector_lod_deferred {
+                        "background pending"
+                    } else {
+                        "exact"
+                    },
+                ),
+                if gpu.vector_lod_deferred { WARN } else { GOOD },
+            ))
             .when(gpu.patch_lod_required_scale != "0.000", |section| {
                 section.child(reading(
                     "PATCH LOD",
@@ -2841,6 +2859,9 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
     }
     if let Some(failure) = page.gpu_failure {
         section = section.child(reading("GPU ERROR", failure, BAD));
+    }
+    if let Some(failure) = page.gpu_refinement_failure {
+        section = section.child(reading("VECTOR REFINE", failure, WARN));
     }
 
     let text = match page.text_index_state {

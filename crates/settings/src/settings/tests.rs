@@ -52,6 +52,29 @@ theme-overrides {
 }
 
 #[test]
+fn default_zoom_accepts_the_extreme_vector_camera_range() {
+    let maximum = parse_settings(
+        r#"
+zoom {
+    default 8192
+}
+"#,
+    )
+    .expect("maximum zoom settings");
+    assert_eq!(maximum.behavior.default_zoom, 8_192.0);
+
+    let clamped = parse_settings(
+        r#"
+zoom {
+    default 65536
+}
+"#,
+    )
+    .expect("clamped zoom settings");
+    assert_eq!(clamped.behavior.default_zoom, 8_192.0);
+}
+
+#[test]
 fn parses_and_exports_epub_reading_settings() {
     let settings = parse_settings(
         r#"

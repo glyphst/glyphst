@@ -190,7 +190,7 @@ impl SettingsWindow {
             SettingField::number_input(
                 NumberFieldOptions {
                     min: 0.25,
-                    max: 8.0,
+                    max: 8_192.0,
                     step: 0.05,
                     decimal_places: Some(2),
                 },

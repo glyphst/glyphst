@@ -123,7 +123,9 @@ use smallvec::{SmallVec, smallvec};
 
 const INITIAL_SELECTION_TOLERANCE_PX: f32 = 24.0;
 const MIN_ZOOM: f32 = 0.25;
-const MAX_ZOOM: f32 = 8.0;
+// Match HEPR's exposed camera range. Native pages refine their retained vector
+// envelope on demand; camera scale is no longer a reason to route to MuPDF.
+const MAX_ZOOM: f32 = 8_192.0;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
 const SCROLL_LINE_STEP_PX: f32 = 120.0;
 const SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS: f32 = 3.0;
@@ -541,6 +543,9 @@ pub struct GpuPageRenderDebugSnapshot {
     pub patch_lod_required_scale: String,
     pub patch_lod_available_scale: String,
     pub patch_lod_deferred: bool,
+    pub vector_lod_requested_scale: String,
+    pub vector_lod_available_scale: String,
+    pub vector_lod_deferred: bool,
     pub reused_tiles: u64,
     pub rendered_tiles: u64,
     pub dirty_tiles: u64,
@@ -768,6 +773,8 @@ pub struct PageRenderDebugSnapshot {
     pub gpu_fallbacks: Vec<GpuFallbackDebugSnapshot>,
     pub gpu_warnings: Vec<GpuWarningDebugSnapshot>,
     pub gpu_failure: Option<String>,
+    /// Non-routing failure from a stricter high-zoom vector refinement.
+    pub gpu_refinement_failure: Option<String>,
     pub requested_raster: Option<RasterDebugSnapshot>,
     pub displayed_raster: Option<RasterDebugSnapshot>,
     pub cached_raster_bytes: u64,

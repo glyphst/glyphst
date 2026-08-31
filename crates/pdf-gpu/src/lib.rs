@@ -30,7 +30,7 @@ pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
     PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
     PreparationStats as GpuPreparationStats, PresentationQuality as GpuPresentationQuality,
-    RenderStats as GpuRenderStats,
+    RenderStats as GpuRenderStats, VectorLodStatus as GpuVectorLodStatus,
 };
 use gpui::{
     ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle,
@@ -1418,6 +1418,63 @@ impl GpuPdfRenderer {
             .map_err(render_error)
     }
 
+    /// Returns whether the retained vector error envelope is sufficient for
+    /// this presentation without allocating or recording GPU work.
+    pub fn vector_lod_status(
+        &self,
+        page: &PreparedGpuPage,
+        request: GpuPaintRequest,
+    ) -> Result<GpuVectorLodStatus> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        let (_, root_transform) = self.render_root_transform(page, request)?;
+        self.renderer
+            .vector_lod_status(&page.gpu, root_transform)
+            .map_err(render_error)
+    }
+
+    /// Builds a stricter complete retained page on a background worker.
+    /// The caller keeps presenting `page` and swaps in this result only after
+    /// successful completion, so resource pressure or cancellation cannot
+    /// invalidate coherent pixels already on screen.
+    pub fn prepare_vector_lod(
+        &self,
+        page: &PreparedGpuPage,
+        scale: f32,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<PreparedGpuPage>> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        let started = Instant::now();
+        let gpu = self
+            .renderer
+            .prepare_interactive_at_scale_with_cancellation(
+                page.compiled.scene(),
+                scale,
+                cancellation,
+            )
+            .map_err(|error| anyhow!(error).context("failed to prepare native PDF vector LOD"))?;
+        let mut timings = page.timings;
+        let elapsed = started.elapsed();
+        timings.gpu_prepare = elapsed;
+        timings.total = timings.total.saturating_add(elapsed);
+        Ok(Arc::new(PreparedGpuPage {
+            compiled: Arc::clone(&page.compiled),
+            gpu: Arc::new(gpu),
+            link_interactions: Arc::clone(&page.link_interactions),
+            warnings: Arc::clone(&page.warnings),
+            timings,
+        }))
+    }
+
     /// Invalidates older queued or currently encoding requests for `page`.
     pub fn supersede_page_render(&self, page: &PreparedGpuPage, generation: u64) -> Result<()> {
         if self.is_device_lost() {
@@ -1797,6 +1854,13 @@ impl GpuPdfRenderer {
         let Some(envelope_request) = scaled_motion_envelope_request(request) else {
             return Ok(None);
         };
+        if !self.vector_lod_status(page, envelope_request)?.ready {
+            // A speculative sharpness envelope must not trigger a semantic
+            // failure or a whole-page renderer switch. The ordinary page
+            // remains coherent while demand-driven refinement follows the
+            // actual settled camera scale.
+            return Ok(None);
+        }
         let envelope_region = envelope_request
             .visible_region
             .clamp(envelope_request.page_size)?;

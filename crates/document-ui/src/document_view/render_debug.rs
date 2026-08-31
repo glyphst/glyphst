@@ -237,6 +237,9 @@ impl DocumentView {
             patch_lod_required_scale: format!("{:.3}", stats.patch_lod_required_scale),
             patch_lod_available_scale: format!("{:.3}", stats.patch_lod_available_scale),
             patch_lod_deferred: stats.patch_lod_deferred,
+            vector_lod_requested_scale: format!("{:.3}", stats.vector_lod_requested_scale),
+            vector_lod_available_scale: format!("{:.3}", stats.vector_lod_available_scale),
+            vector_lod_deferred: stats.vector_lod_deferred,
             reused_tiles: stats.reused_tiles,
             rendered_tiles: stats.rendered_tiles,
             dirty_tiles: stats.dirty_tiles,
@@ -354,6 +357,9 @@ impl DocumentView {
             .map(gpu_warning_debug_snapshot)
             .collect::<Vec<_>>();
         let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
+        let gpu_refinement_failure = self
+            .native_gpu_vector_lod_failure(page_idx)
+            .map(str::to_owned);
         let backend = if gpu.is_some() {
             PageRenderBackendDebug::GlyphstGpu
         } else if strict_native && (!gpu_fallbacks.is_empty() || gpu_failure.is_some()) {
@@ -412,6 +418,7 @@ impl DocumentView {
             gpu_fallbacks,
             gpu_warnings,
             gpu_failure,
+            gpu_refinement_failure,
             requested_raster: requested.map(|key| self.raster_debug_snapshot(key)),
             displayed_raster: displayed.map(|key| self.raster_debug_snapshot(key)),
             cached_raster_bytes,
