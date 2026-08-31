@@ -224,6 +224,7 @@ impl DocumentView {
             });
             self.apply_zoom_anchor(zoom, anchor);
             changed_zoom = true;
+            self.record_native_gpu_zoom_step();
             if (self.target_zoom - self.zoom).abs() <= f32::EPSILON {
                 self.zoom_anchor = None;
             }
@@ -251,6 +252,13 @@ impl DocumentView {
             self.mark_native_gpu_zoom_motion(cx);
         } else if changed_x || changed_y {
             self.mark_native_gpu_motion(cx);
+        }
+        if hold_zoom_for_gpu {
+            // Completion of an external queue submission updates the target
+            // lease without mutating application state. Keep this view dirty
+            // so the next display tick retries admission instead of relying
+            // on an unrelated UI notification to discover the free target.
+            cx.notify();
         }
         if changed_zoom || changed_x || changed_y || hold_zoom_for_gpu {
             window.request_animation_frame();

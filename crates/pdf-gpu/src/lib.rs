@@ -32,7 +32,10 @@ pub use glyphst_pdf_render_wgpu::{
     PreparationStats as GpuPreparationStats, PresentationQuality as GpuPresentationQuality,
     RenderStats as GpuRenderStats,
 };
-use gpui::{ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle};
+use gpui::{
+    ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle,
+    ExternalTextureWriteReservation,
+};
 use gpui_wgpu::{WgpuExternalContext, wgpu};
 use std::{
     collections::HashMap,
@@ -40,16 +43,14 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{SyncSender, sync_channel},
     },
-    thread,
     time::{Duration, Instant},
 };
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
-const MAX_PRESENTATION_SURFACES: usize = 5;
-const MOTION_TARGET_COUNT: usize = 2;
+const MAX_PRESENTATION_SURFACES: usize = 7;
+const MOTION_TARGET_COUNT: usize = 4;
 const MOTION_PREWARM_SCALE: u32 = 2;
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
@@ -1218,39 +1219,6 @@ pub struct GpuPdfRenderer {
     output_format: wgpu::TextureFormat,
     motion_submitted: Arc<AtomicU64>,
     motion_completed: Arc<AtomicU64>,
-    motion_poller: MotionPoller,
-}
-
-struct MotionPoller {
-    wake: SyncSender<()>,
-}
-
-impl MotionPoller {
-    fn new(device: Arc<wgpu::Device>) -> Result<Self> {
-        let (wake, requests) = sync_channel(1);
-        thread::Builder::new()
-            .name("glyphst-pdf-motion-poll".into())
-            .spawn(move || {
-                while requests.recv().is_ok() {
-                    // Wait only for work submitted before this poll. Running
-                    // on this dedicated worker keeps Vulkan completion and
-                    // resource-retirement bookkeeping out of GPUI's draw.
-                    // Give that draw a brief head start so the compositor can
-                    // enqueue its sample of this texture before a blocking
-                    // backend poll claims the shared device.
-                    thread::sleep(Duration::from_micros(500));
-                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-                }
-            })
-            .context("failed to start native PDF GPU completion worker")?;
-        Ok(Self { wake })
-    }
-
-    fn request_poll(&self) {
-        // One queued wake is sufficient: a wait drains all work submitted
-        // before it began, and a submission racing that wait queues the next.
-        let _ = self.wake.try_send(());
-    }
 }
 
 impl fmt::Debug for GpuPdfRenderer {
@@ -1289,14 +1257,12 @@ impl GpuPdfRenderer {
             config,
         )
         .map_err(renderer_init_error)?;
-        let motion_poller = MotionPoller::new(Arc::clone(context.device()))?;
         Ok(Self {
             context,
             renderer: Arc::new(renderer),
             output_format,
             motion_submitted: Arc::new(AtomicU64::new(0)),
             motion_completed: Arc::new(AtomicU64::new(0)),
-            motion_poller,
         })
     }
 
@@ -1312,16 +1278,54 @@ impl GpuPdfRenderer {
         self.context.device().limits().max_texture_dimension_2d
     }
 
-    /// Whether every sharp in-motion frame submitted so far has completed on
-    /// the GPU. Readers use this as admission control instead of allowing
-    /// animated zoom steps to build an unbounded queue of obsolete frames.
-    pub fn motion_frame_ready(&self) -> bool {
-        // GPUI's compositor submissions drive WGPU completion callbacks. Do
-        // not poll the shared device from the UI draw path: even non-waiting
-        // Vulkan polling may occasionally process enough driver bookkeeping
-        // to turn one zoom frame into a visible hitch.
-        self.motion_completed.load(Ordering::Acquire)
-            >= self.motion_submitted.load(Ordering::Acquire)
+    /// Reserves one preallocated, non-presented target for the next sharp motion frame.
+    ///
+    /// `Ok(None)` is bounded backpressure: every motion target is still
+    /// written or sampled. The caller should keep presenting its previous
+    /// coherent texture and retry on the next animation frame.
+    pub fn reserve_motion_target(
+        &self,
+        presentation: &GpuPagePresentation,
+    ) -> Result<Option<GpuMotionTargetReservation>> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if presentation
+            .token
+            .is_some_and(|token| token != self.token())
+        {
+            bail!("the PDF presentation belongs to a stale GPU generation");
+        }
+        let Some(size) = presentation.motion_target_size else {
+            return Ok(None);
+        };
+        let completed_write = self.motion_completed.load(Ordering::Acquire);
+        Ok(presentation.reserve_existing_motion_target(size, completed_write, self.token()))
+    }
+
+    fn mark_surface_write_submitted(&self, selection: &mut SurfaceSelection) {
+        let reservation = selection
+            .write_reservation
+            .take()
+            .expect("a rendered external texture owns its write reservation");
+        let serial = self
+            .motion_submitted
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        selection
+            .surface
+            .last_write_submission
+            .store(serial, Ordering::Release);
+        let completed = Arc::clone(&self.motion_completed);
+        self.context.queue().on_submitted_work_done(move || {
+            completed.fetch_max(serial, Ordering::Release);
+        });
+        // The write is already ordered on the shared queue. Releasing the
+        // exclusive lease now allows a later GPUI scene sample to enqueue
+        // behind it, while the per-surface serial still prevents another
+        // writer from recycling this target before completion.
+        reservation.mark_submitted();
+        self.context.request_completion_poll();
     }
 
     /// Complete whole-page routing. No GPU resource is returned when either
@@ -1628,7 +1632,7 @@ impl GpuPdfRenderer {
                 presentation.region_mode = region_mode;
                 return Ok(GpuPageRenderOutcome::Deferred);
             }
-            let selection = presentation.select_target(
+            let mut selection = presentation.select_target(
                 target_size,
                 work.kind == GpuIncrementalWorkKind::Direct,
                 |size| self.create_surface(size),
@@ -1643,6 +1647,7 @@ impl GpuPdfRenderer {
                 &target.view,
             ) {
                 Ok(stats) => {
+                    self.mark_surface_write_submitted(&mut selection);
                     presentation.region_mode = region_mode;
                     let presented = presentation.commit(
                         selection,
@@ -1652,7 +1657,7 @@ impl GpuPdfRenderer {
                         stats.presentation_quality,
                     );
                     if let Some(size) = motion_target_size {
-                        // Allocate both viewport-sized ping-pong destinations
+                        // Allocate the viewport-sized motion target ring
                         // before interaction. A motion worker must never create
                         // a target or overwrite the coherent surface currently
                         // sampled by GPUI.
@@ -1677,13 +1682,14 @@ impl GpuPdfRenderer {
     /// Redraw one in-motion page directly from retained GPU resources.
     ///
     /// This path deliberately discards incremental presentation pixels and
-    /// writes only to an existing non-presented ping-pong target. Missing
+    /// writes only to an existing non-presented motion target. Missing
     /// preallocation is an error: no texture allocation is permitted on the
     /// gesture path.
     pub fn render_motion_page(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
+        reservation: GpuMotionTargetReservation,
         presentation: &mut GpuPagePresentation,
     ) -> Result<GpuPageRenderOutcome> {
         if self.is_device_lost() {
@@ -1702,9 +1708,23 @@ impl GpuPdfRenderer {
                 self.context.device().limits().max_texture_dimension_2d,
             )?
             .ok_or_else(|| anyhow!("native PDF motion target was not preallocated"))?;
+        if reservation.token != self.token() || reservation.size != target_size {
+            bail!("native PDF motion target reservation is stale or has the wrong extent");
+        }
+        let SurfaceSlot::Existing(reserved_index) = reservation.selection.slot else {
+            bail!("native PDF motion target reservation does not reference an existing slot");
+        };
+        if !presentation
+            .surfaces
+            .get(reserved_index)
+            .is_some_and(|surface| Arc::ptr_eq(surface, &reservation.selection.surface))
+        {
+            bail!("native PDF motion target reservation no longer belongs to this presentation");
+        }
         let surface_region = request.visible_region.clamp(request.page_size)?;
+        let render_size = surface_region.size();
         let (_, engine_request) =
-            self.engine_render_request_for_region(page, request, surface_region, target_size)?;
+            self.engine_render_request_for_region(page, request, surface_region, render_size)?;
         let [width, height] = target_size;
         if width == 0 || height == 0 {
             bail!("native PDF render target must be non-empty");
@@ -1722,17 +1742,14 @@ impl GpuPdfRenderer {
         next.incremental.clear();
         next.current = next.presented;
         next.current_region = next.presented_region;
-        let selection = next
-            .select_existing_motion_target(target_size)
-            .ok_or_else(|| {
-                anyhow!("native PDF motion target {width}x{height} is not safely preallocated")
-            })?;
+        let mut selection = reservation.selection;
         let target = selection.surface();
         match self
             .renderer
             .render(&page.gpu, engine_request, &target.view)
         {
             Ok(stats) => {
+                self.mark_surface_write_submitted(&mut selection);
                 let presented = next.commit(
                     selection,
                     surface_region,
@@ -1741,16 +1758,6 @@ impl GpuPdfRenderer {
                     stats.presentation_quality,
                 );
                 *presentation = next;
-
-                let serial = self
-                    .motion_submitted
-                    .fetch_add(1, Ordering::AcqRel)
-                    .wrapping_add(1);
-                let completed = Arc::clone(&self.motion_completed);
-                self.context.queue().on_submitted_work_done(move || {
-                    completed.fetch_max(serial, Ordering::Release);
-                });
-                self.motion_poller.request_poll();
                 Ok(GpuPageRenderOutcome::Rendered { presented, stats })
             }
             Err(RenderError::StaleRenderGeneration { .. }) => Ok(GpuPageRenderOutcome::Superseded),
@@ -1758,16 +1765,19 @@ impl GpuPdfRenderer {
         }
     }
 
-    /// Re-establishes the viewport-sized direct-render working set after
-    /// lower-priority page work used the renderer's shared transient pool.
-    /// The spare presentation texture is warmed without changing which
-    /// coherent surface the reader currently displays.
+    /// Builds a 2x-density motion envelope without changing the coherent
+    /// surface currently displayed by the reader.
+    ///
+    /// The envelope is one large sampled texture, but it is rendered through
+    /// viewport-sized tiles so transparency/MSAA transients remain bounded.
+    /// During zoom the compositor may crop and downsample it without issuing a
+    /// page render or magnifying stale pixels.
     pub fn prewarm_motion_page(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
         presentation: &GpuPagePresentation,
-    ) -> Result<bool> {
+    ) -> Result<Option<GpuPagePresentation>> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
         }
@@ -1782,51 +1792,72 @@ impl GpuPdfRenderer {
             self.context.device().limits().max_texture_dimension_2d,
         )?
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let target = presentation
-            .select_existing_motion_target(target_size)
-            .map(|selection| selection.surface)
-            // A visible-sized presentation can legitimately occupy every
-            // matching ring slot. Use an unretained scratch target in that
-            // case: allocation happens on this idle worker, and WGPU keeps
-            // the submitted resource alive until the prewarm completes.
-            .unwrap_or_else(|| self.create_surface(target_size));
-        let surface_region = request.visible_region.clamp(request.page_size)?;
-        let mut request = request;
-        request.settled = false;
-        if let Some(envelope) = scaled_motion_prewarm_request(request) {
-            let envelope_region = envelope.visible_region.clamp(envelope.page_size)?;
-            let (_, envelope_request) = self.engine_render_request_for_region(
-                page,
-                envelope,
-                envelope_region,
-                target_size,
-            )?;
-            match self
-                .renderer
-                .render(&page.gpu, envelope_request, target.view.as_ref())
-            {
-                Ok(_) => {}
-                Err(RenderError::StaleRenderGeneration { .. }) => return Ok(false),
-                // The envelope is an optional allocation/LOD warmup rather
-                // than visible output. A page already near an explicit scale
-                // or transient limit still receives its exact current-scale
-                // prewarm below.
-                Err(RenderError::VectorScaleLimit { .. } | RenderError::Limit { .. }) => {}
-                Err(error) => return Err(render_error(error)),
+        let Some(envelope_request) = scaled_motion_envelope_request(request) else {
+            return Ok(None);
+        };
+        let envelope_region = envelope_request
+            .visible_region
+            .clamp(envelope_request.page_size)?;
+        let envelope_size = envelope_region.size();
+        let dimension_limit = self.context.device().limits().max_texture_dimension_2d;
+        if envelope_size[0] > dimension_limit || envelope_size[1] > dimension_limit {
+            return Ok(None);
+        }
+
+        let surface = self.create_surface(envelope_size);
+        let write_reservation = surface
+            .handle
+            .try_reserve_write()
+            .ok_or_else(|| anyhow!("new native PDF motion envelope is not writable"))?;
+        let mut selection = SurfaceSelection {
+            slot: SurfaceSlot::Insert,
+            surface: Arc::clone(&surface),
+            write_reservation: Some(write_reservation),
+        };
+        let mut y = 0;
+        while y < envelope_size[1] {
+            let tile_height = target_size[1].min(envelope_size[1] - y);
+            let mut x = 0;
+            while x < envelope_size[0] {
+                let tile_width = target_size[0].min(envelope_size[0] - x);
+                let tile_region = GpuPageRegion {
+                    x: envelope_region.x.saturating_add(x),
+                    y: envelope_region.y.saturating_add(y),
+                    width: tile_width,
+                    height: tile_height,
+                };
+                let mut tile_request = envelope_request;
+                tile_request.visible_region = tile_region;
+                let (_, engine_request) = self.engine_render_request_for_region(
+                    page,
+                    tile_request,
+                    tile_region,
+                    tile_region.size(),
+                )?;
+                match self.renderer.render_into_region(
+                    &page.gpu,
+                    engine_request,
+                    surface.view.as_ref(),
+                    [x, y],
+                ) {
+                    Ok(_) => {}
+                    Err(RenderError::StaleRenderGeneration { .. }) => return Ok(None),
+                    Err(error) => return Err(render_error(error)),
+                }
+                x = x.saturating_add(tile_width);
             }
+            y = y.saturating_add(tile_height);
         }
-        let (_, engine_request) =
-            self.engine_render_request_for_region(page, request, surface_region, target_size)?;
-        match self
-            .renderer
-            .render(&page.gpu, engine_request, target.view.as_ref())
-        {
-            Ok(_) => Ok(true),
-            Err(RenderError::StaleRenderGeneration { .. }) => Ok(false),
-            Err(error) => Err(render_error(error)),
-        }
+        self.mark_surface_write_submitted(&mut selection);
+        let mut next = presentation.clone();
+        next.motion_envelope = Some(GpuMotionEnvelope {
+            surface,
+            page_size: envelope_request.page_size,
+            region: envelope_region,
+        });
+        Ok(Some(next))
     }
 
     fn create_surface(&self, size: [u32; 2]) -> Arc<GpuPageSurface> {
@@ -1857,29 +1888,28 @@ impl GpuPdfRenderer {
             handle,
             size,
             token: self.token(),
+            last_write_submission: AtomicU64::new(0),
         })
     }
 }
 
-fn scaled_motion_prewarm_request(mut request: GpuPaintRequest) -> Option<GpuPaintRequest> {
+fn scaled_motion_envelope_request(mut request: GpuPaintRequest) -> Option<GpuPaintRequest> {
     let visible = request.visible_region.clamp(request.page_size).ok()?;
     let page_size = request
         .page_size
         .map(|extent| extent.saturating_mul(MOTION_PREWARM_SCALE));
-    let center_scaled = |origin: u32, extent: u32| {
-        origin
-            .checked_mul(MOTION_PREWARM_SCALE)
-            .and_then(|value| value.checked_add(extent / 2))
-    };
     request.page_size = page_size;
     request.visible_region = GpuPageRegion {
-        x: center_scaled(visible.x, visible.width)?,
-        y: center_scaled(visible.y, visible.height)?,
-        width: visible.width,
-        height: visible.height,
+        x: visible.x.checked_mul(MOTION_PREWARM_SCALE)?,
+        y: visible.y.checked_mul(MOTION_PREWARM_SCALE)?,
+        width: visible.width.checked_mul(MOTION_PREWARM_SCALE)?,
+        height: visible.height.checked_mul(MOTION_PREWARM_SCALE)?,
     }
     .clamp(page_size)
     .ok()?;
+    request.target_capacity = None;
+    request.motion_target_capacity = None;
+    request.settled = true;
     Some(request)
 }
 
@@ -1979,6 +2009,40 @@ impl GpuPageRegion {
             height: y1 - y0,
         })
     }
+}
+
+fn region_contains(outer: GpuPageRegion, inner: GpuPageRegion) -> bool {
+    outer.x <= inner.x
+        && outer.y <= inner.y
+        && outer.right() >= inner.right()
+        && outer.bottom() >= inner.bottom()
+}
+
+fn map_region_between_page_sizes(
+    region: GpuPageRegion,
+    from: [u32; 2],
+    to: [u32; 2],
+) -> Option<GpuPageRegion> {
+    if from.contains(&0) || to.contains(&0) {
+        return None;
+    }
+    let floor = |value: u32, numerator: u32, denominator: u32| {
+        u32::try_from(u64::from(value) * u64::from(numerator) / u64::from(denominator)).ok()
+    };
+    let ceil = |value: u32, numerator: u32, denominator: u32| {
+        let product = u64::from(value) * u64::from(numerator);
+        u32::try_from(product.div_ceil(u64::from(denominator))).ok()
+    };
+    let x0 = floor(region.x, to[0], from[0])?;
+    let y0 = floor(region.y, to[1], from[1])?;
+    let x1 = ceil(region.right(), to[0], from[0])?.min(to[0]);
+    let y1 = ceil(region.bottom(), to[1], from[1])?.min(to[1]);
+    (x1 > x0 && y1 > y0).then_some(GpuPageRegion {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
 }
 
 /// Parameters for one visible-region render.
@@ -2099,6 +2163,7 @@ struct GpuPageSurface {
     handle: ExternalTextureHandle,
     size: [u32; 2],
     token: ExternalGpuDeviceToken,
+    last_write_submission: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2111,6 +2176,14 @@ enum SurfaceSlot {
 struct SurfaceSelection {
     slot: SurfaceSlot,
     surface: Arc<GpuPageSurface>,
+    write_reservation: Option<ExternalTextureWriteReservation>,
+}
+
+#[derive(Clone)]
+struct GpuMotionEnvelope {
+    surface: Arc<GpuPageSurface>,
+    page_size: [u32; 2],
+    region: GpuPageRegion,
 }
 
 impl SurfaceSelection {
@@ -2119,12 +2192,34 @@ impl SurfaceSelection {
     }
 }
 
+/// One safely reserved, preallocated destination for a retained motion redraw.
+///
+/// The reservation is tied to the presentation clone that supplied the slot.
+/// Dropping it before rendering releases the external-texture write lease.
+pub struct GpuMotionTargetReservation {
+    selection: SurfaceSelection,
+    size: [u32; 2],
+    token: ExternalGpuDeviceToken,
+}
+
+impl fmt::Debug for GpuMotionTargetReservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuMotionTargetReservation")
+            .field("slot", &self.selection.slot)
+            .field("size", &self.size)
+            .field("token", &self.token)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Bounded same-device presentation state for one prepared page.
 ///
 /// Working state may advance through incomplete settled tiles while the last
-/// coherent surface remains immutable and displayable. At most five surfaces
-/// cover the coherent output, incremental sources, and two motion ping-pong
-/// targets.
+/// coherent surface remains immutable and displayable. At most seven surfaces
+/// cover the coherent output, incremental sources, and a four-target motion
+/// ring. The extra retiring target prevents compositor completion jitter from
+/// stalling a 120 Hz gesture.
 #[derive(Clone, Default)]
 pub struct GpuPagePresentation {
     token: Option<ExternalGpuDeviceToken>,
@@ -2139,6 +2234,7 @@ pub struct GpuPagePresentation {
     presented_quality: Option<GpuPresentationQuality>,
     presented_incremental: IncrementalRenderState,
     motion_target_size: Option<[u32; 2]>,
+    motion_envelope: Option<GpuMotionEnvelope>,
     region_mode: SurfaceRegionMode,
     incremental: IncrementalRenderState,
 }
@@ -2156,6 +2252,13 @@ impl fmt::Debug for GpuPagePresentation {
             .field("presented_region", &self.presented_region)
             .field("presented_quality", &self.presented_quality)
             .field("motion_target_size", &self.motion_target_size)
+            .field(
+                "motion_envelope",
+                &self
+                    .motion_envelope
+                    .as_ref()
+                    .map(|envelope| (envelope.page_size, envelope.region)),
+            )
             .field("region_mode", &self.region_mode)
             .field("refinement_pending", &self.incremental.refinement_pending())
             .finish()
@@ -2266,13 +2369,29 @@ impl GpuPagePresentation {
             .count()
     }
 
-    fn select_existing_motion_target(&self, size: [u32; 2]) -> Option<SurfaceSelection> {
-        let index = self
-            .unprotected_surface_indices()
-            .find(|index| self.surfaces[*index].size == size)?;
-        Some(SurfaceSelection {
-            slot: SurfaceSlot::Existing(index),
-            surface: Arc::clone(&self.surfaces[index]),
+    fn reserve_existing_motion_target(
+        &self,
+        size: [u32; 2],
+        completed_write: u64,
+        token: ExternalGpuDeviceToken,
+    ) -> Option<GpuMotionTargetReservation> {
+        self.unprotected_surface_indices().find_map(|index| {
+            let surface = &self.surfaces[index];
+            if surface.size != size
+                || surface.last_write_submission.load(Ordering::Acquire) > completed_write
+            {
+                return None;
+            }
+            let write_reservation = surface.handle.try_reserve_write()?;
+            Some(GpuMotionTargetReservation {
+                selection: SurfaceSelection {
+                    slot: SurfaceSlot::Existing(index),
+                    surface: Arc::clone(surface),
+                    write_reservation: Some(write_reservation),
+                },
+                size,
+                token,
+            })
         })
     }
 
@@ -2283,11 +2402,39 @@ impl GpuPagePresentation {
         create: impl FnOnce([u32; 2]) -> Arc<GpuPageSurface>,
     ) -> SurfaceSelection {
         let slot = self.target_slot(size, allow_current);
-        let surface = match slot {
-            SurfaceSlot::Existing(index) => Arc::clone(&self.surfaces[index]),
-            SurfaceSlot::Insert | SurfaceSlot::Replace(_) => create(size),
-        };
-        SurfaceSelection { slot, surface }
+        if let SurfaceSlot::Existing(index) = slot {
+            let surface = Arc::clone(&self.surfaces[index]);
+            if let Some(write_reservation) = surface.handle.try_reserve_write() {
+                return SurfaceSelection {
+                    slot,
+                    surface,
+                    write_reservation: Some(write_reservation),
+                };
+            }
+            // The logical slot is reusable, but a previously submitted GPUI
+            // scene still samples its texture. Replace the Arc in the cloned
+            // presentation instead of racing that sample.
+            let surface = create(size);
+            let write_reservation = surface
+                .handle
+                .try_reserve_write()
+                .expect("a newly created external texture is writable");
+            return SurfaceSelection {
+                slot: SurfaceSlot::Replace(index),
+                surface,
+                write_reservation: Some(write_reservation),
+            };
+        }
+        let surface = create(size);
+        let write_reservation = surface
+            .handle
+            .try_reserve_write()
+            .expect("a newly created external texture is writable");
+        SurfaceSelection {
+            slot,
+            surface,
+            write_reservation: Some(write_reservation),
+        }
     }
 
     fn commit(
@@ -2298,6 +2445,7 @@ impl GpuPagePresentation {
         request: RenderRequest,
         quality: GpuPresentationQuality,
     ) -> Option<GpuPageTexture> {
+        debug_assert!(selection.write_reservation.is_none());
         let index = match selection.slot {
             SurfaceSlot::Existing(index) => index,
             SurfaceSlot::Insert => {
@@ -2326,6 +2474,12 @@ impl GpuPagePresentation {
         Some(GpuPageTexture {
             surface: selection.surface,
             region,
+            source_region: GpuPageRegion {
+                x: 0,
+                y: 0,
+                width: region.width,
+                height: region.height,
+            },
         })
     }
 
@@ -2335,6 +2489,39 @@ impl GpuPagePresentation {
         Some(GpuPageTexture {
             surface,
             region: self.presented_region?,
+            source_region: GpuPageRegion {
+                x: 0,
+                y: 0,
+                width: self.presented_region?.width,
+                height: self.presented_region?.height,
+            },
+        })
+    }
+
+    /// Returns a prewarmed texture whose density is at least the requested
+    /// device-pixel density and whose retained page region fully covers the
+    /// current viewport. This is a crop/downsample only; it never magnifies a
+    /// prior presentation.
+    #[must_use]
+    pub fn motion_texture(&self, request: GpuPaintRequest) -> Option<GpuPageTexture> {
+        let envelope = self.motion_envelope.as_ref()?;
+        let visible = request.visible_region.clamp(request.page_size).ok()?;
+        let mapped = map_region_between_page_sizes(visible, request.page_size, envelope.page_size)?;
+        if !region_contains(envelope.region, mapped)
+            || mapped.width < visible.width
+            || mapped.height < visible.height
+        {
+            return None;
+        }
+        Some(GpuPageTexture {
+            surface: Arc::clone(&envelope.surface),
+            region: visible,
+            source_region: GpuPageRegion {
+                x: mapped.x.checked_sub(envelope.region.x)?,
+                y: mapped.y.checked_sub(envelope.region.y)?,
+                width: mapped.width,
+                height: mapped.height,
+            },
         })
     }
 
@@ -2355,6 +2542,9 @@ impl GpuPagePresentation {
             .iter()
             .map(|surface| surface_byte_len(surface.size))
             .sum::<u64>();
+        if let Some(envelope) = &self.motion_envelope {
+            bytes = bytes.saturating_add(surface_byte_len(envelope.surface.size));
+        }
         match self.target_slot(region.size(), allow_current) {
             SurfaceSlot::Existing(_) => {}
             SurfaceSlot::Insert => bytes = bytes.saturating_add(region.byte_len()),
@@ -2379,15 +2569,21 @@ impl GpuPagePresentation {
 
     #[must_use]
     pub fn byte_len(&self) -> u64 {
-        self.surfaces
+        let surfaces = self
+            .surfaces
             .iter()
             .map(|surface| surface_byte_len(surface.size))
-            .sum()
+            .sum::<u64>();
+        surfaces.saturating_add(
+            self.motion_envelope
+                .as_ref()
+                .map_or(0, |envelope| surface_byte_len(envelope.surface.size)),
+        )
     }
 
     #[must_use]
     pub fn surface_count(&self) -> usize {
-        self.surfaces.len()
+        self.surfaces.len() + usize::from(self.motion_envelope.is_some())
     }
 
     #[must_use]
@@ -2450,7 +2646,7 @@ fn presentation_surface_slot(
         }
     }
     // Presented and incremental retained sources overlap in normal operation;
-    // the five-entry ring therefore always has one writable surface.
+    // the seven-entry ring therefore always has one writable surface.
     unreachable!("native PDF presentation ring has no writable surface")
 }
 
@@ -2472,6 +2668,7 @@ fn surface_byte_len(size: [u32; 2]) -> u64 {
 pub struct GpuPageTexture {
     surface: Arc<GpuPageSurface>,
     region: GpuPageRegion,
+    source_region: GpuPageRegion,
 }
 
 impl fmt::Debug for GpuPageTexture {
@@ -2481,6 +2678,7 @@ impl fmt::Debug for GpuPageTexture {
             .field("handle", &self.surface.handle)
             .field("size", &self.surface.size)
             .field("region", &self.region)
+            .field("source_region", &self.source_region)
             .field("token", &self.surface.token)
             .finish_non_exhaustive()
     }
@@ -2499,12 +2697,22 @@ impl GpuPageTexture {
         self.region
     }
 
-    /// Normalized top-left subregion containing rendered page pixels. Any
-    /// remaining allocation capacity is intentionally excluded.
+    /// Normalized extent of the subregion containing rendered page pixels.
+    /// Any remaining allocation capacity is intentionally excluded.
     pub fn source_extent(&self) -> [f32; 2] {
         [
-            self.region.width as f32 / self.surface.size[0] as f32,
-            self.region.height as f32 / self.surface.size[1] as f32,
+            self.source_region.width as f32 / self.surface.size[0] as f32,
+            self.source_region.height as f32 / self.surface.size[1] as f32,
+        ]
+    }
+
+    /// Normalized source rectangle inside the external texture.
+    pub fn source_bounds(&self) -> [f32; 4] {
+        [
+            self.source_region.x as f32 / self.surface.size[0] as f32,
+            self.source_region.y as f32 / self.surface.size[1] as f32,
+            self.source_region.width as f32 / self.surface.size[0] as f32,
+            self.source_region.height as f32 / self.surface.size[1] as f32,
         ]
     }
 
@@ -3453,7 +3661,7 @@ trailer <</Root 1 0 R>>
     }
 
     #[test]
-    fn motion_prewarm_envelope_doubles_scale_around_the_visible_center() {
+    fn motion_prewarm_envelope_retains_the_full_view_at_double_density() {
         let request = GpuPaintRequest {
             page_size: [4_000, 5_000],
             visible_region: GpuPageRegion {
@@ -3469,22 +3677,42 @@ trailer <</Root 1 0 R>>
             settled: true,
             generation: 7,
         };
-        let scaled = scaled_motion_prewarm_request(request).expect("bounded scale envelope");
+        let scaled = scaled_motion_envelope_request(request).expect("bounded scale envelope");
         assert_eq!(scaled.page_size, [8_000, 10_000]);
         assert_eq!(
             scaled.visible_region,
             GpuPageRegion {
-                x: 2_400,
-                y: 3_300,
-                width: 800,
-                height: 600,
+                x: 2_000,
+                y: 3_000,
+                width: 1_600,
+                height: 1_200,
             }
         );
-        assert_eq!(
-            scaled.motion_target_capacity,
-            request.motion_target_capacity
-        );
+        assert_eq!(scaled.target_capacity, None);
+        assert_eq!(scaled.motion_target_capacity, None);
+        assert!(scaled.settled);
         assert_eq!(scaled.generation, 7);
+    }
+
+    #[test]
+    fn page_regions_map_outward_without_losing_density_or_coverage() {
+        let mapped = map_region_between_page_sizes(
+            GpuPageRegion {
+                x: 101,
+                y: 203,
+                width: 799,
+                height: 597,
+            },
+            [4_001, 5_003],
+            [8_000, 10_000],
+        )
+        .expect("mapped region");
+        assert_eq!(mapped.x, 201);
+        assert_eq!(mapped.y, 405);
+        assert_eq!(mapped.right(), 1_800);
+        assert_eq!(mapped.bottom(), 1_600);
+        assert!(mapped.width >= 799);
+        assert!(mapped.height >= 597);
     }
 
     #[test]
@@ -3512,7 +3740,7 @@ trailer <</Root 1 0 R>>
         );
         assert_eq!(
             presentation_surface_slot(
-                &[size, size, size, size, size],
+                &[size, size, size, size, size, size, size],
                 Some(2),
                 &[Some(0)],
                 [768, 896],
