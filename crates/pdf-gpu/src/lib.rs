@@ -24,7 +24,7 @@ use glyphst_pdf_render_cpu::{CpuRenderer, CpuViewportRequest};
 use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
     IncrementalWorkPlan, PrepareError, RenderConfig, RenderError, RenderRequest,
-    RenderSupportIssue, RendererInitError,
+    RenderSupportIssue, RenderTargetExtentPolicy, RendererInitError,
 };
 pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
@@ -48,7 +48,8 @@ use std::{
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
-const MAX_PRESENTATION_SURFACES: usize = 4;
+const MAX_PRESENTATION_SURFACES: usize = 5;
+const MOTION_TARGET_COUNT: usize = 2;
 const MOTION_PREWARM_SCALE: u32 = 2;
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
@@ -1275,6 +1276,7 @@ impl GpuPdfRenderer {
         config.max_render_dimension = config
             .max_render_dimension
             .min(context.device().limits().max_texture_dimension_2d);
+        config.render_target_extent = RenderTargetExtentPolicy::RequestBounded;
         let output_format = config.output_format;
         let token = context.token();
         let renderer = GpuRenderer::new(
@@ -1557,7 +1559,7 @@ impl GpuPdfRenderer {
         }
     }
 
-    /// Render a prepared complete page into a bounded four-surface ring.
+    /// Render a prepared complete page into a bounded five-surface ring.
     ///
     /// Reprojection and refinement select a destination distinct from their
     /// source. A direct retained redraw samples no presentation pixels and may
@@ -1650,11 +1652,11 @@ impl GpuPdfRenderer {
                         stats.presentation_quality,
                     );
                     if let Some(size) = motion_target_size {
-                        // Allocate the viewport-sized spare before interaction.
-                        // The document view performs one final direct prewarm
-                        // after lower-priority page and surface work drains, so
-                        // that work cannot immediately replace the pool shape.
-                        presentation.ensure_motion_target(size, |size| self.create_surface(size));
+                        // Allocate both viewport-sized ping-pong destinations
+                        // before interaction. A motion worker must never create
+                        // a target or overwrite the coherent surface currently
+                        // sampled by GPUI.
+                        presentation.ensure_motion_targets(size, |size| self.create_surface(size));
                     }
                     return Ok(GpuPageRenderOutcome::Rendered { presented, stats });
                 }
@@ -1675,9 +1677,9 @@ impl GpuPdfRenderer {
     /// Redraw one in-motion page directly from retained GPU resources.
     ///
     /// This path deliberately discards incremental presentation pixels and
-    /// may overwrite the current matching-capacity surface. Queue ordering
-    /// makes the previous GPUI sample complete before this write and the next
-    /// GPUI sample follow it, so no presentation copy or resampling is needed.
+    /// writes only to an existing non-presented ping-pong target. Missing
+    /// preallocation is an error: no texture allocation is permitted on the
+    /// gesture path.
     pub fn render_motion_page(
         &self,
         page: &PreparedGpuPage,
@@ -1695,84 +1697,64 @@ impl GpuPdfRenderer {
             bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
         }
 
-        let preallocated_target_size = request.preallocated_motion_target_size(
-            self.context.device().limits().max_texture_dimension_2d,
-        )?;
-        let mut use_capacity = true;
-        loop {
-            let surface_region = request.visible_region.clamp(request.page_size)?;
-            let region_size = surface_region.size();
-            let target_size = if use_capacity {
-                preallocated_target_size.unwrap_or(region_size)
-            } else {
-                region_size
-            };
-            let (_, engine_request) =
-                self.engine_render_request_for_region(page, request, surface_region, target_size)?;
-            let [width, height] = target_size;
-            if width == 0 || height == 0 {
-                bail!("native PDF render target must be non-empty");
-            }
-            let limit = self.context.device().limits().max_texture_dimension_2d;
-            if width > limit || height > limit {
-                if !use_capacity {
-                    bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
-                }
-                use_capacity = false;
-                continue;
-            }
+        let target_size = request
+            .preallocated_motion_target_size(
+                self.context.device().limits().max_texture_dimension_2d,
+            )?
+            .ok_or_else(|| anyhow!("native PDF motion target was not preallocated"))?;
+        let surface_region = request.visible_region.clamp(request.page_size)?;
+        let (_, engine_request) =
+            self.engine_render_request_for_region(page, request, surface_region, target_size)?;
+        let [width, height] = target_size;
+        if width == 0 || height == 0 {
+            bail!("native PDF render target must be non-empty");
+        }
+        let limit = self.context.device().limits().max_texture_dimension_2d;
+        if width > limit || height > limit {
+            bail!("native PDF render target {width}x{height} exceeds device limit {limit}");
+        }
 
-            // Work on a clone so a pre-submission error leaves all
-            // presentation metadata intact. Clearing retained sources proves
-            // that the current target is not sampled by this stateless redraw.
-            let mut next = presentation.clone();
-            next.token = Some(self.token());
-            next.incremental.clear();
-            next.presented_incremental.clear();
-            next.current = next.presented;
-            next.current_region = next.presented_region;
-            next.presented = None;
-            next.presented_region = None;
-            next.presented_request = None;
-            next.presented_quality = None;
-            let selection = next.select_target(target_size, true, |size| self.create_surface(size));
-            let target = selection.surface();
-            match self
-                .renderer
-                .render(&page.gpu, engine_request, &target.view)
-            {
-                Ok(stats) => {
-                    let presented = next.commit(
-                        selection,
-                        surface_region,
-                        IncrementalRenderState::default(),
-                        engine_request,
-                        stats.presentation_quality,
-                    );
-                    *presentation = next;
+        // Work on a clone so a pre-submission error leaves all presentation
+        // metadata intact. The coherent presented target remains protected
+        // until the replacement submission succeeds.
+        let mut next = presentation.clone();
+        next.token = Some(self.token());
+        next.incremental.clear();
+        next.current = next.presented;
+        next.current_region = next.presented_region;
+        let selection = next
+            .select_existing_motion_target(target_size)
+            .ok_or_else(|| {
+                anyhow!("native PDF motion target {width}x{height} is not safely preallocated")
+            })?;
+        let target = selection.surface();
+        match self
+            .renderer
+            .render(&page.gpu, engine_request, &target.view)
+        {
+            Ok(stats) => {
+                let presented = next.commit(
+                    selection,
+                    surface_region,
+                    IncrementalRenderState::default(),
+                    engine_request,
+                    stats.presentation_quality,
+                );
+                *presentation = next;
 
-                    let serial = self
-                        .motion_submitted
-                        .fetch_add(1, Ordering::AcqRel)
-                        .wrapping_add(1);
-                    let completed = Arc::clone(&self.motion_completed);
-                    self.context.queue().on_submitted_work_done(move || {
-                        completed.fetch_max(serial, Ordering::Release);
-                    });
-                    self.motion_poller.request_poll();
-                    return Ok(GpuPageRenderOutcome::Rendered { presented, stats });
-                }
-                Err(RenderError::StaleRenderGeneration { .. }) => {
-                    return Ok(GpuPageRenderOutcome::Superseded);
-                }
-                Err(error) if render_target_limit(&error) => {
-                    if !use_capacity {
-                        return Err(render_error(error));
-                    }
-                    use_capacity = false;
-                }
-                Err(error) => return Err(render_error(error)),
+                let serial = self
+                    .motion_submitted
+                    .fetch_add(1, Ordering::AcqRel)
+                    .wrapping_add(1);
+                let completed = Arc::clone(&self.motion_completed);
+                self.context.queue().on_submitted_work_done(move || {
+                    completed.fetch_max(serial, Ordering::Release);
+                });
+                self.motion_poller.request_poll();
+                Ok(GpuPageRenderOutcome::Rendered { presented, stats })
             }
+            Err(RenderError::StaleRenderGeneration { .. }) => Ok(GpuPageRenderOutcome::Superseded),
+            Err(error) => Err(render_error(error)),
         }
     }
 
@@ -1803,13 +1785,8 @@ impl GpuPdfRenderer {
             return Ok(false);
         };
         let target = presentation
-            .surfaces
-            .iter()
-            .enumerate()
-            .find(|(index, surface)| {
-                Some(*index) != presentation.presented && surface.size == target_size
-            })
-            .map(|(_, surface)| Arc::clone(surface))
+            .select_existing_motion_target(target_size)
+            .map(|selection| selection.surface)
             // A visible-sized presentation can legitimately occupy every
             // matching ring slot. Use an unretained scratch target in that
             // case: allocation happens on this idle worker, and WGPU keeps
@@ -2145,8 +2122,9 @@ impl SurfaceSelection {
 /// Bounded same-device presentation state for one prepared page.
 ///
 /// Working state may advance through incomplete settled tiles while the last
-/// coherent surface remains immutable and displayable. At most four surfaces
-/// cover the coherent output, incremental source, and two ping-pong targets.
+/// coherent surface remains immutable and displayable. At most five surfaces
+/// cover the coherent output, incremental sources, and two motion ping-pong
+/// targets.
 #[derive(Clone, Default)]
 pub struct GpuPagePresentation {
     token: Option<ExternalGpuDeviceToken>,
@@ -2197,20 +2175,27 @@ impl GpuPagePresentation {
             .map(|surface| surface.view.as_ref())
     }
 
-    fn ensure_motion_target(
+    fn ensure_motion_targets(
         &mut self,
         size: [u32; 2],
-        create: impl FnOnce([u32; 2]) -> Arc<GpuPageSurface>,
-    ) -> Option<Arc<GpuPageSurface>> {
+        mut create: impl FnMut([u32; 2]) -> Arc<GpuPageSurface>,
+    ) -> usize {
         self.motion_target_size = Some(size);
-        if self.surfaces.iter().any(|surface| surface.size == size)
-            || self.surfaces.len() >= MAX_PRESENTATION_SURFACES
-        {
-            return None;
+        while self.available_motion_target_count(size) < MOTION_TARGET_COUNT {
+            let surface = create(size);
+            if self.surfaces.len() < MAX_PRESENTATION_SURFACES {
+                self.surfaces.push(surface);
+                continue;
+            }
+            let Some(index) = self
+                .unprotected_surface_indices()
+                .find(|index| self.surfaces[*index].size != size)
+            else {
+                break;
+            };
+            self.surfaces[index] = surface;
         }
-        let surface = create(size);
-        self.surfaces.push(Arc::clone(&surface));
-        Some(surface)
+        self.available_motion_target_count(size)
     }
 
     #[must_use]
@@ -2255,6 +2240,40 @@ impl GpuPagePresentation {
             size,
             allow_current,
         )
+    }
+
+    fn unprotected_surface_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        let working_retained = self
+            .surfaces
+            .iter()
+            .position(|surface| self.incremental.references_texture(&surface.view));
+        let presented_retained = self
+            .surfaces
+            .iter()
+            .position(|surface| self.presented_incremental.references_texture(&surface.view));
+        let protected = [
+            self.current,
+            self.presented,
+            working_retained,
+            presented_retained,
+        ];
+        (0..self.surfaces.len()).filter(move |index| !protected.contains(&Some(*index)))
+    }
+
+    fn available_motion_target_count(&self, size: [u32; 2]) -> usize {
+        self.unprotected_surface_indices()
+            .filter(|index| self.surfaces[*index].size == size)
+            .count()
+    }
+
+    fn select_existing_motion_target(&self, size: [u32; 2]) -> Option<SurfaceSelection> {
+        let index = self
+            .unprotected_surface_indices()
+            .find(|index| self.surfaces[*index].size == size)?;
+        Some(SurfaceSelection {
+            slot: SurfaceSlot::Existing(index),
+            surface: Arc::clone(&self.surfaces[index]),
+        })
     }
 
     fn select_target(
@@ -2431,7 +2450,7 @@ fn presentation_surface_slot(
         }
     }
     // Presented and incremental retained sources overlap in normal operation;
-    // a four-entry ring therefore always has one writable surface.
+    // the five-entry ring therefore always has one writable surface.
     unreachable!("native PDF presentation ring has no writable surface")
 }
 
@@ -3493,7 +3512,7 @@ trailer <</Root 1 0 R>>
         );
         assert_eq!(
             presentation_surface_slot(
-                &[size, size, size, size],
+                &[size, size, size, size, size],
                 Some(2),
                 &[Some(0)],
                 [768, 896],

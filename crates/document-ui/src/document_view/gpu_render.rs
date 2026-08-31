@@ -53,6 +53,7 @@ pub(super) struct GpuPdfState {
     surface_failures: HashMap<u32, String>,
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
+    motion_retained_pages: Vec<u32>,
     last_scroll_y_doc: Option<f32>,
     last_scroll_direction: i8,
     preparation_generation: u64,
@@ -67,6 +68,12 @@ pub(super) struct GpuPdfState {
     surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
     motion_prewarm_generation: u64,
     motion_prewarm_task: Option<MotionPrewarmTask>,
+    motion_render_generation: u64,
+    motion_render_task: Option<MotionRenderTask>,
+    motion_render_started: u64,
+    motion_render_completed: u64,
+    motion_render_superseded: u64,
+    motion_render_detached_reuses: u64,
     surface_render_sequence: u64,
     surface_render_pending: HashMap<u32, PendingSurfaceRender>,
     surface_render_started: u64,
@@ -225,6 +232,14 @@ struct MotionPrewarmTask {
     _task: Task<()>,
 }
 
+struct MotionRenderTask {
+    page: u32,
+    generation: u64,
+    prepared: Arc<PreparedGpuPage>,
+    renderer: Arc<GpuPdfRenderer>,
+    _task: Task<()>,
+}
+
 struct PendingSurfaceRender {
     sequence: u64,
     key: RenderKey,
@@ -309,6 +324,7 @@ impl GpuPdfState {
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
+        self.motion_retained_pages.clear();
         self.last_scroll_y_doc = None;
         self.last_scroll_direction = 1;
         self.preparation_generation = 0;
@@ -323,6 +339,12 @@ impl GpuPdfState {
         self.surface_seed_tasks.clear();
         self.motion_prewarm_generation = 0;
         self.motion_prewarm_task = None;
+        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
+        self.motion_render_task = None;
+        self.motion_render_started = 0;
+        self.motion_render_completed = 0;
+        self.motion_render_superseded = 0;
+        self.motion_render_detached_reuses = 0;
         self.surface_render_sequence = 0;
         self.surface_render_pending.clear();
         self.surface_render_started = 0;
@@ -396,6 +418,7 @@ impl GpuPdfState {
         self.surface_failures.clear();
         self.page_last_used.clear();
         self.page_usage_clock = 0;
+        self.motion_retained_pages.clear();
         self.last_scroll_y_doc = None;
         self.last_scroll_direction = 1;
         self.preparation_generation = 0;
@@ -410,6 +433,12 @@ impl GpuPdfState {
         self.surface_seed_tasks.clear();
         self.motion_prewarm_generation = 0;
         self.motion_prewarm_task = None;
+        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
+        self.motion_render_task = None;
+        self.motion_render_started = 0;
+        self.motion_render_completed = 0;
+        self.motion_render_superseded = 0;
+        self.motion_render_detached_reuses = 0;
         self.surface_render_sequence = 0;
         self.surface_render_pending.clear();
         self.surface_render_started = 0;
@@ -483,11 +512,79 @@ impl GpuPdfState {
         self.surface_seed_tasks.clear();
         self.motion_prewarm_generation = self.motion_prewarm_generation.wrapping_add(1).max(1);
         self.motion_prewarm_task = None;
+        self.cancel_motion_render_task();
         self.speculative_resume_generation =
             self.speculative_resume_generation.wrapping_add(1).max(1);
         self.speculative_resume_task = None;
         self.surface_render_pending.clear();
         self.fallback_grace_tasks.clear();
+    }
+
+    fn cancel_motion_render_task(&mut self) {
+        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
+        if let Some(task) = self.motion_render_task.take() {
+            self.render_generation = self.render_generation.wrapping_add(1).max(1);
+            _ = task
+                .renderer
+                .supersede_page_render(&task.prepared, self.render_generation);
+            self.motion_render_superseded = self.motion_render_superseded.saturating_add(1);
+        }
+    }
+
+    fn begin_motion(&mut self) {
+        if self.motion_active {
+            return;
+        }
+        let speculative_preparations = self
+            .pages
+            .iter()
+            .filter_map(|(page, state)| {
+                matches!(
+                    state,
+                    GpuPageState::Preparing {
+                        demand: GpuPreparationDemand {
+                            speculative: true,
+                            ..
+                        },
+                        ..
+                    }
+                )
+                .then_some(*page)
+            })
+            .collect::<Vec<_>>();
+        for page in speculative_preparations {
+            self.cancel_active_preparation(page, true);
+        }
+
+        self.surface_render_pending.retain(|_, pending| {
+            !pending.speculative && pending.role == SurfaceRenderRole::Primary
+        });
+        let active = self
+            .surface_seed_tasks
+            .iter()
+            .filter(|(_, task)| {
+                !task.superseded && (task.speculative || task.role == SurfaceRenderRole::Continuity)
+            })
+            .map(|(page, task)| {
+                (
+                    *page,
+                    Arc::clone(&task.prepared),
+                    Arc::clone(&task.renderer),
+                )
+            })
+            .collect::<Vec<_>>();
+        if !active.is_empty() {
+            self.render_generation = self.render_generation.wrapping_add(1).max(1);
+            for (page, prepared, renderer) in active {
+                if renderer
+                    .supersede_page_render(&prepared, self.render_generation)
+                    .is_ok()
+                    && let Some(task) = self.surface_seed_tasks.get_mut(&page)
+                {
+                    task.superseded = true;
+                }
+            }
+        }
     }
 
     fn begin_zoom_motion(&mut self) {
@@ -614,6 +711,7 @@ impl GpuPdfState {
             || !self.patch_lod_tasks.is_empty()
             || !self.surface_seed_tasks.is_empty()
             || self.motion_prewarm_task.is_some()
+            || self.motion_render_task.is_some()
             || self.speculative_resume_task.is_some()
             || !self.surface_render_pending.is_empty()
             || !self.preparation_demands.is_empty()
@@ -698,7 +796,12 @@ impl GpuPdfState {
             self.surface_failures.remove(&page);
         }
 
-        let incoming_visible = retained
+        // Reserve capacity only for pages that must be painted now. Merely
+        // predicting a new speculative corridor must not synchronously evict
+        // retained WGPU resources from the old corridor during a direction
+        // reversal; speculative preparation will naturally wait while the
+        // cache is full.
+        let incoming_visible = visible
             .iter()
             .filter(|page| !self.pages.contains_key(page))
             .count();
@@ -1110,6 +1213,7 @@ impl Drop for GpuPdfState {
 fn gpu_preparation_targets(
     visible: &HashSet<u32>,
     target_viewport: &HashSet<u32>,
+    motion_history: &[u32],
     page_count: u32,
     forward: bool,
 ) -> (Vec<GpuPreparationTarget>, Option<u32>) {
@@ -1152,6 +1256,23 @@ fn gpu_preparation_targets(
             speculative: false,
         }
     }));
+
+    // Preserve the most recently traversed pages before spending the
+    // remaining cache window on directional speculation. This prevents a
+    // direction reversal from immediately recompiling pages that were on
+    // screen only a few frames ago.
+    for page in motion_history.iter().rev().copied() {
+        if ordered.len() >= MAX_RETAINED_GPU_PAGES {
+            break;
+        }
+        if page < page_count && !ordered.iter().any(|target| target.page == page) {
+            ordered.push(GpuPreparationTarget {
+                page,
+                priority: ordered.len(),
+                speculative: true,
+            });
+        }
+    }
 
     let speculative_budget = MAX_RETAINED_GPU_PAGES.saturating_sub(ordered.len());
     if speculative_budget == 0 {
@@ -1563,6 +1684,9 @@ fn continuity_render_key(exact: RenderKey) -> RenderKey {
     let width = u64::from(exact.physical_width.max(1));
     let height = u64::from(exact.physical_height.max(1));
     let longest = width.max(height);
+    if longest <= u64::from(GPU_CONTINUITY_LONG_EDGE) {
+        return exact;
+    }
     let scaled = |dimension: u64| {
         dimension
             .saturating_mul(u64::from(GPU_CONTINUITY_LONG_EDGE))
@@ -1621,6 +1745,15 @@ fn presented_surface_kind(
     } else {
         None
     }
+}
+
+fn should_defer_fixed_scale_scroll_refresh(
+    settled: bool,
+    current_dimensions_exact: bool,
+    primary_covers: bool,
+    continuity_covers: bool,
+) -> bool {
+    !settled && current_dimensions_exact && primary_covers && continuity_covers
 }
 
 fn should_reproject_scale_motion(
@@ -1819,6 +1952,7 @@ impl DocumentView {
     }
 
     pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
+        self.gpu_pdf.begin_motion();
         if self.gpu_pdf.speculative_resume_task.take().is_some() {
             self.gpu_pdf.speculative_resume_generation = self
                 .gpu_pdf
@@ -1851,6 +1985,7 @@ impl DocumentView {
                     this.gpu_pdf.zoom_motion_active = false;
                     this.gpu_pdf.motion_deadline = None;
                     this.gpu_pdf.motion_settle_task = None;
+                    this.gpu_pdf.motion_retained_pages.clear();
                     this.schedule_native_gpu_speculative_resume(cx);
                     this.dispatch_native_gpu_page_preparations(cx);
                     this.dispatch_native_gpu_surface_render(cx);
@@ -1901,7 +2036,8 @@ impl DocumentView {
 
     pub(super) fn native_gpu_zoom_frame_ready(&mut self) -> bool {
         let ready = !self.gpu_pdf.zoom_motion_active
-            || (self.gpu_pdf.surface_seed_tasks.is_empty()
+            || (self.gpu_pdf.motion_render_task.is_none()
+                && self.gpu_pdf.surface_seed_tasks.is_empty()
                 && self.gpu_pdf.motion_prewarm_task.is_none()
                 && self
                     .gpu_pdf
@@ -1930,7 +2066,7 @@ impl DocumentView {
         viewport_bounds: Bounds<Pixels>,
         renderer_token: ExternalGpuDeviceToken,
         current: Option<&CurrentGpuSurface>,
-    ) -> Option<SelectedGpuSurface> {
+    ) -> (Option<SelectedGpuSurface>, bool) {
         let primary_covers = current.is_some_and(|current| {
             gpu_region_contains(current.texture.region(), current.visible_region)
         });
@@ -1951,8 +2087,13 @@ impl DocumentView {
                     visible_gpu_region(surface.key, image_bounds, viewport_bounds)?;
                 gpu_region_contains(surface.texture.region(), visible_region).then_some(surface)
             });
-        let kind = presented_surface_kind(primary_covers, continuity.is_some(), primary_overlaps)?;
-        match kind {
+        let continuity_covers = continuity.is_some();
+        let Some(kind) =
+            presented_surface_kind(primary_covers, continuity_covers, primary_overlaps)
+        else {
+            return (None, continuity_covers);
+        };
+        let selected = match kind {
             PresentedSurfaceKind::Primary | PresentedSurfaceKind::PartialPrimary => {
                 let current = current.expect("primary presentation was selected");
                 Some(SelectedGpuSurface {
@@ -1969,7 +2110,8 @@ impl DocumentView {
                     kind,
                 })
             }
-        }
+        };
+        (selected, continuity_covers)
     }
 
     fn present_gpu_surface(
@@ -2065,134 +2207,198 @@ impl DocumentView {
             .get(&page)
             .and_then(|rendered| rendered.last_paint.clone());
         if held.is_some() {
+            // Presentation bookkeeping is rebuilt on every paint. A detached
+            // motion render deliberately keeps the last completed GPU texture
+            // visible, so record that texture as the presented backend too.
+            // Otherwise diagnostics (and link activation) briefly classify a
+            // genuinely GPU-painted frame as `glyphst-pending` while the next
+            // sharp target is in flight.
+            self.gpu_pdf.presented_pages.insert(page);
+            self.gpu_pdf.presented_continuity_pages.remove(&page);
+            self.gpu_pdf.surface_failures.remove(&page);
             self.gpu_pdf.surface_zoom_gpu_holds =
                 self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
         }
         held
     }
 
-    fn render_native_gpu_zoom_frame(
+    fn start_native_gpu_zoom_frame(
         &mut self,
         page: u32,
         key: RenderKey,
-        image_bounds: Bounds<Pixels>,
-        prepared: &PreparedGpuPage,
-        renderer: &GpuPdfRenderer,
+        prepared: Arc<PreparedGpuPage>,
+        renderer: Arc<GpuPdfRenderer>,
         mut request: GpuPaintRequest,
-    ) -> Result<Option<GpuPaintTexture>, String> {
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        if self.gpu_pdf.motion_render_task.is_some() {
+            return Ok(false);
+        }
         assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
         renderer
-            .supersede_page_render(prepared, request.generation)
+            .supersede_page_render(&prepared, request.generation)
             .map_err(|error| format!("{error:#}"))?;
         let mut presentation = self
             .gpu_pdf
             .rendered
             .get(&page)
             .map(|rendered| rendered.presentation.clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                "sharp native PDF zoom redraw has no retained presentation".to_string()
+            })?;
         let previous_surface_bytes = presentation.byte_len();
-        let render_started = Instant::now();
-        let outcome = renderer
-            .render_motion_page(prepared, request, &mut presentation)
-            .map_err(|error| format!("{error:#}"))?;
-        let render_elapsed = render_started.elapsed();
-        match outcome {
-            GpuPageRenderOutcome::Rendered {
-                presented: Some(texture),
-                stats,
-            } => {
-                if render_elapsed >= Duration::from_millis(8) {
-                    eprintln!(
-                        "slow sharp native PDF zoom redraw on page {}: total {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, pool grew {}, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
-                        page + 1,
-                        render_elapsed.as_secs_f64() * 1_000.0,
-                        stats.cpu_time.as_secs_f64() * 1_000.0,
-                        stats.command_encoding_time.as_secs_f64() * 1_000.0,
-                        stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
-                        stats.frame_pool_grew,
-                        stats.transient_pool_reuses,
-                        stats.offscreen_passes,
-                        stats.transient_peak_bytes as f64 / (1024.0 * 1024.0),
-                        stats.transient_resident_bytes as f64 / (1024.0 * 1024.0),
-                        stats.selected_vector_lod,
-                        request
-                            .motion_target_capacity
-                            .map_or(request.visible_region.width, |size| size[0]),
-                        request
-                            .motion_target_capacity
-                            .map_or(request.visible_region.height, |size| size[1]),
-                    );
+        let document_generation = self.gpu_pdf.generation;
+        self.gpu_pdf.motion_render_generation =
+            self.gpu_pdf.motion_render_generation.wrapping_add(1).max(1);
+        let generation = self.gpu_pdf.motion_render_generation;
+        let token = renderer.token();
+        let worker_page = Arc::clone(&prepared);
+        let worker_renderer = Arc::clone(&renderer);
+        let completion_page = Arc::clone(&prepared);
+        let started_at = Instant::now();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    worker_renderer
+                        .render_motion_page(&worker_page, request, &mut presentation)
+                        .map(|outcome| (presentation, outcome, started_at.elapsed()))
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+            let update_result = this.update(cx, |this, cx| {
+                if this.gpu_pdf.generation != document_generation
+                    || !matches!(
+                        this.gpu_pdf.motion_render_task.as_ref(),
+                        Some(task) if task.page == page && task.generation == generation
+                    )
+                {
+                    return;
                 }
-                self.gpu_pdf
-                    .reserve_surface(page, presentation.byte_len())
-                    .map_err(|required| {
-                        format!(
-                            "sharp native PDF zoom surfaces require {required} bytes, exceeding the {MAX_RETAINED_GPU_SURFACE_BYTES}-byte cache limit"
-                        )
-                    })?;
-                let reused_target = presentation.byte_len() <= previous_surface_bytes;
-                let refresh_region =
-                    surface_refresh_guard(texture.region(), request.visible_region);
-                if let Some(rendered) = self.gpu_pdf.rendered.get_mut(&page) {
-                    rendered.key = key;
-                    rendered.request = request;
-                    rendered.refresh_region = refresh_region;
-                    rendered.presentation = presentation;
-                    rendered.latest_stats = stats;
-                    rendered.prewarmed = false;
-                    rendered.motion_prewarmed = true;
-                } else {
-                    self.gpu_pdf.rendered.insert(
-                        page,
-                        RenderedGpuPage {
-                            key,
-                            request,
-                            refresh_region,
-                            presentation,
-                            stats,
-                            latest_stats: stats,
-                            enqueued_at: Instant::now(),
-                            first_paint_recorded: false,
-                            prewarmed: false,
-                            motion_prewarmed: true,
-                            last_paint: None,
-                        },
-                    );
+                let Some(completed_task) = this.gpu_pdf.motion_render_task.take() else {
+                    return;
+                };
+                this.gpu_pdf.motion_render_completed =
+                    this.gpu_pdf.motion_render_completed.saturating_add(1);
+                if this
+                    .gpu_pdf
+                    .renderer
+                    .as_ref()
+                    .is_none_or(|current| current.token() != token)
+                    || !matches!(
+                        this.gpu_pdf.pages.get(&page),
+                        Some(GpuPageState::Ready(current))
+                            if Arc::ptr_eq(current, &completion_page)
+                    )
+                {
+                    this.gpu_pdf.motion_render_superseded =
+                        this.gpu_pdf.motion_render_superseded.saturating_add(1);
+                    cx.notify();
+                    return;
                 }
-                self.gpu_pdf.surface_zoom_live_redraws =
-                    self.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
-                self.gpu_pdf.surface_failures.remove(&page);
-                if reused_target {
-                    self.gpu_pdf.surface_zoom_target_reuses =
-                        self.gpu_pdf.surface_zoom_target_reuses.saturating_add(1);
-                } else {
-                    self.gpu_pdf.surface_zoom_target_allocations = self
-                        .gpu_pdf
-                        .surface_zoom_target_allocations
-                        .saturating_add(1);
+                match result {
+                    Ok((presentation, GpuPageRenderOutcome::Rendered {
+                        presented: Some(texture),
+                        stats,
+                    }, elapsed)) => {
+                        if elapsed >= Duration::from_millis(8) {
+                            eprintln!(
+                                "slow detached native PDF zoom redraw on page {}: total {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, pool grew {}, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
+                                page + 1,
+                                elapsed.as_secs_f64() * 1_000.0,
+                                stats.cpu_time.as_secs_f64() * 1_000.0,
+                                stats.command_encoding_time.as_secs_f64() * 1_000.0,
+                                stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
+                                stats.frame_pool_grew,
+                                stats.transient_pool_reuses,
+                                stats.offscreen_passes,
+                                stats.transient_peak_bytes as f64 / (1024.0 * 1024.0),
+                                stats.transient_resident_bytes as f64 / (1024.0 * 1024.0),
+                                stats.selected_vector_lod,
+                                request.motion_target_capacity.map_or(
+                                    request.visible_region.width,
+                                    |size| size[0],
+                                ),
+                                request.motion_target_capacity.map_or(
+                                    request.visible_region.height,
+                                    |size| size[1],
+                                ),
+                            );
+                        }
+                        let bytes = presentation.byte_len();
+                        if let Err(required) = this.gpu_pdf.reserve_surface(page, bytes) {
+                            this.gpu_pdf.surface_zoom_live_failures =
+                                this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
+                            eprintln!(
+                                "discarding sharp native PDF zoom redraw on page {}: surfaces require {required} bytes, exceeding the {MAX_RETAINED_GPU_SURFACE_BYTES}-byte cache limit",
+                                page + 1,
+                            );
+                        } else if let Some(rendered) = this.gpu_pdf.rendered.get_mut(&page) {
+                            rendered.key = key;
+                            rendered.request = request;
+                            rendered.refresh_region =
+                                surface_refresh_guard(texture.region(), request.visible_region);
+                            rendered.presentation = presentation;
+                            rendered.latest_stats = stats;
+                            rendered.prewarmed = false;
+                            rendered.motion_prewarmed = true;
+                            this.gpu_pdf.surface_zoom_live_redraws =
+                                this.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
+                            this.gpu_pdf.surface_zoom_target_reuses =
+                                this.gpu_pdf.surface_zoom_target_reuses.saturating_add(1);
+                            this.gpu_pdf.motion_render_detached_reuses = this
+                                .gpu_pdf
+                                .motion_render_detached_reuses
+                                .saturating_add(1);
+                            debug_assert!(bytes <= previous_surface_bytes);
+                            this.gpu_pdf.surface_failures.remove(&page);
+                        } else {
+                            this.gpu_pdf.motion_render_superseded =
+                                this.gpu_pdf.motion_render_superseded.saturating_add(1);
+                        }
+                    }
+                    Ok((_, GpuPageRenderOutcome::Superseded, _)) => {
+                        this.gpu_pdf.motion_render_superseded =
+                            this.gpu_pdf.motion_render_superseded.saturating_add(1);
+                    }
+                    Ok((_, GpuPageRenderOutcome::Rendered { presented: None, .. }, _))
+                    | Ok((_, GpuPageRenderOutcome::Deferred, _)) => {
+                        this.gpu_pdf.surface_zoom_live_failures =
+                            this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
+                    }
+                    Err(error) => {
+                        if completed_task.renderer.is_device_lost() {
+                            this.gpu_pdf.reset_device();
+                        } else {
+                            this.gpu_pdf.surface_zoom_live_failures =
+                                this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
+                            eprintln!(
+                                "failed to redraw native PDF page {} sharply during zoom: {error}",
+                                page + 1
+                            );
+                        }
+                    }
                 }
-                Ok(Some(self.present_gpu_surface(
-                    page,
-                    image_bounds,
-                    SelectedGpuSurface {
-                        key,
-                        texture,
-                        kind: PresentedSurfaceKind::Primary,
-                    },
-                )))
+                if this.gpu_pdf.zoom_motion_active {
+                    this.gpu_pdf.motion_deadline =
+                        Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
+                }
+                cx.notify();
+            });
+            if let Err(error) = update_result
+                && error.to_string() != "entity released"
+            {
+                eprintln!("failed to install detached native PDF zoom redraw: {error:#}");
             }
-            GpuPageRenderOutcome::Rendered {
-                presented: None, ..
-            } => Err("sharp native PDF zoom redraw produced no coherent presentation".into()),
-            GpuPageRenderOutcome::Superseded => {
-                self.gpu_pdf.surface_render_superseded =
-                    self.gpu_pdf.surface_render_superseded.saturating_add(1);
-                Ok(None)
-            }
-            GpuPageRenderOutcome::Deferred => {
-                Err("sharp native PDF zoom redraw was unexpectedly deferred".into())
-            }
-        }
+        });
+        self.gpu_pdf.motion_render_task = Some(MotionRenderTask {
+            page,
+            generation,
+            prepared,
+            renderer,
+            _task: task,
+        });
+        self.gpu_pdf.motion_render_started = self.gpu_pdf.motion_render_started.saturating_add(1);
+        Ok(true)
     }
 
     pub(super) fn native_gpu_texture(
@@ -2449,7 +2655,7 @@ impl DocumentView {
                 cx,
             );
         }
-        let selected_surface = self.selected_gpu_surface(
+        let (selected_surface, continuity_covers) = self.selected_gpu_surface(
             page,
             key,
             image_bounds,
@@ -2457,6 +2663,18 @@ impl DocumentView {
             renderer.token(),
             current_surface.as_ref(),
         );
+
+        if !settled
+            && selected_surface
+                .as_ref()
+                .is_some_and(|selected| selected.kind == PresentedSurfaceKind::Continuity)
+        {
+            // A prewarmed full-page continuity surface is the motion frame.
+            // Exact primary pixels wait for settlement instead of contending
+            // with the gesture or replacing the coherent anchor mid-scroll.
+            return selected_surface
+                .map(|selected| self.present_gpu_surface(page, image_bounds, selected));
+        }
 
         let dimension_motion = !settled && !current_dimensions_exact;
         if dimension_motion && self.gpu_pdf.zoom_motion_active {
@@ -2467,18 +2685,15 @@ impl DocumentView {
                 target_capacity,
                 motion_target_capacity,
             );
-            match self.render_native_gpu_zoom_frame(
+            match self.start_native_gpu_zoom_frame(
                 page,
                 key,
-                image_bounds,
-                &prepared,
-                &renderer,
+                Arc::clone(&prepared),
+                Arc::clone(&renderer),
                 request,
+                cx,
             ) {
-                Ok(Some(texture)) => return Some(texture),
-                Ok(None) => {
-                    return self.hold_last_sharp_gpu_texture(page);
-                }
+                Ok(_) => return self.hold_last_sharp_gpu_texture(page),
                 Err(error) => {
                     self.gpu_pdf.surface_zoom_live_failures =
                         self.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
@@ -2490,7 +2705,6 @@ impl DocumentView {
                         "failed to redraw native PDF page {} sharply during zoom: {error}",
                         page + 1
                     );
-                    self.gpu_pdf.surface_failures.insert(page, error);
                     return self.hold_last_sharp_gpu_texture(page);
                 }
             }
@@ -2536,6 +2750,26 @@ impl DocumentView {
                     rendered.prewarmed = false;
                 }
             }
+        }
+
+        if should_defer_fixed_scale_scroll_refresh(
+            settled,
+            current_dimensions_exact,
+            current_covers,
+            continuity_covers,
+        ) {
+            if current_surface
+                .as_ref()
+                .is_some_and(|current| current.request.visible_region != current.visible_region)
+            {
+                self.gpu_pdf.surface_scroll_reuses =
+                    self.gpu_pdf.surface_scroll_reuses.saturating_add(1);
+            }
+            if intent == GpuSurfaceIntent::Visible {
+                let selected = selected_surface.expect("covered primary surface was selected");
+                return Some(self.present_gpu_surface(page, image_bounds, selected));
+            }
+            return None;
         }
 
         // Fixed-scale scrolling stops here while its overscan remains safe.
@@ -2857,11 +3091,10 @@ impl DocumentView {
             return;
         };
         let motion_active = self.native_gpu_preparation_motion_active();
-        let zoom_motion_active = self.gpu_pdf.zoom_motion_active;
-        let speculative_background_paused = zoom_motion_active
+        let speculative_background_paused = motion_active
             || self.gpu_pdf.motion_prewarm_task.is_some()
             || self.gpu_pdf.speculative_resume_task.is_some();
-        while zoom_motion_active && self.gpu_pdf.active_speculative_preparations() > 0 {
+        while speculative_background_paused && self.gpu_pdf.active_speculative_preparations() > 0 {
             let Some(page) = self.gpu_pdf.worst_speculative_preparation() else {
                 break;
             };
@@ -3305,6 +3538,7 @@ impl DocumentView {
 
     fn dispatch_native_gpu_surface_render(&mut self, cx: &mut Context<Self>) {
         if self.gpu_pdf.zoom_motion_active
+            || self.gpu_pdf.motion_render_task.is_some()
             || self.gpu_pdf.motion_prewarm_task.is_some()
             || !self.gpu_pdf.surface_seed_tasks.is_empty()
         {
@@ -3316,6 +3550,10 @@ impl DocumentView {
                 .gpu_pdf
                 .surface_render_pending
                 .iter()
+                .filter(|(_, pending)| {
+                    !self.native_gpu_preparation_motion_active()
+                        || (pending.role == SurfaceRenderRole::Primary && !pending.speculative)
+                })
                 .min_by_key(|(page, pending)| {
                     pending_surface_priority(
                         **page,
@@ -4009,6 +4247,21 @@ impl DocumentView {
         }
         let forward = self.gpu_pdf.last_scroll_direction >= 0;
         let page_count = u32::try_from(self.pages.len()).unwrap_or(u32::MAX);
+        if self.native_gpu_preparation_motion_active() {
+            let mut ordered_visible = visible.iter().copied().collect::<Vec<_>>();
+            ordered_visible.sort_unstable();
+            for page in ordered_visible {
+                self.gpu_pdf
+                    .motion_retained_pages
+                    .retain(|retained| *retained != page);
+                self.gpu_pdf.motion_retained_pages.push(page);
+            }
+            while self.gpu_pdf.motion_retained_pages.len() > MAX_RETAINED_GPU_PAGES {
+                self.gpu_pdf.motion_retained_pages.remove(0);
+            }
+        } else {
+            self.gpu_pdf.motion_retained_pages.clear();
+        }
         let target_viewport = if self.is_presentation_mode() {
             visible.clone()
         } else {
@@ -4023,14 +4276,33 @@ impl DocumentView {
                 .filter_map(|page| u32::try_from(page).ok())
                 .collect::<HashSet<_>>()
         };
-        let (targets, nearest) =
-            gpu_preparation_targets(&visible, &target_viewport, page_count, forward);
+        let (targets, _) = gpu_preparation_targets(
+            &visible,
+            &target_viewport,
+            &self.gpu_pdf.motion_retained_pages,
+            page_count,
+            forward,
+        );
         let retained = targets
             .iter()
             .map(|target| target.page)
             .collect::<HashSet<_>>();
         self.gpu_pdf.prune(&visible, &retained);
-        let nearest_index = nearest.and_then(|page| usize::try_from(page).ok());
+        let nearest_index = targets
+            .iter()
+            .filter(|target| target.speculative)
+            .find(|target| {
+                matches!(
+                    self.gpu_pdf.pages.get(&target.page),
+                    Some(GpuPageState::Ready(_))
+                ) && !self.gpu_pdf.continuity_surfaces.contains_key(&target.page)
+                    && !self.gpu_pdf.surface_seed_tasks.contains_key(&target.page)
+                    && !self
+                        .gpu_pdf
+                        .surface_render_pending
+                        .contains_key(&target.page)
+            })
+            .and_then(|target| usize::try_from(target.page).ok());
 
         let engine = cx
             .global::<SettingsStore>()
@@ -4054,7 +4326,7 @@ impl DocumentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.gpu_pdf.zoom_motion_active {
+        if self.native_gpu_preparation_motion_active() {
             return;
         }
         let motion_active = self.native_gpu_preparation_motion_active();
@@ -4093,22 +4365,9 @@ impl DocumentView {
             return;
         }
         let surface_region = full_page_gpu_region(continuity_render_key(key));
-        let protected_visible_bytes = self
-            .gpu_pdf
-            .rendered
-            .iter()
-            .filter(|(candidate, _)| self.gpu_pdf.visible_pages.contains(candidate))
-            .map(|(_, rendered)| rendered.presentation.byte_len())
-            .chain(
-                self.gpu_pdf
-                    .continuity_surfaces
-                    .iter()
-                    .filter(|(candidate, _)| self.gpu_pdf.visible_pages.contains(candidate))
-                    .map(|(_, continuity)| continuity.texture.byte_len()),
-            )
-            .fold(0_u64, u64::saturating_add);
+        let retained_surface_bytes = self.gpu_pdf.surface_bytes();
         let budget_fits = speculative_surface_fits(
-            protected_visible_bytes,
+            retained_surface_bytes,
             surface_region.byte_len(),
             MAX_RETAINED_GPU_SURFACE_BYTES,
         );
@@ -4309,7 +4568,8 @@ impl DocumentView {
                 .gpu_pdf
                 .surface_seed_tasks
                 .len()
-                .saturating_add(usize::from(self.gpu_pdf.motion_prewarm_task.is_some())),
+                .saturating_add(usize::from(self.gpu_pdf.motion_prewarm_task.is_some()))
+                .saturating_add(usize::from(self.gpu_pdf.motion_render_task.is_some())),
             surface_in_flight_bytes: self
                 .gpu_pdf
                 .surface_seed_tasks
@@ -4344,6 +4604,11 @@ impl DocumentView {
             surface_zoom_scaled_presentations: self.gpu_pdf.surface_zoom_scaled_presentations,
             surface_zoom_target_reuses: self.gpu_pdf.surface_zoom_target_reuses,
             surface_zoom_target_allocations: self.gpu_pdf.surface_zoom_target_allocations,
+            motion_render_jobs_started: self.gpu_pdf.motion_render_started,
+            motion_render_jobs_completed: self.gpu_pdf.motion_render_completed,
+            motion_render_jobs_superseded: self.gpu_pdf.motion_render_superseded,
+            motion_render_jobs_pending: usize::from(self.gpu_pdf.motion_render_task.is_some()),
+            motion_render_detached_target_reuses: self.gpu_pdf.motion_render_detached_reuses,
             surface_warm_requests: self.gpu_pdf.surface_warm_requests,
             surface_warm_hits: self.gpu_pdf.surface_warm_hits,
             surface_warm_pages: self
@@ -4466,8 +4731,8 @@ mod tests {
     fn continuity_key_is_stable_aspect_preserving_and_bounded() {
         let exact = render_key();
         let continuity = continuity_render_key(exact);
-        assert_eq!(continuity.physical_width, 1_024);
-        assert_eq!(continuity.physical_height, GPU_CONTINUITY_LONG_EDGE);
+        assert_eq!(continuity.physical_width, exact.physical_width);
+        assert_eq!(continuity.physical_height, exact.physical_height);
         assert_eq!(continuity.doc_id, exact.doc_id);
         assert_eq!(continuity.page_idx, exact.page_idx);
         assert!(continuity.byte_len() <= 16 * 1024 * 1024);
@@ -4483,6 +4748,17 @@ mod tests {
             GPU_CONTINUITY_LONG_EDGE
         );
         assert_eq!(landscape_continuity.physical_height, 512);
+
+        let small = RenderKey {
+            physical_width: 640,
+            physical_height: 960,
+            ..exact
+        };
+        assert_eq!(
+            continuity_render_key(small),
+            small,
+            "continuity rendering must never upscale beyond the exact display key"
+        );
     }
 
     #[test]
@@ -4585,6 +4861,25 @@ mod tests {
     }
 
     #[test]
+    fn fixed_scale_scroll_defers_refresh_only_with_a_full_page_safety_net() {
+        assert!(should_defer_fixed_scale_scroll_refresh(
+            false, true, true, true,
+        ));
+        assert!(!should_defer_fixed_scale_scroll_refresh(
+            true, true, true, true,
+        ));
+        assert!(!should_defer_fixed_scale_scroll_refresh(
+            false, false, true, true,
+        ));
+        assert!(!should_defer_fixed_scale_scroll_refresh(
+            false, true, false, true,
+        ));
+        assert!(!should_defer_fixed_scale_scroll_refresh(
+            false, true, true, false,
+        ));
+    }
+
+    #[test]
     fn zoom_motion_cancels_only_replaceable_or_lower_priority_work() {
         assert!(zoom_motion_cancels_surface_work(
             true,
@@ -4619,7 +4914,7 @@ mod tests {
     fn preparation_window_is_directional_and_deterministic() {
         let visible = [4, 5].into_iter().collect::<HashSet<_>>();
         let (forward, nearest_forward) =
-            gpu_preparation_targets(&visible, &HashSet::new(), 10, true);
+            gpu_preparation_targets(&visible, &HashSet::new(), &[], 10, true);
         assert_eq!(nearest_forward, Some(6));
         assert_eq!(
             forward
@@ -4639,7 +4934,7 @@ mod tests {
         );
 
         let (backward, nearest_backward) =
-            gpu_preparation_targets(&visible, &HashSet::new(), 10, false);
+            gpu_preparation_targets(&visible, &HashSet::new(), &[], 10, false);
         assert_eq!(nearest_backward, Some(3));
         assert_eq!(
             backward
@@ -4663,7 +4958,7 @@ mod tests {
     fn target_viewport_precedes_the_directional_scroll_corridor() {
         let visible = [2].into_iter().collect::<HashSet<_>>();
         let target = [6, 7].into_iter().collect::<HashSet<_>>();
-        let (targets, nearest) = gpu_preparation_targets(&visible, &target, 12, true);
+        let (targets, nearest) = gpu_preparation_targets(&visible, &target, &[], 12, true);
         assert_eq!(nearest, Some(3));
         assert_eq!(
             targets
@@ -4684,9 +4979,34 @@ mod tests {
     }
 
     #[test]
+    fn recent_motion_history_precedes_directional_speculation() {
+        let visible = HashSet::from([6]);
+        let history = [2, 3, 4, 5, 6];
+        let (targets, nearest) =
+            gpu_preparation_targets(&visible, &HashSet::new(), &history, 12, true);
+        assert_eq!(nearest, Some(7));
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.page, target.speculative))
+                .collect::<Vec<_>>(),
+            vec![
+                (6, false),
+                (5, true),
+                (4, true),
+                (3, true),
+                (2, true),
+                (7, true),
+                (8, true),
+                (9, true),
+            ]
+        );
+    }
+
+    #[test]
     fn visible_pages_consume_the_speculative_cache_budget_first() {
         let visible = (0..MAX_RETAINED_GPU_PAGES as u32).collect::<HashSet<_>>();
-        let (targets, nearest) = gpu_preparation_targets(&visible, &HashSet::new(), 20, true);
+        let (targets, nearest) = gpu_preparation_targets(&visible, &HashSet::new(), &[], 20, true);
         assert_eq!(targets.len(), visible.len());
         assert!(targets.iter().all(|target| !target.speculative));
         assert_eq!(nearest, None);

@@ -241,7 +241,15 @@ impl DocumentView {
             smooth_scrolling,
             elapsed,
         );
-        if changed_zoom || changed_x || changed_y {
+        if changed_zoom || hold_zoom_for_gpu {
+            // A detached retained redraw intentionally holds the next scale
+            // step. Keep *zoom* motion alive until that sharp frame is
+            // installed. Reasserting the zoom-specific state also closes the
+            // timer/animation race where a settle callback can run just
+            // before the final animated scale step and otherwise enqueue an
+            // obsolete exact-size surface.
+            self.mark_native_gpu_zoom_motion(cx);
+        } else if changed_x || changed_y {
             self.mark_native_gpu_motion(cx);
         }
         if changed_zoom || changed_x || changed_y || hold_zoom_for_gpu {

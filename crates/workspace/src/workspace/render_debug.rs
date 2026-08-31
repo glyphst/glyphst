@@ -1447,7 +1447,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 5,
+        "schema_version": 6,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1675,6 +1675,11 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "scaled_presentations": cache.surface_zoom_scaled_presentations,
         "target_reuses": cache.surface_zoom_target_reuses,
         "target_allocations": cache.surface_zoom_target_allocations,
+        "jobs_started": cache.motion_render_jobs_started,
+        "jobs_completed": cache.motion_render_jobs_completed,
+        "jobs_superseded": cache.motion_render_jobs_superseded,
+        "jobs_pending": cache.motion_render_jobs_pending,
+        "detached_target_reuses": cache.motion_render_detached_target_reuses,
         "active": cache.zoom_motion_active,
     });
     let surfaces = json!({
@@ -1862,6 +1867,10 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(surface_zoom_scaled_presentations);
     counter!(surface_zoom_target_reuses);
     counter!(surface_zoom_target_allocations);
+    counter!(motion_render_jobs_started);
+    counter!(motion_render_jobs_completed);
+    counter!(motion_render_jobs_superseded);
+    counter!(motion_render_detached_target_reuses);
     counter!(surface_warm_requests);
     counter!(surface_warm_hits);
     counter!(surface_continuity_requests);
@@ -2123,10 +2132,11 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU ZOOM MOTION",
             format!(
-                "{} live redraw · {} GPU hold · {} target reuse · {} scaled · {} failed",
+                "{} live redraw · {} detached reuse · {} pending · {} GPU hold · {} scaled · {} failed",
                 document.gpu_cache.surface_zoom_live_redraws,
+                document.gpu_cache.motion_render_detached_target_reuses,
+                document.gpu_cache.motion_render_jobs_pending,
                 document.gpu_cache.surface_zoom_gpu_holds,
-                document.gpu_cache.surface_zoom_target_reuses,
                 document.gpu_cache.surface_zoom_scaled_presentations,
                 document.gpu_cache.surface_zoom_live_failures,
             ),
@@ -3068,6 +3078,11 @@ mod tests {
             surface_zoom_scaled_presentations: 0,
             surface_zoom_target_reuses: 119,
             surface_zoom_target_allocations: 0,
+            motion_render_jobs_started: 120,
+            motion_render_jobs_completed: 119,
+            motion_render_jobs_superseded: 1,
+            motion_render_jobs_pending: 0,
+            motion_render_detached_target_reuses: 119,
             zoom_motion_active: true,
             refinement_pages: 1,
             retained_refinement_pages: 4,
@@ -3098,6 +3113,14 @@ mod tests {
         assert_eq!(report["surfaces"]["zoom_motion"]["scaled_presentations"], 0);
         assert_eq!(report["surfaces"]["zoom_motion"]["target_reuses"], 119);
         assert_eq!(report["surfaces"]["zoom_motion"]["target_allocations"], 0);
+        assert_eq!(report["surfaces"]["zoom_motion"]["jobs_started"], 120);
+        assert_eq!(report["surfaces"]["zoom_motion"]["jobs_completed"], 119);
+        assert_eq!(report["surfaces"]["zoom_motion"]["jobs_superseded"], 1);
+        assert_eq!(report["surfaces"]["zoom_motion"]["jobs_pending"], 0);
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["detached_target_reuses"],
+            119
+        );
         assert_eq!(report["surfaces"]["zoom_motion"]["active"], true);
         assert_eq!(report["surfaces"]["refinement_pages"], 1);
         assert_eq!(report["surfaces"]["retained_refinement_pages"], 4);
