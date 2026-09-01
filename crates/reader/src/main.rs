@@ -420,6 +420,7 @@ fn run_automated_render_trace(
                     match workspace.try_start_automated_render_debug_trace(
                         kind,
                         request.page,
+                        request.initial_zoom,
                         request.output.clone(),
                         window,
                         cx,

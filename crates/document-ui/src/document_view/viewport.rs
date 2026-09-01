@@ -3,6 +3,7 @@ use super::*;
 const ZOOM_RESPONSE_PER_SECOND: f32 = 24.0;
 const ZOOM_SNAP: f32 = 0.0005;
 const MAX_ZOOM_FRAME_ELAPSED: Duration = Duration::from_micros(16_667);
+const GPU_SCROLL_MAX_CAMERA_STEP_PX: f32 = 32.0;
 
 fn animated_zoom_step(current: f32, target: f32, elapsed: Duration) -> f32 {
     let delta = target - current;
@@ -12,6 +13,19 @@ fn animated_zoom_step(current: f32, target: f32, elapsed: Duration) -> f32 {
     let elapsed_seconds = elapsed.min(MAX_ZOOM_FRAME_ELAPSED).as_secs_f32();
     let factor = 1.0 - (-ZOOM_RESPONSE_PER_SECOND * elapsed_seconds).exp();
     current + delta * factor
+}
+
+fn advance_toward_capped(
+    current: &mut f32,
+    target: f32,
+    smooth: bool,
+    elapsed: Duration,
+    max_step: f32,
+) -> bool {
+    let previous = *current;
+    _ = advance_toward(current, target, smooth, elapsed);
+    *current = current.clamp(previous - max_step, previous + max_step);
+    (*current - previous).abs() > f32::EPSILON
 }
 
 impl DocumentView {
@@ -35,6 +49,15 @@ impl DocumentView {
     ) -> bool {
         let previous_x = self.scroll_x_doc;
         let previous_y = self.scroll_y_doc;
+        if (scroll_x_doc - previous_x).abs() > f32::EPSILON
+            || (scroll_y_doc - previous_y).abs() > f32::EPSILON
+        {
+            // Immediate scroll sources cannot be paused and replayed by the
+            // animation driver. Reserve opportunistically before mutating the
+            // camera; the paint path still preserves the last sharp frame if
+            // the external-texture ring is temporarily busy.
+            _ = self.native_gpu_camera_frame_ready();
+        }
         self.scroll_x_doc = scroll_x_doc;
         self.scroll_y_doc = scroll_y_doc;
         self.target_scroll_x_doc = scroll_x_doc;
@@ -45,6 +68,7 @@ impl DocumentView {
             || (self.scroll_y_doc - previous_y).abs() > f32::EPSILON;
         if changed {
             self.mark_native_gpu_motion(cx);
+            self.record_native_gpu_camera_step(false);
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
@@ -63,6 +87,10 @@ impl DocumentView {
     ) -> bool {
         let previous_x = self.target_scroll_x_doc;
         let previous_y = self.target_scroll_y_doc;
+        let previous_camera_x = self.scroll_x_doc;
+        let previous_camera_y = self.scroll_y_doc;
+        let camera_backlog = (previous_x - previous_camera_x).abs() > f32::EPSILON
+            || (previous_y - previous_camera_y).abs() > f32::EPSILON;
         self.target_scroll_x_doc = scroll_x_doc;
         self.target_scroll_y_doc = scroll_y_doc;
         self.clamp_scroll();
@@ -72,23 +100,34 @@ impl DocumentView {
             .settings
             .behavior
             .smooth_scrolling;
+        let mut admitted_camera = [self.scroll_x_doc, self.scroll_y_doc];
         if smooth_scrolling {
             let viewport_height_doc = self.viewport_height / self.effective_scale();
             let max_animated_distance = viewport_height_doc * SMOOTH_SCROLL_LARGE_JUMP_VIEWPORTS;
             let delta_y = self.target_scroll_y_doc - self.scroll_y_doc;
             if delta_y.abs() > max_animated_distance {
-                self.scroll_y_doc =
+                admitted_camera[1] =
                     self.target_scroll_y_doc - delta_y.signum() * max_animated_distance;
             }
-        } else {
-            self.scroll_x_doc = self.target_scroll_x_doc;
-            self.scroll_y_doc = self.target_scroll_y_doc;
+        } else if !camera_backlog {
+            admitted_camera = [self.target_scroll_x_doc, self.target_scroll_y_doc];
+        }
+        let camera_would_change = (admitted_camera[0] - self.scroll_x_doc).abs() > f32::EPSILON
+            || (admitted_camera[1] - self.scroll_y_doc).abs() > f32::EPSILON;
+        if !camera_would_change || self.native_gpu_camera_frame_ready() {
+            self.scroll_x_doc = admitted_camera[0];
+            self.scroll_y_doc = admitted_camera[1];
         }
 
         let changed = (self.target_scroll_x_doc - previous_x).abs() > f32::EPSILON
             || (self.target_scroll_y_doc - previous_y).abs() > f32::EPSILON;
         if changed {
             self.mark_native_gpu_motion(cx);
+            if (self.scroll_x_doc - previous_camera_x).abs() > f32::EPSILON
+                || (self.scroll_y_doc - previous_camera_y).abs() > f32::EPSILON
+            {
+                self.record_native_gpu_camera_step(false);
+            }
             self.hovered_link = None;
             self.pending_link = None;
             self.schedule_position_save(cx);
@@ -212,9 +251,10 @@ impl DocumentView {
                 now.saturating_duration_since(previous)
             });
 
+        let hold_camera_for_gpu =
+            (zoom_pending || scroll_pending) && !self.native_gpu_camera_frame_ready();
         let mut changed_zoom = false;
-        let hold_zoom_for_gpu = zoom_pending && !self.native_gpu_zoom_frame_ready();
-        if zoom_pending && !hold_zoom_for_gpu {
+        if zoom_pending && !hold_camera_for_gpu {
             let zoom = animated_zoom_step(self.zoom, self.target_zoom, elapsed);
             let anchor = self.zoom_anchor.unwrap_or_else(|| {
                 self.zoom_anchor_at_viewport([
@@ -224,25 +264,51 @@ impl DocumentView {
             });
             self.apply_zoom_anchor(zoom, anchor);
             changed_zoom = true;
-            self.record_native_gpu_zoom_step();
             if (self.target_zoom - self.zoom).abs() <= f32::EPSILON {
                 self.zoom_anchor = None;
             }
         }
 
-        let changed_x = advance_toward(
-            &mut self.scroll_x_doc,
-            self.target_scroll_x_doc,
-            smooth_scrolling,
-            elapsed,
-        );
-        let changed_y = advance_toward(
-            &mut self.scroll_y_doc,
-            self.target_scroll_y_doc,
-            smooth_scrolling,
-            elapsed,
-        );
-        if changed_zoom || hold_zoom_for_gpu {
+        let gpu_camera_step = self
+            .gpu_pdf
+            .has_renderer()
+            .then(|| GPU_SCROLL_MAX_CAMERA_STEP_PX / self.effective_scale().max(0.001));
+        let (changed_x, changed_y) = if hold_camera_for_gpu {
+            (false, false)
+        } else if let Some(max_step) = gpu_camera_step {
+            (
+                advance_toward_capped(
+                    &mut self.scroll_x_doc,
+                    self.target_scroll_x_doc,
+                    smooth_scrolling,
+                    elapsed,
+                    max_step,
+                ),
+                advance_toward_capped(
+                    &mut self.scroll_y_doc,
+                    self.target_scroll_y_doc,
+                    smooth_scrolling,
+                    elapsed,
+                    max_step,
+                ),
+            )
+        } else {
+            (
+                advance_toward(
+                    &mut self.scroll_x_doc,
+                    self.target_scroll_x_doc,
+                    smooth_scrolling,
+                    elapsed,
+                ),
+                advance_toward(
+                    &mut self.scroll_y_doc,
+                    self.target_scroll_y_doc,
+                    smooth_scrolling,
+                    elapsed,
+                ),
+            )
+        };
+        if changed_zoom || (hold_camera_for_gpu && zoom_pending) {
             // A detached retained redraw intentionally holds the next scale
             // step. Keep *zoom* motion alive until that sharp frame is
             // installed. Reasserting the zoom-specific state also closes the
@@ -250,17 +316,20 @@ impl DocumentView {
             // before the final animated scale step and otherwise enqueue an
             // obsolete exact-size surface.
             self.mark_native_gpu_zoom_motion(cx);
-        } else if changed_x || changed_y {
+        } else if changed_x || changed_y || hold_camera_for_gpu {
             self.mark_native_gpu_motion(cx);
         }
-        if hold_zoom_for_gpu {
+        if changed_zoom || changed_x || changed_y {
+            self.record_native_gpu_camera_step(changed_zoom);
+        }
+        if hold_camera_for_gpu {
             // Completion of an external queue submission updates the target
             // lease without mutating application state. Keep this view dirty
             // so the next display tick retries admission instead of relying
             // on an unrelated UI notification to discover the free target.
             cx.notify();
         }
-        if changed_zoom || changed_x || changed_y || hold_zoom_for_gpu {
+        if changed_zoom || changed_x || changed_y || hold_camera_for_gpu {
             window.request_animation_frame();
         }
     }
@@ -290,5 +359,28 @@ mod tests {
             zoom = animated_zoom_step(zoom, 1.0, Duration::from_millis(64));
         }
         assert_eq!(zoom, 1.0);
+    }
+
+    #[test]
+    fn admitted_scroll_backlog_never_becomes_one_large_camera_jump() {
+        let mut immediate = 0.0;
+        assert!(advance_toward_capped(
+            &mut immediate,
+            100.0,
+            false,
+            Duration::ZERO,
+            32.0,
+        ));
+        assert_eq!(immediate, 32.0);
+
+        let mut reverse = 100.0;
+        assert!(advance_toward_capped(
+            &mut reverse,
+            0.0,
+            false,
+            Duration::ZERO,
+            32.0,
+        ));
+        assert_eq!(reverse, 68.0);
     }
 }

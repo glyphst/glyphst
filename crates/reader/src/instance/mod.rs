@@ -40,6 +40,7 @@ pub(crate) struct RenderTraceRequest {
     pub(crate) kind: RenderTraceKind,
     pub(crate) engine: RenderTraceEngine,
     pub(crate) page: usize,
+    pub(crate) initial_zoom: f32,
     pub(crate) output: PathBuf,
     pub(crate) window_width: f32,
     pub(crate) window_height: f32,
@@ -61,6 +62,7 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRe
     let mut trace_kind = None;
     let mut trace_engine = None;
     let mut trace_page = 1_usize;
+    let mut trace_zoom = 1.0_f32;
     let mut trace_output = None;
     let mut window_width = 1440.0_f32;
     let mut window_height = 900.0_f32;
@@ -99,6 +101,13 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRe
             trace_option_seen = true;
             let value = required_option_value(&mut args, "--render-page")?;
             trace_page = parse_positive_usize(&value, "--render-page")?;
+            continue;
+        }
+
+        if arg.as_os_str() == OsStr::new("--render-zoom") {
+            trace_option_seen = true;
+            let value = required_option_value(&mut args, "--render-zoom")?;
+            trace_zoom = parse_render_zoom(&value)?;
             continue;
         }
 
@@ -158,6 +167,7 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRe
             engine: trace_engine
                 .ok_or_else(|| anyhow::anyhow!("missing required --render-engine option"))?,
             page: trace_page,
+            initial_zoom: trace_zoom,
             output: trace_output
                 .ok_or_else(|| anyhow::anyhow!("missing required --render-output option"))?,
             window_width,
@@ -203,6 +213,19 @@ fn parse_window_extent(value: &OsStr, option: &str, minimum: f32) -> Result<f32>
         .map_err(|_| anyhow::anyhow!("{option} must be a finite number"))?;
     if !parsed.is_finite() || parsed < minimum {
         bail!("{option} must be a finite number at least {minimum}");
+    }
+    Ok(parsed)
+}
+
+fn parse_render_zoom(value: &OsStr) -> Result<f32> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("--render-zoom is not valid UTF-8"))?;
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| anyhow::anyhow!("--render-zoom must be a finite number"))?;
+    if !parsed.is_finite() || !(0.25..=8_192.0).contains(&parsed) {
+        bail!("--render-zoom must be a finite number from 0.25 through 8192");
     }
     Ok(parsed)
 }
@@ -263,6 +286,8 @@ mod tests {
             "glyphst",
             "--render-page",
             "29",
+            "--render-zoom",
+            "4",
             "--render-output",
             "/tmp/trace.json",
             "--window-width",
@@ -277,6 +302,7 @@ mod tests {
                 kind: RenderTraceKind::Zoom,
                 engine: RenderTraceEngine::Glyphst,
                 page: 29,
+                initial_zoom: 4.0,
                 output: PathBuf::from("/tmp/trace.json"),
                 window_width: 1536.0,
                 window_height: 960.0,
@@ -318,6 +344,16 @@ mod tests {
         ])
         .unwrap_err();
         assert!(small_window.to_string().contains("at least 900"));
+
+        let invalid_zoom = parse(&[
+            "/tmp/book.pdf",
+            "--render-zoom",
+            "0.1",
+            "--render-trace",
+            "zoom",
+        ])
+        .unwrap_err();
+        assert!(invalid_zoom.to_string().contains("0.25 through 8192"));
     }
 
     #[test]

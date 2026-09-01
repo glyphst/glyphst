@@ -38,11 +38,12 @@ const TRACE_WARMUP_READY_FRAMES: usize = 5;
 // measure any zoom frames.
 const TRACE_WARMUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRACE_SCROLL_FRAMES_PER_DIRECTION: usize = 120;
-const TRACE_SCROLL_PIXELS_PER_FRAME: f32 = 32.0;
+const TRACE_SCROLL_MIN_PIXELS_PER_FRAME: f32 = 8.0;
+const TRACE_SCROLL_MAX_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
-const TRACE_REPORT_VERSION: u32 = 7;
+const TRACE_REPORT_VERSION: u32 = 8;
 
 struct RenderDebugCaptureNotification;
 
@@ -168,6 +169,7 @@ struct RenderDebugTraceReport {
     planned_settling_frames: usize,
     completed_settling_frames: usize,
     warmup_duration: Duration,
+    scroll_pixels_per_frame: f32,
     markers: Vec<RenderDebugTraceMarker>,
     cancelled: bool,
     failure: Option<String>,
@@ -276,6 +278,7 @@ impl Workspace {
         &mut self,
         kind: RenderDebugTraceKind,
         page_number: usize,
+        initial_zoom: f32,
         output: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -307,7 +310,7 @@ impl Workspace {
             ));
         }
         let positioned = document.update(cx, |document, cx| {
-            document.prepare_render_debug_trace_position(page_number, 1.0, cx)
+            document.prepare_render_debug_trace_position(page_number, initial_zoom, cx)
         });
         if !positioned {
             return AutomatedRenderTraceStart::Failed(
@@ -367,11 +370,14 @@ impl Workspace {
             let room_before = interaction.target_scroll_y_doc.max(0.0) * scale;
             let room_after =
                 (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
-            if room_after >= room_before {
-                TRACE_SCROLL_PIXELS_PER_FRAME
-            } else {
-                -TRACE_SCROLL_PIXELS_PER_FRAME
-            }
+            let room = room_before.max(room_after);
+            let step = ((room - 0.5).max(0.0) / TRACE_SCROLL_FRAMES_PER_DIRECTION as f32)
+                .floor()
+                .clamp(
+                    TRACE_SCROLL_MIN_PIXELS_PER_FRAME,
+                    TRACE_SCROLL_MAX_PIXELS_PER_FRAME,
+                );
+            step.copysign(room_after - room_before)
         } else {
             0.0
         };
@@ -537,7 +543,7 @@ impl Workspace {
                                 SynchronizedScrollDelta {
                                     x_pixels: 0.0,
                                     y_pixels,
-                                    mode: SynchronizedScrollMode::Immediate,
+                                    mode: SynchronizedScrollMode::Target,
                                 },
                                 cx,
                             );
@@ -645,6 +651,7 @@ impl Workspace {
                 planned_settling_frames: TRACE_SETTLING_FRAMES,
                 completed_settling_frames: trace.completed_settling_frames,
                 warmup_duration,
+                scroll_pixels_per_frame: trace.scroll_pixels_per_frame.abs(),
                 markers: trace.markers.clone(),
                 cancelled,
                 failure,
@@ -834,7 +841,7 @@ fn render_debug_trace_precondition(
         let before = interaction.target_scroll_y_doc.max(0.0) * scale;
         let after =
             (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
-        let required = TRACE_SCROLL_FRAMES_PER_DIRECTION as f32 * TRACE_SCROLL_PIXELS_PER_FRAME;
+        let required = TRACE_SCROLL_FRAMES_PER_DIRECTION as f32 * TRACE_SCROLL_MIN_PIXELS_PER_FRAME;
         if before.max(after) + 0.5 < required {
             return Some(format!(
                 "the current position needs {required:.0} physical pixels of scroll room in one direction"
@@ -1478,7 +1485,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 9,
+        "schema_version": 10,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1639,6 +1646,7 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
         "warmup_ready_frames": TRACE_WARMUP_READY_FRAMES,
         "warmup_timeout_ms": milliseconds(TRACE_WARMUP_TIMEOUT),
         "warmup_ms": milliseconds(trace.warmup_duration),
+        "scroll_pixels_per_frame": finite_f32_json(trace.scroll_pixels_per_frame),
         "phase_markers": trace.markers.iter().map(|marker| json!({
             "phase": marker.phase,
             "frame_index": marker.frame_index,
@@ -1724,13 +1732,15 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "detached_target_reuses": cache.motion_render_detached_target_reuses,
         "inline_frames": cache.motion_render_inline_frames,
         "inline_failures": cache.motion_render_inline_failures,
+        "pan_inline_frames": cache.camera_pan_inline_frames,
+        "pan_admission_holds": cache.camera_pan_admission_holds,
         "camera_serial": cache.motion_render_camera_serial,
         "presented_camera_serial": cache.motion_render_presented_camera_serial,
         "camera_serial_mismatches": cache.motion_render_camera_serial_mismatches,
-        "reservations_started": cache.motion_target_reservations_started,
-        "reservations_consumed": cache.motion_target_reservations_consumed,
-        "reservations_released": cache.motion_target_reservations_released,
-        "reservations_pending": cache.motion_target_reservations_pending,
+        "reservations_started": cache.camera_target_reservations_started,
+        "reservations_consumed": cache.camera_target_reservations_consumed,
+        "reservations_released": cache.camera_target_reservations_released,
+        "reservations_pending": cache.camera_target_reservations_pending,
         "active": cache.zoom_motion_active,
     });
     let surfaces = json!({
@@ -1753,6 +1763,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "scroll_reuses": cache.surface_scroll_reuses,
         "scroll_prefetches": cache.surface_scroll_prefetches,
         "scroll_misses": cache.surface_scroll_misses,
+        "sharp_pan_cache_presentations": cache.surface_sharp_pan_cache_presentations,
         "zoom_reuses": cache.surface_zoom_reuses,
         "zoom_quality_refreshes": cache.surface_zoom_quality_refreshes,
         "zoom_coverage_refreshes": cache.surface_zoom_coverage_refreshes,
@@ -1931,6 +1942,7 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(surface_scroll_reuses);
     counter!(surface_scroll_prefetches);
     counter!(surface_scroll_misses);
+    counter!(surface_sharp_pan_cache_presentations);
     counter!(surface_zoom_reuses);
     counter!(surface_zoom_quality_refreshes);
     counter!(surface_zoom_coverage_refreshes);
@@ -1957,10 +1969,12 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(motion_render_detached_target_reuses);
     counter!(motion_render_inline_frames);
     counter!(motion_render_inline_failures);
+    counter!(camera_pan_inline_frames);
+    counter!(camera_pan_admission_holds);
     counter!(motion_render_camera_serial_mismatches);
-    counter!(motion_target_reservations_started);
-    counter!(motion_target_reservations_consumed);
-    counter!(motion_target_reservations_released);
+    counter!(camera_target_reservations_started);
+    counter!(camera_target_reservations_consumed);
+    counter!(camera_target_reservations_released);
     counter!(surface_warm_requests);
     counter!(surface_warm_hits);
     counter!(surface_continuity_requests);
@@ -2193,8 +2207,9 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
         .child(reading(
             "GPU SCROLL CACHE",
             format!(
-                "{} overscan reuse · {} proactive refresh · {} uncovered refresh",
+                "{} exact reuse · {} sharp presentations · {} proactive refresh · {} uncovered refresh",
                 document.gpu_cache.surface_scroll_reuses,
+                document.gpu_cache.surface_sharp_pan_cache_presentations,
                 document.gpu_cache.surface_scroll_prefetches,
                 document.gpu_cache.surface_scroll_misses,
             ),
@@ -2220,17 +2235,19 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
-            "GPU ZOOM MOTION",
+            "GPU CAMERA MOTION",
             format!(
-                "{} live redraw / {} animation steps · {} inline / {} cached sharp · {} detached reuse · {}/{} pending/peak · {} admission hold · {} scaled · {} failed",
+                "{} live redraw / {} zoom steps · {} inline ({} fixed-scale) / {} cached sharp · {} detached reuse · {}/{} pending/peak · {} admission hold ({} pan-cache) · {} scaled · {} failed",
                 document.gpu_cache.surface_zoom_live_redraws,
                 document.gpu_cache.surface_zoom_animation_steps,
                 document.gpu_cache.motion_render_inline_frames,
+                document.gpu_cache.camera_pan_inline_frames,
                 document.gpu_cache.surface_zoom_cached_sharp_presentations,
                 document.gpu_cache.motion_render_detached_target_reuses,
                 document.gpu_cache.motion_render_jobs_pending,
                 document.gpu_cache.motion_render_jobs_peak,
                 document.gpu_cache.surface_zoom_admission_holds,
+                document.gpu_cache.camera_pan_admission_holds,
                 document.gpu_cache.surface_zoom_scaled_presentations,
                 document.gpu_cache.surface_zoom_live_failures,
             ),
@@ -2245,7 +2262,7 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
             },
         ))
         .child(reading(
-            "GPU ZOOM CONTROL",
+            "GPU CAMERA CONTROL",
             format!(
                 "{} worker / {} sample / {} presentation holds · camera {}/{} ({} mismatches) · {} reservations ({}/{} consumed/released, {} pending) · {} stale canceled · {} motion allocation · {} legacy emergency",
                 document.gpu_cache.surface_zoom_worker_holds,
@@ -2254,10 +2271,10 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 document.gpu_cache.motion_render_presented_camera_serial,
                 document.gpu_cache.motion_render_camera_serial,
                 document.gpu_cache.motion_render_camera_serial_mismatches,
-                document.gpu_cache.motion_target_reservations_started,
-                document.gpu_cache.motion_target_reservations_consumed,
-                document.gpu_cache.motion_target_reservations_released,
-                document.gpu_cache.motion_target_reservations_pending,
+                document.gpu_cache.camera_target_reservations_started,
+                document.gpu_cache.camera_target_reservations_consumed,
+                document.gpu_cache.camera_target_reservations_released,
+                document.gpu_cache.camera_target_reservations_pending,
                 document.gpu_cache.surface_zoom_motion_cancellations,
                 document.gpu_cache.surface_zoom_target_allocations,
                 document.gpu_cache.surface_zoom_emergency_renders,
@@ -3022,6 +3039,7 @@ mod tests {
             planned_settling_frames: 30,
             completed_settling_frames: 30,
             warmup_duration: Duration::from_millis(42),
+            scroll_pixels_per_frame: 0.0,
             markers: vec![RenderDebugTraceMarker {
                 phase: "forward",
                 frame_index: 0,
@@ -3039,6 +3057,7 @@ mod tests {
         assert_eq!(report["driver"], "fixed-deadline-draw");
         assert_eq!(report["planned_interaction_frames"], 120);
         assert_eq!(report["warmup_ms"], 42.0);
+        assert_eq!(report["scroll_pixels_per_frame"], 0.0);
         assert_eq!(report["phase_markers"][0]["phase"], "forward");
         assert_eq!(report["original_position"]["page"], 3);
         assert_eq!(report["observations"]["fallback_frames"], 0);
@@ -3229,10 +3248,12 @@ mod tests {
             motion_render_detached_target_reuses: 119,
             motion_render_inline_frames: 118,
             motion_render_inline_failures: 0,
-            motion_target_reservations_started: 120,
-            motion_target_reservations_consumed: 119,
-            motion_target_reservations_released: 1,
-            motion_target_reservations_pending: 0,
+            camera_pan_inline_frames: 42,
+            camera_pan_admission_holds: 3,
+            camera_target_reservations_started: 120,
+            camera_target_reservations_consumed: 119,
+            camera_target_reservations_released: 1,
+            camera_target_reservations_pending: 0,
             zoom_motion_active: true,
             refinement_pages: 1,
             retained_refinement_pages: 4,
@@ -3294,6 +3315,8 @@ mod tests {
             1
         );
         assert_eq!(report["surfaces"]["zoom_motion"]["reservations_pending"], 0);
+        assert_eq!(report["surfaces"]["zoom_motion"]["pan_inline_frames"], 42);
+        assert_eq!(report["surfaces"]["zoom_motion"]["pan_admission_holds"], 3);
         assert_eq!(report["surfaces"]["zoom_motion"]["active"], true);
         assert_eq!(report["surfaces"]["refinement_pages"], 1);
         assert_eq!(report["surfaces"]["retained_refinement_pages"], 4);

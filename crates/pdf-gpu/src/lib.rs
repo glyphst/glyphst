@@ -51,7 +51,24 @@ use std::{
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
 const MAX_PRESENTATION_SURFACES: usize = 7;
-const MOTION_TARGET_COUNT: usize = 4;
+const CAMERA_TARGET_COUNT: usize = 4;
+const PAN_CACHE_TARGET_COUNT: usize = 3;
+const PAN_CACHE_GUTTER_MIN: u32 = 96;
+
+fn pan_cache_gutter(extent: u32, overscan_axis: bool) -> u32 {
+    // Glyphst's measured strict-render cache is 1.7x the viewport with a 96 px
+    // minimum border on each side. The reader may keep only that minimum on
+    // the cross axis of a one-dimensional gesture; integer arithmetic keeps
+    // both contracts deterministic before tile alignment.
+    if overscan_axis {
+        extent
+            .saturating_mul(7)
+            .div_ceil(20)
+            .max(PAN_CACHE_GUTTER_MIN)
+    } else {
+        PAN_CACHE_GUTTER_MIN
+    }
+}
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1284,15 +1301,15 @@ impl GpuPdfRenderer {
         self.context.device().limits().max_texture_dimension_2d
     }
 
-    /// Reserves one preallocated, non-presented target for the next sharp motion frame.
+    /// Reserves one preallocated, non-presented target for the next sharp camera frame.
     ///
-    /// `Ok(None)` is bounded backpressure: every motion target is still
+    /// `Ok(None)` is bounded backpressure: every camera target is still
     /// written or sampled. The caller should keep presenting its previous
     /// coherent texture and retry on the next animation frame.
-    pub fn reserve_motion_target(
+    pub fn reserve_camera_target(
         &self,
         presentation: &GpuPagePresentation,
-    ) -> Result<Option<GpuMotionTargetReservation>> {
+    ) -> Result<Option<GpuCameraTargetReservation>> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
         }
@@ -1302,11 +1319,11 @@ impl GpuPdfRenderer {
         {
             bail!("the PDF presentation belongs to a stale GPU generation");
         }
-        let Some(size) = presentation.motion_target_size else {
+        let Some(size) = presentation.camera_target_size else {
             return Ok(None);
         };
         let completed_write = self.motion_completed.load(Ordering::Acquire);
-        Ok(presentation.reserve_existing_motion_target(size, completed_write, self.token()))
+        Ok(presentation.reserve_existing_camera_target(size, completed_write, self.token()))
     }
 
     fn mark_surface_write_submitted(&self, selection: &mut SurfaceSelection) {
@@ -1522,15 +1539,7 @@ impl GpuPdfRenderer {
         let surface_region = request.surface_region()?;
         let page_transform =
             page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
-        let surface_translation = Transform::new([
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            -f64::from(surface_region.x),
-            -f64::from(surface_region.y),
-        ])
-        .context("failed to construct native PDF surface translation")?;
+        let surface_translation = camera_surface_translation(surface_region, request)?;
         Ok((surface_region, surface_translation.compose(page_transform)))
     }
 
@@ -1543,15 +1552,7 @@ impl GpuPdfRenderer {
     ) -> Result<(GpuPageRegion, RenderRequest)> {
         let page_transform =
             page_transform(page.gpu.page_bounds(), request.rotation, request.page_size)?;
-        let surface_translation = Transform::new([
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            -f64::from(surface_region.x),
-            -f64::from(surface_region.y),
-        ])
-        .context("failed to construct native PDF surface translation")?;
+        let surface_translation = camera_surface_translation(surface_region, request)?;
         let root_transform = surface_translation.compose(page_transform);
         let visible = request.visible_region.clamp(request.page_size)?;
         let visible_local = Rect {
@@ -1595,7 +1596,7 @@ impl GpuPdfRenderer {
         {
             bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
         }
-        request.preallocated_motion_target_size(
+        request.preallocated_camera_target_size(
             self.context.device().limits().max_texture_dimension_2d,
         )?;
         let mut region_mode = presentation.region_mode;
@@ -1626,7 +1627,7 @@ impl GpuPdfRenderer {
         }
     }
 
-    /// Render a prepared complete page into a bounded five-surface ring.
+    /// Render a prepared complete page into a bounded seven-surface ring.
     ///
     /// Reprojection and refinement select a destination distinct from their
     /// source. A direct retained redraw samples no presentation pixels and may
@@ -1650,7 +1651,7 @@ impl GpuPdfRenderer {
         {
             bail!("the prepared PDF page or presentation belongs to a stale GPU generation");
         }
-        let motion_target_size = request.preallocated_motion_target_size(
+        let camera_target_size = request.preallocated_camera_target_size(
             self.context.device().limits().max_texture_dimension_2d,
         )?;
         presentation.token = Some(self.token());
@@ -1719,12 +1720,24 @@ impl GpuPdfRenderer {
                         engine_request,
                         stats.presentation_quality,
                     );
-                    if let Some(size) = motion_target_size {
-                        // Allocate the viewport-sized motion target ring
-                        // before interaction. A motion worker must never create
+                    if let Some(size) = camera_target_size {
+                        // Allocate the viewport-sized camera target ring
+                        // before interaction. A camera worker must never create
                         // a target or overwrite the coherent surface currently
                         // sampled by GPUI.
-                        presentation.ensure_motion_targets(size, |size| self.create_surface(size));
+                        presentation.ensure_camera_targets(size, |size| self.create_surface(size));
+                    }
+                    if request.target_capacity.is_some()
+                        && region_mode == SurfaceRegionMode::Overscanned
+                    {
+                        // Keep the current exact-density pan surface plus two
+                        // alternates resident before interaction. A cache
+                        // refresh must not create or zero a large texture on
+                        // the gesture path, and the third surface lets GPUI
+                        // finish sampling the retiring cache independently.
+                        presentation.ensure_pan_cache_targets(target_size, |size| {
+                            self.create_surface(size)
+                        });
                     }
                     return Ok(GpuPageRenderOutcome::Rendered { presented, stats });
                 }
@@ -1745,14 +1758,14 @@ impl GpuPdfRenderer {
     /// Redraw one in-motion page directly from retained GPU resources.
     ///
     /// This path deliberately discards incremental presentation pixels and
-    /// writes only to an existing non-presented motion target. Missing
+    /// writes only to an existing non-presented camera target. Missing
     /// preallocation is an error: no texture allocation is permitted on the
     /// gesture path.
-    pub fn render_motion_page(
+    pub fn render_camera_page(
         &self,
         page: &PreparedGpuPage,
         request: GpuPaintRequest,
-        reservation: GpuMotionTargetReservation,
+        reservation: GpuCameraTargetReservation,
         presentation: &mut GpuPagePresentation,
     ) -> Result<GpuPageRenderOutcome> {
         if self.is_device_lost() {
@@ -1767,22 +1780,22 @@ impl GpuPdfRenderer {
         }
 
         let target_size = request
-            .preallocated_motion_target_size(
+            .preallocated_camera_target_size(
                 self.context.device().limits().max_texture_dimension_2d,
             )?
-            .ok_or_else(|| anyhow!("native PDF motion target was not preallocated"))?;
+            .ok_or_else(|| anyhow!("native PDF camera target was not preallocated"))?;
         if reservation.token != self.token() || reservation.size != target_size {
-            bail!("native PDF motion target reservation is stale or has the wrong extent");
+            bail!("native PDF camera target reservation is stale or has the wrong extent");
         }
         let SurfaceSlot::Existing(reserved_index) = reservation.selection.slot else {
-            bail!("native PDF motion target reservation does not reference an existing slot");
+            bail!("native PDF camera target reservation does not reference an existing slot");
         };
         if !presentation
             .surfaces
             .get(reserved_index)
             .is_some_and(|surface| Arc::ptr_eq(surface, &reservation.selection.surface))
         {
-            bail!("native PDF motion target reservation no longer belongs to this presentation");
+            bail!("native PDF camera target reservation no longer belongs to this presentation");
         }
         let surface_region = request.visible_region.clamp(request.page_size)?;
         let render_size = surface_region.size();
@@ -1968,9 +1981,23 @@ pub struct GpuPaintRequest {
     /// rendered page subregion occupies its top-left corner and presentation
     /// crops the unused capacity. Tighter budget-recovery modes ignore it.
     pub target_capacity: Option<[u32; 2]>,
-    /// Preallocated viewport-sized target used for direct retained redraw
-    /// during scale motion. It intentionally excludes scroll overscan.
-    pub motion_target_capacity: Option<[u32; 2]>,
+    /// Axes receiving the full 1.7x pan-cache overscan. An inactive cross axis
+    /// retains the 96-device-pixel minimum border.
+    pub pan_cache_axes: [bool; 2],
+    /// Active axes promoted to the complete page extent when the retained
+    /// scene is expensive and the bounded seven-target ring can afford it.
+    pub full_page_pan_cache_axes: [bool; 2],
+    /// Preallocated viewport-sized target used for a direct retained camera
+    /// redraw. It intentionally excludes pan-cache overscan.
+    pub camera_target_capacity: Option<[u32; 2]>,
+    /// Monotonic reader camera update represented by this request. The value
+    /// does not affect pixels, but lets the reader prove that an accepted pan
+    /// or zoom state reached the same-device presentation ring.
+    pub camera_serial: u64,
+    /// Fractional device-pixel offset between the continuous page origin and
+    /// GPUI's snapped external-texture destination. Applying it to the root
+    /// transform keeps retained vector coverage phase-aligned with the camera.
+    pub device_origin_phase: [f32; 2],
     pub rotation: DocumentRotation,
     pub background: [f64; 4],
     pub settled: bool,
@@ -1988,18 +2015,30 @@ impl GpuPaintRequest {
         }
         let gutter = [
             if mode == SurfaceRegionMode::Overscanned {
-                (self.visible_region.width / 4).max(ANALYTIC_TILE_SIZE)
+                pan_cache_gutter(self.visible_region.width, self.pan_cache_axes[0])
             } else {
                 0
             },
             if mode == SurfaceRegionMode::Overscanned {
-                (self.visible_region.height / 4).max(ANALYTIC_TILE_SIZE)
+                pan_cache_gutter(self.visible_region.height, self.pan_cache_axes[1])
             } else {
                 0
             },
         ];
-        self.visible_region
-            .with_gutter_aligned(self.page_size, gutter, ANALYTIC_TILE_SIZE)
+        let mut region =
+            self.visible_region
+                .with_gutter_aligned(self.page_size, gutter, ANALYTIC_TILE_SIZE)?;
+        if mode == SurfaceRegionMode::Overscanned {
+            if self.full_page_pan_cache_axes[0] {
+                region.x = 0;
+                region.width = self.page_size[0];
+            }
+            if self.full_page_pan_cache_axes[1] {
+                region.y = 0;
+                region.height = self.page_size[1];
+            }
+        }
+        Ok(region)
     }
 
     fn target_size_for(
@@ -2023,16 +2062,16 @@ impl GpuPaintRequest {
         ])
     }
 
-    fn preallocated_motion_target_size(self, dimension_limit: u32) -> Result<Option<[u32; 2]>> {
-        let Some(capacity) = self.motion_target_capacity else {
+    fn preallocated_camera_target_size(self, dimension_limit: u32) -> Result<Option<[u32; 2]>> {
+        let Some(capacity) = self.camera_target_capacity else {
             return Ok(None);
         };
         if capacity.contains(&0) {
-            bail!("native PDF motion target capacity must be non-empty");
+            bail!("native PDF camera target capacity must be non-empty");
         }
         if capacity[0] > dimension_limit || capacity[1] > dimension_limit {
             bail!(
-                "native PDF motion target capacity {}x{} exceeds device limit {dimension_limit}",
+                "native PDF camera target capacity {}x{} exceeds device limit {dimension_limit}",
                 capacity[0],
                 capacity[1]
             );
@@ -2044,7 +2083,7 @@ impl GpuPaintRequest {
         ];
         if target_size[0] > dimension_limit || target_size[1] > dimension_limit {
             bail!(
-                "native PDF motion render target {}x{} exceeds device limit {dimension_limit}",
+                "native PDF camera render target {}x{} exceeds device limit {dimension_limit}",
                 target_size[0],
                 target_size[1]
             );
@@ -2103,16 +2142,16 @@ impl SurfaceSelection {
 ///
 /// The reservation is tied to the presentation clone that supplied the slot.
 /// Dropping it before rendering releases the external-texture write lease.
-pub struct GpuMotionTargetReservation {
+pub struct GpuCameraTargetReservation {
     selection: SurfaceSelection,
     size: [u32; 2],
     token: ExternalGpuDeviceToken,
 }
 
-impl fmt::Debug for GpuMotionTargetReservation {
+impl fmt::Debug for GpuCameraTargetReservation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GpuMotionTargetReservation")
+            .debug_struct("GpuCameraTargetReservation")
             .field("slot", &self.selection.slot)
             .field("size", &self.size)
             .field("token", &self.token)
@@ -2124,9 +2163,9 @@ impl fmt::Debug for GpuMotionTargetReservation {
 ///
 /// Working state may advance through incomplete settled tiles while the last
 /// coherent surface remains immutable and displayable. At most seven surfaces
-/// cover the coherent output, incremental sources, and a four-target motion
-/// ring. The extra retiring target prevents compositor completion jitter from
-/// stalling a 120 Hz gesture.
+/// provide three exact-density pan-cache slots and four viewport-sized camera
+/// targets. The alternates prevent compositor completion jitter from stalling
+/// a 120 Hz gesture or forcing texture allocation during it.
 #[derive(Clone, Default)]
 pub struct GpuPagePresentation {
     token: Option<ExternalGpuDeviceToken>,
@@ -2140,7 +2179,7 @@ pub struct GpuPagePresentation {
     presented_request: Option<RenderRequest>,
     presented_quality: Option<GpuPresentationQuality>,
     presented_incremental: IncrementalRenderState,
-    motion_target_size: Option<[u32; 2]>,
+    camera_target_size: Option<[u32; 2]>,
     region_mode: SurfaceRegionMode,
     incremental: IncrementalRenderState,
 }
@@ -2157,7 +2196,7 @@ impl fmt::Debug for GpuPagePresentation {
             .field("presented", &self.presented)
             .field("presented_region", &self.presented_region)
             .field("presented_quality", &self.presented_quality)
-            .field("motion_target_size", &self.motion_target_size)
+            .field("camera_target_size", &self.camera_target_size)
             .field("region_mode", &self.region_mode)
             .field("refinement_pending", &self.incremental.refinement_pending())
             .finish()
@@ -2177,13 +2216,13 @@ impl GpuPagePresentation {
             .map(|surface| surface.view.as_ref())
     }
 
-    fn ensure_motion_targets(
+    fn ensure_camera_targets(
         &mut self,
         size: [u32; 2],
         mut create: impl FnMut([u32; 2]) -> Arc<GpuPageSurface>,
     ) -> usize {
-        self.motion_target_size = Some(size);
-        while self.available_motion_target_count(size) < MOTION_TARGET_COUNT {
+        self.camera_target_size = Some(size);
+        while self.available_camera_target_count(size) < CAMERA_TARGET_COUNT {
             let surface = create(size);
             if self.surfaces.len() < MAX_PRESENTATION_SURFACES {
                 self.surfaces.push(surface);
@@ -2197,12 +2236,43 @@ impl GpuPagePresentation {
             };
             self.surfaces[index] = surface;
         }
-        self.available_motion_target_count(size)
+        self.available_camera_target_count(size)
+    }
+
+    fn ensure_pan_cache_targets(
+        &mut self,
+        size: [u32; 2],
+        mut create: impl FnMut([u32; 2]) -> Arc<GpuPageSurface>,
+    ) -> usize {
+        while self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.size == size)
+            .count()
+            < PAN_CACHE_TARGET_COUNT
+        {
+            let surface = create(size);
+            if self.surfaces.len() < MAX_PRESENTATION_SURFACES {
+                self.surfaces.push(surface);
+                continue;
+            }
+            let Some(index) = self
+                .unprotected_surface_indices()
+                .find(|index| self.surfaces[*index].size != size)
+            else {
+                break;
+            };
+            self.surfaces[index] = surface;
+        }
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.size == size)
+            .count()
     }
 
     #[must_use]
-    pub const fn motion_target_size(&self) -> Option<[u32; 2]> {
-        self.motion_target_size
+    pub const fn camera_target_size(&self) -> Option<[u32; 2]> {
+        self.camera_target_size
     }
 
     fn prepare_request(&mut self, request: RenderRequest) {
@@ -2262,18 +2332,18 @@ impl GpuPagePresentation {
         (0..self.surfaces.len()).filter(move |index| !protected.contains(&Some(*index)))
     }
 
-    fn available_motion_target_count(&self, size: [u32; 2]) -> usize {
+    fn available_camera_target_count(&self, size: [u32; 2]) -> usize {
         self.unprotected_surface_indices()
             .filter(|index| self.surfaces[*index].size == size)
             .count()
     }
 
-    fn reserve_existing_motion_target(
+    fn reserve_existing_camera_target(
         &self,
         size: [u32; 2],
         completed_write: u64,
         token: ExternalGpuDeviceToken,
-    ) -> Option<GpuMotionTargetReservation> {
+    ) -> Option<GpuCameraTargetReservation> {
         self.unprotected_surface_indices().find_map(|index| {
             let surface = &self.surfaces[index];
             if surface.size != size
@@ -2282,7 +2352,7 @@ impl GpuPagePresentation {
                 return None;
             }
             let write_reservation = surface.handle.try_reserve_write()?;
-            Some(GpuMotionTargetReservation {
+            Some(GpuCameraTargetReservation {
                 selection: SurfaceSelection {
                     slot: SurfaceSlot::Existing(index),
                     surface: Arc::clone(surface),
@@ -2586,6 +2656,29 @@ impl GpuPageTexture {
     pub fn token(&self) -> ExternalGpuDeviceToken {
         self.surface.token
     }
+}
+
+fn camera_surface_translation(
+    surface_region: GpuPageRegion,
+    request: GpuPaintRequest,
+) -> Result<Transform> {
+    let [phase_x, phase_y] = request.device_origin_phase;
+    if !phase_x.is_finite()
+        || !phase_y.is_finite()
+        || phase_x.abs() > 0.500_001
+        || phase_y.abs() > 0.500_001
+    {
+        bail!("native PDF device-origin phase must be finite and within half a device pixel");
+    }
+    Transform::new([
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        -f64::from(surface_region.x) + f64::from(phase_x),
+        -f64::from(surface_region.y) + f64::from(phase_y),
+    ])
+    .context("failed to construct native PDF camera surface translation")
 }
 
 fn page_transform(
@@ -3392,7 +3485,11 @@ trailer <</Root 1 0 R>>
                 height: 400,
             },
             target_capacity: None,
-            motion_target_capacity: None,
+            pan_cache_axes: [true; 2],
+            full_page_pan_cache_axes: [false; 2],
+            camera_target_capacity: None,
+            camera_serial: 0,
+            device_origin_phase: [0.0; 2],
             rotation: DocumentRotation::Degrees0,
             background: [1.0; 4],
             settled: false,
@@ -3454,12 +3551,27 @@ trailer <</Root 1 0 R>>
         assert_eq!(
             large.surface_region().unwrap(),
             GpuPageRegion {
-                x: 512,
+                x: 384,
                 y: 640,
-                width: 2_560,
-                height: 1_664,
+                width: 2_816,
+                height: 1_792,
             },
-            "large viewports retain a 1.5x motion cache before tile alignment"
+            "large viewports retain a 1.7x exact-density pan cache before tile alignment"
+        );
+
+        let full_vertical = GpuPaintRequest {
+            full_page_pan_cache_axes: [false, true],
+            ..large
+        };
+        assert_eq!(
+            full_vertical.surface_region().unwrap(),
+            GpuPageRegion {
+                x: 384,
+                y: 0,
+                width: 2_816,
+                height: 4_000,
+            },
+            "a selected full page axis keeps the directional cross-axis cache",
         );
     }
 
@@ -3474,7 +3586,11 @@ trailer <</Root 1 0 R>>
                 height: 600,
             },
             target_capacity: Some([2_048, 1_536]),
-            motion_target_capacity: Some([1_536, 1_024]),
+            pan_cache_axes: [true; 2],
+            full_page_pan_cache_axes: [false; 2],
+            camera_target_capacity: Some([1_536, 1_024]),
+            camera_serial: 7,
+            device_origin_phase: [0.25, -0.375],
             rotation: DocumentRotation::Degrees0,
             background: [1.0; 4],
             settled: false,
@@ -3501,25 +3617,74 @@ trailer <</Root 1 0 R>>
             "budget recovery must be able to discard unused capacity"
         );
         assert_eq!(
-            request.preallocated_motion_target_size(8_192).unwrap(),
+            request.preallocated_camera_target_size(8_192).unwrap(),
             Some([1_536, 1_024])
         );
 
         let too_small = GpuPaintRequest {
-            motion_target_capacity: Some([512, 512]),
+            camera_target_capacity: Some([512, 512]),
             ..request
         };
         assert_eq!(
-            too_small.preallocated_motion_target_size(8_192).unwrap(),
+            too_small.preallocated_camera_target_size(8_192).unwrap(),
             Some([800, 600]),
             "preallocation must cover the effective visible target"
         );
         for invalid in [[0, 1_024], [1_536, 0], [8_193, 1_024]] {
             let invalid = GpuPaintRequest {
-                motion_target_capacity: Some(invalid),
+                camera_target_capacity: Some(invalid),
                 ..request
             };
-            assert!(invalid.preallocated_motion_target_size(8_192).is_err());
+            assert!(invalid.preallocated_camera_target_size(8_192).is_err());
+        }
+    }
+
+    #[test]
+    fn camera_surface_translation_applies_fractional_device_phase() {
+        let request = GpuPaintRequest {
+            page_size: [1_000, 2_000],
+            visible_region: GpuPageRegion {
+                x: 200,
+                y: 500,
+                width: 300,
+                height: 400,
+            },
+            target_capacity: None,
+            pan_cache_axes: [true; 2],
+            full_page_pan_cache_axes: [false; 2],
+            camera_target_capacity: None,
+            camera_serial: 42,
+            device_origin_phase: [0.25, -0.375],
+            rotation: DocumentRotation::Degrees0,
+            background: [1.0; 4],
+            settled: true,
+            generation: 1,
+        };
+        let region = request.surface_region().expect("surface region");
+        let transform = camera_surface_translation(region, request).expect("camera translation");
+        assert_eq!(
+            transform.coefficients(),
+            [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                -f64::from(region.x) + 0.25,
+                -f64::from(region.y) - 0.375
+            ]
+        );
+
+        for phase in [[f32::NAN, 0.0], [0.0, f32::INFINITY], [0.500_1, 0.0]] {
+            assert!(
+                camera_surface_translation(
+                    region,
+                    GpuPaintRequest {
+                        device_origin_phase: phase,
+                        ..request
+                    },
+                )
+                .is_err()
+            );
         }
     }
 
@@ -3621,7 +3786,11 @@ trailer <</Root 1 0 R>>
                 height: 1_000,
             },
             target_capacity: None,
-            motion_target_capacity: None,
+            pan_cache_axes: [true; 2],
+            full_page_pan_cache_axes: [false; 2],
+            camera_target_capacity: None,
+            camera_serial: 0,
+            device_origin_phase: [0.0; 2],
             rotation: DocumentRotation::Degrees0,
             background: [1.0; 4],
             settled: false,
@@ -3631,10 +3800,10 @@ trailer <</Root 1 0 R>>
         assert_eq!(
             presentation.surface_region(request).unwrap(),
             GpuPageRegion {
-                x: 512,
+                x: 384,
                 y: 640,
-                width: 2_560,
-                height: 1_664,
+                width: 2_816,
+                height: 1_792,
             }
         );
 
