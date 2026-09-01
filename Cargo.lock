@@ -278,7 +278,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1297,7 +1297,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2198,7 +2198,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "ciborium",
  "glyphst-pdf-core",
@@ -3233,7 +3233,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3247,7 +3247,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-cpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
@@ -3260,7 +3260,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3276,7 +3276,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=6de03a3e67541dcfe08a09ab8784a0605bbd182f#6de03a3e67541dcfe08a09ab8784a0605bbd182f"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=3ec14cd11c927da7be3302b4f2846649b4e4c235#3ec14cd11c927da7be3302b4f2846649b4e4c235"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -3477,7 +3477,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.18",
- "windows 0.58.0",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -4542,7 +4542,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -6595,7 +6595,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7391,7 +7391,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8131,7 +8131,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9249,7 +9249,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11214,7 +11214,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

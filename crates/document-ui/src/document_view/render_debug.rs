@@ -330,6 +330,8 @@ impl DocumentView {
                 motion_stroke_lod_levels: stats.motion_stroke_lod_levels,
                 motion_stroke_coarsest_segments: stats.motion_stroke_coarsest_segments,
                 motion_stroke_lod_segments: stats.motion_stroke_lod_segments,
+                motion_stroke_source_segments: stats.motion_stroke_source_segments,
+                motion_stroke_quadratic_segments: stats.motion_stroke_quadratic_segments,
                 exact_stroke_segments: stats.exact_stroke_segments,
                 render_bundle_runs: stats.render_bundle_runs,
                 render_bundle_operations: stats.render_bundle_operations,

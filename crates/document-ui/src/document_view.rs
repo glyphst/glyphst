@@ -632,6 +632,8 @@ pub struct GpuPagePreparationDebugSnapshot {
     pub motion_stroke_lod_levels: u64,
     pub motion_stroke_coarsest_segments: u64,
     pub motion_stroke_lod_segments: u64,
+    pub motion_stroke_source_segments: u64,
+    pub motion_stroke_quadratic_segments: u64,
     pub exact_stroke_segments: u64,
     pub render_bundle_runs: u64,
     pub render_bundle_operations: u64,

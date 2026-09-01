@@ -44,7 +44,7 @@ const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
-const TRACE_REPORT_VERSION: u32 = 9;
+const TRACE_REPORT_VERSION: u32 = 10;
 
 struct RenderDebugCaptureNotification;
 
@@ -1545,7 +1545,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 12,
+        "schema_version": 13,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1956,6 +1956,8 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "motion_stroke_lod_levels": preparation.motion_stroke_lod_levels,
             "motion_stroke_coarsest_segments": preparation.motion_stroke_coarsest_segments,
             "motion_stroke_lod_segments": preparation.motion_stroke_lod_segments,
+            "motion_stroke_source_segments": preparation.motion_stroke_source_segments,
+            "motion_stroke_quadratic_segments": preparation.motion_stroke_quadratic_segments,
             "exact_stroke_segments": preparation.exact_stroke_segments,
             "camera_program_partitions": preparation.camera_program_partitions,
             "camera_program_operations": preparation.camera_program_operations,
