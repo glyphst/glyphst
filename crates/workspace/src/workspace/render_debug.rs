@@ -43,7 +43,8 @@ const TRACE_SCROLL_MAX_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
-const TRACE_REPORT_VERSION: u32 = 8;
+const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
+const TRACE_REPORT_VERSION: u32 = 9;
 
 struct RenderDebugCaptureNotification;
 
@@ -74,6 +75,7 @@ impl Drop for RenderDebugCapture {
 pub enum RenderDebugTraceKind {
     Scroll,
     Zoom,
+    ZoomScroll,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,13 +105,14 @@ impl RenderDebugTraceKind {
         match self {
             Self::Scroll => "scroll",
             Self::Zoom => "zoom",
+            Self::ZoomScroll => "zoom-scroll",
         }
     }
 
     fn frames_per_direction(self) -> usize {
         match self {
             Self::Scroll => TRACE_SCROLL_FRAMES_PER_DIRECTION,
-            Self::Zoom => TRACE_ZOOM_FRAMES_PER_DIRECTION,
+            Self::Zoom | Self::ZoomScroll => TRACE_ZOOM_FRAMES_PER_DIRECTION,
         }
     }
 
@@ -158,6 +161,9 @@ struct RenderDebugTraceObservations {
     zoom_max: Option<f32>,
     target_zoom_min: Option<f32>,
     target_zoom_max: Option<f32>,
+    zoom_scroll_started_at: Option<Duration>,
+    zoom_scroll_start_y_doc: Option<f32>,
+    zoom_scroll_activation_latency: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -364,14 +370,17 @@ impl Workspace {
             return Err(reason);
         }
 
-        let scroll_pixels_per_frame = if kind == RenderDebugTraceKind::Scroll {
+        let scroll_pixels_per_frame = if matches!(
+            kind,
+            RenderDebugTraceKind::Scroll | RenderDebugTraceKind::ZoomScroll
+        ) {
             let interaction = &document_start.interaction;
             let scale = interaction.effective_scale.max(0.001);
             let room_before = interaction.target_scroll_y_doc.max(0.0) * scale;
             let room_after =
                 (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
             let room = room_before.max(room_after);
-            let step = ((room - 0.5).max(0.0) / TRACE_SCROLL_FRAMES_PER_DIRECTION as f32)
+            let step = ((room - 0.5).max(0.0) / kind.frames_per_direction() as f32)
                 .floor()
                 .clamp(
                     TRACE_SCROLL_MIN_PIXELS_PER_FRAME,
@@ -531,6 +540,25 @@ impl Workspace {
                 }
                 observe_render_debug_trace(&mut trace.observations, &snapshot);
                 let forward = trace.phase == RenderDebugTracePhase::Forward;
+                if trace.kind == RenderDebugTraceKind::ZoomScroll && !forward {
+                    if trace.observations.zoom_scroll_started_at.is_none() {
+                        trace.observations.zoom_scroll_started_at = Some(elapsed);
+                        trace.observations.zoom_scroll_start_y_doc =
+                            Some(snapshot.interaction.scroll_y_doc);
+                    } else if trace.observations.zoom_scroll_activation_latency.is_none()
+                        && trace
+                            .observations
+                            .zoom_scroll_start_y_doc
+                            .is_some_and(|start| {
+                                (snapshot.interaction.scroll_y_doc - start).abs() > f32::EPSILON
+                            })
+                    {
+                        trace.observations.zoom_scroll_activation_latency = trace
+                            .observations
+                            .zoom_scroll_started_at
+                            .map(|started| elapsed.saturating_sub(started));
+                    }
+                }
                 let input_applied = match trace.kind {
                     RenderDebugTraceKind::Scroll => {
                         let y_pixels = if forward {
@@ -559,6 +587,24 @@ impl Workspace {
                         document.update(cx, |document, cx| {
                             document.apply_render_debug_zoom_factor(factor, cx)
                         })
+                    }
+                    RenderDebugTraceKind::ZoomScroll if forward => {
+                        document.update(cx, |document, cx| {
+                            document.apply_render_debug_zoom_factor(TRACE_ZOOM_FACTOR_PER_FRAME, cx)
+                        })
+                    }
+                    RenderDebugTraceKind::ZoomScroll => {
+                        document.update(cx, |document, cx| {
+                            document.apply_synchronized_scroll_delta(
+                                SynchronizedScrollDelta {
+                                    x_pixels: 0.0,
+                                    y_pixels: trace.scroll_pixels_per_frame,
+                                    mode: SynchronizedScrollMode::Target,
+                                },
+                                cx,
+                            );
+                        });
+                        true
                     }
                 };
                 if !input_applied {
@@ -836,12 +882,15 @@ fn render_debug_trace_precondition(
     {
         return Some("the document viewport has no measurable extent".to_string());
     }
-    if kind == RenderDebugTraceKind::Scroll {
+    if matches!(
+        kind,
+        RenderDebugTraceKind::Scroll | RenderDebugTraceKind::ZoomScroll
+    ) {
         let scale = interaction.effective_scale.max(0.001);
         let before = interaction.target_scroll_y_doc.max(0.0) * scale;
         let after =
             (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
-        let required = TRACE_SCROLL_FRAMES_PER_DIRECTION as f32 * TRACE_SCROLL_MIN_PIXELS_PER_FRAME;
+        let required = kind.frames_per_direction() as f32 * TRACE_SCROLL_MIN_PIXELS_PER_FRAME;
         if before.max(after) + 0.5 < required {
             return Some(format!(
                 "the current position needs {required:.0} physical pixels of scroll room in one direction"
@@ -985,6 +1034,17 @@ fn render_debug_trace_settle_failure(
     }
     if trace.observations.unexpected_backend_frames != 0 {
         return Some("an unexpected page backend was observed during the trace".to_string());
+    }
+    if trace.kind == RenderDebugTraceKind::ZoomScroll {
+        let Some(latency) = trace.observations.zoom_scroll_activation_latency else {
+            return Some("target scrolling never advanced the camera after zoom".to_string());
+        };
+        if latency > TRACE_SCROLL_ACTIVATION_LIMIT {
+            return Some(format!(
+                "target scrolling took {:.3} ms to advance the camera after zoom",
+                milliseconds(latency)
+            ));
+        }
     }
     if snapshot.pages.iter().any(|page| {
         page.status != PageRenderDebugStatus::Exact
@@ -1485,7 +1545,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 11,
+        "schema_version": 12,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1669,6 +1729,7 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
             "zoom_max": trace.observations.zoom_max.map(finite_f32_json),
             "target_zoom_min": trace.observations.target_zoom_min.map(finite_f32_json),
             "target_zoom_max": trace.observations.target_zoom_max.map(finite_f32_json),
+            "zoom_scroll_activation_latency_ms": trace.observations.zoom_scroll_activation_latency.map(milliseconds),
         },
     })
 }
@@ -1707,6 +1768,14 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "resident_bytes": cache.resident_bytes,
         "resident_byte_limit": cache.resident_byte_limit,
     });
+    let zoom_worker_latency = json!({
+        "queue_p95_ms": milliseconds(cache.motion_render_queue_latency_p95),
+        "queue_max_ms": milliseconds(cache.motion_render_queue_latency_max),
+        "execution_p95_ms": milliseconds(cache.motion_render_execution_latency_p95),
+        "execution_max_ms": milliseconds(cache.motion_render_execution_latency_max),
+        "total_p95_ms": milliseconds(cache.motion_render_total_latency_p95),
+        "total_max_ms": milliseconds(cache.motion_render_total_latency_max),
+    });
     let zoom_motion = json!({
         "reprojections": cache.surface_zoom_motion_reprojections,
         "refreshes_suppressed": cache.surface_zoom_motion_refreshes_suppressed,
@@ -1743,6 +1812,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "reservations_consumed": cache.camera_target_reservations_consumed,
         "reservations_released": cache.camera_target_reservations_released,
         "reservations_pending": cache.camera_target_reservations_pending,
+        "worker_latency": zoom_worker_latency,
         "active": cache.zoom_motion_active,
     });
     let surfaces = json!({
@@ -3258,6 +3328,12 @@ mod tests {
             camera_target_reservations_consumed: 119,
             camera_target_reservations_released: 1,
             camera_target_reservations_pending: 0,
+            motion_render_queue_latency_p95: Duration::from_micros(1_250),
+            motion_render_queue_latency_max: Duration::from_micros(2_500),
+            motion_render_execution_latency_p95: Duration::from_micros(2_000),
+            motion_render_execution_latency_max: Duration::from_micros(3_000),
+            motion_render_total_latency_p95: Duration::from_micros(3_250),
+            motion_render_total_latency_max: Duration::from_micros(5_500),
             zoom_motion_active: true,
             refinement_pages: 1,
             retained_refinement_pages: 4,
@@ -3319,6 +3395,22 @@ mod tests {
             1
         );
         assert_eq!(report["surfaces"]["zoom_motion"]["reservations_pending"], 0);
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["worker_latency"]["queue_p95_ms"],
+            1.25
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["worker_latency"]["queue_max_ms"],
+            2.5
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["worker_latency"]["execution_p95_ms"],
+            2.0
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["worker_latency"]["total_max_ms"],
+            5.5
+        );
         assert_eq!(report["surfaces"]["zoom_motion"]["pan_inline_frames"], 42);
         assert_eq!(
             report["surfaces"]["zoom_motion"]["ui_thread_submissions"],

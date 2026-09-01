@@ -25,6 +25,7 @@ use glyphst_pdf_render_wgpu::{
     ANALYTIC_TILE_SIZE, DeviceToken, GpuPage, GpuRenderer, IncrementalRenderState,
     IncrementalWorkPlan, PrepareError, RenderConfig, RenderError, RenderRequest,
     RenderSupportIssue, RenderTargetExtentPolicy, RendererInitError, RetainedStrokeStrategy,
+    output_format_supported,
 };
 pub use glyphst_pdf_render_wgpu::{
     IncrementalWorkKind as GpuIncrementalWorkKind, IncrementalWorkPlan as GpuIncrementalWorkPlan,
@@ -34,10 +35,10 @@ pub use glyphst_pdf_render_wgpu::{
     RenderStats as GpuRenderStats, VectorLodStatus as GpuVectorLodStatus,
 };
 use gpui::{
-    ExternalGpuContext, ExternalGpuDeviceToken, ExternalTextureHandle,
+    ExternalGpuContext, ExternalGpuDeviceToken, ExternalGpuRenderHandle, ExternalTextureHandle,
     ExternalTextureWriteReservation,
 };
-use gpui_wgpu::{WgpuExternalContext, wgpu};
+use gpui_wgpu::{WgpuExternalContext, WgpuExternalRender, WgpuExternalRenderContext, wgpu};
 use std::{
     collections::HashMap,
     fmt, fs,
@@ -1485,7 +1486,8 @@ impl GpuPdfRenderer {
             .min(context.device().limits().max_texture_dimension_2d);
         config.render_target_extent = RenderTargetExtentPolicy::RequestBounded;
         config.retained_strokes = RetainedStrokeStrategy::CameraAdaptive;
-        let output_format = config.output_format;
+        let output_format = context.surface_format();
+        config.output_format = output_format;
         let token = context.token();
         let renderer = GpuRenderer::new(
             Arc::clone(context.device()),
@@ -1516,6 +1518,27 @@ impl GpuPdfRenderer {
 
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.context.device().limits().max_texture_dimension_2d
+    }
+
+    /// Creates a painter-ordered callback that records this page directly into
+    /// GPUI's current frame encoder.
+    pub fn direct_render_handle(
+        self: &Arc<Self>,
+        page: Arc<PreparedGpuPage>,
+        request: GpuPaintRequest,
+    ) -> Result<ExternalGpuRenderHandle> {
+        if self.is_device_lost() {
+            bail!("the active GPUI WGPU device is lost");
+        }
+        if page.device_token() != self.token() {
+            bail!("the prepared PDF page belongs to a stale GPU generation");
+        }
+        request.visible_region.clamp(request.page_size)?;
+        Ok(self.context.render_handle(Arc::new(DirectPageRender {
+            renderer: Arc::clone(self),
+            page,
+            request,
+        })))
     }
 
     /// Reserves one preallocated, non-presented target for the next sharp camera frame.
@@ -2092,6 +2115,118 @@ impl GpuPdfRenderer {
             last_write_submission: AtomicU64::new(0),
         })
     }
+}
+
+struct DirectPageRender {
+    renderer: Arc<GpuPdfRenderer>,
+    page: Arc<PreparedGpuPage>,
+    request: GpuPaintRequest,
+}
+
+impl WgpuExternalRender for DirectPageRender {
+    fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
+        if context.target_format != self.renderer.output_format
+            || !output_format_supported(context.target_format)
+        {
+            bail!(
+                "native PDF direct target format {:?} does not match renderer format {:?}",
+                context.target_format,
+                self.renderer.output_format
+            );
+        }
+        let Some((target_origin, visible_region)) = clipped_direct_region(
+            [
+                context.bounds.origin.x.as_f32(),
+                context.bounds.origin.y.as_f32(),
+                context.bounds.size.width.as_f32(),
+                context.bounds.size.height.as_f32(),
+            ],
+            [
+                context.content_mask.bounds.origin.x.as_f32(),
+                context.content_mask.bounds.origin.y.as_f32(),
+                context.content_mask.bounds.size.width.as_f32(),
+                context.content_mask.bounds.size.height.as_f32(),
+            ],
+            context.target_size,
+            self.request.visible_region,
+            self.request.page_size,
+        ) else {
+            return Ok(());
+        };
+        let mut request = self.request;
+        request.visible_region = visible_region;
+        let (_, engine_request) = self.renderer.engine_render_request_for_region(
+            &self.page,
+            request,
+            visible_region,
+            visible_region.size(),
+        )?;
+        self.renderer
+            .renderer
+            .encode_into_region(
+                &self.page.gpu,
+                engine_request,
+                context.target,
+                target_origin,
+                context.encoder,
+            )
+            .map(|_| ())
+            .map_err(render_error)
+    }
+}
+
+fn clipped_direct_region(
+    bounds: [f32; 4],
+    mask: [f32; 4],
+    target_size: [u32; 2],
+    visible: GpuPageRegion,
+    page_size: [u32; 2],
+) -> Option<([u32; 2], GpuPageRegion)> {
+    if bounds
+        .into_iter()
+        .chain(mask)
+        .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let [x, y, width, height] = bounds;
+    let [mask_x, mask_y, mask_width, mask_height] = mask;
+    let original_x = x.round() as i64;
+    let original_y = y.round() as i64;
+    let x0 = original_x
+        .max(mask_x.round() as i64)
+        .max(0)
+        .min(i64::from(target_size[0]));
+    let y0 = original_y
+        .max(mask_y.round() as i64)
+        .max(0)
+        .min(i64::from(target_size[1]));
+    let x1 = (x + width)
+        .round()
+        .min((mask_x + mask_width).round())
+        .clamp(0.0, target_size[0] as f32) as i64;
+    let y1 = (y + height)
+        .round()
+        .min((mask_y + mask_height).round())
+        .clamp(0.0, target_size[1] as f32) as i64;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let offset_x = u32::try_from(x0.saturating_sub(original_x)).ok()?;
+    let offset_y = u32::try_from(y0.saturating_sub(original_y)).ok()?;
+    let region_x = visible.x.checked_add(offset_x)?.min(page_size[0]);
+    let region_y = visible.y.checked_add(offset_y)?.min(page_size[1]);
+    let region = GpuPageRegion {
+        x: region_x,
+        y: region_y,
+        width: u32::try_from(x1 - x0)
+            .ok()?
+            .min(page_size[0].saturating_sub(region_x)),
+        height: u32::try_from(y1 - y0)
+            .ok()?
+            .min(page_size[1].saturating_sub(region_y)),
+    };
+    (region.width > 0 && region.height > 0).then_some(([x0 as u32, y0 as u32], region))
 }
 
 fn renderer_init_error(error: RendererInitError) -> anyhow::Error {
@@ -2947,6 +3082,34 @@ fn page_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_render_region_tracks_window_clipping_in_page_space() {
+        let visible = GpuPageRegion {
+            x: 100,
+            y: 200,
+            width: 400,
+            height: 300,
+        };
+        assert_eq!(
+            clipped_direct_region(
+                [-10.0, 20.0, 400.0, 300.0],
+                [25.0, 40.0, 200.0, 150.0],
+                [1_000, 800],
+                visible,
+                [2_000, 2_000],
+            ),
+            Some((
+                [25, 40],
+                GpuPageRegion {
+                    x: 135,
+                    y: 220,
+                    width: 200,
+                    height: 150,
+                }
+            ))
+        );
+    }
 
     #[test]
     fn full_render_deferral_is_opt_in() {

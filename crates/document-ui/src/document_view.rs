@@ -61,10 +61,10 @@ use glyphst_pdf::{
 };
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
-    GpuCameraTargetReservation, GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource,
-    GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute,
-    GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation, GpuPageRegion,
-    GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture, GpuPaintRequest,
+    GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
+    GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute, GpuOutlineItem,
+    GpuPagePreparationTimings, GpuPagePresentation, GpuPageRegion, GpuPageRenderOptions,
+    GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture, GpuPaintRequest,
     GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats,
     GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
@@ -91,14 +91,14 @@ use glyphst_ui::{
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
     DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, ExternalGpuDeviceToken,
-    ExternalTextureAlphaMode, ExternalTextureColorEffect, ExternalTextureColorSpace,
-    ExternalTextureFilter, ExternalTextureHandle, FocusHandle, Focusable, FontWeight, Hsla,
-    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
-    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
-    deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
-    rgb, rgba, size, transparent_black, uniform_list,
+    ExternalGpuRenderHandle, ExternalTextureAlphaMode, ExternalTextureColorEffect,
+    ExternalTextureColorSpace, ExternalTextureFilter, ExternalTextureHandle, FocusHandle,
+    Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton,
+    PromptLevel, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Size, StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle,
+    Window, anchored, canvas, deferred, div, fill, hsla, linear_color_stop, linear_gradient,
+    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName as ComponentIconName, IndexPath,
@@ -742,6 +742,12 @@ pub struct GpuCacheDebugSnapshot {
     pub camera_target_reservations_consumed: u64,
     pub camera_target_reservations_released: u64,
     pub camera_target_reservations_pending: usize,
+    pub motion_render_queue_latency_p95: Duration,
+    pub motion_render_queue_latency_max: Duration,
+    pub motion_render_execution_latency_p95: Duration,
+    pub motion_render_execution_latency_max: Duration,
+    pub motion_render_total_latency_p95: Duration,
+    pub motion_render_total_latency_max: Duration,
     pub surface_warm_requests: u64,
     pub surface_warm_hits: u64,
     pub surface_warm_pages: usize,
@@ -1243,6 +1249,13 @@ struct GpuPaintTexture {
     bounds: Bounds<Pixels>,
     source_bounds: Bounds<f32>,
     texture: GpuPageTexture,
+    direct: Option<GpuDirectPaint>,
+}
+
+#[derive(Clone)]
+struct GpuDirectPaint {
+    bounds: Bounds<Pixels>,
+    render: ExternalGpuRenderHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -416,6 +416,7 @@ fn run_automated_render_trace(
                     let kind = match request.kind {
                         instance::RenderTraceKind::Scroll => RenderDebugTraceKind::Scroll,
                         instance::RenderTraceKind::Zoom => RenderDebugTraceKind::Zoom,
+                        instance::RenderTraceKind::ZoomScroll => RenderDebugTraceKind::ZoomScroll,
                     };
                     match workspace.try_start_automated_render_debug_trace(
                         kind,

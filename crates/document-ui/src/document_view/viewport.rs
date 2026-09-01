@@ -5,6 +5,28 @@ const ZOOM_SNAP: f32 = 0.0005;
 const MAX_ZOOM_FRAME_ELAPSED: Duration = Duration::from_micros(16_667);
 const GPU_SCROLL_MAX_CAMERA_STEP_PX: f32 = 32.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MotionRefresh {
+    Zoom,
+    Pan,
+}
+
+fn motion_refresh(
+    changed_zoom: bool,
+    changed_x: bool,
+    changed_y: bool,
+    hold_camera_for_gpu: bool,
+    zoom_pending: bool,
+) -> Option<MotionRefresh> {
+    if changed_zoom || (hold_camera_for_gpu && zoom_pending) {
+        Some(MotionRefresh::Zoom)
+    } else if changed_x || changed_y {
+        Some(MotionRefresh::Pan)
+    } else {
+        None
+    }
+}
+
 fn animated_zoom_step(current: f32, target: f32, elapsed: Duration) -> f32 {
     let delta = target - current;
     if delta.abs() <= ZOOM_SNAP {
@@ -241,6 +263,10 @@ impl DocumentView {
             || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON;
         if !zoom_pending && !scroll_pending {
             self.last_animation_frame = None;
+            // Expensive same-frame PDF draws can occupy every executor tick.
+            // Settle from the frame path as well as the timer so motion cannot
+            // remain latched merely because the timer was starved.
+            self.settle_native_gpu_motion_if_due(cx);
             return;
         }
         let now = Instant::now();
@@ -308,25 +334,27 @@ impl DocumentView {
                 ),
             )
         };
-        if changed_zoom || (hold_camera_for_gpu && zoom_pending) {
-            // A detached retained redraw intentionally holds the next scale
-            // step. Keep *zoom* motion alive until that sharp frame is
-            // installed. Reasserting the zoom-specific state also closes the
-            // timer/animation race where a settle callback can run just
-            // before the final animated scale step and otherwise enqueue an
-            // obsolete exact-size surface.
-            self.mark_native_gpu_zoom_motion(cx);
-        } else if changed_x || changed_y || hold_camera_for_gpu {
-            self.mark_native_gpu_motion(cx);
+        match motion_refresh(
+            changed_zoom,
+            changed_x,
+            changed_y,
+            hold_camera_for_gpu,
+            zoom_pending,
+        ) {
+            Some(MotionRefresh::Zoom) => {
+                // Reassert zoom-specific motion after the settle timer races a
+                // new scale step, avoiding obsolete exact-size surface work.
+                self.mark_native_gpu_zoom_motion(cx);
+            }
+            Some(MotionRefresh::Pan) => self.mark_native_gpu_motion(cx),
+            None => {}
         }
         if changed_zoom || changed_x || changed_y {
             self.record_native_gpu_camera_step(changed_zoom);
         }
         if hold_camera_for_gpu {
-            // Completion of an external queue submission updates the target
-            // lease without mutating application state. Keep this view dirty
-            // so the next display tick retries admission instead of relying
-            // on an unrelated UI notification to discover the free target.
+            // Keep this view dirty so the next display tick retries pan-cache
+            // admission without relying on an unrelated UI notification.
             cx.notify();
         }
         if changed_zoom || changed_x || changed_y || hold_camera_for_gpu {
@@ -382,5 +410,18 @@ mod tests {
             32.0,
         ));
         assert_eq!(reverse, 68.0);
+    }
+
+    #[test]
+    fn held_pan_does_not_keep_zoom_motion_alive() {
+        assert_eq!(motion_refresh(false, false, false, true, false), None);
+        assert_eq!(
+            motion_refresh(false, false, false, true, true),
+            Some(MotionRefresh::Zoom)
+        );
+        assert_eq!(
+            motion_refresh(false, false, true, false, false),
+            Some(MotionRefresh::Pan)
+        );
     }
 }

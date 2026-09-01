@@ -770,8 +770,8 @@ impl Render for DocumentView {
                                                         false,
                                                     );
                                                 }
-                                                if let Some(texture) = page.gpu_texture
-                                                    && let Err(error) =
+                                                if let Some(texture) = page.gpu_texture {
+                                                    if let Err(error) =
                                                         window.paint_external_texture(
                                                             texture.bounds,
                                                             texture.source_bounds,
@@ -781,10 +781,22 @@ impl Render for DocumentView {
                                                             ExternalTextureColorSpace::LinearSrgb,
                                                             ExternalTextureAlphaMode::Opaque,
                                                         )
-                                                {
-                                                    eprintln!(
-                                                        "failed to present native PDF GPU page: {error:#}"
-                                                    );
+                                                    {
+                                                        eprintln!(
+                                                            "failed to present native PDF GPU page: {error:#}"
+                                                        );
+                                                    }
+                                                    if let Some(direct) = texture.direct
+                                                        && let Err(error) = window
+                                                            .paint_external_gpu(
+                                                                direct.bounds,
+                                                                direct.render,
+                                                            )
+                                                    {
+                                                        eprintln!(
+                                                            "failed to render native PDF directly into the GPUI frame: {error:#}"
+                                                        );
+                                                    }
                                                 }
                                             }
 

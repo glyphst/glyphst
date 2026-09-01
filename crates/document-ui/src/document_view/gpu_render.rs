@@ -56,13 +56,6 @@ fn presented_refinement_page_count(
         .count()
 }
 
-fn replace_queued_motion<T>(queued: &mut VecDeque<T>, latest: T) -> usize {
-    let replaced = queued.len();
-    queued.clear();
-    queued.push_back(latest);
-    replaced
-}
-
 fn camera_batch_ready(serial: u64, page_serials: impl IntoIterator<Item = u64>) -> bool {
     let mut page_serials = page_serials.into_iter().peekable();
     page_serials.peek().is_some() && page_serials.all(|page_serial| page_serial == serial)
@@ -108,14 +101,6 @@ pub(super) struct GpuPdfState {
     vector_lod_failures: HashMap<u32, VectorLodFailure>,
     surface_seed_generation: u64,
     surface_seed_tasks: HashMap<u32, SurfaceSeedTask>,
-    motion_render_generation: u64,
-    motion_render_tasks: HashMap<u32, MotionRenderTask>,
-    motion_render_queued: HashMap<u32, VecDeque<QueuedMotionRender>>,
-    camera_target_reservations: HashMap<u32, GpuCameraTargetReservation>,
-    motion_render_started: u64,
-    motion_render_completed: u64,
-    motion_render_superseded: u64,
-    motion_render_detached_reuses: u64,
     motion_render_inline_frames: u64,
     motion_render_inline_failures: u64,
     camera_pan_inline_frames: u64,
@@ -124,10 +109,6 @@ pub(super) struct GpuPdfState {
     motion_presented_camera_serial: u64,
     motion_camera_serial_mismatches: u64,
     motion_camera_batch_commits: u64,
-    motion_render_peak: usize,
-    motion_reservations_started: u64,
-    motion_reservations_consumed: u64,
-    motion_reservations_released: u64,
     surface_render_sequence: u64,
     surface_render_pending: HashMap<u32, PendingSurfaceRender>,
     surface_render_started: u64,
@@ -298,29 +279,6 @@ struct SurfaceSeedTask {
     _task: Task<()>,
 }
 
-struct MotionRenderTask {
-    page: u32,
-    generation: u64,
-    camera_serial: u64,
-    prepared: Arc<PreparedGpuPage>,
-    renderer: Arc<GpuPdfRenderer>,
-    _task: Task<()>,
-}
-
-struct QueuedMotionRender {
-    page: u32,
-    generation: u64,
-    key: RenderKey,
-    image_bounds: Bounds<Pixels>,
-    request: GpuPaintRequest,
-    presentation: GpuPagePresentation,
-    previous_surface_bytes: u64,
-    prepared: Arc<PreparedGpuPage>,
-    renderer: Arc<GpuPdfRenderer>,
-    reservation: GpuCameraTargetReservation,
-    enqueued_at: Instant,
-}
-
 struct PendingSurfaceRender {
     sequence: u64,
     key: RenderKey,
@@ -425,14 +383,6 @@ impl GpuPdfState {
         self.vector_lod_failures.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
-        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
-        self.motion_render_tasks.clear();
-        self.motion_render_queued.clear();
-        self.camera_target_reservations.clear();
-        self.motion_render_started = 0;
-        self.motion_render_completed = 0;
-        self.motion_render_superseded = 0;
-        self.motion_render_detached_reuses = 0;
         self.motion_render_inline_frames = 0;
         self.motion_render_inline_failures = 0;
         self.camera_pan_inline_frames = 0;
@@ -441,10 +391,6 @@ impl GpuPdfState {
         self.motion_presented_camera_serial = 0;
         self.motion_camera_serial_mismatches = 0;
         self.motion_camera_batch_commits = 0;
-        self.motion_render_peak = 0;
-        self.motion_reservations_started = 0;
-        self.motion_reservations_consumed = 0;
-        self.motion_reservations_released = 0;
         self.surface_render_sequence = 0;
         self.surface_render_pending.clear();
         self.surface_render_started = 0;
@@ -541,14 +487,6 @@ impl GpuPdfState {
         self.vector_lod_failures.clear();
         self.surface_seed_generation = 0;
         self.surface_seed_tasks.clear();
-        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
-        self.motion_render_tasks.clear();
-        self.motion_render_queued.clear();
-        self.camera_target_reservations.clear();
-        self.motion_render_started = 0;
-        self.motion_render_completed = 0;
-        self.motion_render_superseded = 0;
-        self.motion_render_detached_reuses = 0;
         self.motion_render_inline_frames = 0;
         self.motion_render_inline_failures = 0;
         self.camera_pan_inline_frames = 0;
@@ -557,10 +495,6 @@ impl GpuPdfState {
         self.motion_presented_camera_serial = 0;
         self.motion_camera_serial_mismatches = 0;
         self.motion_camera_batch_commits = 0;
-        self.motion_render_peak = 0;
-        self.motion_reservations_started = 0;
-        self.motion_reservations_consumed = 0;
-        self.motion_reservations_released = 0;
         self.surface_render_sequence = 0;
         self.surface_render_pending.clear();
         self.surface_render_started = 0;
@@ -644,44 +578,11 @@ impl GpuPdfState {
                 .supersede_page_render(&task.prepared, self.render_generation);
         }
         self.surface_seed_tasks.clear();
-        self.cancel_motion_render_tasks();
         self.speculative_resume_generation =
             self.speculative_resume_generation.wrapping_add(1).max(1);
         self.speculative_resume_task = None;
         self.surface_render_pending.clear();
         self.fallback_grace_tasks.clear();
-    }
-
-    fn cancel_motion_render_tasks(&mut self) {
-        self.motion_render_generation = self.motion_render_generation.wrapping_add(1).max(1);
-        self.release_camera_target_reservations();
-        let released = self
-            .motion_render_queued
-            .values()
-            .map(VecDeque::len)
-            .sum::<usize>() as u64;
-        self.motion_render_queued.clear();
-        self.motion_reservations_released =
-            self.motion_reservations_released.saturating_add(released);
-        if !self.motion_render_tasks.is_empty() {
-            self.render_generation = self.render_generation.wrapping_add(1).max(1);
-            for task in self.motion_render_tasks.values() {
-                _ = task
-                    .renderer
-                    .supersede_page_render(&task.prepared, self.render_generation);
-            }
-            self.motion_render_superseded = self
-                .motion_render_superseded
-                .saturating_add(self.motion_render_tasks.len() as u64);
-            self.motion_render_tasks.clear();
-        }
-    }
-
-    fn release_camera_target_reservations(&mut self) {
-        let released = self.camera_target_reservations.len() as u64;
-        self.camera_target_reservations.clear();
-        self.motion_reservations_released =
-            self.motion_reservations_released.saturating_add(released);
     }
 
     fn begin_motion(&mut self) {
@@ -875,9 +776,6 @@ impl GpuPdfState {
             || !self.patch_lod_tasks.is_empty()
             || !self.vector_lod_tasks.is_empty()
             || !self.surface_seed_tasks.is_empty()
-            || !self.motion_render_tasks.is_empty()
-            || !self.motion_render_queued.is_empty()
-            || !self.camera_target_reservations.is_empty()
             || self.speculative_resume_task.is_some()
             || !self.surface_render_pending.is_empty()
             || !self.preparation_demands.is_empty()
@@ -1645,6 +1543,7 @@ fn gpu_paint_texture(
         bounds: gpu_surface_bounds(key, image_bounds, texture.region()),
         source_bounds: Bounds::new(point(source_x, source_y), size(source_width, source_height)),
         texture,
+        direct: None,
     }
 }
 
@@ -2289,16 +2188,7 @@ impl DocumentView {
                     {
                         return Some(deadline.duration_since(now));
                     }
-                    this.gpu_pdf.motion_active = false;
-                    this.gpu_pdf.zoom_motion_active = false;
-                    this.gpu_pdf.release_camera_target_reservations();
-                    this.gpu_pdf.motion_deadline = None;
-                    this.gpu_pdf.motion_settle_task = None;
-                    this.gpu_pdf.motion_retained_pages.clear();
-                    this.schedule_native_gpu_speculative_resume(cx);
-                    this.dispatch_native_gpu_page_preparations(cx);
-                    this.dispatch_native_gpu_surface_render(cx);
-                    cx.notify();
+                    this.finish_native_gpu_motion(cx);
                     None
                 }) else {
                     break;
@@ -2309,6 +2199,29 @@ impl DocumentView {
                 remaining = next;
             }
         }));
+    }
+
+    pub(super) fn settle_native_gpu_motion_if_due(&mut self, cx: &mut Context<Self>) {
+        if self.gpu_pdf.motion_active
+            && self
+                .gpu_pdf
+                .motion_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.finish_native_gpu_motion(cx);
+        }
+    }
+
+    fn finish_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
+        self.gpu_pdf.motion_active = false;
+        self.gpu_pdf.zoom_motion_active = false;
+        self.gpu_pdf.motion_deadline = None;
+        self.gpu_pdf.motion_settle_task = None;
+        self.gpu_pdf.motion_retained_pages.clear();
+        self.schedule_native_gpu_speculative_resume(cx);
+        self.dispatch_native_gpu_page_preparations(cx);
+        self.dispatch_native_gpu_surface_render(cx);
+        cx.notify();
     }
 
     fn schedule_native_gpu_speculative_resume(&mut self, cx: &mut Context<Self>) {
@@ -2343,14 +2256,10 @@ impl DocumentView {
     }
 
     pub(super) fn native_gpu_camera_frame_ready(&mut self) -> bool {
-        if self.gpu_pdf.zoom_motion_active && !self.gpu_pdf.surface_seed_tasks.is_empty() {
-            self.gpu_pdf.surface_zoom_worker_holds =
-                self.gpu_pdf.surface_zoom_worker_holds.saturating_add(1);
-            self.gpu_pdf.surface_zoom_admission_holds =
-                self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
-            self.gpu_pdf.surface_zoom_gpu_holds =
-                self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
-            return false;
+        if self.gpu_pdf.zoom_motion_active {
+            // Same-frame retained rendering uses GPUI's current target and
+            // encoder, so zoom admission has no worker or texture-ring wait.
+            return true;
         }
 
         // Fixed-scale translation pans every page through an exact-density
@@ -2359,145 +2268,57 @@ impl DocumentView {
         // camera consume the remaining cache while that work runs. Stop only
         // at the bounded outer admission guard instead of outrunning the
         // sharp texture and exposing a substitute or an uncovered edge.
-        if !self.gpu_pdf.zoom_motion_active {
-            let viewport_bounds = Bounds::new(
-                self.viewport_origin,
-                size(px(self.viewport_width), px(self.viewport_height)),
-            );
-            let cache_blocked = self.gpu_pdf.presented_pages.iter().any(|page| {
-                let Some(rendered) = self.gpu_pdf.rendered.get(page) else {
-                    return false;
-                };
-                let Some(image_bounds) = self
-                    .page_image_bounds
-                    .get(*page as usize)
-                    .and_then(Option::as_ref)
-                    .copied()
-                else {
-                    return false;
-                };
-                let Some(visible_region) =
-                    visible_gpu_region(rendered.key, image_bounds, viewport_bounds)
-                else {
-                    return false;
-                };
-                let Some(texture) = rendered.presentation.current_texture() else {
-                    return false;
-                };
-                let requested_axes = directional_pan_cache_axes(
-                    Some((
-                        rendered.request.visible_region,
-                        rendered.request.pan_cache_axes,
-                    )),
-                    visible_region,
-                );
-                let admission_region = surface_admission_guard(
-                    texture.region(),
-                    rendered.request.visible_region,
-                    [0, 1].map(|axis| {
-                        requested_axes[axis] && !rendered.request.full_page_pan_cache_axes[axis]
-                    }),
-                );
-                !pan_cache_admission_ready(texture.region(), admission_region, visible_region)
-            });
-            if cache_blocked {
-                self.gpu_pdf.camera_pan_admission_holds =
-                    self.gpu_pdf.camera_pan_admission_holds.saturating_add(1);
-                self.gpu_pdf.surface_zoom_gpu_holds =
-                    self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
-                self.gpu_pdf.surface_zoom_admission_holds =
-                    self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
+        let viewport_bounds = Bounds::new(
+            self.viewport_origin,
+            size(px(self.viewport_width), px(self.viewport_height)),
+        );
+        let cache_blocked = self.gpu_pdf.presented_pages.iter().any(|page| {
+            let Some(rendered) = self.gpu_pdf.rendered.get(page) else {
                 return false;
-            }
-
-            // Camera targets are reserved only for scale-changing frames.
-            // Translation remains sharp by sampling the exact-density pan
-            // cache without resubmitting the retained scene on every step.
-            self.gpu_pdf.release_camera_target_reservations();
-            return true;
+            };
+            let Some(image_bounds) = self
+                .page_image_bounds
+                .get(*page as usize)
+                .and_then(Option::as_ref)
+                .copied()
+            else {
+                return false;
+            };
+            let Some(visible_region) =
+                visible_gpu_region(rendered.key, image_bounds, viewport_bounds)
+            else {
+                return false;
+            };
+            let Some(texture) = rendered.presentation.current_texture() else {
+                return false;
+            };
+            let requested_axes = directional_pan_cache_axes(
+                Some((
+                    rendered.request.visible_region,
+                    rendered.request.pan_cache_axes,
+                )),
+                visible_region,
+            );
+            let admission_region = surface_admission_guard(
+                texture.region(),
+                rendered.request.visible_region,
+                [0, 1].map(|axis| {
+                    requested_axes[axis] && !rendered.request.full_page_pan_cache_axes[axis]
+                }),
+            );
+            !pan_cache_admission_ready(texture.region(), admission_region, visible_region)
+        });
+        if cache_blocked {
+            self.gpu_pdf.camera_pan_admission_holds =
+                self.gpu_pdf.camera_pan_admission_holds.saturating_add(1);
+            self.gpu_pdf.surface_zoom_gpu_holds =
+                self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
+            self.gpu_pdf.surface_zoom_admission_holds =
+                self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
+            return false;
         }
 
-        let mut pages = self
-            .gpu_pdf
-            .presented_pages
-            .iter()
-            .filter(|page| self.gpu_pdf.rendered.contains_key(page))
-            .copied()
-            .collect::<Vec<_>>();
-        pages.sort_unstable();
-        if pages.is_empty() {
-            self.gpu_pdf.release_camera_target_reservations();
-            return true;
-        }
-
-        // Every admitted scale-changing step needs a writable retained-render
-        // target. Raster density envelopes are intentionally not an alternate
-        // source while the page scale changes.
-        let pages_requiring_targets = pages;
-        let reservations_match = self.gpu_pdf.camera_target_reservations.len()
-            == pages_requiring_targets.len()
-            && pages_requiring_targets
-                .iter()
-                .all(|page| self.gpu_pdf.camera_target_reservations.contains_key(page));
-        if reservations_match {
-            return true;
-        }
-        self.gpu_pdf.release_camera_target_reservations();
-
-        let Some(renderer) = self.gpu_pdf.renderer.clone() else {
-            return true;
-        };
-        let mut reservations = HashMap::with_capacity(pages_requiring_targets.len());
-        for page in pages_requiring_targets {
-            let reservation =
-                self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
-                    match renderer.reserve_camera_target(&rendered.presentation) {
-                        Ok(reservation) => reservation.map(Ok),
-                        Err(error) => Some(Err(error)),
-                    }
-                });
-            match reservation {
-                Some(Ok(reservation)) => {
-                    reservations.insert(page, reservation);
-                    self.gpu_pdf.motion_reservations_started =
-                        self.gpu_pdf.motion_reservations_started.saturating_add(1);
-                }
-                None => {
-                    self.gpu_pdf.motion_reservations_released = self
-                        .gpu_pdf
-                        .motion_reservations_released
-                        .saturating_add(reservations.len() as u64);
-                    drop(reservations);
-                    self.gpu_pdf.surface_zoom_sample_holds =
-                        self.gpu_pdf.surface_zoom_sample_holds.saturating_add(1);
-                    self.gpu_pdf.surface_zoom_admission_holds =
-                        self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
-                    self.gpu_pdf.surface_zoom_gpu_holds =
-                        self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
-                    return false;
-                }
-                Some(Err(error)) => {
-                    self.gpu_pdf.motion_reservations_released = self
-                        .gpu_pdf
-                        .motion_reservations_released
-                        .saturating_add(reservations.len() as u64);
-                    drop(reservations);
-                    if renderer.is_device_lost() {
-                        self.gpu_pdf.reset_device();
-                    } else {
-                        eprintln!("failed to reserve native PDF camera target: {error:#}");
-                    }
-                    self.gpu_pdf.surface_zoom_sample_holds =
-                        self.gpu_pdf.surface_zoom_sample_holds.saturating_add(1);
-                    self.gpu_pdf.surface_zoom_admission_holds =
-                        self.gpu_pdf.surface_zoom_admission_holds.saturating_add(1);
-                    self.gpu_pdf.surface_zoom_gpu_holds =
-                        self.gpu_pdf.surface_zoom_gpu_holds.saturating_add(1);
-                    return false;
-                }
-            }
-        }
-        self.gpu_pdf.camera_target_reservations = reservations;
+        // Translation remains sharp by sampling the exact-density pan cache.
         true
     }
 
@@ -2694,354 +2515,6 @@ impl DocumentView {
         held
     }
 
-    fn start_native_gpu_zoom_frame(
-        &mut self,
-        page: u32,
-        key: RenderKey,
-        image_bounds: Bounds<Pixels>,
-        prepared: Arc<PreparedGpuPage>,
-        renderer: Arc<GpuPdfRenderer>,
-        request: GpuPaintRequest,
-        cx: &mut Context<Self>,
-    ) -> Result<bool, String> {
-        if self
-            .gpu_pdf
-            .motion_render_tasks
-            .get(&page)
-            .is_some_and(|task| task.camera_serial == request.camera_serial)
-            || self
-                .gpu_pdf
-                .motion_render_queued
-                .get(&page)
-                .and_then(|queued| queued.back())
-                .is_some_and(|queued| queued.request.camera_serial == request.camera_serial)
-        {
-            return Ok(true);
-        }
-        let presentation = self
-            .gpu_pdf
-            .rendered
-            .get(&page)
-            .map(|rendered| rendered.presentation.clone())
-            .ok_or_else(|| {
-                "sharp native PDF zoom redraw has no retained presentation".to_string()
-            })?;
-        let previous_surface_bytes = presentation.byte_len();
-        let Some(reservation) = self.gpu_pdf.camera_target_reservations.remove(&page) else {
-            return Ok(false);
-        };
-        self.gpu_pdf.motion_render_generation =
-            self.gpu_pdf.motion_render_generation.wrapping_add(1).max(1);
-        let generation = self.gpu_pdf.motion_render_generation;
-        let queued_frame = QueuedMotionRender {
-            page,
-            generation,
-            key,
-            image_bounds,
-            request,
-            presentation,
-            previous_surface_bytes,
-            prepared,
-            renderer,
-            reservation,
-            enqueued_at: Instant::now(),
-        };
-        if self.gpu_pdf.motion_render_tasks.contains_key(&page) {
-            let queued = self.gpu_pdf.motion_render_queued.entry(page).or_default();
-            let replaced = replace_queued_motion(queued, queued_frame);
-            self.gpu_pdf.motion_reservations_released = self
-                .gpu_pdf
-                .motion_reservations_released
-                .saturating_add(replaced as u64);
-            self.gpu_pdf.motion_render_superseded = self
-                .gpu_pdf
-                .motion_render_superseded
-                .saturating_add(replaced as u64);
-            self.gpu_pdf.motion_render_peak = self
-                .gpu_pdf
-                .motion_render_peak
-                .max(queued.len().saturating_add(1));
-            return Ok(true);
-        }
-        self.launch_native_gpu_zoom_frame(queued_frame, cx)?;
-        Ok(true)
-    }
-
-    fn launch_native_gpu_zoom_frame(
-        &mut self,
-        queued: QueuedMotionRender,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let QueuedMotionRender {
-            page,
-            generation,
-            key,
-            image_bounds,
-            mut request,
-            mut presentation,
-            previous_surface_bytes,
-            prepared,
-            renderer,
-            reservation,
-            enqueued_at,
-        } = queued;
-        debug_assert!(!self.gpu_pdf.motion_render_tasks.contains_key(&page));
-        assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
-        if let Err(error) = renderer.supersede_page_render(&prepared, request.generation) {
-            self.gpu_pdf.motion_reservations_released =
-                self.gpu_pdf.motion_reservations_released.saturating_add(1);
-            return Err(format!("{error:#}"));
-        }
-        self.gpu_pdf.motion_reservations_consumed =
-            self.gpu_pdf.motion_reservations_consumed.saturating_add(1);
-        let document_generation = self.gpu_pdf.generation;
-        let token = renderer.token();
-        let worker_page = Arc::clone(&prepared);
-        let worker_renderer = Arc::clone(&renderer);
-        let completion_page = Arc::clone(&prepared);
-        let task = cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let queue_wait = enqueued_at.elapsed();
-                    let execution_started = Instant::now();
-                    worker_renderer
-                        .render_camera_page(
-                            &worker_page,
-                            request,
-                            reservation,
-                            &mut presentation,
-                        )
-                        .map(|outcome| {
-                            (
-                                presentation,
-                                outcome,
-                                queue_wait,
-                                execution_started.elapsed(),
-                            )
-                        })
-                        .map_err(|error| format!("{error:#}"))
-                })
-                .await;
-            let update_result = this.update(cx, |this, cx| {
-                if this.gpu_pdf.generation != document_generation
-                    || !matches!(
-                        this.gpu_pdf.motion_render_tasks.get(&page),
-                        Some(task) if task.page == page && task.generation == generation
-                    )
-                {
-                    return;
-                }
-                let Some(completed_task) = this.gpu_pdf.motion_render_tasks.remove(&page) else {
-                    return;
-                };
-                this.gpu_pdf.motion_render_completed =
-                    this.gpu_pdf.motion_render_completed.saturating_add(1);
-                if this
-                    .gpu_pdf
-                    .renderer
-                    .as_ref()
-                    .is_none_or(|current| current.token() != token)
-                    || !matches!(
-                        this.gpu_pdf.pages.get(&page),
-                        Some(GpuPageState::Ready(current))
-                            if Arc::ptr_eq(current, &completion_page)
-                    )
-                {
-                    this.gpu_pdf.motion_render_superseded =
-                        this.gpu_pdf.motion_render_superseded.saturating_add(1);
-                    if let Some(queued) = this.gpu_pdf.motion_render_queued.remove(&page) {
-                        this.gpu_pdf.motion_reservations_released = this
-                            .gpu_pdf
-                            .motion_reservations_released
-                            .saturating_add(queued.len() as u64);
-                    }
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok((
-                        presentation,
-                        GpuPageRenderOutcome::Rendered {
-                            presented: Some(texture),
-                            stats,
-                        },
-                        queue_wait,
-                        execution,
-                    )) => {
-                        let elapsed = queue_wait.saturating_add(execution);
-                        if elapsed >= Duration::from_millis(8) {
-                            eprintln!(
-                                "slow detached native PDF zoom redraw on page {}: total {:.3} ms, worker queue {:.3} ms, execution {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, pool grew {}, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
-                                page + 1,
-                                elapsed.as_secs_f64() * 1_000.0,
-                                queue_wait.as_secs_f64() * 1_000.0,
-                                execution.as_secs_f64() * 1_000.0,
-                                stats.cpu_time.as_secs_f64() * 1_000.0,
-                                stats.command_encoding_time.as_secs_f64() * 1_000.0,
-                                stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
-                                stats.frame_pool_grew,
-                                stats.transient_pool_reuses,
-                                stats.offscreen_passes,
-                                stats.transient_peak_bytes as f64 / (1024.0 * 1024.0),
-                                stats.transient_resident_bytes as f64 / (1024.0 * 1024.0),
-                                stats.selected_vector_lod,
-                                request.camera_target_capacity.map_or(
-                                    request.visible_region.width,
-                                    |size| size[0],
-                                ),
-                                request.camera_target_capacity.map_or(
-                                    request.visible_region.height,
-                                    |size| size[1],
-                                ),
-                            );
-                        }
-                        let bytes = presentation.byte_len();
-                        if let Err(required) = this.gpu_pdf.reserve_surface(page, bytes) {
-                            this.gpu_pdf.surface_zoom_live_failures =
-                                this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                            eprintln!(
-                                "discarding sharp native PDF zoom redraw on page {}: surfaces require {required} bytes, exceeding the {MAX_RETAINED_GPU_SURFACE_BYTES}-byte cache limit",
-                                page + 1,
-                            );
-                        } else if let Some(rendered) = this.gpu_pdf.rendered.get_mut(&page) {
-                            rendered.key = key;
-                            rendered.request = request;
-                            rendered.refresh_region =
-                                surface_refresh_guard(texture.region(), request.visible_region);
-                            rendered.presentation = presentation;
-                            rendered.latest_stats = stats;
-                            rendered.prewarmed = false;
-                            rendered.last_paint = Some(gpu_paint_texture(
-                                key,
-                                image_bounds,
-                                texture.clone(),
-                            ));
-                            this.gpu_pdf.surface_zoom_live_redraws =
-                                this.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
-                            this.gpu_pdf.surface_zoom_target_reuses =
-                                this.gpu_pdf.surface_zoom_target_reuses.saturating_add(1);
-                            this.gpu_pdf.motion_render_detached_reuses = this
-                                .gpu_pdf
-                                .motion_render_detached_reuses
-                                .saturating_add(1);
-                            debug_assert!(bytes <= previous_surface_bytes);
-                            this.gpu_pdf.surface_failures.remove(&page);
-                            let serial = request.camera_serial;
-                            if this.gpu_pdf.zoom_motion_active
-                                && this.gpu_pdf.motion_presented_camera_serial != serial
-                                && camera_batch_ready(
-                                    serial,
-                                    this.gpu_pdf.visible_pages.iter().filter_map(
-                                        |visible_page| {
-                                            this.gpu_pdf
-                                                .rendered
-                                                .get(visible_page)
-                                                .filter(|rendered| rendered.last_paint.is_some())
-                                                .map(|rendered| rendered.request.camera_serial)
-                                        },
-                                    ),
-                                )
-                            {
-                                this.gpu_pdf.motion_presented_camera_serial = serial;
-                                this.gpu_pdf.motion_camera_batch_commits = this
-                                    .gpu_pdf
-                                    .motion_camera_batch_commits
-                                    .saturating_add(1);
-                            }
-                        } else {
-                            this.gpu_pdf.motion_render_superseded =
-                                this.gpu_pdf.motion_render_superseded.saturating_add(1);
-                        }
-                    }
-                    Ok((_, GpuPageRenderOutcome::Superseded, _, _)) => {
-                        this.gpu_pdf.motion_render_superseded =
-                            this.gpu_pdf.motion_render_superseded.saturating_add(1);
-                    }
-                    Ok((
-                        _,
-                        GpuPageRenderOutcome::Rendered { presented: None, .. },
-                        _,
-                        _,
-                    ))
-                    | Ok((_, GpuPageRenderOutcome::Deferred, _, _)) => {
-                        this.gpu_pdf.surface_zoom_live_failures =
-                            this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                    }
-                    Err(error) => {
-                        if completed_task.renderer.is_device_lost() {
-                            this.gpu_pdf.reset_device();
-                        } else {
-                            this.gpu_pdf.surface_zoom_live_failures =
-                                this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                            eprintln!(
-                                "failed to redraw native PDF page {} sharply during zoom: {error}",
-                                page + 1
-                            );
-                        }
-                    }
-                }
-                if this.gpu_pdf.zoom_motion_active {
-                    this.gpu_pdf.motion_deadline =
-                        Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
-                }
-                if this.gpu_pdf.renderer.is_some() && this.gpu_pdf.rendered.contains_key(&page) {
-                    let queued = this
-                        .gpu_pdf
-                        .motion_render_queued
-                        .get_mut(&page)
-                        .and_then(VecDeque::pop_front);
-                    if this
-                        .gpu_pdf
-                        .motion_render_queued
-                        .get(&page)
-                        .is_some_and(VecDeque::is_empty)
-                    {
-                        this.gpu_pdf.motion_render_queued.remove(&page);
-                    }
-                    if let Some(queued) = queued
-                        && let Err(error) = this.launch_native_gpu_zoom_frame(queued, cx)
-                    {
-                        let released = this
-                            .gpu_pdf
-                            .motion_render_queued
-                            .remove(&page)
-                            .map_or(0, |queued| queued.len() as u64);
-                        this.gpu_pdf.motion_reservations_released = this
-                            .gpu_pdf
-                            .motion_reservations_released
-                            .saturating_add(released);
-                        this.gpu_pdf.surface_zoom_live_failures =
-                            this.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                        eprintln!(
-                            "failed to launch queued native PDF zoom redraw on page {}: {error}",
-                            page + 1
-                        );
-                    }
-                }
-                cx.notify();
-            });
-            if let Err(error) = update_result
-                && error.to_string() != "entity released"
-            {
-                eprintln!("failed to install detached native PDF zoom redraw: {error:#}");
-            }
-        });
-        self.gpu_pdf.motion_render_tasks.insert(
-            page,
-            MotionRenderTask {
-                page,
-                generation,
-                camera_serial: request.camera_serial,
-                prepared,
-                renderer,
-                _task: task,
-            },
-        );
-        self.gpu_pdf.motion_render_peak = self.gpu_pdf.motion_render_peak.max(1);
-        self.gpu_pdf.motion_render_started = self.gpu_pdf.motion_render_started.saturating_add(1);
-        Ok(())
-    }
-
     pub(super) fn native_gpu_texture(
         &mut self,
         key: RenderKey,
@@ -3162,18 +2635,6 @@ impl DocumentView {
             viewport_bounds,
             renderer.max_texture_dimension_2d(),
         );
-        let camera_target_capacity = self
-            .gpu_pdf
-            .zoom_motion_active
-            .then(|| {
-                self.gpu_pdf
-                    .rendered
-                    .get(&page)
-                    .and_then(|rendered| rendered.presentation.camera_target_size())
-            })
-            .flatten()
-            .or(computed_camera_target_capacity);
-
         let speculative = intent.is_speculative();
         self.gpu_pdf.mark_page_used(page);
         let prepared = match self.gpu_pdf.pages.get(&page) {
@@ -3192,7 +2653,7 @@ impl DocumentView {
                 None
             }
         }?;
-        let full_page_pan_axes = match (computed_target_capacity, camera_target_capacity) {
+        let full_page_pan_axes = match (computed_target_capacity, computed_camera_target_capacity) {
             (Some(pan_capacity), Some(camera_capacity)) => bounded_full_page_pan_cache_axes(
                 [key.physical_width, key.physical_height],
                 pan_capacity,
@@ -3209,9 +2670,6 @@ impl DocumentView {
                 if full_page_pan_axes[axis] {
                     capacity[axis] = page_size[axis];
                 }
-                if let Some(camera_capacity) = camera_target_capacity {
-                    capacity[axis] = capacity[axis].max(camera_capacity[axis]);
-                }
             }
             capacity
         });
@@ -3219,7 +2677,7 @@ impl DocumentView {
             pan_capacity: target_capacity,
             pan_axes: pan_cache_axes,
             full_page_pan_axes,
-            camera_capacity: camera_target_capacity,
+            camera_capacity: None,
         };
 
         if engine.is_strict_native() && !self.gpu_pdf.reader_link_replacements.contains_key(&page) {
@@ -3329,7 +2787,7 @@ impl DocumentView {
         let dimension_motion = !settled && !current_dimensions_exact;
         let fixed_scale_pan = !dimension_motion && current_dimensions_exact;
         if self.gpu_pdf.zoom_motion_active && dimension_motion {
-            let request = gpu_paint_request(
+            let mut request = gpu_paint_request(
                 key,
                 exact_visible_region,
                 false,
@@ -3337,29 +2795,43 @@ impl DocumentView {
                 self.gpu_pdf.motion_camera_serial,
                 device_origin_phase,
             );
-            match self.start_native_gpu_zoom_frame(
-                page,
-                key,
-                image_bounds,
-                Arc::clone(&prepared),
-                Arc::clone(&renderer),
-                request,
-                cx,
-            ) {
-                Ok(_) => return self.hold_last_sharp_gpu_texture(page),
-                Err(error) => {
-                    self.gpu_pdf.surface_zoom_live_failures =
-                        self.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                    if renderer.is_device_lost() {
-                        self.gpu_pdf.reset_device();
-                        return None;
+            if let Some(mut paint) = self.hold_last_sharp_gpu_texture(page) {
+                assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
+                let direct = renderer
+                    .supersede_page_render(&prepared, request.generation)
+                    .and_then(|()| renderer.direct_render_handle(Arc::clone(&prepared), request));
+                match direct {
+                    Ok(render) => {
+                        paint.direct = Some(GpuDirectPaint {
+                            bounds: gpu_surface_bounds(key, image_bounds, exact_visible_region),
+                            render,
+                        });
+                        self.gpu_pdf.motion_render_inline_frames =
+                            self.gpu_pdf.motion_render_inline_frames.saturating_add(1);
+                        self.gpu_pdf.surface_zoom_live_redraws =
+                            self.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
+                        if self.gpu_pdf.motion_presented_camera_serial != request.camera_serial {
+                            self.gpu_pdf.motion_presented_camera_serial = request.camera_serial;
+                            self.gpu_pdf.motion_camera_batch_commits =
+                                self.gpu_pdf.motion_camera_batch_commits.saturating_add(1);
+                        }
                     }
-                    eprintln!(
-                        "failed to redraw native PDF page {} sharply during zoom: {error}",
-                        page + 1
-                    );
-                    return self.hold_last_sharp_gpu_texture(page);
+                    Err(error) => {
+                        self.gpu_pdf.motion_render_inline_failures =
+                            self.gpu_pdf.motion_render_inline_failures.saturating_add(1);
+                        self.gpu_pdf.surface_zoom_live_failures =
+                            self.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
+                        if renderer.is_device_lost() {
+                            self.gpu_pdf.reset_device();
+                            return None;
+                        }
+                        eprintln!(
+                            "failed to prepare same-frame native PDF zoom redraw on page {}: {error:#}",
+                            page + 1
+                        );
+                    }
                 }
+                return Some(paint);
             }
         }
         if self.gpu_pdf.zoom_motion_active
@@ -4079,8 +3551,6 @@ impl DocumentView {
 
     fn dispatch_native_gpu_surface_render(&mut self, cx: &mut Context<Self>) {
         if self.gpu_pdf.zoom_motion_active
-            || !self.gpu_pdf.motion_render_tasks.is_empty()
-            || !self.gpu_pdf.motion_render_queued.is_empty()
             || !self.gpu_pdf.surface_seed_tasks.is_empty()
             || !self.gpu_pdf.vector_lod_tasks.is_empty()
         {
@@ -5042,12 +4512,6 @@ impl DocumentView {
             renderer.max_texture_dimension_2d(),
             [false, true],
         );
-        let camera_target_capacity = stable_gpu_camera_target_capacity(
-            key,
-            image_bounds,
-            predicted_viewport,
-            renderer.max_texture_dimension_2d(),
-        );
         let request = gpu_paint_request(
             key,
             visible_region,
@@ -5056,7 +4520,7 @@ impl DocumentView {
                 pan_capacity: target_capacity,
                 pan_axes: [false, true],
                 full_page_pan_axes: [false; 2],
-                camera_capacity: camera_target_capacity,
+                camera_capacity: None,
             },
             self.gpu_pdf.motion_camera_serial,
             gpu_device_origin_phase(image_bounds, window.scale_factor()),
@@ -5272,18 +4736,7 @@ impl DocumentView {
                 .values()
                 .map(|continuity| continuity.texture.byte_len())
                 .sum(),
-            surface_seed_tasks: self
-                .gpu_pdf
-                .surface_seed_tasks
-                .len()
-                .saturating_add(self.gpu_pdf.motion_render_tasks.len())
-                .saturating_add(
-                    self.gpu_pdf
-                        .motion_render_queued
-                        .values()
-                        .map(VecDeque::len)
-                        .sum::<usize>(),
-                ),
+            surface_seed_tasks: self.gpu_pdf.surface_seed_tasks.len(),
             surface_in_flight_bytes: self
                 .gpu_pdf
                 .surface_seed_tasks
@@ -5329,18 +4782,12 @@ impl DocumentView {
             surface_zoom_scaled_presentations: self.gpu_pdf.surface_zoom_scaled_presentations,
             surface_zoom_target_reuses: self.gpu_pdf.surface_zoom_target_reuses,
             surface_zoom_target_allocations: self.gpu_pdf.surface_zoom_target_allocations,
-            motion_render_jobs_started: self.gpu_pdf.motion_render_started,
-            motion_render_jobs_completed: self.gpu_pdf.motion_render_completed,
-            motion_render_jobs_superseded: self.gpu_pdf.motion_render_superseded,
-            motion_render_jobs_pending: self.gpu_pdf.motion_render_tasks.len().saturating_add(
-                self.gpu_pdf
-                    .motion_render_queued
-                    .values()
-                    .map(VecDeque::len)
-                    .sum::<usize>(),
-            ),
-            motion_render_jobs_peak: self.gpu_pdf.motion_render_peak,
-            motion_render_detached_target_reuses: self.gpu_pdf.motion_render_detached_reuses,
+            motion_render_jobs_started: 0,
+            motion_render_jobs_completed: 0,
+            motion_render_jobs_superseded: 0,
+            motion_render_jobs_pending: 0,
+            motion_render_jobs_peak: 0,
+            motion_render_detached_target_reuses: 0,
             motion_render_inline_frames: self.gpu_pdf.motion_render_inline_frames,
             motion_render_inline_failures: self.gpu_pdf.motion_render_inline_failures,
             camera_pan_inline_frames: self.gpu_pdf.camera_pan_inline_frames,
@@ -5349,20 +4796,16 @@ impl DocumentView {
             motion_render_presented_camera_serial: self.gpu_pdf.motion_presented_camera_serial,
             motion_render_camera_serial_mismatches: self.gpu_pdf.motion_camera_serial_mismatches,
             motion_render_camera_batch_commits: self.gpu_pdf.motion_camera_batch_commits,
-            camera_target_reservations_started: self.gpu_pdf.motion_reservations_started,
-            camera_target_reservations_consumed: self.gpu_pdf.motion_reservations_consumed,
-            camera_target_reservations_released: self.gpu_pdf.motion_reservations_released,
-            camera_target_reservations_pending: self
-                .gpu_pdf
-                .camera_target_reservations
-                .len()
-                .saturating_add(
-                    self.gpu_pdf
-                        .motion_render_queued
-                        .values()
-                        .map(VecDeque::len)
-                        .sum::<usize>(),
-                ),
+            camera_target_reservations_started: 0,
+            camera_target_reservations_consumed: 0,
+            camera_target_reservations_released: 0,
+            camera_target_reservations_pending: 0,
+            motion_render_queue_latency_p95: Duration::ZERO,
+            motion_render_queue_latency_max: Duration::ZERO,
+            motion_render_execution_latency_p95: Duration::ZERO,
+            motion_render_execution_latency_max: Duration::ZERO,
+            motion_render_total_latency_p95: Duration::ZERO,
+            motion_render_total_latency_max: Duration::ZERO,
             surface_warm_requests: self.gpu_pdf.surface_warm_requests,
             surface_warm_hits: self.gpu_pdf.surface_warm_hits,
             surface_warm_pages: self
@@ -5485,13 +4928,6 @@ mod tests {
         assert_eq!(next_vector_lod_scale(4_096.0, 8_192.0), Some(8_192.0));
         assert_eq!(next_vector_lod_scale(8.0, 8.0), None);
         assert_eq!(next_vector_lod_scale(8_192.0, 16_384.0), Some(16_384.0));
-    }
-
-    #[test]
-    fn motion_queue_keeps_only_the_latest_camera_request() {
-        let mut queued = VecDeque::from([1_u32, 2]);
-        assert_eq!(replace_queued_motion(&mut queued, 3), 2);
-        assert_eq!(queued, VecDeque::from([3]));
     }
 
     #[test]

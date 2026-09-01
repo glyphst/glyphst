@@ -27,6 +27,7 @@ pub(crate) struct OpenRequest {
 pub(crate) enum RenderTraceKind {
     Scroll,
     Zoom,
+    ZoomScroll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +82,8 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRe
             trace_kind = Some(match value.to_str() {
                 Some("scroll") => RenderTraceKind::Scroll,
                 Some("zoom") => RenderTraceKind::Zoom,
-                _ => bail!("--render-trace must be 'scroll' or 'zoom'"),
+                Some("zoom-scroll") => RenderTraceKind::ZoomScroll,
+                _ => bail!("--render-trace must be 'scroll', 'zoom', or 'zoom-scroll'"),
             });
             continue;
         }
@@ -308,6 +310,21 @@ mod tests {
                 window_height: 960.0,
             })
         );
+    }
+
+    #[test]
+    fn parses_zoom_scroll_trace() {
+        let request = parse(&[
+            "/tmp/book.pdf",
+            "--render-trace",
+            "zoom-scroll",
+            "--render-engine",
+            "glyphst",
+            "--render-output",
+            "/tmp/trace.json",
+        ])
+        .unwrap();
+        assert_eq!(request.trace.unwrap().kind, RenderTraceKind::ZoomScroll);
     }
 
     #[test]
