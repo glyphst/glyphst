@@ -12,7 +12,7 @@ const GPU_PAN_CACHE_GUTTER_MIN: u32 = 96;
 const GPU_PAN_AXIS_JITTER_PX: u32 = 4;
 const GPU_FULL_PAGE_CACHE_MIN_MOTION_SEGMENTS: u64 = 300_000;
 const GPU_PAN_CACHE_TARGET_COUNT: u64 = 3;
-const GPU_CAMERA_TARGET_COUNT: u64 = 4;
+const GPU_CAMERA_TARGET_COUNT: u64 = 2;
 const GPU_MOTION_MIN_DENSITY_NUMERATOR: u64 = 9;
 const GPU_MOTION_MIN_DENSITY_DENOMINATOR: u64 = 10;
 
@@ -61,6 +61,11 @@ fn replace_queued_motion<T>(queued: &mut VecDeque<T>, latest: T) -> usize {
     queued.clear();
     queued.push_back(latest);
     replaced
+}
+
+fn camera_batch_ready(serial: u64, page_serials: impl IntoIterator<Item = u64>) -> bool {
+    let mut page_serials = page_serials.into_iter().peekable();
+    page_serials.peek().is_some() && page_serials.all(|page_serial| page_serial == serial)
 }
 
 #[derive(Default)]
@@ -118,6 +123,7 @@ pub(super) struct GpuPdfState {
     motion_camera_serial: u64,
     motion_presented_camera_serial: u64,
     motion_camera_serial_mismatches: u64,
+    motion_camera_batch_commits: u64,
     motion_render_peak: usize,
     motion_reservations_started: u64,
     motion_reservations_consumed: u64,
@@ -295,6 +301,7 @@ struct SurfaceSeedTask {
 struct MotionRenderTask {
     page: u32,
     generation: u64,
+    camera_serial: u64,
     prepared: Arc<PreparedGpuPage>,
     renderer: Arc<GpuPdfRenderer>,
     _task: Task<()>,
@@ -304,6 +311,7 @@ struct QueuedMotionRender {
     page: u32,
     generation: u64,
     key: RenderKey,
+    image_bounds: Bounds<Pixels>,
     request: GpuPaintRequest,
     presentation: GpuPagePresentation,
     previous_surface_bytes: u64,
@@ -432,6 +440,7 @@ impl GpuPdfState {
         self.motion_camera_serial = 0;
         self.motion_presented_camera_serial = 0;
         self.motion_camera_serial_mismatches = 0;
+        self.motion_camera_batch_commits = 0;
         self.motion_render_peak = 0;
         self.motion_reservations_started = 0;
         self.motion_reservations_consumed = 0;
@@ -547,6 +556,7 @@ impl GpuPdfState {
         self.motion_camera_serial = 0;
         self.motion_presented_camera_serial = 0;
         self.motion_camera_serial_mismatches = 0;
+        self.motion_camera_batch_commits = 0;
         self.motion_render_peak = 0;
         self.motion_reservations_started = 0;
         self.motion_reservations_consumed = 0;
@@ -1631,6 +1641,7 @@ fn gpu_paint_texture(
 ) -> GpuPaintTexture {
     let [source_x, source_y, source_width, source_height] = texture.source_bounds();
     GpuPaintTexture {
+        page_bounds: image_bounds,
         bounds: gpu_surface_bounds(key, image_bounds, texture.region()),
         source_bounds: Bounds::new(point(source_x, source_y), size(source_width, source_height)),
         texture,
@@ -1975,18 +1986,6 @@ fn motion_surface_density_sufficient(rendered: RenderKey, requested: RenderKey) 
             >= u64::from(requested.physical_height).saturating_mul(GPU_MOTION_MIN_DENSITY_NUMERATOR)
 }
 
-fn uses_direct_camera_frame(
-    zoom_motion_active: bool,
-    dimensions_changed: bool,
-    camera_changed: bool,
-    render_mode: GpuMotionRenderMode,
-) -> bool {
-    zoom_motion_active
-        && dimensions_changed
-        && camera_changed
-        && render_mode == GpuMotionRenderMode::OrderedCameraProgram
-}
-
 fn gpu_region_contains(outer: GpuPageRegion, inner: GpuPageRegion) -> bool {
     inner.x >= outer.x
         && inner.y >= outer.y
@@ -2258,6 +2257,9 @@ impl DocumentView {
     }
 
     pub(super) fn mark_native_gpu_motion(&mut self, cx: &mut Context<Self>) {
+        if let Some(document) = self.gpu_pdf.document.as_ref() {
+            document.note_interaction();
+        }
         self.gpu_pdf.begin_motion();
         if self.gpu_pdf.speculative_resume_task.take().is_some() {
             self.gpu_pdf.speculative_resume_generation = self
@@ -2692,179 +2694,30 @@ impl DocumentView {
         held
     }
 
-    fn ensure_native_gpu_camera_target(
-        &mut self,
-        page: u32,
-        renderer: &GpuPdfRenderer,
-    ) -> Result<bool, String> {
-        if self.gpu_pdf.camera_target_reservations.contains_key(&page) {
-            return Ok(true);
-        }
-        let Some(presentation) = self
-            .gpu_pdf
-            .rendered
-            .get(&page)
-            .map(|rendered| rendered.presentation.clone())
-        else {
-            return Ok(false);
-        };
-        match renderer.reserve_camera_target(&presentation) {
-            Ok(Some(reservation)) => {
-                self.gpu_pdf
-                    .camera_target_reservations
-                    .insert(page, reservation);
-                self.gpu_pdf.motion_reservations_started =
-                    self.gpu_pdf.motion_reservations_started.saturating_add(1);
-                Ok(true)
-            }
-            Ok(None) => Ok(false),
-            Err(error) => Err(format!("{error:#}")),
-        }
-    }
-
-    fn render_native_gpu_camera_frame_inline(
-        &mut self,
-        page: u32,
-        key: RenderKey,
-        image_bounds: Bounds<Pixels>,
-        prepared: &PreparedGpuPage,
-        renderer: &GpuPdfRenderer,
-        mut request: GpuPaintRequest,
-    ) -> Result<Option<GpuPaintTexture>, String> {
-        let camera_serial = self.gpu_pdf.motion_camera_serial;
-        let result = (|| {
-            let mut presentation = self
-                .gpu_pdf
-                .rendered
-                .get(&page)
-                .map(|rendered| rendered.presentation.clone())
-                .ok_or_else(|| {
-                    "inline native PDF camera redraw has no retained presentation".to_string()
-                })?;
-            let reservation = self
-                .gpu_pdf
-                .camera_target_reservations
-                .remove(&page)
-                .ok_or_else(|| {
-                    "inline native PDF camera redraw has no reserved target".to_string()
-                })?;
-            assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
-            if let Err(error) = renderer.supersede_page_render(prepared, request.generation) {
-                self.gpu_pdf.motion_reservations_released =
-                    self.gpu_pdf.motion_reservations_released.saturating_add(1);
-                return Err(format!("{error:#}"));
-            }
-            self.gpu_pdf.motion_reservations_consumed =
-                self.gpu_pdf.motion_reservations_consumed.saturating_add(1);
-            let started = Instant::now();
-            let outcome = renderer
-                .render_camera_page(prepared, request, reservation, &mut presentation)
-                .map_err(|error| format!("{error:#}"))?;
-            let (texture, stats) = match outcome {
-                GpuPageRenderOutcome::Rendered {
-                    presented: Some(texture),
-                    stats,
-                } => (texture, stats),
-                GpuPageRenderOutcome::Rendered {
-                    presented: None, ..
-                } => {
-                    return Err(
-                        "inline native PDF camera redraw produced no coherent texture".into(),
-                    );
-                }
-                GpuPageRenderOutcome::Deferred => {
-                    return Err("inline native PDF camera redraw was unexpectedly deferred".into());
-                }
-                GpuPageRenderOutcome::Superseded => {
-                    return Err(
-                        "inline native PDF camera redraw was unexpectedly superseded".into(),
-                    );
-                }
-            };
-            let elapsed = started.elapsed();
-            if elapsed >= Duration::from_millis(8) {
-                eprintln!(
-                    "slow inline native PDF camera redraw on page {}: total {:.3} ms, renderer CPU {:.3} ms, encoding {:.3} ms, pool wait {:.3} ms, transient reuse {}/{}, transient {:.1}/{:.1} MiB, LOD {}, target {}x{}",
-                    page + 1,
-                    elapsed.as_secs_f64() * 1_000.0,
-                    stats.cpu_time.as_secs_f64() * 1_000.0,
-                    stats.command_encoding_time.as_secs_f64() * 1_000.0,
-                    stats.frame_pool_wait_time.as_secs_f64() * 1_000.0,
-                    stats.transient_pool_reuses,
-                    stats.offscreen_passes,
-                    stats.transient_peak_bytes as f64 / (1024.0 * 1024.0),
-                    stats.transient_resident_bytes as f64 / (1024.0 * 1024.0),
-                    stats.selected_vector_lod,
-                    request
-                        .camera_target_capacity
-                        .map_or(request.visible_region.width, |size| size[0],),
-                    request
-                        .camera_target_capacity
-                        .map_or(request.visible_region.height, |size| size[1],),
-                );
-            }
-            let bytes = presentation.byte_len();
-            self.gpu_pdf
-                .reserve_surface(page, bytes)
-                .map_err(|required| {
-                    format!(
-                        "inline native PDF zoom surfaces require {required} bytes, exceeding the {MAX_RETAINED_GPU_SURFACE_BYTES}-byte cache limit"
-                    )
-                })?;
-            let rendered = self
-                .gpu_pdf
-                .rendered
-                .get_mut(&page)
-                .ok_or_else(|| "inline native PDF zoom page was evicted".to_string())?;
-            rendered.key = key;
-            rendered.request = request;
-            rendered.refresh_region =
-                surface_refresh_guard(texture.region(), request.visible_region);
-            rendered.presentation = presentation;
-            rendered.latest_stats = stats;
-            rendered.prewarmed = false;
-            self.gpu_pdf.surface_zoom_live_redraws =
-                self.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
-            self.gpu_pdf.surface_zoom_target_reuses =
-                self.gpu_pdf.surface_zoom_target_reuses.saturating_add(1);
-            self.gpu_pdf.motion_render_inline_frames =
-                self.gpu_pdf.motion_render_inline_frames.saturating_add(1);
-            if request.settled {
-                self.gpu_pdf.camera_pan_inline_frames =
-                    self.gpu_pdf.camera_pan_inline_frames.saturating_add(1);
-            }
-            if self.gpu_pdf.motion_camera_serial != camera_serial {
-                self.gpu_pdf.motion_camera_serial_mismatches = self
-                    .gpu_pdf
-                    .motion_camera_serial_mismatches
-                    .saturating_add(1);
-            }
-            self.gpu_pdf.motion_presented_camera_serial = camera_serial;
-            self.gpu_pdf.surface_failures.remove(&page);
-            self.gpu_pdf.motion_deadline = Some(Instant::now() + GPU_MOTION_SETTLE_DELAY);
-            let selected = SelectedGpuSurface {
-                key,
-                texture,
-                kind: PresentedSurfaceKind::Primary,
-            };
-            Ok(Some(self.present_gpu_surface(page, image_bounds, selected)))
-        })();
-        if result.is_err() {
-            self.gpu_pdf.motion_render_inline_failures =
-                self.gpu_pdf.motion_render_inline_failures.saturating_add(1);
-        }
-        result
-    }
-
     fn start_native_gpu_zoom_frame(
         &mut self,
         page: u32,
         key: RenderKey,
+        image_bounds: Bounds<Pixels>,
         prepared: Arc<PreparedGpuPage>,
         renderer: Arc<GpuPdfRenderer>,
         request: GpuPaintRequest,
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
+        if self
+            .gpu_pdf
+            .motion_render_tasks
+            .get(&page)
+            .is_some_and(|task| task.camera_serial == request.camera_serial)
+            || self
+                .gpu_pdf
+                .motion_render_queued
+                .get(&page)
+                .and_then(|queued| queued.back())
+                .is_some_and(|queued| queued.request.camera_serial == request.camera_serial)
+        {
+            return Ok(true);
+        }
         let presentation = self
             .gpu_pdf
             .rendered
@@ -2884,6 +2737,7 @@ impl DocumentView {
             page,
             generation,
             key,
+            image_bounds,
             request,
             presentation,
             previous_surface_bytes,
@@ -2922,6 +2776,7 @@ impl DocumentView {
             page,
             generation,
             key,
+            image_bounds,
             mut request,
             mut presentation,
             previous_surface_bytes,
@@ -3056,6 +2911,11 @@ impl DocumentView {
                             rendered.presentation = presentation;
                             rendered.latest_stats = stats;
                             rendered.prewarmed = false;
+                            rendered.last_paint = Some(gpu_paint_texture(
+                                key,
+                                image_bounds,
+                                texture.clone(),
+                            ));
                             this.gpu_pdf.surface_zoom_live_redraws =
                                 this.gpu_pdf.surface_zoom_live_redraws.saturating_add(1);
                             this.gpu_pdf.surface_zoom_target_reuses =
@@ -3066,6 +2926,28 @@ impl DocumentView {
                                 .saturating_add(1);
                             debug_assert!(bytes <= previous_surface_bytes);
                             this.gpu_pdf.surface_failures.remove(&page);
+                            let serial = request.camera_serial;
+                            if this.gpu_pdf.zoom_motion_active
+                                && this.gpu_pdf.motion_presented_camera_serial != serial
+                                && camera_batch_ready(
+                                    serial,
+                                    this.gpu_pdf.visible_pages.iter().filter_map(
+                                        |visible_page| {
+                                            this.gpu_pdf
+                                                .rendered
+                                                .get(visible_page)
+                                                .filter(|rendered| rendered.last_paint.is_some())
+                                                .map(|rendered| rendered.request.camera_serial)
+                                        },
+                                    ),
+                                )
+                            {
+                                this.gpu_pdf.motion_presented_camera_serial = serial;
+                                this.gpu_pdf.motion_camera_batch_commits = this
+                                    .gpu_pdf
+                                    .motion_camera_batch_commits
+                                    .saturating_add(1);
+                            }
                         } else {
                             this.gpu_pdf.motion_render_superseded =
                                 this.gpu_pdf.motion_render_superseded.saturating_add(1);
@@ -3149,6 +3031,7 @@ impl DocumentView {
             MotionRenderTask {
                 page,
                 generation,
+                camera_serial: request.camera_serial,
                 prepared,
                 renderer,
                 _task: task,
@@ -3326,6 +3209,9 @@ impl DocumentView {
                 if full_page_pan_axes[axis] {
                     capacity[axis] = page_size[axis];
                 }
+                if let Some(camera_capacity) = camera_target_capacity {
+                    capacity[axis] = capacity[axis].max(camera_capacity[axis]);
+                }
             }
             capacity
         });
@@ -3392,9 +3278,9 @@ impl DocumentView {
             && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= 0.01
             && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= 0.01;
         // Compare the live layout with the retained page in the retained
-        // page's own physical coordinate space. Scale-changing motion takes
-        // the direct current-camera path below instead of sampling these
-        // completed pixels at a different density.
+        // page's own physical coordinate space. Scale-changing motion keeps
+        // the latest completed sharp camera frame visible while its detached
+        // successor renders.
         let current_surface = self.gpu_pdf.rendered.get(&page).and_then(|rendered| {
             if !same_gpu_page_source(rendered.key, key)
                 || rendered.presentation.token() != Some(renderer.token())
@@ -3442,67 +3328,7 @@ impl DocumentView {
 
         let dimension_motion = !settled && !current_dimensions_exact;
         let fixed_scale_pan = !dimension_motion && current_dimensions_exact;
-        let camera_changed = current_surface.as_ref().is_some_and(|current| {
-            !current_dimensions_exact
-                || current.request.visible_region != current.visible_region
-                || current.request.device_origin_phase != device_origin_phase
-                || current.request.camera_serial != self.gpu_pdf.motion_camera_serial
-        });
-        if uses_direct_camera_frame(
-            self.gpu_pdf.zoom_motion_active,
-            dimension_motion,
-            camera_changed,
-            prepared.motion_render_mode(),
-        ) {
-            let request = gpu_paint_request(
-                key,
-                exact_visible_region,
-                false,
-                paint_targets,
-                self.gpu_pdf.motion_camera_serial,
-                device_origin_phase,
-            );
-            match self.ensure_native_gpu_camera_target(page, &renderer) {
-                Ok(true) => {}
-                Ok(false) => return self.hold_last_sharp_gpu_texture(page),
-                Err(error) => {
-                    if renderer.is_device_lost() {
-                        self.gpu_pdf.reset_device();
-                        return None;
-                    }
-                    eprintln!(
-                        "failed to reserve native PDF page {} camera target: {error}",
-                        page + 1
-                    );
-                    return self.hold_last_sharp_gpu_texture(page);
-                }
-            }
-            match self.render_native_gpu_camera_frame_inline(
-                page,
-                key,
-                image_bounds,
-                &prepared,
-                &renderer,
-                request,
-            ) {
-                Ok(texture) => return texture,
-                Err(error) => {
-                    self.gpu_pdf.surface_zoom_live_failures =
-                        self.gpu_pdf.surface_zoom_live_failures.saturating_add(1);
-                    if renderer.is_device_lost() {
-                        self.gpu_pdf.reset_device();
-                        return None;
-                    }
-                    eprintln!(
-                        "failed to render inline native PDF page {} for camera {}: {error}",
-                        page + 1,
-                        request.camera_serial,
-                    );
-                    return self.hold_last_sharp_gpu_texture(page);
-                }
-            }
-        }
-        if dimension_motion && self.gpu_pdf.zoom_motion_active {
+        if self.gpu_pdf.zoom_motion_active && dimension_motion {
             let request = gpu_paint_request(
                 key,
                 exact_visible_region,
@@ -3514,6 +3340,7 @@ impl DocumentView {
             match self.start_native_gpu_zoom_frame(
                 page,
                 key,
+                image_bounds,
                 Arc::clone(&prepared),
                 Arc::clone(&renderer),
                 request,
@@ -3533,6 +3360,39 @@ impl DocumentView {
                     );
                     return self.hold_last_sharp_gpu_texture(page);
                 }
+            }
+        }
+        if self.gpu_pdf.zoom_motion_active
+            && let Some(rendered) = self.gpu_pdf.rendered.get_mut(&page)
+        {
+            // Physical-size equality means the completed pixels are already
+            // the exact output for this animation step. Promote only the
+            // serial instead of queuing a duplicate subpixel redraw.
+            rendered.request.camera_serial = self.gpu_pdf.motion_camera_serial;
+        }
+        if self.gpu_pdf.zoom_motion_active
+            && self.gpu_pdf.motion_presented_camera_serial != self.gpu_pdf.motion_camera_serial
+        {
+            let serial = self.gpu_pdf.motion_camera_serial;
+            let ready = camera_batch_ready(
+                serial,
+                self.gpu_pdf
+                    .visible_pages
+                    .iter()
+                    .filter_map(|visible_page| {
+                        self.gpu_pdf
+                            .rendered
+                            .get(visible_page)
+                            .filter(|rendered| rendered.last_paint.is_some())
+                            .map(|rendered| rendered.request.camera_serial)
+                    }),
+            );
+            if ready {
+                self.gpu_pdf.motion_presented_camera_serial = serial;
+                self.gpu_pdf.motion_camera_batch_commits =
+                    self.gpu_pdf.motion_camera_batch_commits.saturating_add(1);
+            } else {
+                return self.hold_last_sharp_gpu_texture(page);
             }
         }
 
@@ -3594,6 +3454,7 @@ impl DocumentView {
             }
             if intent == GpuSurfaceIntent::Visible {
                 if fixed_scale_pan
+                    && !self.gpu_pdf.zoom_motion_active
                     && self.gpu_pdf.motion_presented_camera_serial
                         != self.gpu_pdf.motion_camera_serial
                 {
@@ -3760,6 +3621,7 @@ impl DocumentView {
         if let Some(selected) = selected_surface {
             if intent == GpuSurfaceIntent::Visible
                 && fixed_scale_pan
+                && !self.gpu_pdf.zoom_motion_active
                 && selected.kind == PresentedSurfaceKind::Primary
                 && self.gpu_pdf.motion_presented_camera_serial != self.gpu_pdf.motion_camera_serial
             {
@@ -3792,7 +3654,12 @@ impl DocumentView {
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    GpuPdfDocument::open(&snapshot)
+                    GpuPdfDocument::open_with_compiled_cache(
+                        &snapshot,
+                        glyphst_core::paths::state_dir()
+                            .join("pdf-gpu")
+                            .join("compiled-v1"),
+                    )
                         .map(Arc::new)
                         .map_err(|error| format!("{error:#}"))
                 })
@@ -5481,6 +5348,7 @@ impl DocumentView {
             motion_render_camera_serial: self.gpu_pdf.motion_camera_serial,
             motion_render_presented_camera_serial: self.gpu_pdf.motion_presented_camera_serial,
             motion_render_camera_serial_mismatches: self.gpu_pdf.motion_camera_serial_mismatches,
+            motion_render_camera_batch_commits: self.gpu_pdf.motion_camera_batch_commits,
             camera_target_reservations_started: self.gpu_pdf.motion_reservations_started,
             camera_target_reservations_consumed: self.gpu_pdf.motion_reservations_consumed,
             camera_target_reservations_released: self.gpu_pdf.motion_reservations_released,
@@ -5624,6 +5492,13 @@ mod tests {
         let mut queued = VecDeque::from([1_u32, 2]);
         assert_eq!(replace_queued_motion(&mut queued, 3), 2);
         assert_eq!(queued, VecDeque::from([3]));
+    }
+
+    #[test]
+    fn camera_batch_is_published_only_when_every_retained_page_matches() {
+        assert!(camera_batch_ready(7, [7, 7]));
+        assert!(!camera_batch_ready(7, [7, 6]));
+        assert!(!camera_batch_ready(7, []));
     }
 
     #[test]
@@ -6297,34 +6172,6 @@ mod tests {
             ),
             [false, true],
         );
-    }
-
-    #[test]
-    fn direct_camera_execution_is_reserved_for_ordered_scale_changes() {
-        assert!(uses_direct_camera_frame(
-            true,
-            true,
-            true,
-            GpuMotionRenderMode::OrderedCameraProgram,
-        ));
-        assert!(!uses_direct_camera_frame(
-            false,
-            false,
-            true,
-            GpuMotionRenderMode::OrderedCameraProgram,
-        ));
-        assert!(!uses_direct_camera_frame(
-            true,
-            false,
-            true,
-            GpuMotionRenderMode::OrderedCameraProgram,
-        ));
-        assert!(!uses_direct_camera_frame(
-            true,
-            true,
-            true,
-            GpuMotionRenderMode::General,
-        ));
     }
 
     #[test]

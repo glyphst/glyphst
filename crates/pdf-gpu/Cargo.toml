@@ -15,3 +15,4 @@ glyphst-pdf-render-cpu.workspace = true
 glyphst-pdf-render-wgpu.workspace = true
 gpui.workspace = true
 gpui_wgpu.workspace = true
+zstd.workspace = true

@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,11 +3205,14 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
+ "ciborium",
  "glyphst-pdf-core",
  "glyphst-pdf-hayro",
  "glyphst-pdf-scene",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3224,12 +3227,13 @@ dependencies = [
  "glyphst-pdf-render-wgpu",
  "gpui",
  "gpui_wgpu",
+ "zstd",
 ]
 
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3243,7 +3247,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-cpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
@@ -3256,7 +3260,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3272,7 +3276,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=46811feb39d02dda2ff1158b760aa8091d68d2bf#46811feb39d02dda2ff1158b760aa8091d68d2bf"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=1d9ce32a4a9cbf0e2904f342fc982db982765908#1d9ce32a4a9cbf0e2904f342fc982db982765908"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -12442,6 +12446,34 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "ztracing"

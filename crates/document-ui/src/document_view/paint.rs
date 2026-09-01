@@ -276,10 +276,13 @@ impl DocumentView {
                 displayed,
             },
         );
+        let page_bounds = gpu_texture
+            .as_ref()
+            .map_or(image_bounds, |texture| texture.page_bounds);
         self.assemble_paint_data(
             vec![PaintPage {
                 page_idx,
-                bounds: image_bounds,
+                bounds: page_bounds,
                 image,
                 gpu_texture,
             }],
@@ -467,9 +470,12 @@ impl DocumentView {
                 self.viewport_render_keys.insert(fallback_key);
             }
             has_rendered_page |= image.is_some() || gpu_texture.is_some();
+            let page_bounds = gpu_texture
+                .as_ref()
+                .map_or(image_bounds, |texture| texture.page_bounds);
             pages.push(PaintPage {
                 page_idx,
-                bounds: image_bounds,
+                bounds: page_bounds,
                 image,
                 gpu_texture,
             });

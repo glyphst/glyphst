@@ -1485,7 +1485,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 10,
+        "schema_version": 11,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1730,6 +1730,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "jobs_pending": cache.motion_render_jobs_pending,
         "jobs_peak": cache.motion_render_jobs_peak,
         "detached_target_reuses": cache.motion_render_detached_target_reuses,
+        "ui_thread_submissions": cache.motion_render_inline_frames,
         "inline_frames": cache.motion_render_inline_frames,
         "inline_failures": cache.motion_render_inline_failures,
         "pan_inline_frames": cache.camera_pan_inline_frames,
@@ -1737,6 +1738,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "camera_serial": cache.motion_render_camera_serial,
         "presented_camera_serial": cache.motion_render_presented_camera_serial,
         "camera_serial_mismatches": cache.motion_render_camera_serial_mismatches,
+        "camera_batch_commits": cache.motion_render_camera_batch_commits,
         "reservations_started": cache.camera_target_reservations_started,
         "reservations_consumed": cache.camera_target_reservations_consumed,
         "reservations_released": cache.camera_target_reservations_released,
@@ -1972,6 +1974,7 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(camera_pan_inline_frames);
     counter!(camera_pan_admission_holds);
     counter!(motion_render_camera_serial_mismatches);
+    counter!(motion_render_camera_batch_commits);
     counter!(camera_target_reservations_started);
     counter!(camera_target_reservations_consumed);
     counter!(camera_target_reservations_released);
@@ -3250,6 +3253,7 @@ mod tests {
             motion_render_inline_failures: 0,
             camera_pan_inline_frames: 42,
             camera_pan_admission_holds: 3,
+            motion_render_camera_batch_commits: 117,
             camera_target_reservations_started: 120,
             camera_target_reservations_consumed: 119,
             camera_target_reservations_released: 1,
@@ -3316,6 +3320,14 @@ mod tests {
         );
         assert_eq!(report["surfaces"]["zoom_motion"]["reservations_pending"], 0);
         assert_eq!(report["surfaces"]["zoom_motion"]["pan_inline_frames"], 42);
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["ui_thread_submissions"],
+            118
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["camera_batch_commits"],
+            117
+        );
         assert_eq!(report["surfaces"]["zoom_motion"]["pan_admission_holds"], 3);
         assert_eq!(report["surfaces"]["zoom_motion"]["active"], true);
         assert_eq!(report["surfaces"]["refinement_pages"], 1);

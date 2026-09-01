@@ -62,11 +62,11 @@ use glyphst_pdf::{
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuCameraTargetReservation, GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource,
-    GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuMotionRenderMode, GpuNamedAction,
-    GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation,
-    GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
-    GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
+    GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute,
+    GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation, GpuPageRegion,
+    GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture, GpuPaintRequest,
+    GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats,
+    GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -737,6 +737,7 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_camera_serial: u64,
     pub motion_render_presented_camera_serial: u64,
     pub motion_render_camera_serial_mismatches: u64,
+    pub motion_render_camera_batch_commits: u64,
     pub camera_target_reservations_started: u64,
     pub camera_target_reservations_consumed: u64,
     pub camera_target_reservations_released: u64,
@@ -1238,6 +1239,7 @@ struct PaintPage {
 
 #[derive(Clone)]
 struct GpuPaintTexture {
+    page_bounds: Bounds<Pixels>,
     bounds: Bounds<Pixels>,
     source_bounds: Bounds<f32>,
     texture: GpuPageTexture,

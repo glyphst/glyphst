@@ -40,18 +40,26 @@ use gpui::{
 use gpui_wgpu::{WgpuExternalContext, wgpu};
 use std::{
     collections::HashMap,
-    fmt,
+    fmt, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 const MAX_COMPILED_PAGE_CACHE_ENTRIES: usize = 8;
 const MAX_CONTENT_BOUNDS_CACHE_ENTRIES: usize = 128;
+const MAX_DISK_COMPILED_CACHE_ENTRIES: usize = 64;
+const MAX_DISK_COMPILED_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+const COMPILED_CACHE_IDLE_DELAY: Duration = Duration::from_secs(5);
+// ponytail: one best-effort writer avoids cache-induced stalls; add an idle
+// queue only if multi-page cache coverage proves more valuable than latency.
+static COMPILED_CACHE_WRITER_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_PRESENTATION_SURFACES: usize = 7;
-const CAMERA_TARGET_COUNT: usize = 4;
+const CAMERA_TARGET_COUNT: usize = 2;
 const PAN_CACHE_TARGET_COUNT: usize = 3;
 const PAN_CACHE_GUTTER_MIN: u32 = 96;
 
@@ -68,6 +76,64 @@ fn pan_cache_gutter(extent: u32, overscan_axis: bool) -> u32 {
     } else {
         PAN_CACHE_GUTTER_MIN
     }
+}
+
+fn prune_compiled_page_cache(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut entries = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            (metadata.is_file() && entry.path().extension().is_some_and(|ext| ext == "zst")).then(
+                || {
+                    (
+                        metadata.modified().unwrap_or(UNIX_EPOCH),
+                        metadata.len(),
+                        entry.path(),
+                    )
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.0);
+    let mut remaining = entries.len();
+    let mut bytes = entries
+        .iter()
+        .map(|entry| entry.1)
+        .fold(0_u64, u64::saturating_add);
+    for (_, len, path) in entries {
+        if remaining <= MAX_DISK_COMPILED_CACHE_ENTRIES && bytes <= MAX_DISK_COMPILED_CACHE_BYTES {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            remaining = remaining.saturating_sub(1);
+            bytes = bytes.saturating_sub(len);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn restrict_private_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn restrict_private_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_private_file(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Parser/interpreter or WGPU capability that requires whole-page fallback.
@@ -380,6 +446,8 @@ struct GpuPdfDocumentInner {
     document: Document,
     limits: ResourceLimits,
     navigation: GpuNavigationRoute,
+    compiled_cache_root: Option<PathBuf>,
+    cache_activity: AtomicU64,
     compiled: Mutex<CompiledPageCache>,
     content_bounds: Mutex<ContentBoundsCache>,
 }
@@ -493,6 +561,18 @@ impl fmt::Debug for GpuPdfDocument {
 impl GpuPdfDocument {
     /// Open the immutable snapshot without duplicating its source allocation.
     pub fn open(snapshot: &DocumentSnapshot) -> Result<Self> {
+        Self::open_inner(snapshot, None)
+    }
+
+    /// Open with a bounded persistent cache for validated compiled pages.
+    pub fn open_with_compiled_cache(
+        snapshot: &DocumentSnapshot,
+        cache_root: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        Self::open_inner(snapshot, Some(cache_root.into()))
+    }
+
+    fn open_inner(snapshot: &DocumentSnapshot, cache_root: Option<PathBuf>) -> Result<Self> {
         let options = OpenOptions {
             password: snapshot
                 .password()
@@ -503,11 +583,14 @@ impl GpuPdfDocument {
         let document = Engine::open(DocumentSource::from_bytes(snapshot.shared_bytes()), options)
             .context("failed to open PDF with the native GPU engine")?;
         let navigation = compiled_document_navigation(&document);
+        let compiled_cache_root = (!document.is_encrypted()).then_some(cache_root).flatten();
         Ok(Self {
             inner: Arc::new(GpuPdfDocumentInner {
                 document,
                 limits,
                 navigation,
+                compiled_cache_root,
+                cache_activity: AtomicU64::new(0),
                 compiled: Mutex::new(CompiledPageCache::default()),
                 content_bounds: Mutex::new(ContentBoundsCache::default()),
             }),
@@ -517,6 +600,11 @@ impl GpuPdfDocument {
     /// Number of checked pages in the native engine.
     pub fn page_count(&self) -> u32 {
         self.inner.document.page_count().get()
+    }
+
+    /// Defers best-effort cache serialization until reader interaction is idle.
+    pub fn note_interaction(&self) {
+        self.inner.cache_activity.fetch_add(1, Ordering::Release);
     }
 
     /// Whether the source uses a PDF encryption security handler.
@@ -609,10 +697,23 @@ impl GpuPdfDocument {
             return Ok((compiled, true));
         }
 
+        let options = CompileOptions::default();
+        if !cancellation.is_cancelled()
+            && let Some(compiled) = self.load_compiled_page_cache(page, &options)
+        {
+            let compiled = self
+                .inner
+                .compiled
+                .lock()
+                .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
+                .insert(page, compiled);
+            return Ok((compiled, true));
+        }
+
         let compiled = self
             .inner
             .document
-            .compile_page(page, CompileOptions::default(), cancellation)
+            .compile_page(page, options, cancellation)
             .with_context(|| format!("failed to compile native PDF page {}", page.get() + 1))?;
         let compiled = self
             .inner
@@ -621,6 +722,122 @@ impl GpuPdfDocument {
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
             .insert(page, compiled);
         Ok((compiled, false))
+    }
+
+    fn compiled_page_cache_path(&self, page: PageIndex) -> Option<PathBuf> {
+        let root = self.inner.compiled_cache_root.as_ref()?;
+        let source = self.inner.document.source_fingerprint().to_hex();
+        Some(root.join(format!("{source}-page-{}.cbor.zst", page.get())))
+    }
+
+    fn load_compiled_page_cache(
+        &self,
+        page: PageIndex,
+        options: &CompileOptions,
+    ) -> Option<Arc<CompiledPage>> {
+        let path = self.compiled_page_cache_path(page)?;
+        let limit = self.inner.limits.max_cpu_cache_bytes;
+        let metadata = fs::metadata(&path).ok()?;
+        if metadata.len() > limit {
+            let _ignored = fs::remove_file(path);
+            return None;
+        }
+        let file = fs::File::open(&path).ok()?;
+        let Ok(decoder) = zstd::stream::read::Decoder::new(file) else {
+            let _ignored = fs::remove_file(path);
+            return None;
+        };
+        let mut archive = Vec::new();
+        if decoder
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut archive)
+            .is_err()
+        {
+            let _ignored = fs::remove_file(path);
+            return None;
+        }
+        if archive.len() as u64 > limit {
+            let _ignored = fs::remove_file(path);
+            return None;
+        }
+        match self
+            .inner
+            .document
+            .decode_compiled_page_cache(page, options, &archive)
+        {
+            Ok(compiled) => Some(compiled),
+            Err(_) => {
+                let _ignored = fs::remove_file(path);
+                None
+            }
+        }
+    }
+
+    fn persist_compiled_page_cache(&self, page: &CompiledPage) -> Result<()> {
+        let Some(path) = self.compiled_page_cache_path(page.index()) else {
+            return Ok(());
+        };
+        let archive = self
+            .inner
+            .document
+            .encode_compiled_page_cache(page, &CompileOptions::default())
+            .context("failed to encode native PDF compiled-page cache")?;
+        if archive.len() as u64 > self.inner.limits.max_cpu_cache_bytes {
+            return Ok(());
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("native PDF compiled-page cache has no parent"))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create native PDF cache {}", parent.display()))?;
+        restrict_private_directory(parent)?;
+        let compressed = zstd::stream::encode_all(archive.as_slice(), 3)
+            .context("failed to compress native PDF compiled-page cache")?;
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = fs::File::create(&temporary).with_context(|| {
+            format!("failed to create native PDF cache {}", temporary.display())
+        })?;
+        file.write_all(&compressed)
+            .with_context(|| format!("failed to write native PDF cache {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush native PDF cache {}", temporary.display()))?;
+        restrict_private_file(&temporary)?;
+        fs::rename(&temporary, &path)
+            .with_context(|| format!("failed to publish native PDF cache {}", path.display()))?;
+        prune_compiled_page_cache(parent);
+        Ok(())
+    }
+
+    fn schedule_compiled_page_cache_write(&self, page: Arc<CompiledPage>) {
+        if self.inner.compiled_cache_root.is_none()
+            || COMPILED_CACHE_WRITER_ACTIVE
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        let document = self.clone();
+        let mut activity = self.inner.cache_activity.load(Ordering::Acquire);
+        if std::thread::Builder::new()
+            .name("glyphst-pdf-cache".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(COMPILED_CACHE_IDLE_DELAY);
+                    let current = document.inner.cache_activity.load(Ordering::Acquire);
+                    if current == activity {
+                        break;
+                    }
+                    activity = current;
+                }
+                if let Err(error) = document.persist_compiled_page_cache(&page) {
+                    eprintln!("failed to persist native PDF compiled-page cache: {error:#}");
+                }
+                COMPILED_CACHE_WRITER_ACTIVE.store(false, Ordering::Release);
+            })
+            .is_err()
+        {
+            COMPILED_CACHE_WRITER_ACTIVE.store(false, Ordering::Release);
+        }
     }
 
     /// Deterministically renders a complete page through the native CPU
@@ -1406,6 +1623,9 @@ impl GpuPdfRenderer {
             Err(error) => return Err(error).context("failed to prepare native PDF GPU page"),
         };
         let gpu_prepare = gpu_started.elapsed();
+        if !compiled_cache_hit {
+            document.schedule_compiled_page_cache_write(Arc::clone(&compiled));
+        }
         Ok(GpuPageRoute::Ready(Arc::new(PreparedGpuPage {
             compiled,
             gpu: Arc::new(gpu),
@@ -2163,9 +2383,9 @@ impl fmt::Debug for GpuCameraTargetReservation {
 ///
 /// Working state may advance through incomplete settled tiles while the last
 /// coherent surface remains immutable and displayable. At most seven surfaces
-/// provide three exact-density pan-cache slots and four viewport-sized camera
-/// targets. The alternates prevent compositor completion jitter from stalling
-/// a 120 Hz gesture or forcing texture allocation during it.
+/// include three exact-density pan-cache slots and two camera targets.
+/// Completion-gated double buffering prevents queued PDF frames from
+/// starving the compositor while keeping allocation off the gesture path.
 #[derive(Clone, Default)]
 pub struct GpuPagePresentation {
     token: Option<ExternalGpuDeviceToken>,
@@ -2738,6 +2958,7 @@ mod tests {
             .defer_full_render
         );
     }
+
     use glyphst_core::DocumentFormat;
 
     fn minimal_pdf() -> Arc<[u8]> {
@@ -2884,6 +3105,54 @@ trailer <</Root 1 0 R>>
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!first_hit);
         assert!(second_hit);
+    }
+
+    #[test]
+    fn compiled_page_disk_cache_reopens_only_validated_source_data() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let cache_root = std::env::temp_dir().join(format!(
+            "glyphst-pdf-compiled-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        let snapshot =
+            DocumentSnapshot::from_bytes("cached.pdf", DocumentFormat::Pdf, minimal_pdf());
+        let first = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("open first document");
+        let (compiled, cache_hit) = first
+            .compile_page_with_cache_status(0, &CancellationToken::new())
+            .expect("compile first page");
+        assert!(!cache_hit);
+        first
+            .persist_compiled_page_cache(&compiled)
+            .expect("persist compiled page");
+
+        let second = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("reopen document");
+        let (restored, cache_hit) = second
+            .compile_page_with_cache_status(0, &CancellationToken::new())
+            .expect("restore compiled page");
+        assert!(cache_hit);
+        assert_eq!(
+            restored.scene().fingerprint(),
+            compiled.scene().fingerprint()
+        );
+
+        let cache_path = first
+            .compiled_page_cache_path(PageIndex::new(0))
+            .expect("compiled cache path");
+        fs::write(&cache_path, b"corrupt-zstd").expect("corrupt cache");
+        let third = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("reopen corrupt cache");
+        let (_, cache_hit) = third
+            .compile_page_with_cache_status(0, &CancellationToken::new())
+            .expect("replace corrupt cache");
+        assert!(!cache_hit);
+        assert!(!cache_path.exists());
+
+        fs::remove_dir_all(cache_root).expect("remove test cache");
     }
 
     #[test]
