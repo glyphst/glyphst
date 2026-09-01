@@ -1459,6 +1459,53 @@ pub struct GpuPdfRenderer {
     output_format: wgpu::TextureFormat,
     motion_submitted: Arc<AtomicU64>,
     motion_completed: Arc<AtomicU64>,
+    direct_render: DirectRenderTelemetry,
+}
+
+#[derive(Default)]
+struct DirectRenderTelemetry {
+    scheduled: AtomicU64,
+    executed: AtomicU64,
+    failed: AtomicU64,
+    last_scheduled_camera_serial: AtomicU64,
+    last_executed_camera_serial: AtomicU64,
+}
+
+/// Execution counters for painter-ordered PDF callbacks in GPUI frames.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuDirectRenderStats {
+    pub scheduled: u64,
+    pub executed: u64,
+    pub failed: u64,
+    pub last_scheduled_camera_serial: u64,
+    pub last_executed_camera_serial: u64,
+}
+
+impl DirectRenderTelemetry {
+    fn schedule(&self, camera_serial: u64) {
+        self.scheduled.fetch_add(1, Ordering::Relaxed);
+        self.last_scheduled_camera_serial
+            .store(camera_serial, Ordering::Release);
+    }
+
+    fn finish(&self, camera_serial: u64, succeeded: bool) {
+        self.executed.fetch_add(1, Ordering::Relaxed);
+        self.last_executed_camera_serial
+            .store(camera_serial, Ordering::Release);
+        if !succeeded {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> GpuDirectRenderStats {
+        GpuDirectRenderStats {
+            scheduled: self.scheduled.load(Ordering::Acquire),
+            executed: self.executed.load(Ordering::Acquire),
+            failed: self.failed.load(Ordering::Acquire),
+            last_scheduled_camera_serial: self.last_scheduled_camera_serial.load(Ordering::Acquire),
+            last_executed_camera_serial: self.last_executed_camera_serial.load(Ordering::Acquire),
+        }
+    }
 }
 
 impl fmt::Debug for GpuPdfRenderer {
@@ -1505,6 +1552,7 @@ impl GpuPdfRenderer {
             output_format,
             motion_submitted: Arc::new(AtomicU64::new(0)),
             motion_completed: Arc::new(AtomicU64::new(0)),
+            direct_render: DirectRenderTelemetry::default(),
         })
     }
 
@@ -1518,6 +1566,10 @@ impl GpuPdfRenderer {
 
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.context.device().limits().max_texture_dimension_2d
+    }
+
+    pub fn direct_render_stats(&self) -> GpuDirectRenderStats {
+        self.direct_render.snapshot()
     }
 
     /// Creates a painter-ordered callback that records this page directly into
@@ -1534,6 +1586,7 @@ impl GpuPdfRenderer {
             bail!("the prepared PDF page belongs to a stale GPU generation");
         }
         request.visible_region.clamp(request.page_size)?;
+        self.direct_render.schedule(request.camera_serial);
         Ok(self.context.render_handle(Arc::new(DirectPageRender {
             renderer: Arc::clone(self),
             page,
@@ -2125,53 +2178,59 @@ struct DirectPageRender {
 
 impl WgpuExternalRender for DirectPageRender {
     fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
-        if context.target_format != self.renderer.output_format
-            || !output_format_supported(context.target_format)
-        {
-            bail!(
-                "native PDF direct target format {:?} does not match renderer format {:?}",
-                context.target_format,
-                self.renderer.output_format
-            );
-        }
-        let Some((target_origin, visible_region)) = clipped_direct_region(
-            [
-                context.bounds.origin.x.as_f32(),
-                context.bounds.origin.y.as_f32(),
-                context.bounds.size.width.as_f32(),
-                context.bounds.size.height.as_f32(),
-            ],
-            [
-                context.content_mask.bounds.origin.x.as_f32(),
-                context.content_mask.bounds.origin.y.as_f32(),
-                context.content_mask.bounds.size.width.as_f32(),
-                context.content_mask.bounds.size.height.as_f32(),
-            ],
-            context.target_size,
-            self.request.visible_region,
-            self.request.page_size,
-        ) else {
-            return Ok(());
-        };
-        let mut request = self.request;
-        request.visible_region = visible_region;
-        let (_, engine_request) = self.renderer.engine_render_request_for_region(
-            &self.page,
-            request,
-            visible_region,
-            visible_region.size(),
-        )?;
+        let result = (|| {
+            if context.target_format != self.renderer.output_format
+                || !output_format_supported(context.target_format)
+            {
+                bail!(
+                    "native PDF direct target format {:?} does not match renderer format {:?}",
+                    context.target_format,
+                    self.renderer.output_format
+                );
+            }
+            let Some((target_origin, visible_region)) = clipped_direct_region(
+                [
+                    context.bounds.origin.x.as_f32(),
+                    context.bounds.origin.y.as_f32(),
+                    context.bounds.size.width.as_f32(),
+                    context.bounds.size.height.as_f32(),
+                ],
+                [
+                    context.content_mask.bounds.origin.x.as_f32(),
+                    context.content_mask.bounds.origin.y.as_f32(),
+                    context.content_mask.bounds.size.width.as_f32(),
+                    context.content_mask.bounds.size.height.as_f32(),
+                ],
+                context.target_size,
+                self.request.visible_region,
+                self.request.page_size,
+            ) else {
+                return Ok(());
+            };
+            let mut request = self.request;
+            request.visible_region = visible_region;
+            let (_, engine_request) = self.renderer.engine_render_request_for_region(
+                &self.page,
+                request,
+                visible_region,
+                visible_region.size(),
+            )?;
+            self.renderer
+                .renderer
+                .encode_into_region(
+                    &self.page.gpu,
+                    engine_request,
+                    context.target,
+                    target_origin,
+                    context.encoder,
+                )
+                .map(|_| ())
+                .map_err(render_error)
+        })();
         self.renderer
-            .renderer
-            .encode_into_region(
-                &self.page.gpu,
-                engine_request,
-                context.target,
-                target_origin,
-                context.encoder,
-            )
-            .map(|_| ())
-            .map_err(render_error)
+            .direct_render
+            .finish(self.request.camera_serial, result.is_ok());
+        result
     }
 }
 
@@ -3082,6 +3141,33 @@ fn page_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_render_telemetry_distinguishes_scheduling_from_execution() {
+        let telemetry = DirectRenderTelemetry::default();
+        telemetry.schedule(7);
+        assert_eq!(
+            telemetry.snapshot(),
+            GpuDirectRenderStats {
+                scheduled: 1,
+                last_scheduled_camera_serial: 7,
+                ..GpuDirectRenderStats::default()
+            }
+        );
+        telemetry.finish(7, true);
+        telemetry.schedule(8);
+        telemetry.finish(8, false);
+        assert_eq!(
+            telemetry.snapshot(),
+            GpuDirectRenderStats {
+                scheduled: 2,
+                executed: 2,
+                failed: 1,
+                last_scheduled_camera_serial: 8,
+                last_executed_camera_serial: 8,
+            }
+        );
+    }
 
     #[test]
     fn direct_render_region_tracks_window_clipping_in_page_space() {

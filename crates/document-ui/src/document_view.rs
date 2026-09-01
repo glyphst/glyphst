@@ -62,11 +62,11 @@ use glyphst_pdf::{
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
-    GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction, GpuNavigationRoute, GpuOutlineItem,
-    GpuPagePreparationTimings, GpuPagePresentation, GpuPageRegion, GpuPageRenderOptions,
-    GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture, GpuPaintRequest,
-    GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer, GpuPreparationStats,
-    GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
+    GpuLinkHighlightMode, GpuLinkInteraction, GpuMotionRenderMode, GpuNamedAction,
+    GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation,
+    GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture,
+    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
+    GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
@@ -734,6 +734,11 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_detached_target_reuses: u64,
     pub motion_render_inline_frames: u64,
     pub motion_render_inline_failures: u64,
+    pub motion_render_callback_scheduled: u64,
+    pub motion_render_callback_executed: u64,
+    pub motion_render_callback_failures: u64,
+    pub motion_render_callback_scheduled_camera_serial: u64,
+    pub motion_render_callback_executed_camera_serial: u64,
     pub camera_pan_inline_frames: u64,
     pub camera_pan_admission_holds: u64,
     pub motion_render_camera_serial: u64,

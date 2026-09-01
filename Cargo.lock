@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "ciborium",
  "glyphst-pdf-core",
@@ -3233,7 +3233,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3247,7 +3247,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-cpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
@@ -3260,7 +3260,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3276,7 +3276,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=7bbed2a05581572e06f283118da8c04fb995b596#7bbed2a05581572e06f283118da8c04fb995b596"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=192d8d3bcb260cd9a5861bf7726b75491343c667#192d8d3bcb260cd9a5861bf7726b75491343c667"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",

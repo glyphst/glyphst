@@ -44,7 +44,7 @@ const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
-const TRACE_REPORT_VERSION: u32 = 10;
+const TRACE_REPORT_VERSION: u32 = 11;
 
 struct RenderDebugCaptureNotification;
 
@@ -1545,7 +1545,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 13,
+        "schema_version": 14,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1776,7 +1776,7 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "total_p95_ms": milliseconds(cache.motion_render_total_latency_p95),
         "total_max_ms": milliseconds(cache.motion_render_total_latency_max),
     });
-    let zoom_motion = json!({
+    let mut zoom_motion = json!({
         "reprojections": cache.surface_zoom_motion_reprojections,
         "refreshes_suppressed": cache.surface_zoom_motion_refreshes_suppressed,
         "cancellations": cache.surface_zoom_motion_cancellations,
@@ -1815,6 +1815,31 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
         "worker_latency": zoom_worker_latency,
         "active": cache.zoom_motion_active,
     });
+    zoom_motion
+        .as_object_mut()
+        .expect("zoom-motion report is an object")
+        .extend([
+            (
+                "callback_scheduled".into(),
+                cache.motion_render_callback_scheduled.into(),
+            ),
+            (
+                "callback_executed".into(),
+                cache.motion_render_callback_executed.into(),
+            ),
+            (
+                "callback_failures".into(),
+                cache.motion_render_callback_failures.into(),
+            ),
+            (
+                "callback_scheduled_camera_serial".into(),
+                cache.motion_render_callback_scheduled_camera_serial.into(),
+            ),
+            (
+                "callback_executed_camera_serial".into(),
+                cache.motion_render_callback_executed_camera_serial.into(),
+            ),
+        ]);
     let surfaces = json!({
         "count": cache.surface_count,
         "bytes": cache.surface_bytes,
@@ -2043,6 +2068,9 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(motion_render_detached_target_reuses);
     counter!(motion_render_inline_frames);
     counter!(motion_render_inline_failures);
+    counter!(motion_render_callback_scheduled);
+    counter!(motion_render_callback_executed);
+    counter!(motion_render_callback_failures);
     counter!(camera_pan_inline_frames);
     counter!(camera_pan_admission_holds);
     counter!(motion_render_camera_serial_mismatches);

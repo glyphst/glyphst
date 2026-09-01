@@ -46,6 +46,13 @@ fn next_vector_lod_scale(available: f32, requested: f64) -> Option<f32> {
     (next.is_finite() && next > available).then_some(next)
 }
 
+fn next_motion_vector_lod_scale(available: f32, requested: f64) -> Option<f32> {
+    if requested <= f64::from(available) * 1.000_001 {
+        return None;
+    }
+    next_vector_lod_scale(available, requested.max(f64::from(available) * 2.0))
+}
+
 fn presented_refinement_page_count(
     presented_pages: &HashSet<u32>,
     pending_pages: impl IntoIterator<Item = u32>,
@@ -59,6 +66,17 @@ fn presented_refinement_page_count(
 fn camera_batch_ready(serial: u64, page_serials: impl IntoIterator<Item = u64>) -> bool {
     let mut page_serials = page_serials.into_iter().peekable();
     page_serials.peek().is_some() && page_serials.all(|page_serial| page_serial == serial)
+}
+
+fn use_current_camera_for_scale_change(
+    scale_changed: bool,
+    zoom_motion_active: bool,
+    motion_mode: GpuMotionRenderMode,
+    vector_lod_ready: bool,
+) -> bool {
+    scale_changed
+        && (zoom_motion_active
+            || (motion_mode == GpuMotionRenderMode::OrderedCameraProgram && vector_lod_ready))
 }
 
 #[derive(Default)]
@@ -2491,7 +2509,11 @@ impl DocumentView {
         None
     }
 
-    fn hold_last_sharp_gpu_texture(&mut self, page: u32) -> Option<GpuPaintTexture> {
+    fn hold_last_sharp_gpu_texture(
+        &mut self,
+        page: u32,
+        count_as_presentation_hold: bool,
+    ) -> Option<GpuPaintTexture> {
         let held = self
             .gpu_pdf
             .rendered
@@ -2507,10 +2529,12 @@ impl DocumentView {
             self.gpu_pdf.presented_pages.insert(page);
             self.gpu_pdf.presented_continuity_pages.remove(&page);
             self.gpu_pdf.surface_failures.remove(&page);
-            self.gpu_pdf.surface_zoom_presentation_holds = self
-                .gpu_pdf
-                .surface_zoom_presentation_holds
-                .saturating_add(1);
+            if count_as_presentation_hold {
+                self.gpu_pdf.surface_zoom_presentation_holds = self
+                    .gpu_pdf
+                    .surface_zoom_presentation_holds
+                    .saturating_add(1);
+            }
         }
         held
     }
@@ -2784,18 +2808,50 @@ impl DocumentView {
             current_surface.as_ref(),
         );
 
-        let dimension_motion = !settled && !current_dimensions_exact;
+        let scale_changed = !current_dimensions_exact;
+        let dimension_motion = !settled && scale_changed;
         let fixed_scale_pan = !dimension_motion && current_dimensions_exact;
-        if self.gpu_pdf.zoom_motion_active && dimension_motion {
-            let mut request = gpu_paint_request(
-                key,
-                exact_visible_region,
-                false,
-                paint_targets,
-                self.gpu_pdf.motion_camera_serial,
-                device_origin_phase,
+        let camera_request = gpu_paint_request(
+            key,
+            exact_visible_region,
+            false,
+            paint_targets,
+            self.gpu_pdf.motion_camera_serial,
+            device_origin_phase,
+        );
+        let camera_vector_lod_status = scale_changed
+            .then(|| renderer.vector_lod_status(&prepared, camera_request))
+            .transpose()
+            .ok()
+            .flatten();
+        if self.gpu_pdf.zoom_motion_active
+            && !speculative
+            && let Some(status) = camera_vector_lod_status
+            && let Some(required_scale) =
+                next_motion_vector_lod_scale(status.available_scale, status.requested_scale)
+        {
+            self.start_native_gpu_vector_lod_prepare(
+                page,
+                Arc::clone(&prepared),
+                Arc::clone(&renderer),
+                required_scale,
+                cx,
             );
-            if let Some(mut paint) = self.hold_last_sharp_gpu_texture(page) {
+        }
+        let camera_vector_lod_ready = !self.gpu_pdf.zoom_motion_active
+            && camera_vector_lod_status.is_some_and(|status| status.ready);
+        if use_current_camera_for_scale_change(
+            scale_changed,
+            self.gpu_pdf.zoom_motion_active,
+            prepared.motion_render_mode(),
+            camera_vector_lod_ready,
+        ) {
+            // HEPR keeps zoom on one camera-current vector representation.
+            // Do the same after animation settlement when its retained LOD is
+            // valid, rather than swapping to a scaled cached surface and then
+            // to a differently rasterized strict surface.
+            let mut request = camera_request;
+            if let Some(mut paint) = self.hold_last_sharp_gpu_texture(page, false) {
                 assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
                 let direct = renderer
                     .supersede_page_render(&prepared, request.generation)
@@ -2817,6 +2873,10 @@ impl DocumentView {
                         }
                     }
                     Err(error) => {
+                        self.gpu_pdf.surface_zoom_presentation_holds = self
+                            .gpu_pdf
+                            .surface_zoom_presentation_holds
+                            .saturating_add(1);
                         self.gpu_pdf.motion_render_inline_failures =
                             self.gpu_pdf.motion_render_inline_failures.saturating_add(1);
                         self.gpu_pdf.surface_zoom_live_failures =
@@ -2864,7 +2924,7 @@ impl DocumentView {
                 self.gpu_pdf.motion_camera_batch_commits =
                     self.gpu_pdf.motion_camera_batch_commits.saturating_add(1);
             } else {
-                return self.hold_last_sharp_gpu_texture(page);
+                return self.hold_last_sharp_gpu_texture(page, true);
             }
         }
 
@@ -4689,6 +4749,12 @@ impl DocumentView {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let direct_render = self
+            .gpu_pdf
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.direct_render_stats())
+            .unwrap_or_default();
         GpuCacheDebugSnapshot {
             frontend_outline_fonts: frontend.outline_fonts,
             frontend_outline_font_bytes: frontend.outline_font_bytes,
@@ -4790,6 +4856,13 @@ impl DocumentView {
             motion_render_detached_target_reuses: 0,
             motion_render_inline_frames: self.gpu_pdf.motion_render_inline_frames,
             motion_render_inline_failures: self.gpu_pdf.motion_render_inline_failures,
+            motion_render_callback_scheduled: direct_render.scheduled,
+            motion_render_callback_executed: direct_render.executed,
+            motion_render_callback_failures: direct_render.failed,
+            motion_render_callback_scheduled_camera_serial: direct_render
+                .last_scheduled_camera_serial,
+            motion_render_callback_executed_camera_serial: direct_render
+                .last_executed_camera_serial,
             camera_pan_inline_frames: self.gpu_pdf.camera_pan_inline_frames,
             camera_pan_admission_holds: self.gpu_pdf.camera_pan_admission_holds,
             motion_render_camera_serial: self.gpu_pdf.motion_camera_serial,
@@ -4928,6 +5001,8 @@ mod tests {
         assert_eq!(next_vector_lod_scale(4_096.0, 8_192.0), Some(8_192.0));
         assert_eq!(next_vector_lod_scale(8.0, 8.0), None);
         assert_eq!(next_vector_lod_scale(8_192.0, 16_384.0), Some(16_384.0));
+        assert_eq!(next_motion_vector_lod_scale(8.0, 8.1), Some(16.0));
+        assert_eq!(next_motion_vector_lod_scale(8.0, 8.0), None);
     }
 
     #[test]
@@ -4935,6 +5010,28 @@ mod tests {
         assert!(camera_batch_ready(7, [7, 7]));
         assert!(!camera_batch_ready(7, [7, 6]));
         assert!(!camera_batch_ready(7, []));
+    }
+
+    #[test]
+    fn ready_ordered_pages_keep_the_camera_current_path_after_zoom_settles() {
+        assert!(use_current_camera_for_scale_change(
+            true,
+            false,
+            GpuMotionRenderMode::OrderedCameraProgram,
+            true,
+        ));
+        assert!(!use_current_camera_for_scale_change(
+            true,
+            false,
+            GpuMotionRenderMode::OrderedCameraProgram,
+            false,
+        ));
+        assert!(!use_current_camera_for_scale_change(
+            false,
+            true,
+            GpuMotionRenderMode::OrderedCameraProgram,
+            true,
+        ));
     }
 
     #[test]
