@@ -42,6 +42,7 @@ const TRACE_SCROLL_MIN_PIXELS_PER_FRAME: f32 = 8.0;
 const TRACE_SCROLL_MAX_PIXELS_PER_FRAME: f32 = 32.0;
 const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
+const TRACE_SETTLING_TIMEOUT: Duration = Duration::from_secs(15);
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
 const TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES: usize = 30;
@@ -533,6 +534,13 @@ impl Workspace {
 
     /// Retains the synchronous draw and presentation owned by one automated-driver tick.
     pub fn collect_automated_render_debug_frame(&mut self, draw_started_at: Instant) {
+        // Slow reference renders may drain after the fixed comparison sample is complete.
+        if self.rendering_debug_trace.as_ref().is_some_and(|trace| {
+            trace.phase == RenderDebugTracePhase::Settle
+                && trace.completed_settling_frames >= TRACE_SETTLING_FRAMES
+        }) {
+            return;
+        }
         let Some(capture) = self
             .rendering_debug_capture
             .as_mut()
@@ -731,12 +739,32 @@ impl Workspace {
                 }
             }
             RenderDebugTracePhase::Settle => {
-                capture_render_debug_trace_frame(&mut trace, &snapshot, elapsed);
-                observe_render_debug_trace(&mut trace.observations, &snapshot, true);
+                if trace.completed_settling_frames < TRACE_SETTLING_FRAMES {
+                    capture_render_debug_trace_frame(&mut trace, &snapshot, elapsed);
+                    observe_render_debug_trace(&mut trace.observations, &snapshot, true);
+                    trace.completed_settling_frames += 1;
+                }
                 trace.phase_frame += 1;
-                trace.completed_settling_frames += 1;
-                if trace.phase_frame >= TRACE_SETTLING_FRAMES {
-                    let failure = render_debug_trace_settle_failure(&trace, &snapshot);
+                let settle_started_at = trace
+                    .markers
+                    .last()
+                    .filter(|marker| marker.phase == RenderDebugTracePhase::Settle.name())
+                    .map_or(elapsed, |marker| marker.offset);
+                let settle_elapsed = elapsed.saturating_sub(settle_started_at);
+                let ready = render_debug_trace_ready(&snapshot);
+                if render_debug_trace_should_finish_settling(
+                    trace.completed_settling_frames,
+                    ready,
+                    settle_elapsed,
+                ) {
+                    let failure = if ready {
+                        render_debug_trace_settle_failure(&trace, &snapshot)
+                    } else {
+                        Some(format!(
+                            "rendering did not settle within {} seconds after the interaction",
+                            TRACE_SETTLING_TIMEOUT.as_secs()
+                        ))
+                    };
                     trace.markers.push(RenderDebugTraceMarker {
                         phase: "complete",
                         frame_index: trace.completed_interaction_frames
@@ -936,6 +964,14 @@ impl Workspace {
         }
         cx.notify();
     }
+}
+
+fn render_debug_trace_should_finish_settling(
+    sampled_frames: usize,
+    ready: bool,
+    elapsed: Duration,
+) -> bool {
+    sampled_frames >= TRACE_SETTLING_FRAMES && (ready || elapsed >= TRACE_SETTLING_TIMEOUT)
 }
 
 fn render_debug_capture_warning(window: &mut Window, message: impl Into<String>, cx: &mut App) {
@@ -3755,6 +3791,30 @@ mod tests {
             frame.present.unwrap().present_duration(),
             Duration::from_millis(3)
         );
+    }
+
+    #[test]
+    fn automated_trace_keeps_fixed_samples_while_slow_reference_work_drains() {
+        assert!(!render_debug_trace_should_finish_settling(
+            TRACE_SETTLING_FRAMES - 1,
+            true,
+            TRACE_SETTLING_TIMEOUT,
+        ));
+        assert!(!render_debug_trace_should_finish_settling(
+            TRACE_SETTLING_FRAMES,
+            false,
+            TRACE_SETTLING_TIMEOUT - Duration::from_millis(1),
+        ));
+        assert!(render_debug_trace_should_finish_settling(
+            TRACE_SETTLING_FRAMES,
+            true,
+            Duration::ZERO,
+        ));
+        assert!(render_debug_trace_should_finish_settling(
+            TRACE_SETTLING_FRAMES,
+            false,
+            TRACE_SETTLING_TIMEOUT,
+        ));
     }
 
     #[test]
