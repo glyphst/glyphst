@@ -443,16 +443,29 @@ fn run_automated_render_trace(
                 if matches!(
                     poll,
                     AutomatedTracePoll::Started | AutomatedTracePoll::Running(_)
-                ) && cx
-                    .with_window(workspace.entity().entity_id(), |window, cx| {
-                        window.draw(cx).clear(cx);
-                        window.present_if_needed();
-                    })
-                    .is_none()
-                {
-                    return AutomatedTracePoll::Failed(
-                        "failed to locate the automated trace window for drawing".into(),
-                    );
+                ) {
+                    let draw_started_at = Instant::now();
+                    if cx
+                        .with_window(workspace.entity().entity_id(), |window, cx| {
+                            window.draw(cx).clear(cx);
+                            window.present_if_needed();
+                        })
+                        .is_none()
+                    {
+                        return AutomatedTracePoll::Failed(
+                            "failed to locate the automated trace window for drawing".into(),
+                        );
+                    }
+                    if workspace
+                        .update(cx, |workspace, _, _| {
+                            workspace.collect_automated_render_debug_frame(draw_started_at)
+                        })
+                        .is_err()
+                    {
+                        return AutomatedTracePoll::Failed(
+                            "failed to collect the automated trace draw".into(),
+                        );
+                    }
                 }
                 poll
             });

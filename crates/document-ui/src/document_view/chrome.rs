@@ -1,7 +1,7 @@
 use super::*;
 
-pub(super) fn document_scroll_percentage(scroll_y: f32, max_scroll_y: f32) -> u8 {
-    if !max_scroll_y.is_finite() || max_scroll_y <= f32::EPSILON {
+pub(super) fn document_scroll_percentage(scroll_y: f64, max_scroll_y: f64) -> u8 {
+    if !max_scroll_y.is_finite() || max_scroll_y <= f64::EPSILON {
         return 100;
     }
     let scroll_y = if scroll_y.is_finite() { scroll_y } else { 0.0 };

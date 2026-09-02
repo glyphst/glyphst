@@ -1472,6 +1472,7 @@ struct DirectRenderTelemetry {
     last_scheduled_camera_serial: AtomicU64,
     last_executed_camera_serial: AtomicU64,
     last_encoded_camera_serial: AtomicU64,
+    latest_stats: Mutex<Option<GpuRenderStats>>,
 }
 
 /// Execution counters for painter-ordered PDF callbacks in GPUI frames.
@@ -1485,6 +1486,17 @@ pub struct GpuDirectRenderStats {
     pub last_scheduled_camera_serial: u64,
     pub last_executed_camera_serial: u64,
     pub last_encoded_camera_serial: u64,
+    pub last_cpu_time: Duration,
+    pub last_frame_pool_wait_time: Duration,
+    pub last_command_encoding_time: Duration,
+    pub last_frame_pool_grew: bool,
+    pub last_frame_pool_capacity_bytes: u64,
+    pub last_render_bundle_runs: u64,
+    pub last_stencil_draws: u64,
+    pub last_retained_stroke_candidate_references: u64,
+    pub last_retained_stroke_cull_dispatches: u64,
+    pub last_retained_stroke_indirect_draws: u64,
+    pub last_retained_stroke_indirect_runs: u64,
 }
 
 /// Final disposition of one painter-ordered direct PDF draw.
@@ -1559,7 +1571,12 @@ impl DirectRenderTelemetry {
             .store(camera_serial, Ordering::Release);
     }
 
-    fn finish(&self, camera_serial: u64, outcome: GpuDirectRenderOutcome) {
+    fn finish(
+        &self,
+        camera_serial: u64,
+        outcome: GpuDirectRenderOutcome,
+        stats: Option<GpuRenderStats>,
+    ) {
         self.executed.fetch_add(1, Ordering::Relaxed);
         self.last_executed_camera_serial
             .store(camera_serial, Ordering::Release);
@@ -1577,6 +1594,12 @@ impl DirectRenderTelemetry {
             }
             GpuDirectRenderOutcome::Pending => {}
         }
+        if let Some(stats) = stats {
+            *self
+                .latest_stats
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stats);
+        }
     }
 
     fn supersede(&self) {
@@ -1584,6 +1607,11 @@ impl DirectRenderTelemetry {
     }
 
     fn snapshot(&self) -> GpuDirectRenderStats {
+        let latest = self
+            .latest_stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_default();
         GpuDirectRenderStats {
             scheduled: self.scheduled.load(Ordering::Acquire),
             executed: self.executed.load(Ordering::Acquire),
@@ -1593,6 +1621,17 @@ impl DirectRenderTelemetry {
             last_scheduled_camera_serial: self.last_scheduled_camera_serial.load(Ordering::Acquire),
             last_executed_camera_serial: self.last_executed_camera_serial.load(Ordering::Acquire),
             last_encoded_camera_serial: self.last_encoded_camera_serial.load(Ordering::Acquire),
+            last_cpu_time: latest.cpu_time,
+            last_frame_pool_wait_time: latest.frame_pool_wait_time,
+            last_command_encoding_time: latest.command_encoding_time,
+            last_frame_pool_grew: latest.frame_pool_grew,
+            last_frame_pool_capacity_bytes: latest.frame_pool_capacity_bytes,
+            last_render_bundle_runs: latest.render_bundle_runs,
+            last_stencil_draws: latest.stencil_draws,
+            last_retained_stroke_candidate_references: latest.retained_stroke_candidate_references,
+            last_retained_stroke_cull_dispatches: latest.retained_stroke_cull_dispatches,
+            last_retained_stroke_indirect_draws: latest.retained_stroke_indirect_draws,
+            last_retained_stroke_indirect_runs: latest.retained_stroke_indirect_runs,
         }
     }
 }
@@ -2276,7 +2315,7 @@ struct DirectPageRender {
 }
 
 impl DirectPageRender {
-    fn finish(&self, outcome: GpuDirectRenderOutcome) {
+    fn finish(&self, outcome: GpuDirectRenderOutcome, stats: Option<GpuRenderStats>) {
         if self
             .receipt
             .state
@@ -2291,7 +2330,7 @@ impl DirectPageRender {
         {
             self.renderer
                 .direct_render
-                .finish(self.request.camera_serial, outcome);
+                .finish(self.request.camera_serial, outcome, stats);
         }
     }
 }
@@ -2315,17 +2354,17 @@ impl Drop for DirectPageRender {
     }
 }
 
-fn direct_render_encoded<T>(result: std::result::Result<T, RenderError>) -> Result<bool> {
+fn direct_render_encoded<T>(result: std::result::Result<T, RenderError>) -> Result<Option<T>> {
     match result {
-        Ok(_) => Ok(true),
-        Err(RenderError::StaleRenderGeneration { .. }) => Ok(false),
+        Ok(value) => Ok(Some(value)),
+        Err(RenderError::StaleRenderGeneration { .. }) => Ok(None),
         Err(error) => Err(render_error(error)),
     }
 }
 
 impl WgpuExternalRender for DirectPageRender {
     fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
-        let result = (|| -> Result<bool> {
+        let result = (|| -> Result<Option<GpuRenderStats>> {
             if context.target_format != self.renderer.output_format
                 || !output_format_supported(context.target_format)
             {
@@ -2352,7 +2391,7 @@ impl WgpuExternalRender for DirectPageRender {
                 self.request.visible_region,
                 self.request.page_size,
             ) else {
-                return Ok(false);
+                return Ok(None);
             };
             let mut request = self.request;
             request.visible_region = visible_region;
@@ -2362,19 +2401,35 @@ impl WgpuExternalRender for DirectPageRender {
                 visible_region,
                 visible_region.size(),
             )?;
-            direct_render_encoded(self.renderer.renderer.encode_into_region(
-                &self.page.gpu,
-                engine_request,
-                context.target,
-                target_origin,
-                context.encoder,
-            ))
+            let frame_capacity = self
+                .request
+                .preallocated_camera_target_size(
+                    self.renderer
+                        .context
+                        .device()
+                        .limits()
+                        .max_texture_dimension_2d,
+                )?
+                .unwrap_or(engine_request.target_size);
+            direct_render_encoded(
+                self.renderer
+                    .renderer
+                    .encode_into_region_with_frame_capacity(
+                        &self.page.gpu,
+                        engine_request,
+                        context.target,
+                        target_origin,
+                        frame_capacity,
+                        context.encoder,
+                    ),
+            )
         })();
-        self.finish(match result {
-            Ok(true) => GpuDirectRenderOutcome::Encoded,
-            Ok(false) => GpuDirectRenderOutcome::Superseded,
+        let outcome = match result {
+            Ok(Some(_)) => GpuDirectRenderOutcome::Encoded,
+            Ok(None) => GpuDirectRenderOutcome::Superseded,
             Err(_) => GpuDirectRenderOutcome::Failed,
-        });
+        };
+        self.finish(outcome, result.as_ref().ok().copied().flatten());
         result.map(|_| ())
     }
 }
@@ -3299,9 +3354,24 @@ mod tests {
                 ..GpuDirectRenderStats::default()
             }
         );
-        telemetry.finish(7, GpuDirectRenderOutcome::Encoded);
+        telemetry.finish(
+            7,
+            GpuDirectRenderOutcome::Encoded,
+            Some(GpuRenderStats {
+                cpu_time: Duration::from_millis(3),
+                command_encoding_time: Duration::from_millis(2),
+                frame_pool_capacity_bytes: 4096,
+                render_bundle_runs: 5,
+                stencil_draws: 7,
+                retained_stroke_candidate_references: 11,
+                retained_stroke_cull_dispatches: 2,
+                retained_stroke_indirect_draws: 3,
+                retained_stroke_indirect_runs: 1,
+                ..GpuRenderStats::default()
+            }),
+        );
         telemetry.schedule(8);
-        telemetry.finish(8, GpuDirectRenderOutcome::Failed);
+        telemetry.finish(8, GpuDirectRenderOutcome::Failed, None);
         assert_eq!(
             telemetry.snapshot(),
             GpuDirectRenderStats {
@@ -3312,6 +3382,15 @@ mod tests {
                 last_scheduled_camera_serial: 8,
                 last_executed_camera_serial: 8,
                 last_encoded_camera_serial: 7,
+                last_cpu_time: Duration::from_millis(3),
+                last_command_encoding_time: Duration::from_millis(2),
+                last_frame_pool_capacity_bytes: 4096,
+                last_render_bundle_runs: 5,
+                last_stencil_draws: 7,
+                last_retained_stroke_candidate_references: 11,
+                last_retained_stroke_cull_dispatches: 2,
+                last_retained_stroke_indirect_draws: 3,
+                last_retained_stroke_indirect_runs: 1,
                 ..GpuDirectRenderStats::default()
             }
         );
@@ -3337,13 +3416,14 @@ mod tests {
 
     #[test]
     fn stale_direct_generation_is_superseded_not_failed() {
-        assert!(direct_render_encoded(Ok(())).unwrap());
-        assert!(
-            !direct_render_encoded::<()>(Err(RenderError::StaleRenderGeneration {
+        assert_eq!(direct_render_encoded(Ok(())).unwrap(), Some(()));
+        assert_eq!(
+            direct_render_encoded::<()>(Err(RenderError::StaleRenderGeneration {
                 requested: 1,
                 latest: 2,
             }))
-            .unwrap()
+            .unwrap(),
+            None
         );
         assert!(
             direct_render_encoded::<()>(Err(RenderError::InvalidRequest("bad".into()))).is_err()

@@ -5,14 +5,14 @@ impl DocumentView {
         self.capabilities.two_column_layout && self.page_layout == DocumentPageLayout::TwoColumn
     }
 
-    pub(super) fn max_scroll_y_doc(&self) -> f32 {
-        let viewport_height_doc = self.viewport_height / self.effective_scale();
-        (self.content_height_doc - viewport_height_doc).max(0.0)
+    pub(super) fn max_scroll_y_doc(&self) -> f64 {
+        let viewport_height_doc = f64::from(self.viewport_height / self.effective_scale());
+        (f64::from(self.content_height_doc) - viewport_height_doc).max(0.0)
     }
 
-    pub(super) fn max_scroll_x_doc(&self) -> f32 {
-        let viewport_width_doc = self.viewport_width / self.effective_scale();
-        ((self.max_page_width - viewport_width_doc) / 2.0).max(0.0)
+    pub(super) fn max_scroll_x_doc(&self) -> f64 {
+        let viewport_width_doc = f64::from(self.viewport_width / self.effective_scale());
+        ((f64::from(self.max_page_width) - viewport_width_doc) / 2.0).max(0.0)
     }
 
     pub(super) fn recompute_layout(&mut self, page_gap: f32) {
@@ -138,17 +138,17 @@ impl DocumentView {
         start..end
     }
 
-    pub(super) fn page_index_for_doc_point(&self, x: f32, y: f32) -> usize {
+    pub(super) fn page_index_for_doc_point(&self, x: f64, y: f64) -> usize {
         self.pages
             .iter()
             .enumerate()
             .find_map(|(page_idx, page)| {
                 let (width, height) = Self::page_dimensions_for(page, self.rotation);
-                (x >= page.offset_x
-                    && x <= page.offset_x + width
-                    && y >= page.offset_y
-                    && y <= page.offset_y + height)
-                    .then_some(page_idx)
+                (x >= f64::from(page.offset_x)
+                    && x <= f64::from(page.offset_x + width)
+                    && y >= f64::from(page.offset_y)
+                    && y <= f64::from(page.offset_y + height))
+                .then_some(page_idx)
             })
             .unwrap_or_else(|| self.page_index_for_doc_y(y))
     }
@@ -178,8 +178,9 @@ impl DocumentView {
         {
             let point = Self::pdf_point_to_view(page.bounds, self.rotation, source_point);
             let scale = self.effective_scale();
-            self.scroll_x_doc = page.offset_x + point.x - self.max_page_width / 2.0;
-            self.scroll_y_doc = page.offset_y + point.y - self.viewport_height / (2.0 * scale);
+            self.scroll_x_doc = f64::from(page.offset_x + point.x - self.max_page_width / 2.0);
+            self.scroll_y_doc =
+                f64::from(page.offset_y + point.y - self.viewport_height / (2.0 * scale));
             self.target_scroll_x_doc = self.scroll_x_doc;
             self.target_scroll_y_doc = self.scroll_y_doc;
             self.clamp_scroll();

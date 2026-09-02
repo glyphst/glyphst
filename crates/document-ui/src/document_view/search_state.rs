@@ -340,7 +340,7 @@ impl DocumentView {
             .enumerate()
             .find_map(|(ix, search_match)| {
                 self.search_match_end_doc_y(search_match)
-                    .and_then(|end_y| (end_y >= self.scroll_y_doc).then_some(ix))
+                    .and_then(|end_y| (f64::from(end_y) >= self.scroll_y_doc).then_some(ix))
             })
             .or(Some(0))
     }
@@ -402,8 +402,8 @@ impl DocumentView {
         let center_y = (doc_rect.y0 + doc_rect.y1) / 2.0;
 
         self.set_scroll_doc(
-            center_x - self.max_page_width / 2.0,
-            center_y - self.viewport_height / (2.0 * scale),
+            f64::from(center_x - self.max_page_width / 2.0),
+            f64::from(center_y - self.viewport_height / (2.0 * scale)),
             cx,
         );
     }

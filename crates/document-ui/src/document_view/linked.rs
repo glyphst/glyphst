@@ -26,7 +26,12 @@ impl DocumentView {
         let (page_idx, center_x, anchor_y, viewport_y_fraction) =
             if let Some(page_idx) = self.presentation_page_index() {
                 let (page_width, page_height) = self.page_dimensions(page_idx);
-                (page_idx, page_width / 2.0, page_height / 2.0, 0.5)
+                (
+                    page_idx,
+                    f64::from(page_width / 2.0),
+                    f64::from(page_height / 2.0),
+                    0.5,
+                )
             } else {
                 let (scroll_x_doc, scroll_y_doc) = match mode {
                     SynchronizedScrollMode::Immediate => (self.scroll_x_doc, self.scroll_y_doc),
@@ -42,15 +47,15 @@ impl DocumentView {
                 } else {
                     0.5
                 };
-                let viewport_height_doc = self.viewport_height / self.effective_scale();
+                let viewport_height_doc = f64::from(self.viewport_height / self.effective_scale());
                 let anchor_doc_y = scroll_y_doc + viewport_height_doc * viewport_y_fraction;
-                let anchor_doc_x = self.max_page_width / 2.0 + scroll_x_doc;
+                let anchor_doc_x = f64::from(self.max_page_width / 2.0) + scroll_x_doc;
                 let page_idx = self.page_index_for_doc_point(anchor_doc_x, anchor_doc_y);
                 let page = self.pages.get(page_idx)?;
                 (
                     page_idx,
-                    anchor_doc_x - page.offset_x,
-                    anchor_doc_y - page.offset_y,
+                    anchor_doc_x - f64::from(page.offset_x),
+                    anchor_doc_y - f64::from(page.offset_y),
                     viewport_y_fraction,
                 )
             };
@@ -59,15 +64,15 @@ impl DocumentView {
             page.bounds,
             self.rotation,
             mupdf::Point {
-                x: center_x,
-                y: anchor_y,
+                x: center_x as f32,
+                y: anchor_y as f32,
             },
         );
         (pdf_point.x.is_finite() && pdf_point.y.is_finite()).then_some(TranslationViewportAnchor {
             page_index: page_idx,
             pdf_x: pdf_point.x,
             pdf_y: pdf_point.y,
-            viewport_y_fraction,
+            viewport_y_fraction: viewport_y_fraction as f32,
             mode,
         })
     }
@@ -118,10 +123,10 @@ impl DocumentView {
                 y: anchor.pdf_y,
             },
         );
-        let scroll_x_doc = page.offset_x + point.x - self.max_page_width / 2.0;
+        let scroll_x_doc = f64::from(page.offset_x + point.x - self.max_page_width / 2.0);
         let viewport_y_fraction = anchor.viewport_y_fraction.clamp(0.0, 1.0);
-        let scroll_y_doc = page.offset_y + point.y
-            - self.viewport_height / self.effective_scale() * viewport_y_fraction;
+        let scroll_y_doc = f64::from(page.offset_y + point.y)
+            - f64::from(self.viewport_height / self.effective_scale() * viewport_y_fraction);
         let was_suppressed = self.translation.suppress_linked_events;
         self.translation.suppress_linked_events = true;
         if self.is_presentation_mode() {
@@ -158,14 +163,14 @@ impl DocumentView {
             return None;
         }
         let scale = self.effective_scale();
-        let center_y = self.target_scroll_y_doc + self.viewport_height / (2.0 * scale);
-        let center_x = self.max_page_width / 2.0 + self.target_scroll_x_doc;
+        let center_y = self.target_scroll_y_doc + f64::from(self.viewport_height / (2.0 * scale));
+        let center_x = f64::from(self.max_page_width / 2.0) + self.target_scroll_x_doc;
         let page_idx = self.page_index_for_doc_point(center_x, center_y);
         let page = self.pages.get(page_idx)?;
         let (page_width, page_height) = self.page_dimensions(page_idx);
         let point = mupdf::Point {
-            x: (center_x - page.offset_x).clamp(0.0, page_width),
-            y: (center_y - page.offset_y).clamp(0.0, page_height),
+            x: (center_x - f64::from(page.offset_x)).clamp(0.0, f64::from(page_width)) as f32,
+            y: (center_y - f64::from(page.offset_y)).clamp(0.0, f64::from(page_height)) as f32,
         };
         Some((
             page_idx,
@@ -209,8 +214,9 @@ impl DocumentView {
         {
             let point = Self::pdf_point_to_view(page.bounds, self.rotation, source_point);
             let scale = self.effective_scale();
-            self.scroll_x_doc = page.offset_x + point.x - self.max_page_width / 2.0;
-            self.scroll_y_doc = page.offset_y + point.y - self.viewport_height / (2.0 * scale);
+            self.scroll_x_doc = f64::from(page.offset_x + point.x - self.max_page_width / 2.0);
+            self.scroll_y_doc =
+                f64::from(page.offset_y + point.y - self.viewport_height / (2.0 * scale));
             self.target_scroll_x_doc = self.scroll_x_doc;
             self.target_scroll_y_doc = self.scroll_y_doc;
             self.clamp_scroll();

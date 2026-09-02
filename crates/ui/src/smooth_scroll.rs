@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-const SMOOTH_SCROLL_RESPONSE_PER_SECOND: f32 = 24.0;
+const SMOOTH_SCROLL_RESPONSE_PER_SECOND: f64 = 24.0;
 const SMOOTH_SCROLL_MAX_ELAPSED: Duration = Duration::from_millis(64);
-const SMOOTH_SCROLL_SNAP: f32 = 0.5;
+const SMOOTH_SCROLL_SNAP: f64 = 0.5;
 
-pub fn advance_toward(current: &mut f32, target: f32, smooth: bool, elapsed: Duration) -> bool {
+pub fn advance_toward(current: &mut f64, target: f64, smooth: bool, elapsed: Duration) -> bool {
     let previous = *current;
     if !smooth {
         *current = target;
@@ -13,13 +13,13 @@ pub fn advance_toward(current: &mut f32, target: f32, smooth: bool, elapsed: Dur
         if delta.abs() <= SMOOTH_SCROLL_SNAP {
             *current = target;
         } else {
-            let elapsed = elapsed.min(SMOOTH_SCROLL_MAX_ELAPSED).as_secs_f32();
+            let elapsed = elapsed.min(SMOOTH_SCROLL_MAX_ELAPSED).as_secs_f64();
             let factor = 1.0 - (-SMOOTH_SCROLL_RESPONSE_PER_SECOND * elapsed).exp();
             *current += delta * factor;
         }
     }
 
-    (*current - previous).abs() > f32::EPSILON
+    (*current - previous).abs() > f64::EPSILON
 }
 
 #[cfg(test)]

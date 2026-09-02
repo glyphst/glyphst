@@ -110,8 +110,8 @@ impl DocumentView {
             motion_active: gpu_cache.motion_active
                 || self.dock_snapshot.layout_motion_active
                 || (self.target_zoom - self.zoom).abs() > f32::EPSILON
-                || (self.target_scroll_x_doc - self.scroll_x_doc).abs() > f32::EPSILON
-                || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON,
+                || (self.target_scroll_x_doc - self.scroll_x_doc).abs() > f64::EPSILON
+                || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f64::EPSILON,
         };
         let pages = if self.grid_overview_open {
             Vec::new()
@@ -243,6 +243,7 @@ impl DocumentView {
             retained_stroke_candidate_references: stats.retained_stroke_candidate_references,
             retained_stroke_cull_dispatches: stats.retained_stroke_cull_dispatches,
             retained_stroke_indirect_draws: stats.retained_stroke_indirect_draws,
+            retained_stroke_indirect_runs: stats.retained_stroke_indirect_runs,
             retained_stroke_global_replay: stats.retained_stroke_global_replay,
             motion_stroke_sample_mask: stats.motion_stroke_sample_mask,
             reprojected_frame: stats.reprojected_frame,

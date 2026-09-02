@@ -6,8 +6,8 @@ use glyphst_document_ui::document_view::{
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FrameEvent, FrameTiming, FrameTimingCollector, Hsla,
-    IntoElement as _, ParentElement as _, Styled as _, WeakEntity, Window, WindowId, div, hsla,
-    prelude::FluentBuilder as _, px,
+    IntoElement as _, ParentElement as _, PresentTiming, Styled as _, WeakEntity, Window, WindowId,
+    div, hsla, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Sizable as _,
@@ -45,12 +45,13 @@ const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
 const TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES: usize = 30;
-const TRACE_REPORT_VERSION: u32 = 12;
+const TRACE_REPORT_VERSION: u32 = 13;
 
 struct RenderDebugCaptureNotification;
 
 pub(super) struct RenderDebugCapture {
     collector: FrameTimingCollector,
+    automated_timings: Vec<CapturedFrameTiming>,
     owns_frame_trace: bool,
     window_id: WindowId,
     started_at: Instant,
@@ -155,10 +156,10 @@ struct RenderDebugTraceFrame {
     offset: Duration,
     zoom: f32,
     target_zoom: f32,
-    scroll_x_doc: f32,
-    scroll_y_doc: f32,
-    target_scroll_x_doc: f32,
-    target_scroll_y_doc: f32,
+    scroll_x_doc: f64,
+    scroll_y_doc: f64,
+    target_scroll_x_doc: f64,
+    target_scroll_y_doc: f64,
     camera_serial: u64,
     presented_camera_serial: u64,
     callback_scheduled: u64,
@@ -166,6 +167,17 @@ struct RenderDebugTraceFrame {
     callback_encoded: u64,
     callback_superseded: u64,
     callback_failures: u64,
+    callback_cpu_time: Duration,
+    callback_frame_pool_wait_time: Duration,
+    callback_command_encoding_time: Duration,
+    callback_frame_pool_grew: bool,
+    callback_frame_pool_capacity_bytes: u64,
+    callback_render_bundle_runs: u64,
+    callback_stencil_draws: u64,
+    callback_retained_stroke_candidate_references: u64,
+    callback_retained_stroke_cull_dispatches: u64,
+    callback_retained_stroke_indirect_draws: u64,
+    callback_retained_stroke_indirect_runs: u64,
     pages: Vec<RenderDebugTracePageFrame>,
 }
 
@@ -199,9 +211,9 @@ struct RenderDebugTraceObservations {
     target_zoom_min: Option<f32>,
     target_zoom_max: Option<f32>,
     zoom_scroll_started_at: Option<Duration>,
-    zoom_scroll_start_y_doc: Option<f32>,
+    zoom_scroll_start_y_doc: Option<f64>,
     zoom_scroll_activation_latency: Option<Duration>,
-    last_camera: Option<[f32; 3]>,
+    last_camera: Option<[f64; 3]>,
     consecutive_camera_stalls: usize,
     max_consecutive_camera_stalls: usize,
     out_of_page_geometry_frames: usize,
@@ -303,6 +315,7 @@ impl Workspace {
         let started_at = Instant::now();
         self.rendering_debug_capture = Some(RenderDebugCapture {
             collector: FrameTimingCollector::new(),
+            automated_timings: Vec::new(),
             owns_frame_trace: false,
             window_id: window.window_handle().window_id(),
             started_at,
@@ -425,17 +438,18 @@ impl Workspace {
         ) {
             let interaction = &document_start.interaction;
             let scale = interaction.effective_scale.max(0.001);
-            let room_before = interaction.target_scroll_y_doc.max(0.0) * scale;
-            let room_after =
-                (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
+            let room_before = interaction.target_scroll_y_doc.max(0.0) * f64::from(scale);
+            let room_after = (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc)
+                .max(0.0)
+                * f64::from(scale);
             let room = room_before.max(room_after);
-            let step = ((room - 0.5).max(0.0) / kind.frames_per_direction() as f32)
+            let step = ((room - 0.5).max(0.0) / kind.frames_per_direction() as f64)
                 .floor()
                 .clamp(
-                    TRACE_SCROLL_MIN_PIXELS_PER_FRAME,
-                    TRACE_SCROLL_MAX_PIXELS_PER_FRAME,
-                );
-            step.copysign(room_after - room_before)
+                    f64::from(TRACE_SCROLL_MIN_PIXELS_PER_FRAME),
+                    f64::from(TRACE_SCROLL_MAX_PIXELS_PER_FRAME),
+                ) as f32;
+            step.copysign((room_after - room_before) as f32)
         } else {
             0.0
         };
@@ -453,6 +467,7 @@ impl Workspace {
         let generation = self.rendering_debug_trace_generation;
         self.rendering_debug_capture = Some(RenderDebugCapture {
             collector: FrameTimingCollector::new(),
+            automated_timings: Vec::new(),
             owns_frame_trace,
             window_id: window.window_handle().window_id(),
             started_at,
@@ -514,6 +529,28 @@ impl Workspace {
             return;
         };
         self.step_render_debug_trace(generation, window, cx);
+    }
+
+    /// Retains the synchronous draw and presentation owned by one automated-driver tick.
+    pub fn collect_automated_render_debug_frame(&mut self, draw_started_at: Instant) {
+        let Some(capture) = self
+            .rendering_debug_capture
+            .as_mut()
+            .filter(|capture| capture.automated_output.is_some())
+        else {
+            return;
+        };
+        let events = capture.collector.collect_unseen();
+        let Some(measurement_started_at) = capture.measurement_started_at else {
+            return;
+        };
+        if let Some(timing) = latest_owned_frame(
+            &events,
+            capture.window_id,
+            draw_started_at.max(measurement_started_at),
+        ) {
+            capture.automated_timings.push(timing);
+        }
     }
 
     fn step_render_debug_trace(
@@ -606,7 +643,7 @@ impl Workspace {
                             .observations
                             .zoom_scroll_start_y_doc
                             .is_some_and(|start| {
-                                (snapshot.interaction.scroll_y_doc - start).abs() > f32::EPSILON
+                                (snapshot.interaction.scroll_y_doc - start).abs() > f64::EPSILON
                             })
                     {
                         trace.observations.zoom_scroll_activation_latency = trace
@@ -712,14 +749,12 @@ impl Workspace {
             }
         }
 
-        self.rendering_debug_trace = Some(trace);
-        if !self
-            .rendering_debug_trace
-            .as_ref()
-            .is_some_and(|trace| trace.automated)
-        {
+        if trace.automated {
+            document.update(cx, |document, _| document.arm_render_debug_fixed_frame());
+        } else {
             schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
         }
+        self.rendering_debug_trace = Some(trace);
         cx.notify();
     }
 
@@ -811,21 +846,17 @@ impl Workspace {
         };
         let automated_output = capture.automated_output.take();
         let measurement_started_at = capture.measurement_started_at;
-        let timings = capture
-            .collector
-            .collect_unseen()
-            .into_iter()
-            .filter_map(|event| match event {
-                FrameEvent::Draw(timing)
-                    if timing.window_id == capture.window_id
-                        && measurement_started_at
-                            .is_some_and(|started_at| timing.draw_start >= started_at) =>
-                {
-                    Some(timing)
-                }
-                FrameEvent::Draw(_) | FrameEvent::Present(_) => None,
+        let timings = if automated_output.is_some() {
+            std::mem::take(&mut capture.automated_timings)
+        } else {
+            measurement_started_at.map_or_else(Vec::new, |started_at| {
+                captured_frame_timings(
+                    &capture.collector.collect_unseen(),
+                    capture.window_id,
+                    started_at,
+                )
             })
-            .collect::<Vec<_>>();
+        };
         let frame_count = timings.len();
         let report = capture_report(&capture, timings, self, window, cx);
         match serde_json::to_string_pretty(&report) {
@@ -952,10 +983,11 @@ fn render_debug_trace_precondition(
         RenderDebugTraceKind::Scroll | RenderDebugTraceKind::ZoomScroll
     ) {
         let scale = interaction.effective_scale.max(0.001);
-        let before = interaction.target_scroll_y_doc.max(0.0) * scale;
-        let after =
-            (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0) * scale;
-        let required = kind.frames_per_direction() as f32 * TRACE_SCROLL_MIN_PIXELS_PER_FRAME;
+        let before = interaction.target_scroll_y_doc.max(0.0) * f64::from(scale);
+        let after = (interaction.max_scroll_y_doc - interaction.target_scroll_y_doc).max(0.0)
+            * f64::from(scale);
+        let required =
+            kind.frames_per_direction() as f64 * f64::from(TRACE_SCROLL_MIN_PIXELS_PER_FRAME);
         if before.max(after) + 0.5 < required {
             return Some(format!(
                 "the current position needs {required:.0} physical pixels of scroll room in one direction"
@@ -1029,6 +1061,21 @@ fn capture_render_debug_trace_frame(
         callback_encoded: gpu.motion_render_callback_encoded,
         callback_superseded: gpu.motion_render_callback_superseded,
         callback_failures: gpu.motion_render_callback_failures,
+        callback_cpu_time: gpu.motion_render_callback_cpu_time,
+        callback_frame_pool_wait_time: gpu.motion_render_callback_frame_pool_wait_time,
+        callback_command_encoding_time: gpu.motion_render_callback_command_encoding_time,
+        callback_frame_pool_grew: gpu.motion_render_callback_frame_pool_grew,
+        callback_frame_pool_capacity_bytes: gpu.motion_render_callback_frame_pool_capacity_bytes,
+        callback_render_bundle_runs: gpu.motion_render_callback_render_bundle_runs,
+        callback_stencil_draws: gpu.motion_render_callback_stencil_draws,
+        callback_retained_stroke_candidate_references: gpu
+            .motion_render_callback_retained_stroke_candidate_references,
+        callback_retained_stroke_cull_dispatches: gpu
+            .motion_render_callback_retained_stroke_cull_dispatches,
+        callback_retained_stroke_indirect_draws: gpu
+            .motion_render_callback_retained_stroke_indirect_draws,
+        callback_retained_stroke_indirect_runs: gpu
+            .motion_render_callback_retained_stroke_indirect_runs,
         pages: snapshot
             .pages
             .iter()
@@ -1151,16 +1198,16 @@ fn observe_render_debug_trace(
         snapshot.interaction.target_zoom,
     );
     let camera = [
-        snapshot.interaction.zoom,
+        f64::from(snapshot.interaction.zoom),
         snapshot.interaction.scroll_x_doc,
         snapshot.interaction.scroll_y_doc,
     ];
     let camera_pending = (snapshot.interaction.zoom - snapshot.interaction.target_zoom).abs()
         > f32::EPSILON
         || (snapshot.interaction.scroll_x_doc - snapshot.interaction.target_scroll_x_doc).abs()
-            > f32::EPSILON
+            > f64::EPSILON
         || (snapshot.interaction.scroll_y_doc - snapshot.interaction.target_scroll_y_doc).abs()
-            > f32::EPSILON;
+            > f64::EPSILON;
     let stalled = camera_pending && observations.last_camera == Some(camera);
     observations.consecutive_camera_stalls = if stalled {
         observations.consecutive_camera_stalls.saturating_add(1)
@@ -1721,8 +1768,16 @@ struct CapturedFrameSample {
     offset: Duration,
     interval: Option<Duration>,
     draw: Duration,
+    present: Option<Duration>,
+    work: Duration,
     dirty_to_draw: Option<Duration>,
     invalidations: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CapturedFrameTiming {
+    draw: FrameTiming,
+    present: Option<PresentTiming>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1744,22 +1799,63 @@ struct CountStatistics {
     max: u64,
 }
 
-fn captured_frame_samples(timings: &[FrameTiming]) -> Vec<CapturedFrameSample> {
-    let Some(first) = timings.first().map(|timing| timing.draw_start) else {
+fn captured_frame_timings(
+    events: &[FrameEvent],
+    window_id: WindowId,
+    not_before: Instant,
+) -> Vec<CapturedFrameTiming> {
+    let mut frames = Vec::new();
+    for event in events {
+        match event {
+            FrameEvent::Draw(draw)
+                if draw.window_id == window_id && draw.draw_start >= not_before =>
+            {
+                frames.push(CapturedFrameTiming {
+                    draw: *draw,
+                    present: None,
+                });
+            }
+            FrameEvent::Present(present) if present.window_id == window_id => {
+                if let Some(frame) = frames.iter_mut().rev().find(|frame| {
+                    frame.present.is_none() && frame.draw.draw_end <= present.present_start
+                }) {
+                    frame.present = Some(*present);
+                }
+            }
+            FrameEvent::Draw(_) | FrameEvent::Present(_) => {}
+        }
+    }
+    frames
+}
+
+fn latest_owned_frame(
+    events: &[FrameEvent],
+    window_id: WindowId,
+    not_before: Instant,
+) -> Option<CapturedFrameTiming> {
+    captured_frame_timings(events, window_id, not_before).pop()
+}
+
+fn captured_frame_samples(timings: &[CapturedFrameTiming]) -> Vec<CapturedFrameSample> {
+    let Some(first) = timings.first().map(|timing| timing.draw.draw_start) else {
         return Vec::new();
     };
     let mut previous = None;
     timings
         .iter()
         .map(|timing| {
-            let interval = previous.map(|previous| timing.draw_start.duration_since(previous));
-            previous = Some(timing.draw_start);
+            let interval = previous.map(|previous| timing.draw.draw_start.duration_since(previous));
+            previous = Some(timing.draw.draw_start);
+            let draw = timing.draw.draw_duration();
+            let present = timing.present.map(|present| present.present_duration());
             CapturedFrameSample {
-                offset: timing.draw_start.duration_since(first),
+                offset: timing.draw.draw_start.duration_since(first),
                 interval,
-                draw: timing.draw_duration(),
-                dirty_to_draw: timing.dirty_to_draw_duration(),
-                invalidations: timing.invalidations,
+                draw,
+                present,
+                work: draw + present.unwrap_or_default(),
+                dirty_to_draw: timing.draw.dirty_to_draw_duration(),
+                invalidations: timing.draw.invalidations,
             }
         })
         .collect()
@@ -1834,7 +1930,7 @@ fn count_statistics_json(statistics: Option<CountStatistics>) -> Value {
 
 fn capture_report(
     capture: &RenderDebugCapture,
-    timings: Vec<FrameTiming>,
+    timings: Vec<CapturedFrameTiming>,
     workspace: &Workspace,
     window: &Window,
     cx: &App,
@@ -1857,7 +1953,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 15,
+        "schema_version": 16,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1900,6 +1996,8 @@ fn capture_report(
 fn frame_report(samples: &[CapturedFrameSample]) -> Value {
     let intervals = samples.iter().filter_map(|sample| sample.interval);
     let draws = samples.iter().map(|sample| sample.draw);
+    let presents = samples.iter().filter_map(|sample| sample.present);
+    let work = samples.iter().map(|sample| sample.work);
     let dirty_to_draw = samples.iter().filter_map(|sample| sample.dirty_to_draw);
     let frame_span = samples
         .last()
@@ -1910,6 +2008,10 @@ fn frame_report(samples: &[CapturedFrameSample]) -> Value {
     let draw_over_budget = samples
         .iter()
         .filter(|sample| sample.draw > FRAME_BUDGET)
+        .count();
+    let work_over_budget = samples
+        .iter()
+        .filter(|sample| sample.work > FRAME_BUDGET)
         .count();
     let interval_count = samples
         .iter()
@@ -1931,6 +2033,8 @@ fn frame_report(samples: &[CapturedFrameSample]) -> Value {
                 "offset_ms": milliseconds(sample.offset),
                 "interval_ms": sample.interval.map(milliseconds),
                 "draw_ms": milliseconds(sample.draw),
+                "present_ms": sample.present.map(milliseconds),
+                "work_ms": milliseconds(sample.work),
                 "dirty_to_draw_ms": sample.dirty_to_draw.map(milliseconds),
                 "invalidations": sample.invalidations,
             })
@@ -1944,6 +2048,8 @@ fn frame_report(samples: &[CapturedFrameSample]) -> Value {
         "frame_span_ms": milliseconds(frame_span),
         "effective_fps": effective_fps,
         "draw": duration_statistics_json(duration_statistics(draws)),
+        "present": duration_statistics_json(duration_statistics(presents)),
+        "work": duration_statistics_json(duration_statistics(work)),
         "interval": duration_statistics_json(duration_statistics(intervals)),
         "dirty_to_draw": duration_statistics_json(duration_statistics(dirty_to_draw)),
         "invalidations": count_statistics_json(count_statistics(
@@ -1952,6 +2058,8 @@ fn frame_report(samples: &[CapturedFrameSample]) -> Value {
         "budget": {
             "draw_overruns": draw_over_budget,
             "draw_overrun_percent": percentage(draw_over_budget, samples.len()),
+            "work_overruns": work_over_budget,
+            "work_overrun_percent": percentage(work_over_budget, samples.len()),
             "interval_overruns": interval_over_budget,
             "interval_overrun_percent": percentage(interval_over_budget, interval_count),
         },
@@ -1986,11 +2094,11 @@ fn document_snapshot_json(document: &DocumentRenderDebugSnapshot) -> Value {
             "zoom": finite_f32_json(interaction.zoom),
             "target_zoom": finite_f32_json(interaction.target_zoom),
             "effective_scale": finite_f32_json(interaction.effective_scale),
-            "scroll_x_doc": finite_f32_json(interaction.scroll_x_doc),
-            "scroll_y_doc": finite_f32_json(interaction.scroll_y_doc),
-            "target_scroll_x_doc": finite_f32_json(interaction.target_scroll_x_doc),
-            "target_scroll_y_doc": finite_f32_json(interaction.target_scroll_y_doc),
-            "max_scroll_y_doc": finite_f32_json(interaction.max_scroll_y_doc),
+            "scroll_x_doc": finite_f64_json(interaction.scroll_x_doc),
+            "scroll_y_doc": finite_f64_json(interaction.scroll_y_doc),
+            "target_scroll_x_doc": finite_f64_json(interaction.target_scroll_x_doc),
+            "target_scroll_y_doc": finite_f64_json(interaction.target_scroll_y_doc),
+            "max_scroll_y_doc": finite_f64_json(interaction.max_scroll_y_doc),
             "motion_active": interaction.motion_active,
         },
         "pending_render_count": document.pending_render_count,
@@ -2011,6 +2119,7 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
         "version": TRACE_REPORT_VERSION,
         "kind": trace.kind.name(),
         "driver": if trace.automated { "fixed-deadline-draw" } else { "platform-frame" },
+        "sample_scope": if trace.automated { "driver-owned-draws" } else { "all-window-draws" },
         "planned_interaction_frames": trace.planned_interaction_frames,
         "completed_interaction_frames": trace.completed_interaction_frames,
         "planned_settling_frames": trace.planned_settling_frames,
@@ -2057,10 +2166,10 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
             "camera": {
                 "zoom": finite_f32_json(frame.zoom),
                 "target_zoom": finite_f32_json(frame.target_zoom),
-                "scroll_x_doc": finite_f32_json(frame.scroll_x_doc),
-                "scroll_y_doc": finite_f32_json(frame.scroll_y_doc),
-                "target_scroll_x_doc": finite_f32_json(frame.target_scroll_x_doc),
-                "target_scroll_y_doc": finite_f32_json(frame.target_scroll_y_doc),
+                "scroll_x_doc": finite_f64_json(frame.scroll_x_doc),
+                "scroll_y_doc": finite_f64_json(frame.scroll_y_doc),
+                "target_scroll_x_doc": finite_f64_json(frame.target_scroll_x_doc),
+                "target_scroll_y_doc": finite_f64_json(frame.target_scroll_y_doc),
                 "serial": frame.camera_serial,
                 "presented_serial": frame.presented_camera_serial,
             },
@@ -2070,6 +2179,17 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
                 "encoded": frame.callback_encoded,
                 "superseded": frame.callback_superseded,
                 "failures": frame.callback_failures,
+                "cpu_ms": milliseconds(frame.callback_cpu_time),
+                "frame_pool_wait_ms": milliseconds(frame.callback_frame_pool_wait_time),
+                "command_encoding_ms": milliseconds(frame.callback_command_encoding_time),
+                "frame_pool_grew": frame.callback_frame_pool_grew,
+                "frame_pool_capacity_bytes": frame.callback_frame_pool_capacity_bytes,
+                "render_bundle_runs": frame.callback_render_bundle_runs,
+                "stencil_draws": frame.callback_stencil_draws,
+                "retained_stroke_candidate_references": frame.callback_retained_stroke_candidate_references,
+                "retained_stroke_cull_dispatches": frame.callback_retained_stroke_cull_dispatches,
+                "retained_stroke_indirect_draws": frame.callback_retained_stroke_indirect_draws,
+                "retained_stroke_indirect_runs": frame.callback_retained_stroke_indirect_runs,
             },
             "pages": frame.pages.iter().map(|page| json!({
                 "page_number": page.page_number,
@@ -2205,6 +2325,60 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
                 "callback_encoded_camera_serial".into(),
                 cache.motion_render_callback_encoded_camera_serial.into(),
             ),
+            (
+                "callback_cpu_ms".into(),
+                milliseconds(cache.motion_render_callback_cpu_time).into(),
+            ),
+            (
+                "callback_frame_pool_wait_ms".into(),
+                milliseconds(cache.motion_render_callback_frame_pool_wait_time).into(),
+            ),
+            (
+                "callback_command_encoding_ms".into(),
+                milliseconds(cache.motion_render_callback_command_encoding_time).into(),
+            ),
+            (
+                "callback_frame_pool_grew".into(),
+                cache.motion_render_callback_frame_pool_grew.into(),
+            ),
+            (
+                "callback_frame_pool_capacity_bytes".into(),
+                cache
+                    .motion_render_callback_frame_pool_capacity_bytes
+                    .into(),
+            ),
+            (
+                "callback_render_bundle_runs".into(),
+                cache.motion_render_callback_render_bundle_runs.into(),
+            ),
+            (
+                "callback_stencil_draws".into(),
+                cache.motion_render_callback_stencil_draws.into(),
+            ),
+            (
+                "callback_retained_stroke_candidate_references".into(),
+                cache
+                    .motion_render_callback_retained_stroke_candidate_references
+                    .into(),
+            ),
+            (
+                "callback_retained_stroke_cull_dispatches".into(),
+                cache
+                    .motion_render_callback_retained_stroke_cull_dispatches
+                    .into(),
+            ),
+            (
+                "callback_retained_stroke_indirect_draws".into(),
+                cache
+                    .motion_render_callback_retained_stroke_indirect_draws
+                    .into(),
+            ),
+            (
+                "callback_retained_stroke_indirect_runs".into(),
+                cache
+                    .motion_render_callback_retained_stroke_indirect_runs
+                    .into(),
+            ),
         ]);
     let surfaces = json!({
         "count": cache.surface_count,
@@ -2284,6 +2458,7 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "candidate_references": gpu.retained_stroke_candidate_references,
             "cull_dispatches": gpu.retained_stroke_cull_dispatches,
             "indirect_draws": gpu.retained_stroke_indirect_draws,
+            "indirect_runs": gpu.retained_stroke_indirect_runs,
             "global_replay": gpu.retained_stroke_global_replay,
             "motion_sample_mask": gpu.motion_stroke_sample_mask,
         });
@@ -3312,11 +3487,12 @@ fn render_page(page: PageRenderDebugSnapshot) -> Div {
             .child(reading(
                 "CULL",
                 format!(
-                    "{} ordered op · {} bundled op · {} stroke ref · {} indirect",
+                    "{} ordered op · {} bundled op · {} stroke ref · {}/{} indirect draw/run",
                     gpu.culled_operations,
                     gpu.culled_bundle_operations,
                     gpu.retained_stroke_candidate_references,
                     gpu.retained_stroke_indirect_draws,
+                    gpu.retained_stroke_indirect_runs,
                 ),
                 if gpu.culled_operations > 0 || gpu.retained_stroke_cull_dispatches > 0 {
                     GOOD
@@ -3540,6 +3716,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn automated_trace_selects_its_owned_draw_and_present() {
+        let before = Instant::now();
+        let other_window = WindowId::from(41_u64);
+        let traced_window = WindowId::from(42_u64);
+        let stale = FrameTiming {
+            window_id: traced_window,
+            dirty_at: None,
+            invalidations: 1,
+            draw_start: before - Duration::from_millis(1),
+            draw_end: before,
+        };
+        let owned = FrameTiming {
+            window_id: traced_window,
+            dirty_at: Some(before),
+            invalidations: 2,
+            draw_start: before + Duration::from_millis(1),
+            draw_end: before + Duration::from_millis(2),
+        };
+        let events = [
+            FrameEvent::Draw(stale),
+            FrameEvent::Draw(FrameTiming {
+                window_id: other_window,
+                ..owned
+            }),
+            FrameEvent::Draw(owned),
+            FrameEvent::Present(PresentTiming {
+                window_id: traced_window,
+                present_start: before + Duration::from_millis(2),
+                present_end: before + Duration::from_millis(5),
+                animation_interval: None,
+            }),
+        ];
+
+        let frame = latest_owned_frame(&events, traced_window, before).unwrap();
+        assert_eq!(frame.draw.draw_start, owned.draw_start);
+        assert_eq!(
+            frame.present.unwrap().present_duration(),
+            Duration::from_millis(3)
+        );
+    }
+
+    #[test]
     fn presentation_geometry_guard_rejects_stale_zoom_bounds() {
         let page = [100.0, 50.0, 1_100.0, 850.0];
         assert!(debug_bounds_contain(page, [100.0, 50.0, 1_100.0, 850.0]));
@@ -3574,6 +3792,7 @@ mod tests {
         assert_eq!(report["version"], TRACE_REPORT_VERSION);
         assert_eq!(report["kind"], "zoom");
         assert_eq!(report["driver"], "fixed-deadline-draw");
+        assert_eq!(report["sample_scope"], "driver-owned-draws");
         assert_eq!(report["planned_interaction_frames"], 120);
         assert_eq!(report["warmup_ms"], 42.0);
         assert_eq!(report["scroll_pixels_per_frame"], 0.0);
@@ -3683,6 +3902,8 @@ mod tests {
                 offset: Duration::ZERO,
                 interval: None,
                 draw: Duration::from_millis(2),
+                present: Some(Duration::from_millis(1)),
+                work: Duration::from_millis(3),
                 dirty_to_draw: Some(Duration::from_millis(3)),
                 invalidations: 1,
             },
@@ -3690,6 +3911,8 @@ mod tests {
                 offset: Duration::from_millis(8),
                 interval: Some(Duration::from_millis(8)),
                 draw: Duration::from_millis(9),
+                present: Some(Duration::from_millis(2)),
+                work: Duration::from_millis(11),
                 dirty_to_draw: Some(Duration::from_millis(10)),
                 invalidations: 3,
             },
@@ -3697,6 +3920,8 @@ mod tests {
                 offset: Duration::from_millis(20),
                 interval: Some(Duration::from_millis(12)),
                 draw: Duration::from_millis(2),
+                present: None,
+                work: Duration::from_millis(2),
                 dirty_to_draw: None,
                 invalidations: 2,
             },
@@ -3705,10 +3930,13 @@ mod tests {
         assert_eq!(report["total_frames"], 3);
         assert_eq!(report["effective_fps"], 100.0);
         assert_eq!(report["draw"]["p95_ms"], 9.0);
+        assert_eq!(report["present"]["p95_ms"], 2.0);
+        assert_eq!(report["work"]["p95_ms"], 11.0);
         assert_eq!(report["interval"]["p95_ms"], 12.0);
         assert_eq!(report["dirty_to_draw"]["count"], 2);
         assert_eq!(report["invalidations"]["p95"], 3);
         assert_eq!(report["budget"]["draw_overruns"], 1);
+        assert_eq!(report["budget"]["work_overruns"], 1);
         assert_eq!(report["budget"]["interval_overruns"], 1);
     }
 
@@ -3719,6 +3947,8 @@ mod tests {
                 offset: Duration::from_millis(index as u64),
                 interval: (index > 0).then_some(Duration::from_millis(1)),
                 draw: Duration::from_micros(500),
+                present: Some(Duration::from_micros(250)),
+                work: Duration::from_micros(750),
                 dirty_to_draw: Some(Duration::from_micros(750)),
                 invalidations: 1,
             })

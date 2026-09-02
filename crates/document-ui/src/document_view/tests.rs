@@ -342,7 +342,7 @@ fn synchronized_scroll_preserves_screen_distance_across_zoom_levels() {
     let screen_delta = 96.0;
     for scale in [0.5, 1.0, 1.75, 3.0] {
         let document_delta = DocumentView::synchronized_document_delta(screen_delta, scale);
-        assert!((document_delta * scale - screen_delta).abs() < f32::EPSILON);
+        assert!((document_delta * f64::from(scale) - f64::from(screen_delta)).abs() < f64::EPSILON);
     }
 }
 

@@ -135,7 +135,7 @@ impl DocumentView {
             return;
         }
 
-        let sync_scroll_y = if (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON {
+        let sync_scroll_y = if (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f64::EPSILON {
             self.target_scroll_y_doc
         } else {
             self.scroll_y_doc

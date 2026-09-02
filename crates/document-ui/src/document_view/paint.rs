@@ -350,8 +350,11 @@ impl DocumentView {
         let scale = self.effective_scale();
         self.document_scroll.update(
             bounds,
-            point(px(0.0), px(-self.scroll_y_doc * scale)),
-            point(px(0.0), px(self.max_scroll_y_doc() * scale)),
+            point(px(0.0), px((-self.scroll_y_doc * f64::from(scale)) as f32)),
+            point(
+                px(0.0),
+                px((self.max_scroll_y_doc() * f64::from(scale)) as f32),
+            ),
         );
         let mut visible_pages = Vec::new();
         let viewport_top = bounds.origin.y.as_f32();

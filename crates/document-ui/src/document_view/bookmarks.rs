@@ -76,8 +76,8 @@ impl DocumentView {
         let page_idx = self.current_page_index();
         if !self.capabilities.reflow {
             return DocumentPosition::fixed(
-                self.scroll_x_doc,
-                self.page_scroll_y_doc(page_idx),
+                self.scroll_x_doc as f32,
+                self.page_scroll_y_doc(page_idx) as f32,
                 self.zoom,
                 page_idx + 1,
             );
@@ -97,14 +97,14 @@ impl DocumentView {
             return position;
         };
         let progress = if self.max_scroll_y_doc() > 0.0 {
-            page.offset_y / self.max_scroll_y_doc()
+            f64::from(page.offset_y) / self.max_scroll_y_doc()
         } else {
             0.0
         };
         DocumentPosition::reflow(
             Self::semantic_anchor_for_glyph(&self.glyphs, glyph_ix),
             0.0,
-            progress.clamp(0.0, 1.0),
+            progress.clamp(0.0, 1.0) as f32,
             self.zoom,
             page_idx + 1,
         )

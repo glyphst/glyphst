@@ -545,13 +545,13 @@ impl DocumentView {
         }
         // Match thumbnail highlighting by tracking the target scroll while an
         // animated document scroll is still settling.
-        let scroll_y = if (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f32::EPSILON {
+        let scroll_y = if (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f64::EPSILON {
             self.target_scroll_y_doc
         } else {
             self.scroll_y_doc
         };
         let viewport_height_doc = self.viewport_height / self.effective_scale().max(0.001);
-        Some(scroll_y + viewport_height_doc / 2.0)
+        Some((scroll_y + f64::from(viewport_height_doc / 2.0)) as f32)
     }
 
     fn current_toc_entry_ix(&self) -> Option<usize> {
@@ -568,7 +568,7 @@ impl DocumentView {
                 return None;
             }
             self.pdf_destination_scroll_position(page_idx, entry.target_top, entry.target_left)
-                .map(|(_, destination_y)| destination_y)
+                .map(|(_, destination_y)| destination_y as f32)
         })
     }
 

@@ -107,7 +107,7 @@ pub(super) struct GpuPdfState {
     page_last_used: HashMap<u32, u64>,
     page_usage_clock: u64,
     motion_retained_pages: Vec<u32>,
-    last_scroll_y_doc: Option<f32>,
+    last_scroll_y_doc: Option<f64>,
     last_scroll_direction: i8,
     preparation_generation: u64,
     preparation_sequence: u64,
@@ -2740,8 +2740,8 @@ impl DocumentView {
         let settled = !self.dock_snapshot.layout_motion_active
             && self.panning.is_none()
             && !self.gpu_pdf.motion_active
-            && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= 0.01
-            && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= 0.01;
+            && (self.scroll_x_doc - self.target_scroll_x_doc).abs() <= f64::EPSILON
+            && (self.scroll_y_doc - self.target_scroll_y_doc).abs() <= f64::EPSILON;
         // Compare the live layout with the retained page in the retained
         // page's own physical coordinate space. Scale-changing motion keeps
         // the latest completed sharp camera frame visible while its detached
@@ -2795,7 +2795,7 @@ impl DocumentView {
         let exact_cache_covers = (current_dimensions_exact && current_covers) || continuity_covers;
         let dimension_motion = !settled && scale_changed;
         let fixed_scale_pan = !dimension_motion && current_dimensions_exact;
-        let camera_request = gpu_paint_request(
+        let mut camera_request = gpu_paint_request(
             key,
             exact_visible_region,
             false,
@@ -2803,6 +2803,7 @@ impl DocumentView {
             self.gpu_pdf.motion_camera_serial,
             device_origin_phase,
         );
+        camera_request.camera_target_capacity = computed_camera_target_capacity;
         let camera_vector_lod_status = scale_changed
             .then(|| renderer.vector_lod_status(&prepared, camera_request))
             .transpose()
@@ -2826,6 +2827,25 @@ impl DocumentView {
                 Arc::clone(&prepared),
                 Arc::clone(&renderer),
                 required_scale,
+                cx,
+            );
+        }
+        let camera_vector_lod_ready =
+            !scale_changed || camera_vector_lod_status.is_some_and(|status| status.ready);
+        let camera_patch_lod_status = (settled && camera_vector_lod_ready)
+            .then(|| renderer.patch_lod_status(&prepared, camera_request))
+            .transpose()
+            .ok()
+            .flatten();
+        if let Some(status) = camera_patch_lod_status
+            && !status.ready
+        {
+            self.start_native_gpu_patch_lod_prepare(
+                page,
+                Arc::clone(&prepared),
+                Arc::clone(&renderer),
+                camera_request,
+                status.required_scale,
                 cx,
             );
         }
@@ -3339,8 +3359,8 @@ impl DocumentView {
         self.dock_snapshot.layout_motion_active
             || self.panning.is_some()
             || self.gpu_pdf.motion_active
-            || (self.scroll_x_doc - self.target_scroll_x_doc).abs() > 0.01
-            || (self.scroll_y_doc - self.target_scroll_y_doc).abs() > 0.01
+            || (self.scroll_x_doc - self.target_scroll_x_doc).abs() > f64::EPSILON
+            || (self.scroll_y_doc - self.target_scroll_y_doc).abs() > f64::EPSILON
     }
 
     fn dispatch_native_gpu_page_preparations(&mut self, cx: &mut Context<Self>) {
@@ -3476,7 +3496,9 @@ impl DocumentView {
             return;
         }
 
-        assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
+        if request.generation == 0 {
+            assign_surface_render_generation(&mut self.gpu_pdf.render_generation, &mut request);
+        }
         if let Some((_, active_page, active_renderer, _, _)) = active_for_page {
             self.gpu_pdf.surface_render_coalesced =
                 self.gpu_pdf.surface_render_coalesced.saturating_add(1);
@@ -4444,12 +4466,12 @@ impl DocumentView {
             .last_scroll_y_doc
             .map_or(0.0, |previous| self.scroll_y_doc - previous);
         self.gpu_pdf.last_scroll_y_doc = Some(self.scroll_y_doc);
-        let direction = if target_delta.abs() > f32::EPSILON {
+        let direction = if target_delta.abs() > f64::EPSILON {
             target_delta
         } else {
             observed_delta
         };
-        if direction.abs() > f32::EPSILON {
+        if direction.abs() > f64::EPSILON {
             self.gpu_pdf.last_scroll_direction = if direction < 0.0 { -1 } else { 1 };
         }
         let forward = self.gpu_pdf.last_scroll_direction >= 0;
@@ -4474,7 +4496,7 @@ impl DocumentView {
         } else {
             let scale = self.effective_scale().max(f32::EPSILON);
             let target_top = self.target_scroll_y_doc;
-            let target_bottom = target_top + self.viewport_height / scale;
+            let target_bottom = target_top + f64::from(self.viewport_height / scale);
             let first = self.page_index_for_doc_y(target_top);
             let last = self
                 .page_index_for_doc_y(target_bottom)
@@ -4883,6 +4905,22 @@ impl DocumentView {
             motion_render_callback_executed_camera_serial: direct_render
                 .last_executed_camera_serial,
             motion_render_callback_encoded_camera_serial: direct_render.last_encoded_camera_serial,
+            motion_render_callback_cpu_time: direct_render.last_cpu_time,
+            motion_render_callback_frame_pool_wait_time: direct_render.last_frame_pool_wait_time,
+            motion_render_callback_command_encoding_time: direct_render.last_command_encoding_time,
+            motion_render_callback_frame_pool_grew: direct_render.last_frame_pool_grew,
+            motion_render_callback_frame_pool_capacity_bytes: direct_render
+                .last_frame_pool_capacity_bytes,
+            motion_render_callback_render_bundle_runs: direct_render.last_render_bundle_runs,
+            motion_render_callback_stencil_draws: direct_render.last_stencil_draws,
+            motion_render_callback_retained_stroke_candidate_references: direct_render
+                .last_retained_stroke_candidate_references,
+            motion_render_callback_retained_stroke_cull_dispatches: direct_render
+                .last_retained_stroke_cull_dispatches,
+            motion_render_callback_retained_stroke_indirect_draws: direct_render
+                .last_retained_stroke_indirect_draws,
+            motion_render_callback_retained_stroke_indirect_runs: direct_render
+                .last_retained_stroke_indirect_runs,
             camera_pan_inline_frames: self.gpu_pdf.camera_pan_inline_frames,
             camera_pan_admission_holds: self.gpu_pdf.camera_pan_admission_holds,
             motion_render_camera_serial: self.gpu_pdf.motion_camera_serial,

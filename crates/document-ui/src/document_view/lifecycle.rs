@@ -211,6 +211,7 @@ impl DocumentView {
             zoom_anchor: None,
             last_animation_frame: None,
             render_debug_fixed_frame_driver: false,
+            render_debug_fixed_frame_armed: false,
             zoom_popup_visible: false,
             zoom_popup_hovered: false,
             zoom_popup_generation: 0,

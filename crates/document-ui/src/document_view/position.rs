@@ -9,7 +9,8 @@ impl DocumentView {
             self.target_zoom = self.zoom;
             self.zoom_anchor = None;
             self.last_animation_frame = None;
-            let progress_scroll = reflow.progress.clamp(0.0, 1.0) * self.max_scroll_y_doc();
+            let progress_scroll =
+                f64::from(reflow.progress.clamp(0.0, 1.0)) * self.max_scroll_y_doc();
             if self.glyphs.is_empty() {
                 self.scroll_x_doc = 0.0;
                 self.scroll_y_doc = progress_scroll;
@@ -25,7 +26,9 @@ impl DocumentView {
             {
                 self.scroll_x_doc = 0.0;
                 self.scroll_y_doc = scroll_y
-                    - reflow.viewport_fraction * (self.viewport_height / self.effective_scale());
+                    - f64::from(
+                        reflow.viewport_fraction * (self.viewport_height / self.effective_scale()),
+                    );
                 self.target_scroll_x_doc = 0.0;
                 self.target_scroll_y_doc = self.scroll_y_doc;
                 self.clamp_scroll();
@@ -44,10 +47,10 @@ impl DocumentView {
         self.target_zoom = self.zoom;
         self.zoom_anchor = None;
         self.last_animation_frame = None;
-        self.scroll_x_doc = position.scroll_x_doc;
-        self.scroll_y_doc = position.scroll_y_doc;
-        self.target_scroll_x_doc = position.scroll_x_doc;
-        self.target_scroll_y_doc = position.scroll_y_doc;
+        self.scroll_x_doc = f64::from(position.scroll_x_doc);
+        self.scroll_y_doc = f64::from(position.scroll_y_doc);
+        self.target_scroll_x_doc = f64::from(position.scroll_x_doc);
+        self.target_scroll_y_doc = f64::from(position.scroll_y_doc);
         self.clamp_scroll();
     }
 
@@ -63,7 +66,7 @@ impl DocumentView {
                 return DocumentPosition::reflow(
                     SemanticTextAnchor::empty(),
                     0.0,
-                    progress,
+                    progress as f32,
                     self.zoom,
                     page_idx + 1,
                 );
@@ -71,7 +74,7 @@ impl DocumentView {
             let y_in_page = self
                 .pages
                 .get(page_idx)
-                .map(|page| (self.target_scroll_y_doc - page.offset_y).max(0.0))
+                .map(|page| (self.target_scroll_y_doc - f64::from(page.offset_y)).max(0.0))
                 .unwrap_or(0.0);
             let glyph_ix = self
                 .pages
@@ -80,16 +83,16 @@ impl DocumentView {
                     page.glyph_range
                         .clone()
                         .find(|glyph_ix| {
-                            self.glyphs
-                                .get(*glyph_ix)
-                                .is_some_and(|glyph| Self::glyph_line_rect(glyph).y1 >= y_in_page)
+                            self.glyphs.get(*glyph_ix).is_some_and(|glyph| {
+                                f64::from(Self::glyph_line_rect(glyph).y1) >= y_in_page
+                            })
                         })
                         .or(Some(page.glyph_range.start))
                 })
                 .unwrap_or(0)
                 .min(self.glyphs.len().saturating_sub(1));
             let anchor = Self::semantic_anchor_for_glyph(&self.glyphs, glyph_ix);
-            let viewport_height_doc = self.viewport_height / self.effective_scale();
+            let viewport_height_doc = f64::from(self.viewport_height / self.effective_scale());
             let viewport_fraction = if viewport_height_doc > 0.0 {
                 self.scroll_y_for_glyph(glyph_ix)
                     .map(|anchor_y| {
@@ -102,8 +105,8 @@ impl DocumentView {
             };
             return DocumentPosition::reflow(
                 anchor,
-                viewport_fraction,
-                progress,
+                viewport_fraction as f32,
+                progress as f32,
                 self.zoom,
                 page_idx + 1,
             );
@@ -111,15 +114,15 @@ impl DocumentView {
         if let Some(page_idx) = self.presentation_page_index() {
             return DocumentPosition::fixed(
                 0.0,
-                self.page_scroll_y_doc(page_idx),
+                self.page_scroll_y_doc(page_idx) as f32,
                 self.zoom,
                 page_idx + 1,
             );
         }
 
         DocumentPosition::fixed(
-            self.target_scroll_x_doc,
-            self.target_scroll_y_doc,
+            self.target_scroll_x_doc as f32,
+            self.target_scroll_y_doc as f32,
             self.zoom,
             self.page_index_for_scroll_y(self.target_scroll_y_doc) + 1,
         )
@@ -201,10 +204,10 @@ impl DocumentView {
                 .eq(expected.iter().copied())
     }
 
-    fn scroll_y_for_glyph(&self, glyph_ix: usize) -> Option<f32> {
+    fn scroll_y_for_glyph(&self, glyph_ix: usize) -> Option<f64> {
         let glyph = self.glyphs.get(glyph_ix)?;
         let page = self.pages.get(glyph.page_idx)?;
-        Some(page.offset_y + Self::glyph_line_rect(glyph).y0)
+        Some(f64::from(page.offset_y + Self::glyph_line_rect(glyph).y0))
     }
 
     pub(super) fn semantic_range_for_selection(

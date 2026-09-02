@@ -141,7 +141,7 @@ const MIN_RASTER_BAND_HEIGHT: u32 = 256;
 const MAX_RASTER_BANDS: usize = 8;
 const PAGE_LOADING_INDICATOR_SIZE: f32 = 24.0;
 const MAX_JUMP_HISTORY: usize = 128;
-const JUMP_POSITION_EPSILON_DOC: f32 = 0.5;
+const JUMP_POSITION_EPSILON_DOC: f64 = 0.5;
 
 fn pdf_outline_color(color: [f32; 3]) -> Hsla {
     let [red, green, blue] = color.map(|component| {
@@ -542,6 +542,7 @@ pub struct GpuPageRenderDebugSnapshot {
     pub retained_stroke_candidate_references: u64,
     pub retained_stroke_cull_dispatches: u64,
     pub retained_stroke_indirect_draws: u64,
+    pub retained_stroke_indirect_runs: u64,
     pub retained_stroke_global_replay: bool,
     pub motion_stroke_sample_mask: bool,
     pub reprojected_frame: bool,
@@ -742,6 +743,17 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_callback_scheduled_camera_serial: u64,
     pub motion_render_callback_executed_camera_serial: u64,
     pub motion_render_callback_encoded_camera_serial: u64,
+    pub motion_render_callback_cpu_time: Duration,
+    pub motion_render_callback_frame_pool_wait_time: Duration,
+    pub motion_render_callback_command_encoding_time: Duration,
+    pub motion_render_callback_frame_pool_grew: bool,
+    pub motion_render_callback_frame_pool_capacity_bytes: u64,
+    pub motion_render_callback_render_bundle_runs: u64,
+    pub motion_render_callback_stencil_draws: u64,
+    pub motion_render_callback_retained_stroke_candidate_references: u64,
+    pub motion_render_callback_retained_stroke_cull_dispatches: u64,
+    pub motion_render_callback_retained_stroke_indirect_draws: u64,
+    pub motion_render_callback_retained_stroke_indirect_runs: u64,
     pub camera_pan_inline_frames: u64,
     pub camera_pan_admission_holds: u64,
     pub motion_render_camera_serial: u64,
@@ -856,11 +868,11 @@ pub struct DocumentInteractionDebugSnapshot {
     pub zoom: f32,
     pub target_zoom: f32,
     pub effective_scale: f32,
-    pub scroll_x_doc: f32,
-    pub scroll_y_doc: f32,
-    pub target_scroll_x_doc: f32,
-    pub target_scroll_y_doc: f32,
-    pub max_scroll_y_doc: f32,
+    pub scroll_x_doc: f64,
+    pub scroll_y_doc: f64,
+    pub target_scroll_x_doc: f64,
+    pub target_scroll_y_doc: f64,
+    pub max_scroll_y_doc: f64,
     pub motion_active: bool,
 }
 
@@ -1972,14 +1984,14 @@ struct TocEntry {
 #[derive(Clone, Copy)]
 struct PanState {
     pointer_origin: GpuiPoint<Pixels>,
-    scroll_origin_x: f32,
-    scroll_origin_y: f32,
+    scroll_origin_x: f64,
+    scroll_origin_y: f64,
 }
 
 #[derive(Clone, Copy)]
 struct JumpPosition {
-    scroll_x_doc: f32,
-    scroll_y_doc: f32,
+    scroll_x_doc: f64,
+    scroll_y_doc: f64,
     presentation_page: Option<usize>,
 }
 
@@ -2196,7 +2208,7 @@ impl DocumentTranslationState {
 
 #[derive(Clone, Copy)]
 struct ZoomAnchor {
-    document: [f32; 2],
+    document: [f64; 2],
     viewport: [f32; 2],
 }
 
@@ -2255,6 +2267,7 @@ pub struct DocumentView {
     zoom_anchor: Option<ZoomAnchor>,
     last_animation_frame: Option<Instant>,
     render_debug_fixed_frame_driver: bool,
+    render_debug_fixed_frame_armed: bool,
     zoom_popup_visible: bool,
     zoom_popup_hovered: bool,
     zoom_popup_generation: u64,
@@ -2263,10 +2276,10 @@ pub struct DocumentView {
     viewport_origin: GpuiPoint<Pixels>,
     viewport_width: f32,
     viewport_height: f32,
-    scroll_x_doc: f32,
-    scroll_y_doc: f32,
-    target_scroll_x_doc: f32,
-    target_scroll_y_doc: f32,
+    scroll_x_doc: f64,
+    scroll_y_doc: f64,
+    target_scroll_x_doc: f64,
+    target_scroll_y_doc: f64,
     document_scroll: ManualScrollHandle,
     search_bar: Option<Entity<SearchBar>>,
     toc_palette: Option<Entity<TocPalette>>,

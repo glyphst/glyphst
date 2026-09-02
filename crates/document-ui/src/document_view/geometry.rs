@@ -11,11 +11,13 @@ impl DocumentView {
         let (page_width, page_height) = self.page_dimensions(page_idx);
         let image_width = px(page_width * scale);
         let image_height = px(page_height * scale);
+        let scale_f64 = f64::from(scale);
         let origin = point(
             bounds.origin.x
                 + (bounds.size.width - px(self.max_page_width * scale)) / 2.0
-                + px((page.offset_x - self.scroll_x_doc) * scale),
-            bounds.origin.y + px((page.offset_y - self.scroll_y_doc) * scale),
+                + px(((f64::from(page.offset_x) - self.scroll_x_doc) * scale_f64) as f32),
+            bounds.origin.y
+                + px(((f64::from(page.offset_y) - self.scroll_y_doc) * scale_f64) as f32),
         );
 
         Bounds::new(origin, size(image_width, image_height))

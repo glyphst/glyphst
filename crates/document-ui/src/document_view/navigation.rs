@@ -33,8 +33,8 @@ impl DocumentView {
         let horizontal_inset = (self.viewport_width - self.max_page_width * scale) / 2.0;
         ZoomAnchor {
             document: [
-                self.scroll_x_doc + (viewport[0] - horizontal_inset) / scale,
-                self.scroll_y_doc + viewport[1] / scale,
+                self.scroll_x_doc + f64::from((viewport[0] - horizontal_inset) / scale),
+                self.scroll_y_doc + f64::from(viewport[1] / scale),
             ],
             viewport,
         }
@@ -44,8 +44,9 @@ impl DocumentView {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         let scale = self.effective_scale();
         let horizontal_inset = (self.viewport_width - self.max_page_width * scale) / 2.0;
-        self.scroll_x_doc = anchor.document[0] - (anchor.viewport[0] - horizontal_inset) / scale;
-        self.scroll_y_doc = anchor.document[1] - anchor.viewport[1] / scale;
+        self.scroll_x_doc =
+            anchor.document[0] - f64::from((anchor.viewport[0] - horizontal_inset) / scale);
+        self.scroll_y_doc = anchor.document[1] - f64::from(anchor.viewport[1] / scale);
         self.target_scroll_x_doc = self.scroll_x_doc;
         self.target_scroll_y_doc = self.scroll_y_doc;
         self.clamp_scroll();
@@ -209,7 +210,7 @@ impl DocumentView {
 
         self.set_zoom(zoom, cx);
         let centered_x = bounds.left + bounds.width / 2.0 - self.max_page_width / 2.0;
-        self.set_scroll_doc(centered_x, self.scroll_y_doc, cx);
+        self.set_scroll_doc(f64::from(centered_x), self.scroll_y_doc, cx);
         self.show_zoom_popup(cx);
     }
 
@@ -227,7 +228,7 @@ impl DocumentView {
 
         self.set_zoom(zoom, cx);
         let centered_x = bounds.left + bounds.width / 2.0 - self.max_page_width / 2.0;
-        self.set_scroll_doc(centered_x, bounds.top, cx);
+        self.set_scroll_doc(f64::from(centered_x), f64::from(bounds.top), cx);
         self.show_zoom_popup(cx);
     }
 
@@ -280,16 +281,16 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(super) fn page_index_for_scroll_y(&self, scroll_y_doc: f32) -> usize {
+    pub(super) fn page_index_for_scroll_y(&self, scroll_y_doc: f64) -> usize {
         let scale = self.effective_scale();
-        let center_doc = scroll_y_doc + self.viewport_height / (2.0 * scale);
+        let center_doc = scroll_y_doc + f64::from(self.viewport_height / (2.0 * scale));
         self.page_index_for_doc_y(center_doc)
     }
 
-    pub(super) fn page_index_for_doc_y(&self, doc_y: f32) -> usize {
+    pub(super) fn page_index_for_doc_y(&self, doc_y: f64) -> usize {
         let current = self
             .pages
-            .partition_point(|page| page.offset_y <= doc_y)
+            .partition_point(|page| f64::from(page.offset_y) <= doc_y)
             .saturating_sub(1)
             .min(self.last_page_index());
         self.spread_start_page(current)
@@ -304,10 +305,10 @@ impl DocumentView {
             .map(|page_idx| page_idx.min(self.last_page_index()))
     }
 
-    pub(super) fn page_scroll_y_doc(&self, page_idx: usize) -> f32 {
+    pub(super) fn page_scroll_y_doc(&self, page_idx: usize) -> f64 {
         self.pages
             .get(page_idx.min(self.last_page_index()))
-            .map(|page| page.offset_y)
+            .map(|page| f64::from(page.offset_y))
             .unwrap_or(0.0)
     }
 
@@ -394,7 +395,7 @@ impl DocumentView {
         let target = self
             .pages
             .get(target_page)
-            .map(|page| page.offset_y)
+            .map(|page| f64::from(page.offset_y))
             .unwrap_or_else(|| self.max_scroll_y_doc());
 
         if self.set_scroll_doc_target_synchronized(self.target_scroll_x_doc, target, cx) {
@@ -583,10 +584,10 @@ impl DocumentView {
             return;
         }
 
-        let delta = self.viewport_height / (2.0 * self.effective_scale());
+        let delta = f64::from(self.viewport_height / (2.0 * self.effective_scale()));
         if self.set_scroll_doc_target_synchronized(
             self.target_scroll_x_doc,
-            self.target_scroll_y_doc + direction * delta,
+            self.target_scroll_y_doc + f64::from(direction) * delta,
             cx,
         ) {
             self.mark_manual_navigation();
@@ -599,10 +600,10 @@ impl DocumentView {
             return;
         }
 
-        let delta = SCROLL_LINE_STEP_PX / self.effective_scale();
+        let delta = f64::from(SCROLL_LINE_STEP_PX / self.effective_scale());
         if self.set_scroll_doc_target_synchronized(
             self.target_scroll_x_doc,
-            self.target_scroll_y_doc + direction * delta,
+            self.target_scroll_y_doc + f64::from(direction) * delta,
             cx,
         ) {
             self.mark_manual_navigation();
@@ -660,8 +661,8 @@ impl DocumentView {
 
             let scale = self.effective_scale();
             if self.set_scroll_doc_target_synchronized(
-                self.target_scroll_x_doc - delta_x / scale,
-                self.target_scroll_y_doc - delta_y / scale,
+                self.target_scroll_x_doc - f64::from(delta_x / scale),
+                self.target_scroll_y_doc - f64::from(delta_y / scale),
                 cx,
             ) {
                 self.mark_manual_navigation();
