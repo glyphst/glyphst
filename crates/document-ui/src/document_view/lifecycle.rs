@@ -210,6 +210,7 @@ impl DocumentView {
             target_zoom: behavior.default_zoom,
             zoom_anchor: None,
             last_animation_frame: None,
+            render_debug_fixed_frame_driver: false,
             zoom_popup_visible: false,
             zoom_popup_hovered: false,
             zoom_popup_generation: 0,

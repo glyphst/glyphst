@@ -44,7 +44,8 @@ const TRACE_ZOOM_FRAMES_PER_DIRECTION: usize = 60;
 const TRACE_SETTLING_FRAMES: usize = 30;
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
-const TRACE_REPORT_VERSION: u32 = 11;
+const TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES: usize = 30;
+const TRACE_REPORT_VERSION: u32 = 12;
 
 struct RenderDebugCaptureNotification;
 
@@ -147,6 +148,42 @@ struct RenderDebugTraceMarker {
     offset: Duration,
 }
 
+#[derive(Clone, Debug)]
+struct RenderDebugTraceFrame {
+    phase: &'static str,
+    frame_index: usize,
+    offset: Duration,
+    zoom: f32,
+    target_zoom: f32,
+    scroll_x_doc: f32,
+    scroll_y_doc: f32,
+    target_scroll_x_doc: f32,
+    target_scroll_y_doc: f32,
+    camera_serial: u64,
+    presented_camera_serial: u64,
+    callback_scheduled: u64,
+    callback_executed: u64,
+    callback_encoded: u64,
+    callback_superseded: u64,
+    callback_failures: u64,
+    pages: Vec<RenderDebugTracePageFrame>,
+}
+
+#[derive(Clone, Debug)]
+struct RenderDebugTracePageFrame {
+    page_number: usize,
+    backend: &'static str,
+    source: Option<String>,
+    page_bounds: Option<[f32; 4]>,
+    texture_bounds: Option<[f32; 4]>,
+    direct_bounds: Option<[f32; 4]>,
+    texture_physical_size: Option<[u32; 2]>,
+    requested_physical_size: Option<[u32; 2]>,
+    vector_lod_requested_scale: Option<String>,
+    vector_lod_available_scale: Option<String>,
+    vector_lod_ready: Option<bool>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct RenderDebugTraceObservations {
     unexpected_backend_frames: usize,
@@ -164,6 +201,16 @@ struct RenderDebugTraceObservations {
     zoom_scroll_started_at: Option<Duration>,
     zoom_scroll_start_y_doc: Option<f32>,
     zoom_scroll_activation_latency: Option<Duration>,
+    last_camera: Option<[f32; 3]>,
+    consecutive_camera_stalls: usize,
+    max_consecutive_camera_stalls: usize,
+    out_of_page_geometry_frames: usize,
+    scaled_texture_frames: usize,
+    vector_lod_underprepared_frames: usize,
+    settled_vector_lod_underprepared_frames: usize,
+    max_consecutive_vector_lod_underprepared_frames: usize,
+    consecutive_vector_lod_underprepared_frames: usize,
+    max_vector_lod_scale_ratio: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +229,7 @@ struct RenderDebugTraceReport {
     original_position: DocumentPosition,
     final_position: Option<DocumentPosition>,
     observations: RenderDebugTraceObservations,
+    frames: Vec<RenderDebugTraceFrame>,
 }
 
 pub(super) struct RenderDebugTrace {
@@ -201,6 +249,7 @@ pub(super) struct RenderDebugTrace {
     completed_settling_frames: usize,
     markers: Vec<RenderDebugTraceMarker>,
     observations: RenderDebugTraceObservations,
+    frames: Vec<RenderDebugTraceFrame>,
 }
 
 impl Workspace {
@@ -392,6 +441,11 @@ impl Workspace {
         };
         let started_at = Instant::now();
         let automated = automated_output.is_some();
+        if automated {
+            document.update(cx, |document, _| {
+                document.set_render_debug_fixed_frame_driver(true)
+            });
+        }
         let owns_frame_trace = automated && gpui::set_trace_enabled(true);
         self.rendering_debug_trace_generation =
             self.rendering_debug_trace_generation.wrapping_add(1);
@@ -432,6 +486,7 @@ impl Workspace {
                 offset: Duration::ZERO,
             }],
             observations: RenderDebugTraceObservations::default(),
+            frames: Vec::with_capacity(kind.planned_interaction_frames() + TRACE_SETTLING_FRAMES),
         });
         if !automated {
             schedule_render_debug_trace_frame(cx.weak_entity(), generation, window);
@@ -538,7 +593,8 @@ impl Workspace {
                     capture.document_start = snapshot.clone();
                     capture.render_cache_start = render_cache_debug_snapshot(cx);
                 }
-                observe_render_debug_trace(&mut trace.observations, &snapshot);
+                capture_render_debug_trace_frame(&mut trace, &snapshot, elapsed);
+                observe_render_debug_trace(&mut trace.observations, &snapshot, false);
                 let forward = trace.phase == RenderDebugTracePhase::Forward;
                 if trace.kind == RenderDebugTraceKind::ZoomScroll && !forward {
                     if trace.observations.zoom_scroll_started_at.is_none() {
@@ -638,7 +694,8 @@ impl Workspace {
                 }
             }
             RenderDebugTracePhase::Settle => {
-                observe_render_debug_trace(&mut trace.observations, &snapshot);
+                capture_render_debug_trace_frame(&mut trace, &snapshot, elapsed);
+                observe_render_debug_trace(&mut trace.observations, &snapshot, true);
                 trace.phase_frame += 1;
                 trace.completed_settling_frames += 1;
                 if trace.phase_frame >= TRACE_SETTLING_FRAMES {
@@ -676,6 +733,13 @@ impl Workspace {
     ) {
         self.rendering_debug_trace_generation =
             self.rendering_debug_trace_generation.wrapping_add(1);
+        if trace.automated
+            && let Some(document) = trace.document.upgrade()
+        {
+            document.update(cx, |document, _| {
+                document.set_render_debug_fixed_frame_driver(false)
+            });
+        }
         let final_position = trace
             .document
             .upgrade()
@@ -704,6 +768,7 @@ impl Workspace {
                 original_position: trace.original_position.clone(),
                 final_position,
                 observations: trace.observations.clone(),
+                frames: trace.frames.clone(),
             });
         }
         self.finish_render_debug_capture_inner(window, cx);
@@ -941,9 +1006,102 @@ fn render_debug_trace_ready(snapshot: &DocumentRenderDebugSnapshot) -> bool {
     all_stable && (all_exact || snapshot.gpu_cache.continuity_surface_count >= snapshot.pages.len())
 }
 
+fn capture_render_debug_trace_frame(
+    trace: &mut RenderDebugTrace,
+    snapshot: &DocumentRenderDebugSnapshot,
+    offset: Duration,
+) {
+    let gpu = &snapshot.gpu_cache;
+    trace.frames.push(RenderDebugTraceFrame {
+        phase: trace.phase.name(),
+        frame_index: trace.completed_interaction_frames + trace.completed_settling_frames,
+        offset,
+        zoom: snapshot.interaction.zoom,
+        target_zoom: snapshot.interaction.target_zoom,
+        scroll_x_doc: snapshot.interaction.scroll_x_doc,
+        scroll_y_doc: snapshot.interaction.scroll_y_doc,
+        target_scroll_x_doc: snapshot.interaction.target_scroll_x_doc,
+        target_scroll_y_doc: snapshot.interaction.target_scroll_y_doc,
+        camera_serial: gpu.motion_render_camera_serial,
+        presented_camera_serial: gpu.motion_render_presented_camera_serial,
+        callback_scheduled: gpu.motion_render_callback_scheduled,
+        callback_executed: gpu.motion_render_callback_executed,
+        callback_encoded: gpu.motion_render_callback_encoded,
+        callback_superseded: gpu.motion_render_callback_superseded,
+        callback_failures: gpu.motion_render_callback_failures,
+        pages: snapshot
+            .pages
+            .iter()
+            .map(|page| RenderDebugTracePageFrame {
+                page_number: page.page_number,
+                backend: page_backend_name(page.backend),
+                source: page
+                    .gpu_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.source.clone()),
+                page_bounds: page
+                    .gpu_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.page_bounds),
+                texture_bounds: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.texture_bounds),
+                direct_bounds: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.direct_bounds),
+                texture_physical_size: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.texture_physical_size),
+                requested_physical_size: page
+                    .requested_raster
+                    .map(|raster| [raster.physical_width, raster.physical_height]),
+                vector_lod_requested_scale: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.vector_lod_requested_scale)
+                    .map(|scale| format!("{scale:.3}"))
+                    .or_else(|| {
+                        page.gpu
+                            .as_ref()
+                            .map(|gpu| gpu.vector_lod_requested_scale.clone())
+                    }),
+                vector_lod_available_scale: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.vector_lod_available_scale)
+                    .map(|scale| format!("{scale:.3}"))
+                    .or_else(|| {
+                        page.gpu
+                            .as_ref()
+                            .map(|gpu| gpu.vector_lod_available_scale.clone())
+                    }),
+                vector_lod_ready: page
+                    .gpu_presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.vector_lod_ready)
+                    .or_else(|| page.gpu.as_ref().map(|gpu| !gpu.vector_lod_deferred)),
+            })
+            .collect(),
+    });
+}
+
+fn debug_bounds_contain(outer: [f32; 4], inner: [f32; 4]) -> bool {
+    outer.into_iter().chain(inner).all(f32::is_finite)
+        && inner[0] >= outer[0] - 1.0
+        && inner[1] >= outer[1] - 1.0
+        && inner[2] <= outer[2] + 1.0
+        && inner[3] <= outer[3] + 1.0
+        && inner[2] >= inner[0]
+        && inner[3] >= inner[1]
+}
+
 fn observe_render_debug_trace(
     observations: &mut RenderDebugTraceObservations,
     snapshot: &DocumentRenderDebugSnapshot,
+    settling: bool,
 ) {
     let native = snapshot.interaction.configured_engine != "mupdf";
     let unexpected_backend = snapshot.pages.iter().any(|page| {
@@ -992,6 +1150,85 @@ fn observe_render_debug_trace(
         &mut observations.target_zoom_max,
         snapshot.interaction.target_zoom,
     );
+    let camera = [
+        snapshot.interaction.zoom,
+        snapshot.interaction.scroll_x_doc,
+        snapshot.interaction.scroll_y_doc,
+    ];
+    let camera_pending = (snapshot.interaction.zoom - snapshot.interaction.target_zoom).abs()
+        > f32::EPSILON
+        || (snapshot.interaction.scroll_x_doc - snapshot.interaction.target_scroll_x_doc).abs()
+            > f32::EPSILON
+        || (snapshot.interaction.scroll_y_doc - snapshot.interaction.target_scroll_y_doc).abs()
+            > f32::EPSILON;
+    let stalled = camera_pending && observations.last_camera == Some(camera);
+    observations.consecutive_camera_stalls = if stalled {
+        observations.consecutive_camera_stalls.saturating_add(1)
+    } else {
+        0
+    };
+    observations.max_consecutive_camera_stalls = observations
+        .max_consecutive_camera_stalls
+        .max(observations.consecutive_camera_stalls);
+    observations.last_camera = Some(camera);
+
+    let out_of_page = snapshot.pages.iter().any(|page| {
+        page.gpu_presentation.as_ref().is_some_and(|presentation| {
+            presentation
+                .texture_bounds
+                .is_some_and(|bounds| !debug_bounds_contain(presentation.page_bounds, bounds))
+                || presentation
+                    .direct_bounds
+                    .is_some_and(|bounds| !debug_bounds_contain(presentation.page_bounds, bounds))
+        })
+    });
+    observations.out_of_page_geometry_frames += usize::from(out_of_page);
+    let scaled_texture = snapshot.pages.iter().any(|page| {
+        let Some(presentation) = page.gpu_presentation.as_ref() else {
+            return false;
+        };
+        let Some(texture_size) = presentation.texture_physical_size else {
+            return false;
+        };
+        page.requested_raster.is_some_and(|requested| {
+            texture_size != [requested.physical_width, requested.physical_height]
+        })
+    });
+    observations.scaled_texture_frames += usize::from(scaled_texture);
+
+    let mut vector_lod_underprepared = false;
+    for page in &snapshot.pages {
+        let Some(presentation) = page.gpu_presentation.as_ref() else {
+            continue;
+        };
+        if presentation.vector_lod_ready == Some(false) {
+            vector_lod_underprepared = true;
+        }
+        if let (Some(requested), Some(available)) = (
+            presentation.vector_lod_requested_scale,
+            presentation.vector_lod_available_scale,
+        ) && requested.is_finite()
+            && available.is_finite()
+            && available > 0.0
+        {
+            observations.max_vector_lod_scale_ratio = observations
+                .max_vector_lod_scale_ratio
+                .max(requested / f64::from(available));
+        }
+    }
+    observations.vector_lod_underprepared_frames += usize::from(vector_lod_underprepared);
+    observations.settled_vector_lod_underprepared_frames +=
+        usize::from(settling && vector_lod_underprepared);
+    observations.consecutive_vector_lod_underprepared_frames = if vector_lod_underprepared {
+        observations
+            .consecutive_vector_lod_underprepared_frames
+            .saturating_add(1)
+    } else {
+        0
+    };
+    observations.max_consecutive_vector_lod_underprepared_frames = observations
+        .max_consecutive_vector_lod_underprepared_frames
+        .max(observations.consecutive_vector_lod_underprepared_frames);
 }
 
 fn observe_finite_range(minimum: &mut Option<f32>, maximum: &mut Option<f32>, value: f32) {
@@ -1034,6 +1271,81 @@ fn render_debug_trace_settle_failure(
     }
     if trace.observations.unexpected_backend_frames != 0 {
         return Some("an unexpected page backend was observed during the trace".to_string());
+    }
+    if trace.observations.max_consecutive_camera_stalls > 2 {
+        return Some(format!(
+            "the camera stopped for {} consecutive drawn frames while an input target was pending",
+            trace.observations.max_consecutive_camera_stalls
+        ));
+    }
+    if trace.observations.out_of_page_geometry_frames != 0 {
+        return Some(format!(
+            "native GPU paint geometry escaped the current page on {} frames",
+            trace.observations.out_of_page_geometry_frames
+        ));
+    }
+    if trace.observations.scaled_texture_frames != 0 {
+        return Some(format!(
+            "native zoom presented a differently scaled texture on {} frames",
+            trace.observations.scaled_texture_frames
+        ));
+    }
+    if trace.observations.settled_vector_lod_underprepared_frames != 0 {
+        return Some(format!(
+            "native vector LOD remained underprepared on {} settling frames",
+            trace.observations.settled_vector_lod_underprepared_frames
+        ));
+    }
+    if trace
+        .observations
+        .max_consecutive_vector_lod_underprepared_frames
+        > TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES
+    {
+        return Some(format!(
+            "native vector LOD lagged the camera for {} consecutive frames",
+            trace
+                .observations
+                .max_consecutive_vector_lod_underprepared_frames
+        ));
+    }
+    if native && snapshot.gpu_cache.motion_render_callback_scheduled > 0 {
+        let finalized = snapshot
+            .gpu_cache
+            .motion_render_callback_encoded
+            .saturating_add(snapshot.gpu_cache.motion_render_callback_superseded)
+            .saturating_add(snapshot.gpu_cache.motion_render_callback_failures);
+        if finalized != snapshot.gpu_cache.motion_render_callback_scheduled {
+            return Some(format!(
+                "{} current-camera callbacks were scheduled but only {finalized} reached a final outcome",
+                snapshot.gpu_cache.motion_render_callback_scheduled
+            ));
+        }
+        if snapshot.gpu_cache.motion_render_callback_failures != 0 {
+            return Some(format!(
+                "{} current-camera GPU callbacks failed",
+                snapshot.gpu_cache.motion_render_callback_failures
+            ));
+        }
+        if snapshot.gpu_cache.motion_render_callback_encoded == 0 {
+            return Some("no scheduled current-camera GPU draw was encoded".to_string());
+        }
+        if snapshot
+            .gpu_cache
+            .motion_render_callback_scheduled_camera_serial
+            != snapshot
+                .gpu_cache
+                .motion_render_callback_encoded_camera_serial
+        {
+            return Some(format!(
+                "the latest scheduled camera serial {} was not encoded (latest encoded {})",
+                snapshot
+                    .gpu_cache
+                    .motion_render_callback_scheduled_camera_serial,
+                snapshot
+                    .gpu_cache
+                    .motion_render_callback_encoded_camera_serial
+            ));
+        }
     }
     if trace.kind == RenderDebugTraceKind::ZoomScroll {
         let Some(latency) = trace.observations.zoom_scroll_activation_latency else {
@@ -1545,7 +1857,7 @@ fn capture_report(
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
 
     json!({
-        "schema_version": 14,
+        "schema_version": 15,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -1730,7 +2042,49 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
             "target_zoom_min": trace.observations.target_zoom_min.map(finite_f32_json),
             "target_zoom_max": trace.observations.target_zoom_max.map(finite_f32_json),
             "zoom_scroll_activation_latency_ms": trace.observations.zoom_scroll_activation_latency.map(milliseconds),
+            "max_consecutive_camera_stalls": trace.observations.max_consecutive_camera_stalls,
+            "out_of_page_geometry_frames": trace.observations.out_of_page_geometry_frames,
+            "scaled_texture_frames": trace.observations.scaled_texture_frames,
+            "vector_lod_underprepared_frames": trace.observations.vector_lod_underprepared_frames,
+            "settled_vector_lod_underprepared_frames": trace.observations.settled_vector_lod_underprepared_frames,
+            "max_consecutive_vector_lod_underprepared_frames": trace.observations.max_consecutive_vector_lod_underprepared_frames,
+            "max_vector_lod_scale_ratio": finite_f64_json(trace.observations.max_vector_lod_scale_ratio),
         },
+        "frames": trace.frames.iter().map(|frame| json!({
+            "phase": frame.phase,
+            "frame_index": frame.frame_index,
+            "offset_ms": milliseconds(frame.offset),
+            "camera": {
+                "zoom": finite_f32_json(frame.zoom),
+                "target_zoom": finite_f32_json(frame.target_zoom),
+                "scroll_x_doc": finite_f32_json(frame.scroll_x_doc),
+                "scroll_y_doc": finite_f32_json(frame.scroll_y_doc),
+                "target_scroll_x_doc": finite_f32_json(frame.target_scroll_x_doc),
+                "target_scroll_y_doc": finite_f32_json(frame.target_scroll_y_doc),
+                "serial": frame.camera_serial,
+                "presented_serial": frame.presented_camera_serial,
+            },
+            "direct_callback": {
+                "scheduled": frame.callback_scheduled,
+                "executed": frame.callback_executed,
+                "encoded": frame.callback_encoded,
+                "superseded": frame.callback_superseded,
+                "failures": frame.callback_failures,
+            },
+            "pages": frame.pages.iter().map(|page| json!({
+                "page_number": page.page_number,
+                "backend": page.backend,
+                "source": page.source,
+                "page_bounds": page.page_bounds,
+                "texture_bounds": page.texture_bounds,
+                "direct_bounds": page.direct_bounds,
+                "texture_physical_size": page.texture_physical_size,
+                "requested_physical_size": page.requested_physical_size,
+                "vector_lod_requested_scale": page.vector_lod_requested_scale,
+                "vector_lod_available_scale": page.vector_lod_available_scale,
+                "vector_lod_ready": page.vector_lod_ready,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1828,6 +2182,14 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
                 cache.motion_render_callback_executed.into(),
             ),
             (
+                "callback_encoded".into(),
+                cache.motion_render_callback_encoded.into(),
+            ),
+            (
+                "callback_superseded".into(),
+                cache.motion_render_callback_superseded.into(),
+            ),
+            (
                 "callback_failures".into(),
                 cache.motion_render_callback_failures.into(),
             ),
@@ -1838,6 +2200,10 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
             (
                 "callback_executed_camera_serial".into(),
                 cache.motion_render_callback_executed_camera_serial.into(),
+            ),
+            (
+                "callback_encoded_camera_serial".into(),
+                cache.motion_render_callback_encoded_camera_serial.into(),
             ),
         ]);
     let surfaces = json!({
@@ -1900,71 +2266,67 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
 }
 
 fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
-    json!({
-        "page_number": page.page_number,
-        "status": page_status_json(page.status),
-        "backend": page_backend_name(page.backend),
-        "requested_raster": page.requested_raster.map(raster_json),
-        "displayed_raster": page.displayed_raster.map(raster_json),
-        "cached_raster_bytes": page.cached_raster_bytes,
-        "cached_raster_variants": page.cached_raster_variants,
-        "source_revision": page.source_revision,
-        "latest_timing": page.latest_timing.map(|timing| json!({
-            "total_ms": milliseconds(timing.total),
-            "display_list_ms": timing.display_list.map(milliseconds),
-            "display_list_cached": timing.display_list_cached,
-            "raster_ms": timing.raster.map(milliseconds),
-            "mupdf_draw_ms": timing.mupdf_draw.map(milliseconds),
-            "raster_bands": timing.raster_bands,
-            "succeeded": timing.succeeded,
-        })),
-        "gpu": page.gpu.as_ref().map(|gpu| {
-            let retained_strokes = json!({
-                "candidate_references": gpu.retained_stroke_candidate_references,
-                "cull_dispatches": gpu.retained_stroke_cull_dispatches,
-                "indirect_draws": gpu.retained_stroke_indirect_draws,
-                "global_replay": gpu.retained_stroke_global_replay,
-                "motion_sample_mask": gpu.motion_stroke_sample_mask,
-            });
-            let culling = json!({
-                "ordered_operations": gpu.culled_operations,
-                "bundled_operations": gpu.culled_bundle_operations,
-                "retained_strokes": retained_strokes,
-            });
-            json!({
-                "cpu_ms": milliseconds(gpu.cpu_time),
-                "frame_pool_wait_ms": milliseconds(gpu.frame_pool_wait_time),
-                "command_encoding_ms": milliseconds(gpu.command_encoding_time),
-                "gpu_ms": gpu.gpu_time.map(milliseconds),
-                "host_to_device_bytes": gpu.host_to_device_bytes,
-                "passes": gpu.passes_executed,
-                "command_buffers": gpu.command_buffers,
-                "vector_batches": gpu.vector_batches,
-                "procedural_stroke_batches": gpu.procedural_stroke_batches,
-                "render_bundle_runs": gpu.render_bundle_runs,
-                "culling": culling,
-                "reprojected": gpu.reprojected_frame,
-                "reused_tiles": gpu.reused_tiles,
-                "rendered_tiles": gpu.rendered_tiles,
-                "dirty_tiles": gpu.dirty_tiles,
-                "refinement_pending": gpu.refinement_pending,
-                "presentation_quality": gpu.presentation_quality,
-                "scheduled_refinement_work": gpu.scheduled_refinement_work,
-                "refinement_work_budget": gpu.refinement_work_budget,
-                "selected_vector_lod": gpu.selected_vector_lod,
-                "vector_lod_requested_scale": gpu.vector_lod_requested_scale,
-                "vector_lod_available_scale": gpu.vector_lod_available_scale,
-                "vector_lod_deferred": gpu.vector_lod_deferred,
-                "frame_pool_reused": gpu.frame_pool_reused,
-                "frame_pool_grew": gpu.frame_pool_grew,
-                "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
-                "generation": gpu.generation,
-                "coverage_strategy": gpu.coverage_strategy,
-                "retained_stroke_strategy": gpu.retained_stroke_strategy,
-                "motion_render_mode": gpu.motion_render_mode,
-            })
-        }),
-        "gpu_preparation": page.gpu_preparation.as_ref().map(|preparation| json!({
+    let gpu_presentation = page.gpu_presentation.as_ref().map(|presentation| {
+        json!({
+            "source": presentation.source,
+            "page_bounds": presentation.page_bounds,
+            "texture_bounds": presentation.texture_bounds,
+            "direct_bounds": presentation.direct_bounds,
+            "texture_physical_size": presentation.texture_physical_size,
+            "camera_serial": presentation.camera_serial,
+            "vector_lod_requested_scale": presentation.vector_lod_requested_scale.map(finite_f64_json),
+            "vector_lod_available_scale": presentation.vector_lod_available_scale.map(finite_f32_json),
+            "vector_lod_ready": presentation.vector_lod_ready,
+        })
+    });
+    let gpu = page.gpu.as_ref().map(|gpu| {
+        let retained_strokes = json!({
+            "candidate_references": gpu.retained_stroke_candidate_references,
+            "cull_dispatches": gpu.retained_stroke_cull_dispatches,
+            "indirect_draws": gpu.retained_stroke_indirect_draws,
+            "global_replay": gpu.retained_stroke_global_replay,
+            "motion_sample_mask": gpu.motion_stroke_sample_mask,
+        });
+        let culling = json!({
+            "ordered_operations": gpu.culled_operations,
+            "bundled_operations": gpu.culled_bundle_operations,
+            "retained_strokes": retained_strokes,
+        });
+        json!({
+            "cpu_ms": milliseconds(gpu.cpu_time),
+            "frame_pool_wait_ms": milliseconds(gpu.frame_pool_wait_time),
+            "command_encoding_ms": milliseconds(gpu.command_encoding_time),
+            "gpu_ms": gpu.gpu_time.map(milliseconds),
+            "host_to_device_bytes": gpu.host_to_device_bytes,
+            "passes": gpu.passes_executed,
+            "command_buffers": gpu.command_buffers,
+            "vector_batches": gpu.vector_batches,
+            "procedural_stroke_batches": gpu.procedural_stroke_batches,
+            "render_bundle_runs": gpu.render_bundle_runs,
+            "culling": culling,
+            "reprojected": gpu.reprojected_frame,
+            "reused_tiles": gpu.reused_tiles,
+            "rendered_tiles": gpu.rendered_tiles,
+            "dirty_tiles": gpu.dirty_tiles,
+            "refinement_pending": gpu.refinement_pending,
+            "presentation_quality": gpu.presentation_quality,
+            "scheduled_refinement_work": gpu.scheduled_refinement_work,
+            "refinement_work_budget": gpu.refinement_work_budget,
+            "selected_vector_lod": gpu.selected_vector_lod,
+            "vector_lod_requested_scale": gpu.vector_lod_requested_scale,
+            "vector_lod_available_scale": gpu.vector_lod_available_scale,
+            "vector_lod_deferred": gpu.vector_lod_deferred,
+            "frame_pool_reused": gpu.frame_pool_reused,
+            "frame_pool_grew": gpu.frame_pool_grew,
+            "frame_pool_capacity_bytes": gpu.frame_pool_capacity_bytes,
+            "generation": gpu.generation,
+            "coverage_strategy": gpu.coverage_strategy,
+            "retained_stroke_strategy": gpu.retained_stroke_strategy,
+            "motion_render_mode": gpu.motion_render_mode,
+        })
+    });
+    let gpu_preparation = page.gpu_preparation.as_ref().map(|preparation| {
+        json!({
             "frontend_preflight_ms": milliseconds(preparation.frontend_preflight),
             "compile_ms": milliseconds(preparation.compile),
             "link_conversion_ms": milliseconds(preparation.link_conversion),
@@ -1977,6 +2339,13 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "retained_operations": preparation.retained_operations,
             "vector_batches": preparation.vector_batches,
             "vector_lod_levels": preparation.vector_lod_levels,
+            "vector_lod_compacted": preparation.vector_lod_compacted,
+            "vector_vertices": preparation.vector_vertices,
+            "vector_triangle_references": preparation.vector_triangle_references,
+            "vector_reference_bytes": preparation.vector_reference_bytes,
+            "vector_instances": preparation.vector_instances,
+            "vector_canonical_indices": preparation.vector_canonical_indices,
+            "vector_reference_segments": preparation.vector_reference_segments,
             "vector_bytes": preparation.vector_bytes,
             "motion_stroke_lod_levels": preparation.motion_stroke_lod_levels,
             "motion_stroke_coarsest_segments": preparation.motion_stroke_coarsest_segments,
@@ -1986,8 +2355,36 @@ fn page_snapshot_json(page: &PageRenderDebugSnapshot) -> Value {
             "exact_stroke_segments": preparation.exact_stroke_segments,
             "camera_program_partitions": preparation.camera_program_partitions,
             "camera_program_operations": preparation.camera_program_operations,
+            "analytic_paths": preparation.analytic_paths,
+            "analytic_segments": preparation.analytic_segments,
+            "analytic_draws": preparation.analytic_draws,
+            "analytic_groups": preparation.analytic_groups,
+            "analytic_bvh_nodes": preparation.analytic_bvh_nodes,
             "analytic_bytes": preparation.analytic_bytes,
+            "analytic_fallback": preparation.analytic_fallback,
+        })
+    });
+    json!({
+        "page_number": page.page_number,
+        "status": page_status_json(page.status),
+        "backend": page_backend_name(page.backend),
+        "requested_raster": page.requested_raster.map(raster_json),
+        "displayed_raster": page.displayed_raster.map(raster_json),
+        "gpu_presentation": gpu_presentation,
+        "cached_raster_bytes": page.cached_raster_bytes,
+        "cached_raster_variants": page.cached_raster_variants,
+        "source_revision": page.source_revision,
+        "latest_timing": page.latest_timing.map(|timing| json!({
+            "total_ms": milliseconds(timing.total),
+            "display_list_ms": timing.display_list.map(milliseconds),
+            "display_list_cached": timing.display_list_cached,
+            "raster_ms": timing.raster.map(milliseconds),
+            "mupdf_draw_ms": timing.mupdf_draw.map(milliseconds),
+            "raster_bands": timing.raster_bands,
+            "succeeded": timing.succeeded,
         })),
+        "gpu": gpu,
+        "gpu_preparation": gpu_preparation,
         "gpu_fallbacks": page.gpu_fallbacks.iter().map(|fallback| json!({
             "feature": fallback.feature,
             "code": fallback.code,
@@ -2070,6 +2467,8 @@ fn gpu_counter_delta_json(start: &GpuCacheDebugSnapshot, end: &GpuCacheDebugSnap
     counter!(motion_render_inline_failures);
     counter!(motion_render_callback_scheduled);
     counter!(motion_render_callback_executed);
+    counter!(motion_render_callback_encoded);
+    counter!(motion_render_callback_superseded);
     counter!(motion_render_callback_failures);
     counter!(camera_pan_inline_frames);
     counter!(camera_pan_admission_holds);
@@ -2156,6 +2555,14 @@ fn text_index_state_name(state: TextIndexDebugState) -> &'static str {
 }
 
 fn finite_f32_json(value: f32) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+fn finite_f64_json(value: f64) -> Value {
     if value.is_finite() {
         json!(value)
     } else {
@@ -3133,6 +3540,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presentation_geometry_guard_rejects_stale_zoom_bounds() {
+        let page = [100.0, 50.0, 1_100.0, 850.0];
+        assert!(debug_bounds_contain(page, [100.0, 50.0, 1_100.0, 850.0]));
+        assert!(debug_bounds_contain(page, [200.0, 100.0, 900.0, 700.0]));
+        assert!(!debug_bounds_contain(page, [0.0, 0.0, 8_000.0, 12_000.0]));
+    }
+
+    #[test]
     fn scripted_trace_report_records_reproducible_workload_metadata() {
         let report = render_debug_trace_report_json(&RenderDebugTraceReport {
             kind: RenderDebugTraceKind::Zoom,
@@ -3153,6 +3568,7 @@ mod tests {
             original_position: DocumentPosition::fixed(1.0, 2.0, 1.25, 3),
             final_position: Some(DocumentPosition::fixed(1.0, 2.0, 1.25, 3)),
             observations: RenderDebugTraceObservations::default(),
+            frames: Vec::new(),
         });
 
         assert_eq!(report["version"], TRACE_REPORT_VERSION);

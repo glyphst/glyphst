@@ -65,7 +65,6 @@ impl DocumentView {
         // the root transform so the next paint can still use the shared
         // camera-target contract.
         self.mark_native_gpu_zoom_motion(cx);
-        _ = self.native_gpu_camera_frame_ready();
         self.apply_zoom_anchor(zoom, anchor);
         self.target_zoom = zoom;
         self.zoom_anchor = None;

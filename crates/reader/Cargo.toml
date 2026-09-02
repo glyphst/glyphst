@@ -25,7 +25,7 @@ glyphst-translation = { path = "../translation" }
 glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 glyphst-workspace = { path = "../workspace" }
-gpui.workspace = true
+gpui = { workspace = true, features = ["bench-support"] }
 gpui_component.workspace = true
 gpui_platform.workspace = true
 serde.workspace = true

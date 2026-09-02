@@ -198,7 +198,14 @@ impl DocumentView {
         // its key and stats here so the HUD does not mislabel that interval as
         // a MuPDF placeholder merely because the keys differ.
         let native_gpu_render = self.native_gpu_render(page_idx);
-        let displayed = native_gpu_render.map(|(key, _)| key).or(mupdf_displayed);
+        let gpu_presentation = self.native_gpu_presentation_debug(page_idx).cloned();
+        let direct_submitted = gpu_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.source == "direct-current");
+        let displayed = native_gpu_render
+            .map(|(key, _)| key)
+            .or_else(|| direct_submitted.then_some(requested).flatten())
+            .or(mupdf_displayed);
         let exact_pending = requested.is_some_and(|requested| {
             self.pending_renders
                 .iter()
@@ -215,7 +222,7 @@ impl DocumentView {
         let status = page_render_debug_status(
             requested,
             displayed,
-            native_gpu_render.is_some(),
+            native_gpu_render.is_some() || direct_submitted,
             exact_pending,
             requested_failed,
         );
@@ -377,7 +384,7 @@ impl DocumentView {
         let gpu_refinement_failure = self
             .native_gpu_vector_lod_failure(page_idx)
             .map(str::to_owned);
-        let backend = if gpu.is_some() {
+        let backend = if gpu.is_some() || direct_submitted {
             PageRenderBackendDebug::GlyphstGpu
         } else if strict_native && (!gpu_fallbacks.is_empty() || gpu_failure.is_some()) {
             PageRenderBackendDebug::GlyphstFailed
@@ -436,6 +443,7 @@ impl DocumentView {
             gpu_warnings,
             gpu_failure,
             gpu_refinement_failure,
+            gpu_presentation,
             requested_raster: requested.map(|key| self.raster_debug_snapshot(key)),
             displayed_raster: displayed.map(|key| self.raster_debug_snapshot(key)),
             cached_raster_bytes,

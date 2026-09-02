@@ -98,7 +98,7 @@ impl DocumentView {
         let Some(page) = pages.iter().find(|page| page.page_idx == link.page_idx) else {
             return Vec::new();
         };
-        let Some(texture) = page.gpu_texture.as_ref() else {
+        let Some(texture) = page.gpu.as_ref().and_then(|gpu| gpu.texture.as_ref()) else {
             return Vec::new();
         };
 

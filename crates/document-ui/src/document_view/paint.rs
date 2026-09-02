@@ -238,7 +238,7 @@ impl DocumentView {
 
         self.viewport_render_debug.clear();
         let adjacent_gpu_page = self.prune_native_gpu_pages(&[page_idx], cx);
-        let gpu_texture = self.native_gpu_texture(
+        let gpu = self.native_gpu_paint(
             native_key,
             image_bounds,
             bounds,
@@ -264,7 +264,7 @@ impl DocumentView {
         }
         let mupdf_allowed = u32::try_from(page_idx)
             .is_ok_and(|page| self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine));
-        let (image, displayed) = if gpu_texture.is_some() || !mupdf_allowed {
+        let (image, displayed) = if gpu.is_some() || !mupdf_allowed {
             (None, None)
         } else {
             self.cached_or_request_viewport_render(key, true, cx)
@@ -276,15 +276,12 @@ impl DocumentView {
                 displayed,
             },
         );
-        let page_bounds = gpu_texture
-            .as_ref()
-            .map_or(image_bounds, |texture| texture.page_bounds);
         self.assemble_paint_data(
             vec![PaintPage {
                 page_idx,
-                bounds: page_bounds,
+                bounds: image_bounds,
                 image,
-                gpu_texture,
+                gpu,
             }],
             cx.global::<SettingsStore>().settings.behavior.reduce_motion,
             window,
@@ -437,7 +434,7 @@ impl DocumentView {
             } else {
                 key
             };
-            let gpu_texture = self.native_gpu_texture(
+            let gpu = self.native_gpu_paint(
                 native_key,
                 image_bounds,
                 bounds,
@@ -448,7 +445,7 @@ impl DocumentView {
             let mupdf_allowed = u32::try_from(page_idx).is_ok_and(|page| {
                 self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine)
             });
-            let (image, fallback_key) = if gpu_texture.is_some() || !mupdf_allowed {
+            let (image, fallback_key) = if gpu.is_some() || !mupdf_allowed {
                 (None, None)
             } else {
                 self.cached_or_request_viewport_render(
@@ -469,15 +466,12 @@ impl DocumentView {
             {
                 self.viewport_render_keys.insert(fallback_key);
             }
-            has_rendered_page |= image.is_some() || gpu_texture.is_some();
-            let page_bounds = gpu_texture
-                .as_ref()
-                .map_or(image_bounds, |texture| texture.page_bounds);
+            has_rendered_page |= image.is_some() || gpu.is_some();
             pages.push(PaintPage {
                 page_idx,
-                bounds: page_bounds,
+                bounds: image_bounds,
                 image,
-                gpu_texture,
+                gpu,
             });
         }
         if let Some((key, image_bounds, forward)) = adjacent_gpu_render {

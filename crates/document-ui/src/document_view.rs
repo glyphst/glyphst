@@ -61,8 +61,8 @@ use glyphst_pdf::{
 };
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
-    GpuDestinationView, GpuFallbackDiagnostic, GpuFallbackSource, GpuLinkAction,
-    GpuLinkHighlightMode, GpuLinkInteraction, GpuMotionRenderMode, GpuNamedAction,
+    GpuDestinationView, GpuDirectRenderOutcome, GpuDirectRenderReceipt, GpuFallbackDiagnostic,
+    GpuFallbackSource, GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction,
     GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation,
     GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture,
     GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
@@ -736,9 +736,12 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_inline_failures: u64,
     pub motion_render_callback_scheduled: u64,
     pub motion_render_callback_executed: u64,
+    pub motion_render_callback_encoded: u64,
+    pub motion_render_callback_superseded: u64,
     pub motion_render_callback_failures: u64,
     pub motion_render_callback_scheduled_camera_serial: u64,
     pub motion_render_callback_executed_camera_serial: u64,
+    pub motion_render_callback_encoded_camera_serial: u64,
     pub camera_pan_inline_frames: u64,
     pub camera_pan_admission_holds: u64,
     pub motion_render_camera_serial: u64,
@@ -799,6 +802,20 @@ pub struct GpuWarningDebugSnapshot {
     pub message: String,
 }
 
+/// Geometry and source chosen for the latest native page paint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuPresentationDebugSnapshot {
+    pub source: String,
+    pub page_bounds: [f32; 4],
+    pub texture_bounds: Option<[f32; 4]>,
+    pub direct_bounds: Option<[f32; 4]>,
+    pub texture_physical_size: Option<[u32; 2]>,
+    pub camera_serial: u64,
+    pub vector_lod_requested_scale: Option<f64>,
+    pub vector_lod_available_scale: Option<f32>,
+    pub vector_lod_ready: Option<bool>,
+}
+
 /// Rendering and content diagnostics for one active page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageRenderDebugSnapshot {
@@ -812,6 +829,7 @@ pub struct PageRenderDebugSnapshot {
     pub gpu_failure: Option<String>,
     /// Non-routing failure from a stricter high-zoom vector refinement.
     pub gpu_refinement_failure: Option<String>,
+    pub gpu_presentation: Option<GpuPresentationDebugSnapshot>,
     pub requested_raster: Option<RasterDebugSnapshot>,
     pub displayed_raster: Option<RasterDebugSnapshot>,
     pub cached_raster_bytes: u64,
@@ -1247,16 +1265,19 @@ struct PaintPage {
     page_idx: usize,
     bounds: Bounds<Pixels>,
     image: Option<Arc<RenderImage>>,
-    gpu_texture: Option<GpuPaintTexture>,
+    gpu: Option<GpuPagePaint>,
+}
+
+struct GpuPagePaint {
+    texture: Option<GpuPaintTexture>,
+    direct: Option<GpuDirectPaint>,
 }
 
 #[derive(Clone)]
 struct GpuPaintTexture {
-    page_bounds: Bounds<Pixels>,
     bounds: Bounds<Pixels>,
     source_bounds: Bounds<f32>,
     texture: GpuPageTexture,
-    direct: Option<GpuDirectPaint>,
 }
 
 #[derive(Clone)]
@@ -2233,6 +2254,7 @@ pub struct DocumentView {
     target_zoom: f32,
     zoom_anchor: Option<ZoomAnchor>,
     last_animation_frame: Option<Instant>,
+    render_debug_fixed_frame_driver: bool,
     zoom_popup_visible: bool,
     zoom_popup_hovered: bool,
     zoom_popup_generation: u64,

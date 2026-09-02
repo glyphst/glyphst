@@ -770,28 +770,28 @@ impl Render for DocumentView {
                                                         false,
                                                     );
                                                 }
-                                                if let Some(texture) = page.gpu_texture {
-                                                    if let Err(error) =
-                                                        window.paint_external_texture(
-                                                            texture.bounds,
-                                                            texture.source_bounds,
-                                                            texture.texture.handle().clone(),
-                                                            1.0,
-                                                            ExternalTextureFilter::Linear,
-                                                            ExternalTextureColorSpace::LinearSrgb,
-                                                            ExternalTextureAlphaMode::Opaque,
-                                                        )
+                                                if let Some(gpu) = page.gpu {
+                                                    if let Some(texture) = gpu.texture
+                                                        && let Err(error) =
+                                                            window.paint_external_texture(
+                                                                texture.bounds,
+                                                                texture.source_bounds,
+                                                                texture.texture.handle().clone(),
+                                                                1.0,
+                                                                ExternalTextureFilter::Linear,
+                                                                ExternalTextureColorSpace::LinearSrgb,
+                                                                ExternalTextureAlphaMode::Opaque,
+                                                            )
                                                     {
                                                         eprintln!(
                                                             "failed to present native PDF GPU page: {error:#}"
                                                         );
                                                     }
-                                                    if let Some(direct) = texture.direct
-                                                        && let Err(error) = window
-                                                            .paint_external_gpu(
-                                                                direct.bounds,
-                                                                direct.render,
-                                                            )
+                                                    if let Some(direct) = gpu.direct
+                                                        && let Err(error) = window.paint_external_gpu(
+                                                            direct.bounds,
+                                                            direct.render,
+                                                        )
                                                     {
                                                         eprintln!(
                                                             "failed to render native PDF directly into the GPUI frame: {error:#}"

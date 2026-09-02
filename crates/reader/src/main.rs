@@ -396,7 +396,7 @@ fn run_automated_render_trace(
             }
 
             let polled = cx.update(|cx| {
-                workspace.update(cx, |workspace, window, cx| {
+                let poll = match workspace.update(cx, |workspace, window, cx| {
                     if let Some(completion) =
                         workspace.take_automated_render_debug_trace_completion()
                     {
@@ -432,33 +432,31 @@ fn run_automated_render_trace(
                             AutomatedTracePoll::Failed(error)
                         }
                     }
-                })
-            });
-            let poll = match polled {
-                Ok(poll) => poll,
-                Err(error) => AutomatedTracePoll::Failed(format!(
-                    "failed to update the automated trace window: {error:#}"
-                )),
-            };
-            if matches!(
-                poll,
-                AutomatedTracePoll::Started | AutomatedTracePoll::Running(_)
-            ) {
-                let drawn = cx.update(|cx| {
-                    cx.with_window(workspace.entity().entity_id(), |window, cx| {
-                        window.draw(cx).clear(cx);
-                    })
-                });
-                match drawn {
-                    Some(()) => {}
-                    None => {
-                        eprintln!("failed to locate the automated trace window for drawing");
-                        exit_status.store(3, Ordering::Release);
-                        cx.update(|cx| cx.quit());
-                        return;
+                }) {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        return AutomatedTracePoll::Failed(format!(
+                            "failed to update the automated trace window: {error:#}"
+                        ));
                     }
+                };
+                if matches!(
+                    poll,
+                    AutomatedTracePoll::Started | AutomatedTracePoll::Running(_)
+                ) && cx
+                    .with_window(workspace.entity().entity_id(), |window, cx| {
+                        window.draw(cx).clear(cx);
+                        window.present_if_needed();
+                    })
+                    .is_none()
+                {
+                    return AutomatedTracePoll::Failed(
+                        "failed to locate the automated trace window for drawing".into(),
+                    );
                 }
-            }
+                poll
+            });
+            let poll = polled;
             match poll {
                 AutomatedTracePoll::Waiting => {}
                 AutomatedTracePoll::Started => trace_started = true,

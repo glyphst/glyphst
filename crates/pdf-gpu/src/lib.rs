@@ -46,7 +46,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -1466,9 +1466,12 @@ pub struct GpuPdfRenderer {
 struct DirectRenderTelemetry {
     scheduled: AtomicU64,
     executed: AtomicU64,
+    encoded: AtomicU64,
+    superseded: AtomicU64,
     failed: AtomicU64,
     last_scheduled_camera_serial: AtomicU64,
     last_executed_camera_serial: AtomicU64,
+    last_encoded_camera_serial: AtomicU64,
 }
 
 /// Execution counters for painter-ordered PDF callbacks in GPUI frames.
@@ -1476,9 +1479,77 @@ struct DirectRenderTelemetry {
 pub struct GpuDirectRenderStats {
     pub scheduled: u64,
     pub executed: u64,
+    pub encoded: u64,
+    pub superseded: u64,
     pub failed: u64,
     pub last_scheduled_camera_serial: u64,
     pub last_executed_camera_serial: u64,
+    pub last_encoded_camera_serial: u64,
+}
+
+/// Final disposition of one painter-ordered direct PDF draw.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GpuDirectRenderOutcome {
+    #[default]
+    Pending,
+    Encoded,
+    Superseded,
+    Failed,
+}
+
+impl GpuDirectRenderOutcome {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Pending => 0,
+            Self::Encoded => 1,
+            Self::Superseded => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Encoded,
+            2 => Self::Superseded,
+            3 => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+struct DirectRenderReceiptState {
+    camera_serial: u64,
+    generation: u64,
+    outcome: AtomicU8,
+}
+
+/// Cloneable receipt that reports what happened to one direct GPUI draw.
+#[derive(Clone)]
+pub struct GpuDirectRenderReceipt {
+    state: Arc<DirectRenderReceiptState>,
+}
+
+impl GpuDirectRenderReceipt {
+    #[must_use]
+    pub fn camera_serial(&self) -> u64 {
+        self.state.camera_serial
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.state.generation
+    }
+
+    #[must_use]
+    pub fn outcome(&self) -> GpuDirectRenderOutcome {
+        GpuDirectRenderOutcome::from_u8(self.state.outcome.load(Ordering::Acquire))
+    }
+}
+
+/// Painter callback and its completion receipt.
+pub struct GpuDirectRenderSubmission {
+    pub render: ExternalGpuRenderHandle,
+    pub receipt: GpuDirectRenderReceipt,
 }
 
 impl DirectRenderTelemetry {
@@ -1488,22 +1559,40 @@ impl DirectRenderTelemetry {
             .store(camera_serial, Ordering::Release);
     }
 
-    fn finish(&self, camera_serial: u64, succeeded: bool) {
+    fn finish(&self, camera_serial: u64, outcome: GpuDirectRenderOutcome) {
         self.executed.fetch_add(1, Ordering::Relaxed);
         self.last_executed_camera_serial
             .store(camera_serial, Ordering::Release);
-        if !succeeded {
-            self.failed.fetch_add(1, Ordering::Relaxed);
+        match outcome {
+            GpuDirectRenderOutcome::Encoded => {
+                self.encoded.fetch_add(1, Ordering::Relaxed);
+                self.last_encoded_camera_serial
+                    .store(camera_serial, Ordering::Release);
+            }
+            GpuDirectRenderOutcome::Superseded => {
+                self.superseded.fetch_add(1, Ordering::Relaxed);
+            }
+            GpuDirectRenderOutcome::Failed => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
+            GpuDirectRenderOutcome::Pending => {}
         }
+    }
+
+    fn supersede(&self) {
+        self.superseded.fetch_add(1, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> GpuDirectRenderStats {
         GpuDirectRenderStats {
             scheduled: self.scheduled.load(Ordering::Acquire),
             executed: self.executed.load(Ordering::Acquire),
+            encoded: self.encoded.load(Ordering::Acquire),
+            superseded: self.superseded.load(Ordering::Acquire),
             failed: self.failed.load(Ordering::Acquire),
             last_scheduled_camera_serial: self.last_scheduled_camera_serial.load(Ordering::Acquire),
             last_executed_camera_serial: self.last_executed_camera_serial.load(Ordering::Acquire),
+            last_encoded_camera_serial: self.last_encoded_camera_serial.load(Ordering::Acquire),
         }
     }
 }
@@ -1578,7 +1667,7 @@ impl GpuPdfRenderer {
         self: &Arc<Self>,
         page: Arc<PreparedGpuPage>,
         request: GpuPaintRequest,
-    ) -> Result<ExternalGpuRenderHandle> {
+    ) -> Result<GpuDirectRenderSubmission> {
         if self.is_device_lost() {
             bail!("the active GPUI WGPU device is lost");
         }
@@ -1587,11 +1676,20 @@ impl GpuPdfRenderer {
         }
         request.visible_region.clamp(request.page_size)?;
         self.direct_render.schedule(request.camera_serial);
-        Ok(self.context.render_handle(Arc::new(DirectPageRender {
+        let receipt = GpuDirectRenderReceipt {
+            state: Arc::new(DirectRenderReceiptState {
+                camera_serial: request.camera_serial,
+                generation: request.generation,
+                outcome: AtomicU8::new(GpuDirectRenderOutcome::Pending.as_u8()),
+            }),
+        };
+        let render = self.context.render_handle(Arc::new(DirectPageRender {
             renderer: Arc::clone(self),
             page,
             request,
-        })))
+            receipt: receipt.clone(),
+        }));
+        Ok(GpuDirectRenderSubmission { render, receipt })
     }
 
     /// Reserves one preallocated, non-presented target for the next sharp camera frame.
@@ -2174,11 +2272,60 @@ struct DirectPageRender {
     renderer: Arc<GpuPdfRenderer>,
     page: Arc<PreparedGpuPage>,
     request: GpuPaintRequest,
+    receipt: GpuDirectRenderReceipt,
+}
+
+impl DirectPageRender {
+    fn finish(&self, outcome: GpuDirectRenderOutcome) {
+        if self
+            .receipt
+            .state
+            .outcome
+            .compare_exchange(
+                GpuDirectRenderOutcome::Pending.as_u8(),
+                outcome.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.renderer
+                .direct_render
+                .finish(self.request.camera_serial, outcome);
+        }
+    }
+}
+
+impl Drop for DirectPageRender {
+    fn drop(&mut self) {
+        if self
+            .receipt
+            .state
+            .outcome
+            .compare_exchange(
+                GpuDirectRenderOutcome::Pending.as_u8(),
+                GpuDirectRenderOutcome::Superseded.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.renderer.direct_render.supersede();
+        }
+    }
+}
+
+fn direct_render_encoded<T>(result: std::result::Result<T, RenderError>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(RenderError::StaleRenderGeneration { .. }) => Ok(false),
+        Err(error) => Err(render_error(error)),
+    }
 }
 
 impl WgpuExternalRender for DirectPageRender {
     fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
-        let result = (|| {
+        let result = (|| -> Result<bool> {
             if context.target_format != self.renderer.output_format
                 || !output_format_supported(context.target_format)
             {
@@ -2205,7 +2352,7 @@ impl WgpuExternalRender for DirectPageRender {
                 self.request.visible_region,
                 self.request.page_size,
             ) else {
-                return Ok(());
+                return Ok(false);
             };
             let mut request = self.request;
             request.visible_region = visible_region;
@@ -2215,22 +2362,20 @@ impl WgpuExternalRender for DirectPageRender {
                 visible_region,
                 visible_region.size(),
             )?;
-            self.renderer
-                .renderer
-                .encode_into_region(
-                    &self.page.gpu,
-                    engine_request,
-                    context.target,
-                    target_origin,
-                    context.encoder,
-                )
-                .map(|_| ())
-                .map_err(render_error)
+            direct_render_encoded(self.renderer.renderer.encode_into_region(
+                &self.page.gpu,
+                engine_request,
+                context.target,
+                target_origin,
+                context.encoder,
+            ))
         })();
-        self.renderer
-            .direct_render
-            .finish(self.request.camera_serial, result.is_ok());
-        result
+        self.finish(match result {
+            Ok(true) => GpuDirectRenderOutcome::Encoded,
+            Ok(false) => GpuDirectRenderOutcome::Superseded,
+            Err(_) => GpuDirectRenderOutcome::Failed,
+        });
+        result.map(|_| ())
     }
 }
 
@@ -3154,18 +3299,54 @@ mod tests {
                 ..GpuDirectRenderStats::default()
             }
         );
-        telemetry.finish(7, true);
+        telemetry.finish(7, GpuDirectRenderOutcome::Encoded);
         telemetry.schedule(8);
-        telemetry.finish(8, false);
+        telemetry.finish(8, GpuDirectRenderOutcome::Failed);
         assert_eq!(
             telemetry.snapshot(),
             GpuDirectRenderStats {
                 scheduled: 2,
                 executed: 2,
+                encoded: 1,
                 failed: 1,
                 last_scheduled_camera_serial: 8,
                 last_executed_camera_serial: 8,
+                last_encoded_camera_serial: 7,
+                ..GpuDirectRenderStats::default()
             }
+        );
+    }
+
+    #[test]
+    fn direct_render_receipt_exposes_request_identity_and_outcome() {
+        let state = Arc::new(DirectRenderReceiptState {
+            camera_serial: 9,
+            generation: 4,
+            outcome: AtomicU8::new(GpuDirectRenderOutcome::Pending.as_u8()),
+        });
+        let receipt = GpuDirectRenderReceipt { state };
+        assert_eq!(receipt.camera_serial(), 9);
+        assert_eq!(receipt.generation(), 4);
+        assert_eq!(receipt.outcome(), GpuDirectRenderOutcome::Pending);
+        receipt
+            .state
+            .outcome
+            .store(GpuDirectRenderOutcome::Encoded.as_u8(), Ordering::Release);
+        assert_eq!(receipt.outcome(), GpuDirectRenderOutcome::Encoded);
+    }
+
+    #[test]
+    fn stale_direct_generation_is_superseded_not_failed() {
+        assert!(direct_render_encoded(Ok(())).unwrap());
+        assert!(
+            !direct_render_encoded::<()>(Err(RenderError::StaleRenderGeneration {
+                requested: 1,
+                latest: 2,
+            }))
+            .unwrap()
+        );
+        assert!(
+            direct_render_encoded::<()>(Err(RenderError::InvalidRequest("bad".into()))).is_err()
         );
     }
 

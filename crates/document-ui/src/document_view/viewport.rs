@@ -11,14 +11,8 @@ enum MotionRefresh {
     Pan,
 }
 
-fn motion_refresh(
-    changed_zoom: bool,
-    changed_x: bool,
-    changed_y: bool,
-    hold_camera_for_gpu: bool,
-    zoom_pending: bool,
-) -> Option<MotionRefresh> {
-    if changed_zoom || (hold_camera_for_gpu && zoom_pending) {
+fn motion_refresh(changed_zoom: bool, changed_x: bool, changed_y: bool) -> Option<MotionRefresh> {
+    if changed_zoom {
         Some(MotionRefresh::Zoom)
     } else if changed_x || changed_y {
         Some(MotionRefresh::Pan)
@@ -71,15 +65,6 @@ impl DocumentView {
     ) -> bool {
         let previous_x = self.scroll_x_doc;
         let previous_y = self.scroll_y_doc;
-        if (scroll_x_doc - previous_x).abs() > f32::EPSILON
-            || (scroll_y_doc - previous_y).abs() > f32::EPSILON
-        {
-            // Immediate scroll sources cannot be paused and replayed by the
-            // animation driver. Reserve opportunistically before mutating the
-            // camera; the paint path still preserves the last sharp frame if
-            // the external-texture ring is temporarily busy.
-            _ = self.native_gpu_camera_frame_ready();
-        }
         self.scroll_x_doc = scroll_x_doc;
         self.scroll_y_doc = scroll_y_doc;
         self.target_scroll_x_doc = scroll_x_doc;
@@ -134,12 +119,8 @@ impl DocumentView {
         } else if !camera_backlog {
             admitted_camera = [self.target_scroll_x_doc, self.target_scroll_y_doc];
         }
-        let camera_would_change = (admitted_camera[0] - self.scroll_x_doc).abs() > f32::EPSILON
-            || (admitted_camera[1] - self.scroll_y_doc).abs() > f32::EPSILON;
-        if !camera_would_change || self.native_gpu_camera_frame_ready() {
-            self.scroll_x_doc = admitted_camera[0];
-            self.scroll_y_doc = admitted_camera[1];
-        }
+        self.scroll_x_doc = admitted_camera[0];
+        self.scroll_y_doc = admitted_camera[1];
 
         let changed = (self.target_scroll_x_doc - previous_x).abs() > f32::EPSILON
             || (self.target_scroll_y_doc - previous_y).abs() > f32::EPSILON;
@@ -252,6 +233,11 @@ impl DocumentView {
         self.translation.suppress_linked_events = false;
     }
 
+    pub fn set_render_debug_fixed_frame_driver(&mut self, enabled: bool) {
+        self.render_debug_fixed_frame_driver = enabled;
+        self.last_animation_frame = None;
+    }
+
     pub(super) fn step_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let smooth_scrolling = cx
             .global::<SettingsStore>()
@@ -277,10 +263,8 @@ impl DocumentView {
                 now.saturating_duration_since(previous)
             });
 
-        let hold_camera_for_gpu =
-            (zoom_pending || scroll_pending) && !self.native_gpu_camera_frame_ready();
         let mut changed_zoom = false;
-        if zoom_pending && !hold_camera_for_gpu {
+        if zoom_pending {
             let zoom = animated_zoom_step(self.zoom, self.target_zoom, elapsed);
             let anchor = self.zoom_anchor.unwrap_or_else(|| {
                 self.zoom_anchor_at_viewport([
@@ -299,9 +283,7 @@ impl DocumentView {
             .gpu_pdf
             .has_renderer()
             .then(|| GPU_SCROLL_MAX_CAMERA_STEP_PX / self.effective_scale().max(0.001));
-        let (changed_x, changed_y) = if hold_camera_for_gpu {
-            (false, false)
-        } else if let Some(max_step) = gpu_camera_step {
+        let (changed_x, changed_y) = if let Some(max_step) = gpu_camera_step {
             (
                 advance_toward_capped(
                     &mut self.scroll_x_doc,
@@ -334,13 +316,7 @@ impl DocumentView {
                 ),
             )
         };
-        match motion_refresh(
-            changed_zoom,
-            changed_x,
-            changed_y,
-            hold_camera_for_gpu,
-            zoom_pending,
-        ) {
+        match motion_refresh(changed_zoom, changed_x, changed_y) {
             Some(MotionRefresh::Zoom) => {
                 // Reassert zoom-specific motion after the settle timer races a
                 // new scale step, avoiding obsolete exact-size surface work.
@@ -352,12 +328,7 @@ impl DocumentView {
         if changed_zoom || changed_x || changed_y {
             self.record_native_gpu_camera_step(changed_zoom);
         }
-        if hold_camera_for_gpu {
-            // Keep this view dirty so the next display tick retries pan-cache
-            // admission without relying on an unrelated UI notification.
-            cx.notify();
-        }
-        if changed_zoom || changed_x || changed_y || hold_camera_for_gpu {
+        if (changed_zoom || changed_x || changed_y) && !self.render_debug_fixed_frame_driver {
             window.request_animation_frame();
         }
     }
@@ -413,15 +384,12 @@ mod tests {
     }
 
     #[test]
-    fn held_pan_does_not_keep_zoom_motion_alive() {
-        assert_eq!(motion_refresh(false, false, false, true, false), None);
+    fn motion_refresh_follows_camera_progress_only() {
+        assert_eq!(motion_refresh(false, false, false), None);
         assert_eq!(
-            motion_refresh(false, false, false, true, true),
+            motion_refresh(true, false, false),
             Some(MotionRefresh::Zoom)
         );
-        assert_eq!(
-            motion_refresh(false, false, true, false, false),
-            Some(MotionRefresh::Pan)
-        );
+        assert_eq!(motion_refresh(false, false, true), Some(MotionRefresh::Pan));
     }
 }
