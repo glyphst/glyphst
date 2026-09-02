@@ -32,7 +32,8 @@ pub use glyphst_pdf_render_wgpu::{
     MotionRenderMode as GpuMotionRenderMode,
     PatchLodPreparationStats as GpuPatchLodPreparationStats, PatchLodStatus as GpuPatchLodStatus,
     PreparationStats as GpuPreparationStats, PresentationQuality as GpuPresentationQuality,
-    RenderStats as GpuRenderStats, VectorLodStatus as GpuVectorLodStatus,
+    RenderStats as GpuRenderStats, VectorCoverageStrategy as GpuVectorCoverageStrategy,
+    VectorLodStatus as GpuVectorLodStatus,
 };
 use gpui::{
     ExternalGpuContext, ExternalGpuDeviceToken, ExternalGpuRenderHandle, ExternalTextureHandle,
@@ -1472,7 +1473,7 @@ struct DirectRenderTelemetry {
     last_scheduled_camera_serial: AtomicU64,
     last_executed_camera_serial: AtomicU64,
     last_encoded_camera_serial: AtomicU64,
-    latest_stats: Mutex<Option<GpuRenderStats>>,
+    latest_stats: Mutex<Option<([u32; 2], GpuRenderStats)>>,
 }
 
 /// Execution counters for painter-ordered PDF callbacks in GPUI frames.
@@ -1491,6 +1492,11 @@ pub struct GpuDirectRenderStats {
     pub last_command_encoding_time: Duration,
     pub last_frame_pool_grew: bool,
     pub last_frame_pool_capacity_bytes: u64,
+    pub last_target_size: [u32; 2],
+    pub last_passes_executed: u64,
+    pub last_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    pub last_transient_peak_bytes: u64,
+    pub last_transient_resident_bytes: u64,
     pub last_render_bundle_runs: u64,
     pub last_stencil_draws: u64,
     pub last_retained_stroke_candidate_references: u64,
@@ -1575,7 +1581,7 @@ impl DirectRenderTelemetry {
         &self,
         camera_serial: u64,
         outcome: GpuDirectRenderOutcome,
-        stats: Option<GpuRenderStats>,
+        stats: Option<([u32; 2], GpuRenderStats)>,
     ) {
         self.executed.fetch_add(1, Ordering::Relaxed);
         self.last_executed_camera_serial
@@ -1607,11 +1613,11 @@ impl DirectRenderTelemetry {
     }
 
     fn snapshot(&self) -> GpuDirectRenderStats {
-        let latest = self
+        let latest = *self
             .latest_stats
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .unwrap_or_default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (target_size, stats) = latest.unwrap_or_default();
         GpuDirectRenderStats {
             scheduled: self.scheduled.load(Ordering::Acquire),
             executed: self.executed.load(Ordering::Acquire),
@@ -1621,17 +1627,22 @@ impl DirectRenderTelemetry {
             last_scheduled_camera_serial: self.last_scheduled_camera_serial.load(Ordering::Acquire),
             last_executed_camera_serial: self.last_executed_camera_serial.load(Ordering::Acquire),
             last_encoded_camera_serial: self.last_encoded_camera_serial.load(Ordering::Acquire),
-            last_cpu_time: latest.cpu_time,
-            last_frame_pool_wait_time: latest.frame_pool_wait_time,
-            last_command_encoding_time: latest.command_encoding_time,
-            last_frame_pool_grew: latest.frame_pool_grew,
-            last_frame_pool_capacity_bytes: latest.frame_pool_capacity_bytes,
-            last_render_bundle_runs: latest.render_bundle_runs,
-            last_stencil_draws: latest.stencil_draws,
-            last_retained_stroke_candidate_references: latest.retained_stroke_candidate_references,
-            last_retained_stroke_cull_dispatches: latest.retained_stroke_cull_dispatches,
-            last_retained_stroke_indirect_draws: latest.retained_stroke_indirect_draws,
-            last_retained_stroke_indirect_runs: latest.retained_stroke_indirect_runs,
+            last_cpu_time: stats.cpu_time,
+            last_frame_pool_wait_time: stats.frame_pool_wait_time,
+            last_command_encoding_time: stats.command_encoding_time,
+            last_frame_pool_grew: stats.frame_pool_grew,
+            last_frame_pool_capacity_bytes: stats.frame_pool_capacity_bytes,
+            last_target_size: target_size,
+            last_passes_executed: stats.passes_executed,
+            last_coverage_strategy: latest.map(|(_, stats)| stats.coverage_strategy),
+            last_transient_peak_bytes: stats.transient_peak_bytes,
+            last_transient_resident_bytes: stats.transient_resident_bytes,
+            last_render_bundle_runs: stats.render_bundle_runs,
+            last_stencil_draws: stats.stencil_draws,
+            last_retained_stroke_candidate_references: stats.retained_stroke_candidate_references,
+            last_retained_stroke_cull_dispatches: stats.retained_stroke_cull_dispatches,
+            last_retained_stroke_indirect_draws: stats.retained_stroke_indirect_draws,
+            last_retained_stroke_indirect_runs: stats.retained_stroke_indirect_runs,
         }
     }
 }
@@ -2315,7 +2326,7 @@ struct DirectPageRender {
 }
 
 impl DirectPageRender {
-    fn finish(&self, outcome: GpuDirectRenderOutcome, stats: Option<GpuRenderStats>) {
+    fn finish(&self, outcome: GpuDirectRenderOutcome, stats: Option<([u32; 2], GpuRenderStats)>) {
         if self
             .receipt
             .state
@@ -2364,7 +2375,7 @@ fn direct_render_encoded<T>(result: std::result::Result<T, RenderError>) -> Resu
 
 impl WgpuExternalRender for DirectPageRender {
     fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
-        let result = (|| -> Result<Option<GpuRenderStats>> {
+        let result = (|| -> Result<Option<([u32; 2], GpuRenderStats)>> {
             if context.target_format != self.renderer.output_format
                 || !output_format_supported(context.target_format)
             {
@@ -2423,6 +2434,7 @@ impl WgpuExternalRender for DirectPageRender {
                         context.encoder,
                     ),
             )
+            .map(|stats| stats.map(|stats| (engine_request.target_size, stats)))
         })();
         let outcome = match result {
             Ok(Some(_)) => GpuDirectRenderOutcome::Encoded,
@@ -3357,18 +3369,24 @@ mod tests {
         telemetry.finish(
             7,
             GpuDirectRenderOutcome::Encoded,
-            Some(GpuRenderStats {
-                cpu_time: Duration::from_millis(3),
-                command_encoding_time: Duration::from_millis(2),
-                frame_pool_capacity_bytes: 4096,
-                render_bundle_runs: 5,
-                stencil_draws: 7,
-                retained_stroke_candidate_references: 11,
-                retained_stroke_cull_dispatches: 2,
-                retained_stroke_indirect_draws: 3,
-                retained_stroke_indirect_runs: 1,
-                ..GpuRenderStats::default()
-            }),
+            Some((
+                [1920, 1080],
+                GpuRenderStats {
+                    cpu_time: Duration::from_millis(3),
+                    command_encoding_time: Duration::from_millis(2),
+                    passes_executed: 6,
+                    frame_pool_capacity_bytes: 4096,
+                    transient_peak_bytes: 3072,
+                    transient_resident_bytes: 4096,
+                    render_bundle_runs: 5,
+                    stencil_draws: 7,
+                    retained_stroke_candidate_references: 11,
+                    retained_stroke_cull_dispatches: 2,
+                    retained_stroke_indirect_draws: 3,
+                    retained_stroke_indirect_runs: 1,
+                    ..GpuRenderStats::default()
+                },
+            )),
         );
         telemetry.schedule(8);
         telemetry.finish(8, GpuDirectRenderOutcome::Failed, None);
@@ -3385,6 +3403,11 @@ mod tests {
                 last_cpu_time: Duration::from_millis(3),
                 last_command_encoding_time: Duration::from_millis(2),
                 last_frame_pool_capacity_bytes: 4096,
+                last_target_size: [1920, 1080],
+                last_passes_executed: 6,
+                last_coverage_strategy: Some(GpuVectorCoverageStrategy::RetainedTriangles),
+                last_transient_peak_bytes: 3072,
+                last_transient_resident_bytes: 4096,
                 last_render_bundle_runs: 5,
                 last_stencil_draws: 7,
                 last_retained_stroke_candidate_references: 11,

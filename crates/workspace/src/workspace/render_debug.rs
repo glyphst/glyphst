@@ -1,7 +1,7 @@
 use glyphst_document_ui::document_view::{
-    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, PageRenderBackendDebug,
-    PageRenderDebugSnapshot, PageRenderDebugStatus, RenderCacheDebugSnapshot,
-    SynchronizedScrollDelta, SynchronizedScrollMode, TextIndexDebugState,
+    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, GpuVectorCoverageStrategy,
+    PageRenderBackendDebug, PageRenderDebugSnapshot, PageRenderDebugStatus,
+    RenderCacheDebugSnapshot, SynchronizedScrollDelta, SynchronizedScrollMode, TextIndexDebugState,
     render_cache_debug_snapshot,
 };
 use gpui::{
@@ -173,6 +173,11 @@ struct RenderDebugTraceFrame {
     callback_command_encoding_time: Duration,
     callback_frame_pool_grew: bool,
     callback_frame_pool_capacity_bytes: u64,
+    callback_target_size: [u32; 2],
+    callback_passes_executed: u64,
+    callback_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    callback_transient_peak_bytes: u64,
+    callback_transient_resident_bytes: u64,
     callback_render_bundle_runs: u64,
     callback_stencil_draws: u64,
     callback_retained_stroke_candidate_references: u64,
@@ -974,6 +979,10 @@ fn render_debug_trace_should_finish_settling(
     sampled_frames >= TRACE_SETTLING_FRAMES && (ready || elapsed >= TRACE_SETTLING_TIMEOUT)
 }
 
+fn required_preparation_count(active: usize, queued: usize, speculative: usize) -> usize {
+    active.saturating_add(queued).saturating_sub(speculative)
+}
+
 fn render_debug_capture_warning(window: &mut Window, message: impl Into<String>, cx: &mut App) {
     window.push_notification(
         Notification::warning(message.into())
@@ -1035,6 +1044,11 @@ fn render_debug_trace_precondition(
 
 fn render_debug_trace_ready(snapshot: &DocumentRenderDebugSnapshot) -> bool {
     let interaction = &snapshot.interaction;
+    let required_preparations = required_preparation_count(
+        snapshot.gpu_cache.active_preparations,
+        snapshot.gpu_cache.queued_preparations,
+        snapshot.gpu_cache.speculative_preparations,
+    );
     if interaction.grid_overview_open
         || interaction.motion_active
         || snapshot.pages.is_empty()
@@ -1042,8 +1056,7 @@ fn render_debug_trace_ready(snapshot: &DocumentRenderDebugSnapshot) -> bool {
         || snapshot.gpu_cache.surface_seed_tasks != 0
         || snapshot.gpu_cache.surface_render_pending != 0
         || snapshot.gpu_cache.refinement_pages != 0
-        || snapshot.gpu_cache.active_preparations != 0
-        || snapshot.gpu_cache.queued_preparations != 0
+        || required_preparations != 0
     {
         return false;
     }
@@ -1102,6 +1115,11 @@ fn capture_render_debug_trace_frame(
         callback_command_encoding_time: gpu.motion_render_callback_command_encoding_time,
         callback_frame_pool_grew: gpu.motion_render_callback_frame_pool_grew,
         callback_frame_pool_capacity_bytes: gpu.motion_render_callback_frame_pool_capacity_bytes,
+        callback_target_size: gpu.motion_render_callback_target_size,
+        callback_passes_executed: gpu.motion_render_callback_passes_executed,
+        callback_coverage_strategy: gpu.motion_render_callback_coverage_strategy,
+        callback_transient_peak_bytes: gpu.motion_render_callback_transient_peak_bytes,
+        callback_transient_resident_bytes: gpu.motion_render_callback_transient_resident_bytes,
         callback_render_bundle_runs: gpu.motion_render_callback_render_bundle_runs,
         callback_stencil_draws: gpu.motion_render_callback_stencil_draws,
         callback_retained_stroke_candidate_references: gpu
@@ -1326,11 +1344,11 @@ fn render_debug_trace_settle_failure(
     trace: &RenderDebugTrace,
     snapshot: &DocumentRenderDebugSnapshot,
 ) -> Option<String> {
-    let required_preparations = snapshot
-        .gpu_cache
-        .active_preparations
-        .saturating_add(snapshot.gpu_cache.queued_preparations)
-        .saturating_sub(snapshot.gpu_cache.speculative_preparations);
+    let required_preparations = required_preparation_count(
+        snapshot.gpu_cache.active_preparations,
+        snapshot.gpu_cache.queued_preparations,
+        snapshot.gpu_cache.speculative_preparations,
+    );
     if trace.completed_interaction_frames != trace.kind.planned_interaction_frames() {
         return Some("the scripted interaction did not complete every planned frame".to_string());
     }
@@ -1987,9 +2005,12 @@ fn capture_report(
     let render_cache_end = render_cache_debug_snapshot(cx);
     let gpu_specs = window.gpu_specs();
     let trace = capture.trace.as_ref().map(render_debug_trace_report_json);
+    let binary_sha256 = std::env::var("GLYPHST_INTERACTION_BUILD_SHA256")
+        .ok()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     json!({
-        "schema_version": 16,
+        "schema_version": 17,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -2001,6 +2022,7 @@ fn capture_report(
             "version": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
+            "binary_sha256": binary_sha256,
         },
         "window": {
             "id": capture.window_id.as_u64(),
@@ -2209,24 +2231,7 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
                 "serial": frame.camera_serial,
                 "presented_serial": frame.presented_camera_serial,
             },
-            "direct_callback": {
-                "scheduled": frame.callback_scheduled,
-                "executed": frame.callback_executed,
-                "encoded": frame.callback_encoded,
-                "superseded": frame.callback_superseded,
-                "failures": frame.callback_failures,
-                "cpu_ms": milliseconds(frame.callback_cpu_time),
-                "frame_pool_wait_ms": milliseconds(frame.callback_frame_pool_wait_time),
-                "command_encoding_ms": milliseconds(frame.callback_command_encoding_time),
-                "frame_pool_grew": frame.callback_frame_pool_grew,
-                "frame_pool_capacity_bytes": frame.callback_frame_pool_capacity_bytes,
-                "render_bundle_runs": frame.callback_render_bundle_runs,
-                "stencil_draws": frame.callback_stencil_draws,
-                "retained_stroke_candidate_references": frame.callback_retained_stroke_candidate_references,
-                "retained_stroke_cull_dispatches": frame.callback_retained_stroke_cull_dispatches,
-                "retained_stroke_indirect_draws": frame.callback_retained_stroke_indirect_draws,
-                "retained_stroke_indirect_runs": frame.callback_retained_stroke_indirect_runs,
-            },
+            "direct_callback": render_debug_trace_direct_callback_json(frame),
             "pages": frame.pages.iter().map(|page| json!({
                 "page_number": page.page_number,
                 "backend": page.backend,
@@ -2241,6 +2246,32 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
                 "vector_lod_ready": page.vector_lod_ready,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+    })
+}
+
+fn render_debug_trace_direct_callback_json(frame: &RenderDebugTraceFrame) -> Value {
+    json!({
+        "scheduled": frame.callback_scheduled,
+        "executed": frame.callback_executed,
+        "encoded": frame.callback_encoded,
+        "superseded": frame.callback_superseded,
+        "failures": frame.callback_failures,
+        "cpu_ms": milliseconds(frame.callback_cpu_time),
+        "frame_pool_wait_ms": milliseconds(frame.callback_frame_pool_wait_time),
+        "command_encoding_ms": milliseconds(frame.callback_command_encoding_time),
+        "frame_pool_grew": frame.callback_frame_pool_grew,
+        "frame_pool_capacity_bytes": frame.callback_frame_pool_capacity_bytes,
+        "target_size": (!frame.callback_target_size.contains(&0)).then_some(frame.callback_target_size),
+        "passes": frame.callback_passes_executed,
+        "coverage_strategy": frame.callback_coverage_strategy.map(vector_coverage_strategy_name),
+        "transient_peak_bytes": frame.callback_transient_peak_bytes,
+        "transient_resident_bytes": frame.callback_transient_resident_bytes,
+        "render_bundle_runs": frame.callback_render_bundle_runs,
+        "stencil_draws": frame.callback_stencil_draws,
+        "retained_stroke_candidate_references": frame.callback_retained_stroke_candidate_references,
+        "retained_stroke_cull_dispatches": frame.callback_retained_stroke_cull_dispatches,
+        "retained_stroke_indirect_draws": frame.callback_retained_stroke_indirect_draws,
+        "retained_stroke_indirect_runs": frame.callback_retained_stroke_indirect_runs,
     })
 }
 
@@ -2382,6 +2413,33 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
                 cache
                     .motion_render_callback_frame_pool_capacity_bytes
                     .into(),
+            ),
+            (
+                "callback_target_size".into(),
+                json!(
+                    (!cache.motion_render_callback_target_size.contains(&0))
+                        .then_some(cache.motion_render_callback_target_size)
+                ),
+            ),
+            (
+                "callback_passes".into(),
+                cache.motion_render_callback_passes_executed.into(),
+            ),
+            (
+                "callback_coverage_strategy".into(),
+                json!(
+                    cache
+                        .motion_render_callback_coverage_strategy
+                        .map(vector_coverage_strategy_name)
+                ),
+            ),
+            (
+                "callback_transient_peak_bytes".into(),
+                cache.motion_render_callback_transient_peak_bytes.into(),
+            ),
+            (
+                "callback_transient_resident_bytes".into(),
+                cache.motion_render_callback_transient_resident_bytes.into(),
             ),
             (
                 "callback_render_bundle_runs".into(),
@@ -2753,6 +2811,13 @@ fn page_backend_name(backend: PageRenderBackendDebug) -> &'static str {
         PageRenderBackendDebug::GlyphstFailed => "glyphst-failed",
         PageRenderBackendDebug::MuPdfWhileGpuPending => "mupdf-placeholder",
         PageRenderBackendDebug::MuPdfFallback => "mupdf-fallback",
+    }
+}
+
+fn vector_coverage_strategy_name(strategy: GpuVectorCoverageStrategy) -> &'static str {
+    match strategy {
+        GpuVectorCoverageStrategy::TiledAnalytic => "TiledAnalytic",
+        GpuVectorCoverageStrategy::RetainedTriangles => "RetainedTriangles",
     }
 }
 
@@ -3818,6 +3883,12 @@ mod tests {
     }
 
     #[test]
+    fn speculative_preparations_do_not_block_trace_settling() {
+        assert_eq!(required_preparation_count(0, 5, 5), 0);
+        assert_eq!(required_preparation_count(1, 5, 5), 1);
+    }
+
+    #[test]
     fn presentation_geometry_guard_rejects_stale_zoom_bounds() {
         let page = [100.0, 50.0, 1_100.0, 850.0];
         assert!(debug_bounds_contain(page, [100.0, 50.0, 1_100.0, 850.0]));
@@ -4057,6 +4128,13 @@ mod tests {
             motion_render_detached_target_reuses: 119,
             motion_render_inline_frames: 118,
             motion_render_inline_failures: 0,
+            motion_render_callback_target_size: [1427, 1756],
+            motion_render_callback_passes_executed: 6,
+            motion_render_callback_coverage_strategy: Some(
+                GpuVectorCoverageStrategy::RetainedTriangles,
+            ),
+            motion_render_callback_transient_peak_bytes: 154_140_672,
+            motion_render_callback_transient_resident_bytes: 154_140_672,
             camera_pan_inline_frames: 42,
             camera_pan_admission_holds: 3,
             motion_render_camera_batch_commits: 117,
@@ -4151,6 +4229,23 @@ mod tests {
         assert_eq!(
             report["surfaces"]["zoom_motion"]["ui_thread_submissions"],
             118
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_target_size"],
+            json!([1427, 1756])
+        );
+        assert_eq!(report["surfaces"]["zoom_motion"]["callback_passes"], 6);
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_coverage_strategy"],
+            "RetainedTriangles"
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_transient_peak_bytes"],
+            154_140_672
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_transient_resident_bytes"],
+            154_140_672
         );
         assert_eq!(
             report["surfaces"]["zoom_motion"]["camera_batch_commits"],

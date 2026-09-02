@@ -4911,6 +4911,12 @@ impl DocumentView {
             motion_render_callback_frame_pool_grew: direct_render.last_frame_pool_grew,
             motion_render_callback_frame_pool_capacity_bytes: direct_render
                 .last_frame_pool_capacity_bytes,
+            motion_render_callback_target_size: direct_render.last_target_size,
+            motion_render_callback_passes_executed: direct_render.last_passes_executed,
+            motion_render_callback_coverage_strategy: direct_render.last_coverage_strategy,
+            motion_render_callback_transient_peak_bytes: direct_render.last_transient_peak_bytes,
+            motion_render_callback_transient_resident_bytes: direct_render
+                .last_transient_resident_bytes,
             motion_render_callback_render_bundle_runs: direct_render.last_render_bundle_runs,
             motion_render_callback_stencil_draws: direct_render.last_stencil_draws,
             motion_render_callback_retained_stroke_candidate_references: direct_render

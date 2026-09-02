@@ -59,6 +59,7 @@ use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,
 };
+pub use glyphst_pdf_gpu::GpuVectorCoverageStrategy;
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuDestinationView, GpuDirectRenderOutcome, GpuDirectRenderReceipt, GpuFallbackDiagnostic,
@@ -748,6 +749,11 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_callback_command_encoding_time: Duration,
     pub motion_render_callback_frame_pool_grew: bool,
     pub motion_render_callback_frame_pool_capacity_bytes: u64,
+    pub motion_render_callback_target_size: [u32; 2],
+    pub motion_render_callback_passes_executed: u64,
+    pub motion_render_callback_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    pub motion_render_callback_transient_peak_bytes: u64,
+    pub motion_render_callback_transient_resident_bytes: u64,
     pub motion_render_callback_render_bundle_runs: u64,
     pub motion_render_callback_stencil_draws: u64,
     pub motion_render_callback_retained_stroke_candidate_references: u64,

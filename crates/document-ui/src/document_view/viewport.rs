@@ -25,6 +25,14 @@ fn admit_animation_frame(fixed_driver: bool, fixed_frame_armed: &mut bool) -> bo
     !fixed_driver || std::mem::take(fixed_frame_armed)
 }
 
+fn keep_animation_frame_alive(
+    fixed_driver: bool,
+    zoom_pending: bool,
+    scroll_pending: bool,
+) -> bool {
+    !fixed_driver && (zoom_pending || scroll_pending)
+}
+
 fn animated_zoom_step(current: f32, target: f32, elapsed: Duration) -> f32 {
     let delta = target - current;
     if delta.abs() <= ZOOM_SNAP {
@@ -349,7 +357,13 @@ impl DocumentView {
         if changed_zoom || changed_x || changed_y {
             self.record_native_gpu_camera_step(changed_zoom);
         }
-        if (changed_zoom || changed_x || changed_y) && !self.render_debug_fixed_frame_driver {
+        // Keep the frame chain alive even when two notifications share an
+        // Instant tick and damping makes no measurable progress.
+        if keep_animation_frame_alive(
+            self.render_debug_fixed_frame_driver,
+            zoom_pending,
+            scroll_pending,
+        ) {
             window.request_animation_frame();
         }
     }
@@ -435,5 +449,13 @@ mod tests {
         assert!(admit_animation_frame(true, &mut armed));
         assert!(!admit_animation_frame(true, &mut armed));
         assert!(admit_animation_frame(false, &mut armed));
+    }
+
+    #[test]
+    fn pending_animation_rearms_without_camera_progress() {
+        assert!(keep_animation_frame_alive(false, false, true));
+        assert!(keep_animation_frame_alive(false, true, false));
+        assert!(!keep_animation_frame_alive(false, false, false));
+        assert!(!keep_animation_frame_alive(true, true, true));
     }
 }
