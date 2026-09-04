@@ -4914,6 +4914,7 @@ impl DocumentView {
             motion_render_callback_target_size: direct_render.last_target_size,
             motion_render_callback_passes_executed: direct_render.last_passes_executed,
             motion_render_callback_coverage_strategy: direct_render.last_coverage_strategy,
+            motion_render_callback_presentation_quality: direct_render.last_presentation_quality,
             motion_render_callback_transient_peak_bytes: direct_render.last_transient_peak_bytes,
             motion_render_callback_transient_resident_bytes: direct_render
                 .last_transient_resident_bytes,
@@ -4927,6 +4928,16 @@ impl DocumentView {
                 .last_retained_stroke_indirect_draws,
             motion_render_callback_retained_stroke_indirect_runs: direct_render
                 .last_retained_stroke_indirect_runs,
+            motion_render_callback_selected_stroke_lod: direct_render.last_selected_stroke_lod,
+            motion_render_callback_active_stroke_lod_levels: direct_render
+                .last_active_stroke_lod_levels,
+            motion_render_callback_selected_stroke_segments: direct_render
+                .last_selected_stroke_segments,
+            motion_render_callback_target_visible_stroke_segments: direct_render
+                .last_target_visible_stroke_segments,
+            motion_render_callback_visible_stroke_tiles: direct_render.last_visible_stroke_tiles,
+            motion_render_callback_max_visible_stroke_tile_segments: direct_render
+                .last_max_visible_stroke_tile_segments,
             camera_pan_inline_frames: self.gpu_pdf.camera_pan_inline_frames,
             camera_pan_admission_holds: self.gpu_pdf.camera_pan_admission_holds,
             motion_render_camera_serial: self.gpu_pdf.motion_camera_serial,

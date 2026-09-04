@@ -59,7 +59,6 @@ use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,
 };
-pub use glyphst_pdf_gpu::GpuVectorCoverageStrategy;
 use glyphst_pdf_gpu::{
     CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
     GpuDestinationView, GpuDirectRenderOutcome, GpuDirectRenderReceipt, GpuFallbackDiagnostic,
@@ -69,6 +68,7 @@ use glyphst_pdf_gpu::{
     GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
     GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
+pub use glyphst_pdf_gpu::{GpuPresentationQuality, GpuVectorCoverageStrategy};
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
     source_text_regions,
@@ -752,6 +752,7 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_callback_target_size: [u32; 2],
     pub motion_render_callback_passes_executed: u64,
     pub motion_render_callback_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    pub motion_render_callback_presentation_quality: Option<GpuPresentationQuality>,
     pub motion_render_callback_transient_peak_bytes: u64,
     pub motion_render_callback_transient_resident_bytes: u64,
     pub motion_render_callback_render_bundle_runs: u64,
@@ -760,6 +761,12 @@ pub struct GpuCacheDebugSnapshot {
     pub motion_render_callback_retained_stroke_cull_dispatches: u64,
     pub motion_render_callback_retained_stroke_indirect_draws: u64,
     pub motion_render_callback_retained_stroke_indirect_runs: u64,
+    pub motion_render_callback_selected_stroke_lod: u32,
+    pub motion_render_callback_active_stroke_lod_levels: u64,
+    pub motion_render_callback_selected_stroke_segments: u64,
+    pub motion_render_callback_target_visible_stroke_segments: u64,
+    pub motion_render_callback_visible_stroke_tiles: u64,
+    pub motion_render_callback_max_visible_stroke_tile_segments: u64,
     pub camera_pan_inline_frames: u64,
     pub camera_pan_admission_holds: u64,
     pub motion_render_camera_serial: u64,

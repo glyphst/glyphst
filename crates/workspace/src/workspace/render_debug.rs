@@ -1,8 +1,8 @@
 use glyphst_document_ui::document_view::{
-    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, GpuVectorCoverageStrategy,
-    PageRenderBackendDebug, PageRenderDebugSnapshot, PageRenderDebugStatus,
-    RenderCacheDebugSnapshot, SynchronizedScrollDelta, SynchronizedScrollMode, TextIndexDebugState,
-    render_cache_debug_snapshot,
+    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, GpuPresentationQuality,
+    GpuVectorCoverageStrategy, PageRenderBackendDebug, PageRenderDebugSnapshot,
+    PageRenderDebugStatus, RenderCacheDebugSnapshot, SynchronizedScrollDelta,
+    SynchronizedScrollMode, TextIndexDebugState, render_cache_debug_snapshot,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FrameEvent, FrameTiming, FrameTimingCollector, Hsla,
@@ -46,7 +46,7 @@ const TRACE_SETTLING_TIMEOUT: Duration = Duration::from_secs(15);
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
 const TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES: usize = 30;
-const TRACE_REPORT_VERSION: u32 = 13;
+const TRACE_REPORT_VERSION: u32 = 14;
 
 struct RenderDebugCaptureNotification;
 
@@ -176,6 +176,7 @@ struct RenderDebugTraceFrame {
     callback_target_size: [u32; 2],
     callback_passes_executed: u64,
     callback_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    callback_presentation_quality: Option<GpuPresentationQuality>,
     callback_transient_peak_bytes: u64,
     callback_transient_resident_bytes: u64,
     callback_render_bundle_runs: u64,
@@ -184,6 +185,12 @@ struct RenderDebugTraceFrame {
     callback_retained_stroke_cull_dispatches: u64,
     callback_retained_stroke_indirect_draws: u64,
     callback_retained_stroke_indirect_runs: u64,
+    callback_selected_stroke_lod: u32,
+    callback_active_stroke_lod_levels: u64,
+    callback_selected_stroke_segments: u64,
+    callback_target_visible_stroke_segments: u64,
+    callback_visible_stroke_tiles: u64,
+    callback_max_visible_stroke_tile_segments: u64,
     pages: Vec<RenderDebugTracePageFrame>,
 }
 
@@ -1118,6 +1125,7 @@ fn capture_render_debug_trace_frame(
         callback_target_size: gpu.motion_render_callback_target_size,
         callback_passes_executed: gpu.motion_render_callback_passes_executed,
         callback_coverage_strategy: gpu.motion_render_callback_coverage_strategy,
+        callback_presentation_quality: gpu.motion_render_callback_presentation_quality,
         callback_transient_peak_bytes: gpu.motion_render_callback_transient_peak_bytes,
         callback_transient_resident_bytes: gpu.motion_render_callback_transient_resident_bytes,
         callback_render_bundle_runs: gpu.motion_render_callback_render_bundle_runs,
@@ -1130,6 +1138,14 @@ fn capture_render_debug_trace_frame(
             .motion_render_callback_retained_stroke_indirect_draws,
         callback_retained_stroke_indirect_runs: gpu
             .motion_render_callback_retained_stroke_indirect_runs,
+        callback_selected_stroke_lod: gpu.motion_render_callback_selected_stroke_lod,
+        callback_active_stroke_lod_levels: gpu.motion_render_callback_active_stroke_lod_levels,
+        callback_selected_stroke_segments: gpu.motion_render_callback_selected_stroke_segments,
+        callback_target_visible_stroke_segments: gpu
+            .motion_render_callback_target_visible_stroke_segments,
+        callback_visible_stroke_tiles: gpu.motion_render_callback_visible_stroke_tiles,
+        callback_max_visible_stroke_tile_segments: gpu
+            .motion_render_callback_max_visible_stroke_tile_segments,
         pages: snapshot
             .pages
             .iter()
@@ -2010,7 +2026,7 @@ fn capture_report(
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     json!({
-        "schema_version": 17,
+        "schema_version": 18,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -2264,6 +2280,7 @@ fn render_debug_trace_direct_callback_json(frame: &RenderDebugTraceFrame) -> Val
         "target_size": (!frame.callback_target_size.contains(&0)).then_some(frame.callback_target_size),
         "passes": frame.callback_passes_executed,
         "coverage_strategy": frame.callback_coverage_strategy.map(vector_coverage_strategy_name),
+        "presentation_quality": frame.callback_presentation_quality.map(presentation_quality_name),
         "transient_peak_bytes": frame.callback_transient_peak_bytes,
         "transient_resident_bytes": frame.callback_transient_resident_bytes,
         "render_bundle_runs": frame.callback_render_bundle_runs,
@@ -2272,6 +2289,12 @@ fn render_debug_trace_direct_callback_json(frame: &RenderDebugTraceFrame) -> Val
         "retained_stroke_cull_dispatches": frame.callback_retained_stroke_cull_dispatches,
         "retained_stroke_indirect_draws": frame.callback_retained_stroke_indirect_draws,
         "retained_stroke_indirect_runs": frame.callback_retained_stroke_indirect_runs,
+        "selected_stroke_lod": frame.callback_selected_stroke_lod,
+        "active_stroke_lod_levels": frame.callback_active_stroke_lod_levels,
+        "selected_stroke_segments": frame.callback_selected_stroke_segments,
+        "target_visible_stroke_segments": frame.callback_target_visible_stroke_segments,
+        "visible_stroke_tiles": frame.callback_visible_stroke_tiles,
+        "max_visible_stroke_tile_segments": frame.callback_max_visible_stroke_tile_segments,
     })
 }
 
@@ -2434,6 +2457,14 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
                 ),
             ),
             (
+                "callback_presentation_quality".into(),
+                json!(
+                    cache
+                        .motion_render_callback_presentation_quality
+                        .map(presentation_quality_name)
+                ),
+            ),
+            (
                 "callback_transient_peak_bytes".into(),
                 cache.motion_render_callback_transient_peak_bytes.into(),
             ),
@@ -2471,6 +2502,34 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
                 "callback_retained_stroke_indirect_runs".into(),
                 cache
                     .motion_render_callback_retained_stroke_indirect_runs
+                    .into(),
+            ),
+            (
+                "callback_selected_stroke_lod".into(),
+                cache.motion_render_callback_selected_stroke_lod.into(),
+            ),
+            (
+                "callback_active_stroke_lod_levels".into(),
+                cache.motion_render_callback_active_stroke_lod_levels.into(),
+            ),
+            (
+                "callback_selected_stroke_segments".into(),
+                cache.motion_render_callback_selected_stroke_segments.into(),
+            ),
+            (
+                "callback_target_visible_stroke_segments".into(),
+                cache
+                    .motion_render_callback_target_visible_stroke_segments
+                    .into(),
+            ),
+            (
+                "callback_visible_stroke_tiles".into(),
+                cache.motion_render_callback_visible_stroke_tiles.into(),
+            ),
+            (
+                "callback_max_visible_stroke_tile_segments".into(),
+                cache
+                    .motion_render_callback_max_visible_stroke_tile_segments
                     .into(),
             ),
         ]);
@@ -2818,6 +2877,15 @@ fn vector_coverage_strategy_name(strategy: GpuVectorCoverageStrategy) -> &'stati
     match strategy {
         GpuVectorCoverageStrategy::TiledAnalytic => "TiledAnalytic",
         GpuVectorCoverageStrategy::RetainedTriangles => "RetainedTriangles",
+    }
+}
+
+fn presentation_quality_name(quality: GpuPresentationQuality) -> &'static str {
+    match quality {
+        GpuPresentationQuality::Exact => "Exact",
+        GpuPresentationQuality::ErrorBounded => "ErrorBounded",
+        GpuPresentationQuality::CoherentPreview => "CoherentPreview",
+        GpuPresentationQuality::Incomplete => "Incomplete",
     }
 }
 
@@ -4133,8 +4201,15 @@ mod tests {
             motion_render_callback_coverage_strategy: Some(
                 GpuVectorCoverageStrategy::RetainedTriangles,
             ),
+            motion_render_callback_presentation_quality: Some(GpuPresentationQuality::ErrorBounded),
             motion_render_callback_transient_peak_bytes: 154_140_672,
             motion_render_callback_transient_resident_bytes: 154_140_672,
+            motion_render_callback_selected_stroke_lod: 2,
+            motion_render_callback_active_stroke_lod_levels: 4,
+            motion_render_callback_selected_stroke_segments: 48_000,
+            motion_render_callback_target_visible_stroke_segments: 50_000,
+            motion_render_callback_visible_stroke_tiles: 21,
+            motion_render_callback_max_visible_stroke_tile_segments: 712,
             camera_pan_inline_frames: 42,
             camera_pan_admission_holds: 3,
             motion_render_camera_batch_commits: 117,
@@ -4240,12 +4315,28 @@ mod tests {
             "RetainedTriangles"
         );
         assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_presentation_quality"],
+            "ErrorBounded"
+        );
+        assert_eq!(
             report["surfaces"]["zoom_motion"]["callback_transient_peak_bytes"],
             154_140_672
         );
         assert_eq!(
             report["surfaces"]["zoom_motion"]["callback_transient_resident_bytes"],
             154_140_672
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_selected_stroke_lod"],
+            2
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_selected_stroke_segments"],
+            48_000
+        );
+        assert_eq!(
+            report["surfaces"]["zoom_motion"]["callback_visible_stroke_tiles"],
+            21
         );
         assert_eq!(
             report["surfaces"]["zoom_motion"]["camera_batch_commits"],

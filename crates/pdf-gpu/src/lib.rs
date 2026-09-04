@@ -1495,6 +1495,7 @@ pub struct GpuDirectRenderStats {
     pub last_target_size: [u32; 2],
     pub last_passes_executed: u64,
     pub last_coverage_strategy: Option<GpuVectorCoverageStrategy>,
+    pub last_presentation_quality: Option<GpuPresentationQuality>,
     pub last_transient_peak_bytes: u64,
     pub last_transient_resident_bytes: u64,
     pub last_render_bundle_runs: u64,
@@ -1503,6 +1504,12 @@ pub struct GpuDirectRenderStats {
     pub last_retained_stroke_cull_dispatches: u64,
     pub last_retained_stroke_indirect_draws: u64,
     pub last_retained_stroke_indirect_runs: u64,
+    pub last_selected_stroke_lod: u32,
+    pub last_active_stroke_lod_levels: u64,
+    pub last_selected_stroke_segments: u64,
+    pub last_target_visible_stroke_segments: u64,
+    pub last_visible_stroke_tiles: u64,
+    pub last_max_visible_stroke_tile_segments: u64,
 }
 
 /// Final disposition of one painter-ordered direct PDF draw.
@@ -1635,6 +1642,7 @@ impl DirectRenderTelemetry {
             last_target_size: target_size,
             last_passes_executed: stats.passes_executed,
             last_coverage_strategy: latest.map(|(_, stats)| stats.coverage_strategy),
+            last_presentation_quality: latest.map(|(_, stats)| stats.presentation_quality),
             last_transient_peak_bytes: stats.transient_peak_bytes,
             last_transient_resident_bytes: stats.transient_resident_bytes,
             last_render_bundle_runs: stats.render_bundle_runs,
@@ -1643,6 +1651,12 @@ impl DirectRenderTelemetry {
             last_retained_stroke_cull_dispatches: stats.retained_stroke_cull_dispatches,
             last_retained_stroke_indirect_draws: stats.retained_stroke_indirect_draws,
             last_retained_stroke_indirect_runs: stats.retained_stroke_indirect_runs,
+            last_selected_stroke_lod: stats.selected_stroke_lod,
+            last_active_stroke_lod_levels: stats.active_stroke_lod_levels,
+            last_selected_stroke_segments: stats.selected_stroke_segments,
+            last_target_visible_stroke_segments: stats.target_visible_stroke_segments,
+            last_visible_stroke_tiles: stats.visible_stroke_tiles,
+            last_max_visible_stroke_tile_segments: stats.max_visible_stroke_tile_segments,
         }
     }
 }
@@ -3374,6 +3388,7 @@ mod tests {
                 GpuRenderStats {
                     cpu_time: Duration::from_millis(3),
                     command_encoding_time: Duration::from_millis(2),
+                    presentation_quality: GpuPresentationQuality::Exact,
                     passes_executed: 6,
                     frame_pool_capacity_bytes: 4096,
                     transient_peak_bytes: 3072,
@@ -3384,6 +3399,12 @@ mod tests {
                     retained_stroke_cull_dispatches: 2,
                     retained_stroke_indirect_draws: 3,
                     retained_stroke_indirect_runs: 1,
+                    selected_stroke_lod: 2,
+                    active_stroke_lod_levels: 4,
+                    selected_stroke_segments: 37,
+                    target_visible_stroke_segments: 50_000,
+                    visible_stroke_tiles: 9,
+                    max_visible_stroke_tile_segments: 7,
                     ..GpuRenderStats::default()
                 },
             )),
@@ -3406,6 +3427,7 @@ mod tests {
                 last_target_size: [1920, 1080],
                 last_passes_executed: 6,
                 last_coverage_strategy: Some(GpuVectorCoverageStrategy::RetainedTriangles),
+                last_presentation_quality: Some(GpuPresentationQuality::Exact),
                 last_transient_peak_bytes: 3072,
                 last_transient_resident_bytes: 4096,
                 last_render_bundle_runs: 5,
@@ -3414,6 +3436,12 @@ mod tests {
                 last_retained_stroke_cull_dispatches: 2,
                 last_retained_stroke_indirect_draws: 3,
                 last_retained_stroke_indirect_runs: 1,
+                last_selected_stroke_lod: 2,
+                last_active_stroke_lod_levels: 4,
+                last_selected_stroke_segments: 37,
+                last_target_visible_stroke_segments: 50_000,
+                last_visible_stroke_tiles: 9,
+                last_max_visible_stroke_tile_segments: 7,
                 ..GpuDirectRenderStats::default()
             }
         );

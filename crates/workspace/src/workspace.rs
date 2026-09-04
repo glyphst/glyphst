@@ -5291,7 +5291,7 @@ mod tests {
             .and_then(|clipboard| clipboard.text())
             .expect("rendering capture JSON on clipboard");
         let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-        assert_eq!(report["schema_version"], 17);
+        assert_eq!(report["schema_version"], 18);
         assert_eq!(report["kind"], "glyphst-reader-interaction");
         assert!(report["application"]["binary_sha256"].is_null());
         assert!(report["trace"].is_null());
@@ -5411,8 +5411,8 @@ mod tests {
             .and_then(|clipboard| clipboard.text())
             .expect("scripted rendering trace JSON on clipboard");
         let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-        assert_eq!(report["schema_version"], 17);
-        assert_eq!(report["trace"]["version"], 13);
+        assert_eq!(report["schema_version"], 18);
+        assert_eq!(report["trace"]["version"], 14);
         assert_eq!(report["trace"]["kind"], "zoom");
         assert_eq!(report["trace"]["completed_interaction_frames"], 0);
         assert_eq!(report["trace"]["completed_settling_frames"], 0);
