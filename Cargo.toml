@@ -41,9 +41,9 @@ gpui = { git = "https://github.com/glyphst/zed", rev = "19da5cb79f5698ed02da0787
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "e2722bf433c75ca3d6efb75036a4dcb2f2daf611", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "e2722bf433c75ca3d6efb75036a4dcb2f2daf611", package = "gpui-kit-assets" }
-gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "e2722bf433c75ca3d6efb75036a4dcb2f2daf611", package = "gpui-fps" }
+gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "a8c5ce01781bf1b5152e7369e384f847ab4182e1", package = "gpui-component" }
+gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "a8c5ce01781bf1b5152e7369e384f847ab4182e1", package = "gpui-kit-assets" }
+gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "a8c5ce01781bf1b5152e7369e384f847ab4182e1", package = "gpui-fps" }
 gpui_platform = { git = "https://github.com/glyphst/zed", rev = "19da5cb79f5698ed02da0787f7f968386e349553", package = "gpui_platform", default-features = false, features = [
     "font-kit",
     "wayland",
