@@ -45,7 +45,7 @@
 	shallow = true
 [submodule "references/yazi"]
 	path = references/yazi
-	url = git@github.com:sxyazi/yazi.git
+	url = https://github.com/sxyazi/yazi.git
 	branch = main
 	shallow = true
 [submodule "dependencies/gpui-component"]
