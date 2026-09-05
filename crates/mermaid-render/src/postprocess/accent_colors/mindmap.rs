@@ -22,7 +22,7 @@ impl MindmapAccents {
 
     pub(super) fn process_event<'a>(&mut self, event: Event<'a>) -> Result<Event<'a>> {
         match &event {
-            Event::Start(e) if e.name().as_ref() == b"g" => {
+            Event::Start(e) if e.name().as_ref() == "g" => {
                 if super::is_foreign_object_fallback_group(e)? {
                     self.section_g_stack.push(AccentStackEntry::none());
                     return Ok(event);
@@ -44,7 +44,7 @@ impl MindmapAccents {
                 Ok(event)
             }
 
-            Event::End(e) if e.name().as_ref() == b"g" => {
+            Event::End(e) if e.name().as_ref() == "g" => {
                 if let Some(entry) = self.section_g_stack.pop()
                     && entry.tracks_node()
                 {
@@ -56,27 +56,27 @@ impl MindmapAccents {
             Event::Start(e) | Event::Empty(e)
                 if matches!(
                     e.name().as_ref(),
-                    b"path" | b"rect" | b"circle" | b"polygon" | b"ellipse"
+                    "path" | "rect" | "circle" | "polygon" | "ellipse"
                 ) =>
             {
-                if e.name().as_ref() == b"path" {
+                if e.name().as_ref() == "path" {
                     self.nodes.update_half_height(e);
                 }
                 Ok(event)
             }
 
             Event::Start(e) | Event::Empty(e)
-                if e.name().as_ref() == b"text" || e.name().as_ref() == b"tspan" =>
+                if e.name().as_ref() == "text" || e.name().as_ref() == "tspan" =>
             {
                 let section_idx = self.current_section_accent().or_else(|| {
-                    if e.name().as_ref() == b"text" {
+                    if e.name().as_ref() == "text" {
                         self.nodes.lookup_accent(e)
                     } else {
                         None
                     }
                 });
 
-                if e.name().as_ref() == b"text" {
+                if e.name().as_ref() == "text" {
                     self.current_text_section = section_idx;
                 }
 
@@ -91,7 +91,7 @@ impl MindmapAccents {
                 Ok(event)
             }
 
-            Event::End(e) if e.name().as_ref() == b"text" => {
+            Event::End(e) if e.name().as_ref() == "text" => {
                 self.current_text_section = None;
                 Ok(event)
             }
@@ -105,7 +105,7 @@ impl MindmapAccents {
             Some(attr) => attr,
             None => return Ok(None),
         };
-        let class = class_attr.unescape_value()?;
+        let class = class_attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
         let is_root = class.split_whitespace().any(|t| t == "section-root");
 
         for token in class.split_whitespace() {

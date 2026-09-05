@@ -293,7 +293,6 @@ impl Workspace {
                 FpsMonitor::new(window, cx)
                     .capacity(240)
                     .frame_budget(FRAME_BUDGET)
-                    .continuous(false)
                     .width(px(620.))
                     .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));

@@ -11,7 +11,7 @@ struct GlyphstAssets;
 /// The application asset source.
 ///
 /// Glyphst-specific assets take precedence, while the curated
-/// `gpui-component-assets` bundle supplies the component icon set.
+/// `gpui-kit-assets` bundle supplies the component icon set.
 pub struct Assets {
     component: ComponentAssets,
 }
@@ -73,7 +73,7 @@ mod tests {
 
         assert!(
             duplicates.is_empty(),
-            "Glyphst must not embed icons already supplied by gpui-component-assets: {duplicates:?}"
+            "Glyphst must not embed icons already supplied by gpui-kit-assets: {duplicates:?}"
         );
     }
 
@@ -85,7 +85,7 @@ mod tests {
 
         assert!(
             component_icons.len() <= 128,
-            "gpui-component-assets grew to {} icons; review the binary-size impact before updating",
+            "gpui-kit-assets grew to {} icons; review the binary-size impact before updating",
             component_icons.len()
         );
     }

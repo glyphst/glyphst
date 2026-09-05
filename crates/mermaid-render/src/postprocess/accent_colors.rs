@@ -59,7 +59,9 @@ impl NodeTracker {
 
 pub(crate) fn parse_translate(e: &BytesStart<'_>) -> Option<(f64, f64)> {
     let attr = e.try_get_attribute("transform").ok()??;
-    let val = attr.unescape_value().ok()?;
+    let val = attr
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+        .ok()?;
     let inner = val.strip_prefix("translate(")?.strip_suffix(')')?;
     let (x_str, y_str) = inner.split_once(',')?;
     Some((x_str.trim().parse().ok()?, y_str.trim().parse().ok()?))
@@ -67,7 +69,9 @@ pub(crate) fn parse_translate(e: &BytesStart<'_>) -> Option<(f64, f64)> {
 
 pub(crate) fn parse_path_half_height(e: &BytesStart<'_>) -> Option<f64> {
     let attr = e.try_get_attribute("d").ok()??;
-    let d = attr.unescape_value().ok()?;
+    let d = attr
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+        .ok()?;
     let rest = d.strip_prefix('M')?.trim_start();
     // The path data starts with `M x,y ...`; the y coordinate is the second
     // whitespace/comma-separated token.
@@ -123,13 +127,13 @@ pub(crate) fn add_to_event<'a>(ev: &Event<'_>, e: &BytesStart<'_>, cl: &str) -> 
 /// Adds a CSS class to an element, preserving any existing classes.
 pub(crate) fn add_class<'a>(e: &BytesStart<'_>, class_to_add: &str) -> Result<BytesStart<'a>> {
     let name = e.name();
-    let tag = std::str::from_utf8(name.as_ref())?;
+    let tag = name.as_ref();
     let mut new_elem = BytesStart::new(tag.to_owned());
     let mut class_found = false;
     for attr in e.attributes() {
         let attr = attr?;
-        if attr.key.local_name().as_ref() == b"class" {
-            let existing = attr.unescape_value()?;
+        if attr.key.local_name().as_ref() == "class" {
+            let existing = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
             let new_class = format!("{existing} {class_to_add}");
             new_elem.push_attribute(("class", new_class.as_str()));
             class_found = true;
@@ -184,14 +188,14 @@ pub(crate) fn current_stack_accent(stack: &[AccentStackEntry]) -> Option<usize> 
 // layout nodes though, so accent tracking must not count them as new nodes.
 pub(crate) fn is_foreign_object_fallback_group(e: &BytesStart<'_>) -> Result<bool> {
     Ok(e.try_get_attribute("data-merman-foreignobject")?
-        .is_some_and(|attr| attr.value.as_ref() == b"fallback"))
+        .is_some_and(|attr| attr.value.as_ref() == "fallback"))
 }
 
 pub(crate) fn lookup_position_accent(node_rects: &[NodeRect], e: &BytesStart<'_>) -> Option<usize> {
     let parse_attr = |name| -> Option<f64> {
         e.try_get_attribute(name)
             .ok()??
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .ok()?
             .parse()
             .ok()
@@ -221,7 +225,7 @@ fn detect_diagram_type(e: &BytesStart<'_>) -> DiagramType {
         .try_get_attribute("class")
         .ok()
         .flatten()
-        .and_then(|a| a.unescape_value().ok())
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
     {
         Some(c) => c,
         None => return DiagramType::SequenceDiagram,
@@ -270,7 +274,7 @@ struct AccentColors<'theme, I> {
 impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> {
     fn process_chart_colors(&mut self, event: Event<'a>) -> Result<Event<'a>> {
         match &event {
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"g" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "g" => {
                 let is_start = matches!(event, Event::Start(_));
                 // Only a real opening tag increases nesting depth. Self-closing `<g/>`
                 // elements have no matching `</g>`, so counting them would leave
@@ -279,7 +283,7 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                     self.plot_depth += 1;
                 }
                 if let Some(class_attr) = e.try_get_attribute("class")? {
-                    let class = class_attr.unescape_value()?;
+                    let class = class_attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
                     if class.as_ref() == "plot" {
                         if is_start && !self.in_plot {
                             self.in_plot = true;
@@ -300,7 +304,7 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                 Ok(event)
             }
 
-            Event::End(e) if e.name().as_ref() == b"g" => {
+            Event::End(e) if e.name().as_ref() == "g" => {
                 if self.in_plot {
                     self.plot_depth = self.plot_depth.saturating_sub(1);
                     if self.plot_depth == 0 {
@@ -310,7 +314,7 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                 Ok(event)
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"rect" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "rect" => {
                 if self.in_legend && self.legend_color_idx < 8 {
                     let class = chart_color_class_name(self.legend_color_idx);
                     self.legend_color_idx += 1;
@@ -323,10 +327,10 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> AccentColors<'theme, I> 
                 }
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"path" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "path" => {
                 let class_val = e
                     .try_get_attribute("class")?
-                    .map(|a| a.unescape_value())
+                    .map(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0))
                     .transpose()?;
 
                 if class_val.as_deref() == Some("pieCircle") {
@@ -360,7 +364,7 @@ impl<'a, 'theme, I: Iterator<Item = Result<Event<'a>>>> Iterator for AccentColor
 
         if matches!(self.handler, Handler::Pending)
             && let Event::Start(e) | Event::Empty(e) = &event
-            && e.name().as_ref() == b"svg"
+            && e.name().as_ref() == "svg"
         {
             let diagram_type = detect_diagram_type(e);
             let count = self.theme.accent_colors.len();

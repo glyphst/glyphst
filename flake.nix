@@ -2,11 +2,6 @@
   description = "A GPUI-based PDF and EPUB reader";
 
   inputs = {
-    gpuiComponent = {
-      url = "git+ssh://gitea@10.126.126.2/glyphst/gpui-component.git?ref=glyphst/main";
-      flake = false;
-    };
-
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     rust-overlay = {
@@ -17,7 +12,6 @@
 
   outputs =
     {
-      gpuiComponent,
       nixpkgs,
       rust-overlay,
       ...
@@ -49,7 +43,7 @@
             rustc = rustToolchain;
           };
           glyphstReader = pkgs.callPackage ./nix/package.nix {
-            inherit gpuiComponent rustPlatform;
+            inherit rustPlatform;
           };
         in
         {

@@ -1,7 +1,9 @@
 [advisories]
 ignore = [
-  # quick-xml is pulled transitively by GPUI through xcb 1.7.0 and wayland-scanner 0.31.10.
-  # Both crates currently constrain quick-xml below the fixed 0.41.0 release.
+  # Reviewed 2026-09-05: quick-xml 0.38.4 remains through citationberg 0.7.0 ->
+  # hayagriva 0.10.1 -> typst-library 0.15.1. GPUI and direct Mermaid paths are fixed.
+  # This is runtime CSL parsing, not a build-only dependency. Keep the exception
+  # explicit until the pinned Typst chain can use quick-xml >=0.41; see ARCHITECTURE.md.
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
 ]

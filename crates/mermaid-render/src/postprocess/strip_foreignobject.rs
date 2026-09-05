@@ -44,16 +44,14 @@ fn collect_native_text_contents(svg: &str) -> HashSet<String> {
     let mut current = String::new();
     for event in ReaderIter::new(reader) {
         match event {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"text" => {
+            Ok(Event::Start(e)) if e.name().as_ref() == "text" => {
                 in_native_text = !is_fallback_text(&e);
                 current.clear();
             }
             Ok(Event::Text(t)) if in_native_text => {
-                if let Ok(decoded) = t.decode() {
-                    current.push_str(&decoded);
-                }
+                current.push_str(t.as_ref());
             }
-            Ok(Event::End(e)) if e.name().as_ref() == b"text" => {
+            Ok(Event::End(e)) if e.name().as_ref() == "text" => {
                 if in_native_text {
                     let trimmed = current.trim();
                     if !trimmed.is_empty() {
@@ -72,7 +70,7 @@ fn is_fallback_text(e: &quick_xml::events::BytesStart<'_>) -> bool {
     e.try_get_attribute("class")
         .ok()
         .flatten()
-        .and_then(|a| a.unescape_value().ok())
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
         .is_some_and(|v| v.split_whitespace().any(|c| c == FALLBACK_TEXT_CLASS))
 }
 
@@ -109,7 +107,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for StripForeignObject<
             // Strip foreignObject elements and their contents (defensive: merman
             // already removes them, but a stray one cannot be rasterized).
             match &event {
-                Event::Start(e) if e.name().as_ref() == b"foreignObject" => {
+                Event::Start(e) if e.name().as_ref() == "foreignObject" => {
                     self.foreign_depth += 1;
                     continue;
                 }
@@ -121,7 +119,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for StripForeignObject<
                     self.foreign_depth -= 1;
                     continue;
                 }
-                Event::Empty(e) if e.name().as_ref() == b"foreignObject" => {
+                Event::Empty(e) if e.name().as_ref() == "foreignObject" => {
                     continue;
                 }
                 _ if self.foreign_depth > 0 => {
@@ -138,7 +136,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for StripForeignObject<
             // Start buffering a fallback group so we can decide whether it is a
             // duplicate of a native label once we have seen its text.
             if let Event::Start(e) = &event
-                && e.name().as_ref() == b"g"
+                && e.name().as_ref() == "g"
                 && is_fallback_group(e)
             {
                 self.fallback_depth = 1;
@@ -158,9 +156,7 @@ impl<'a, I> StripForeignObject<'a, I> {
             Event::Start(_) => self.fallback_depth += 1,
             Event::End(_) => self.fallback_depth = self.fallback_depth.saturating_sub(1),
             Event::Text(t) => {
-                if let Ok(decoded) = t.decode() {
-                    self.buffered_text.push_str(&decoded);
-                }
+                self.buffered_text.push_str(t.as_ref());
             }
             _ => {}
         }
@@ -182,7 +178,7 @@ fn is_fallback_group(e: &quick_xml::events::BytesStart<'_>) -> bool {
     e.try_get_attribute("data-merman-foreignobject")
         .ok()
         .flatten()
-        .is_some_and(|attr| attr.value.as_ref() == b"fallback")
+        .is_some_and(|attr| attr.value.as_ref() == "fallback")
 }
 
 pub(super) fn process<'a>(

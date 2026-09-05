@@ -57,11 +57,11 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for InjectCss<'a, I> {
         };
 
         match &event {
-            Event::Start(e) if e.name().as_ref() == b"style" => {
+            Event::Start(e) if e.name().as_ref() == "style" => {
                 self.in_style = true;
                 return Some(Ok(event));
             }
-            Event::End(e) if e.name().as_ref() == b"style" => {
+            Event::End(e) if e.name().as_ref() == "style" => {
                 self.in_style = false;
                 if !self.injected {
                     self.injected = true;
@@ -76,10 +76,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> Iterator for InjectCss<'a, I> {
             }
             Event::Text(text) if self.in_style => {
                 self.injected = true;
-                let existing = match std::str::from_utf8(text.as_ref()) {
-                    Ok(s) => s,
-                    Err(e) => return Some(Err(e.into())),
-                };
+                let existing = text.as_ref();
                 let mut combined = String::with_capacity(existing.len() + self.injected_css.len());
                 combined.push_str(existing);
                 combined.push_str(&self.injected_css);

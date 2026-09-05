@@ -48,10 +48,6 @@
 	url = https://github.com/sxyazi/yazi.git
 	branch = main
 	shallow = true
-[submodule "dependencies/gpui-component"]
-	path = dependencies/gpui-component
-	url = ../gpui-component.git
-	branch = glyphst/main
 [submodule "references/comet"]
 	path = references/comet
 	url = https://github.com/zeronsh/comet.git

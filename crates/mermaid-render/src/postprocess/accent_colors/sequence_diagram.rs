@@ -28,7 +28,7 @@ impl SequenceDiagramAccents {
         }
 
         match &event {
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"rect" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "rect" => {
                 if let Some(idx) = self.check_actor_rect(e)? {
                     add_to_event(&event, e, accent_class_name(idx))
                 } else {
@@ -36,7 +36,7 @@ impl SequenceDiagramAccents {
                 }
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"text" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "text" => {
                 if let Some(idx) = self.check_actor_text(e)? {
                     self.current_text_accent = Some(idx);
                     add_to_event(&event, e, accent_class_name(idx))
@@ -45,7 +45,7 @@ impl SequenceDiagramAccents {
                 }
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"tspan" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "tspan" => {
                 if let Some(idx) = self.current_text_accent {
                     add_to_event(&event, e, accent_class_name(idx))
                 } else {
@@ -53,7 +53,7 @@ impl SequenceDiagramAccents {
                 }
             }
 
-            Event::End(e) if e.name().as_ref() == b"text" => {
+            Event::End(e) if e.name().as_ref() == "text" => {
                 self.current_text_accent = None;
                 Ok(event)
             }
@@ -67,7 +67,7 @@ impl SequenceDiagramAccents {
             Some(a) => a,
             None => return Ok(None),
         };
-        let class_val = class_attr.unescape_value()?;
+        let class_val = class_attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
         if class_val.contains("actor-bottom") {
             let idx = self.actor_bottom_counter % self.accent_count;
             self.actor_bottom_counter += 1;
@@ -88,7 +88,7 @@ impl SequenceDiagramAccents {
             Some(a) => a,
             None => return Ok(None),
         };
-        let class_val = class_attr.unescape_value()?;
+        let class_val = class_attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
         if class_val.contains("actor") && class_val.contains("actor-box") {
             Ok(self.last_actor_accent.take())
         } else {

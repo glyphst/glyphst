@@ -37,17 +37,17 @@ struct ElementFixup<I> {
 
 fn rewrite_attr<'a>(
     e: &BytesStart<'_>,
-    attr_name: &[u8],
+    attr_name: &str,
     new_value: &str,
 ) -> Result<BytesStart<'a>> {
     let name = e.name();
-    let tag = std::str::from_utf8(name.as_ref())?;
+    let tag = name.as_ref();
     let mut new_elem = BytesStart::new(tag.to_owned());
     for attr in e.attributes() {
         let attr = attr?;
         if attr.key.local_name().as_ref() == attr_name {
             let local_name = attr.key.local_name();
-            let key = std::str::from_utf8(local_name.as_ref())?;
+            let key = local_name.as_ref();
             new_elem.push_attribute((key, new_value));
         } else {
             new_elem.push_attribute(attr);
@@ -68,7 +68,7 @@ fn is_bad_rect(e: &BytesStart) -> Result<bool> {
         match e.try_get_attribute(attr_name)? {
             None => return Ok(true),
             Some(attr) => {
-                let val = attr.unescape_value()?;
+                let val = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
                 let trimmed = val.trim();
                 if trimmed.is_empty() {
                     return Ok(true);
@@ -183,7 +183,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
     fn rewrite_svg_style(&self, e: &BytesStart<'_>) -> Result<Option<BytesStart<'a>>> {
         let Some(style) = e
             .try_get_attribute("style")?
-            .map(|a| a.unescape_value())
+            .map(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0))
             .transpose()?
         else {
             return Ok(None);
@@ -193,12 +193,12 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
             return Ok(None);
         }
 
-        Ok(Some(rewrite_attr(e, b"style", &new_style)?))
+        Ok(Some(rewrite_attr(e, "style", &new_style)?))
     }
 
     fn rewrite_text_element(&self, e: &BytesStart<'_>, fix_fill: bool) -> Result<BytesStart<'a>> {
         let name = e.name();
-        let tag = std::str::from_utf8(name.as_ref())?;
+        let tag = name.as_ref();
         let mut new_elem = BytesStart::new(tag.to_owned());
         let mut has_font_family = false;
         let mut has_style = false;
@@ -206,21 +206,21 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
         for attr in e.attributes() {
             let attr = attr?;
             match attr.key.local_name().as_ref() {
-                b"fill" if fix_fill => {
-                    let val = attr.unescape_value()?;
+                "fill" if fix_fill => {
+                    let val = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
                     if is_hardcoded_text_fill(&val) {
                         new_elem.push_attribute(("fill", self.text_color_css.as_str()));
                     } else {
                         new_elem.push_attribute(attr);
                     }
                 }
-                b"font-family" => {
+                "font-family" => {
                     has_font_family = true;
                     new_elem.push_attribute(("font-family", self.font_family_css.as_str()));
                 }
-                b"style" => {
+                "style" => {
                     has_style = true;
-                    let style = attr.unescape_value()?;
+                    let style = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
                     let style = rewrite_font_style(&style, &self.font_family_css);
                     new_elem.push_attribute(("style", style.as_ref()));
                 }
@@ -241,7 +241,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
 
     fn process_event(&mut self, event: Event<'a>) -> Result<Option<Event<'a>>> {
         match &event {
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"svg" && !self.svg_seen => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "svg" && !self.svg_seen => {
                 self.svg_seen = true;
                 if let Some(new_elem) = self.rewrite_svg_style(e)? {
                     Ok(Some(rewrap(&event, new_elem)))
@@ -250,7 +250,7 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
                 }
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"rect" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "rect" => {
                 if is_bad_rect(e)? {
                     if matches!(event, Event::Start(_)) {
                         self.skip_rect_depth = 1;
@@ -261,11 +261,11 @@ impl<'a, I: Iterator<Item = Result<Event<'a>>>> ElementFixup<I> {
                 }
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"text" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "text" => {
                 Ok(Some(rewrap(&event, self.rewrite_text_element(e, true)?)))
             }
 
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"tspan" => {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "tspan" => {
                 Ok(Some(rewrap(&event, self.rewrite_text_element(e, false)?)))
             }
 

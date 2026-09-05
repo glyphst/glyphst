@@ -3,7 +3,7 @@
 //! Each submodule is a specific pass that tweaks the SVG event iterator in a particular way.
 //!
 //! We always produce and consume [`Event`]s with a short lifetime.
-//! [`Event<'a>`] is backed internally by a [`Cow<'a, [u8]>`](std::borrow::Cow),
+//! [`Event<'a>`] is backed internally by a [`Cow<'a, str>`](std::borrow::Cow),
 //! so we don't have lifetime issues when we need to mutate the text in an
 //! [`Event`], but also don't force allocating a new [`String`] each time.
 //!
@@ -55,12 +55,12 @@ fn extract_svg_id(svg: &str) -> String {
         let Ok(Event::Start(e) | Event::Empty(e)) = event else {
             continue;
         };
-        if e.name().as_ref() == b"svg" {
+        if e.name().as_ref() == "svg" {
             return e
                 .try_get_attribute("id")
                 .ok()
                 .flatten()
-                .and_then(|a| a.unescape_value().ok())
+                .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
                 .map(|v| v.into_owned())
                 .unwrap_or_default();
         }
