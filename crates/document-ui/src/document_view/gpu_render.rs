@@ -3199,7 +3199,7 @@ impl DocumentView {
                         &snapshot,
                         glyphst_core::paths::state_dir()
                             .join("pdf-gpu")
-                            .join("compiled-v1"),
+                            .join(format!("compiled-v{}", glyphst_pdf_gpu::COMPILED_PAGE_CACHE_VERSION)),
                     )
                         .map(Arc::new)
                         .map_err(|error| format!("{error:#}"))
@@ -4812,6 +4812,16 @@ impl DocumentView {
                 .as_ref()
                 .map_or(0, |document| document.compiled_cache_entries()),
             compiled_page_limit: GpuPdfDocument::compiled_cache_limit(),
+            compiled_bytes: self
+                .gpu_pdf
+                .document
+                .as_ref()
+                .map_or(0, |document| document.compiled_cache_bytes()),
+            compiled_byte_limit: self
+                .gpu_pdf
+                .document
+                .as_ref()
+                .map_or(0, |document| document.compiled_cache_byte_limit()),
             content_bound_pages: self
                 .gpu_pdf
                 .document

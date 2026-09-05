@@ -3345,6 +3345,7 @@ name = "glyphst-pdf-gpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "glyphst-core",
  "glyphst-pdf",
  "glyphst-pdf-engine",

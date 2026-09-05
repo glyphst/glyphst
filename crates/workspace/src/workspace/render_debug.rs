@@ -2324,6 +2324,8 @@ fn gpu_cache_json(cache: &GpuCacheDebugSnapshot) -> Value {
     let scenes = json!({
         "compiled_pages": cache.compiled_pages,
         "compiled_page_limit": cache.compiled_page_limit,
+        "compiled_bytes": cache.compiled_bytes,
+        "compiled_byte_limit": cache.compiled_byte_limit,
         "content_bound_pages": cache.content_bound_pages,
         "content_bound_page_limit": cache.content_bound_page_limit,
         "prepared_pages": cache.prepared_pages,
@@ -2969,6 +2971,15 @@ fn render_document(this: Div, document: DocumentRenderDebugSnapshot) -> Div {
                 document.gpu_cache.content_bound_page_limit,
                 document.gpu_cache.prepared_pages,
                 document.gpu_cache.prepared_page_limit
+            ),
+            FOREGROUND,
+        ))
+        .child(reading(
+            "COMPILED CPU",
+            format!(
+                "{} / {} estimated",
+                format_bytes(document.gpu_cache.compiled_bytes),
+                format_bytes(document.gpu_cache.compiled_byte_limit)
             ),
             FOREGROUND,
         ))

@@ -17,8 +17,8 @@ use glyphst_pdf_engine::{
     Transform,
 };
 pub use glyphst_pdf_engine::{
-    CancellationToken, DocumentCacheStats as GpuDocumentCacheStats, FeatureId,
-    Permissions as GpuPdfPermissions,
+    COMPILED_PAGE_CACHE_VERSION, CancellationToken, DocumentCacheStats as GpuDocumentCacheStats,
+    FeatureId, Permissions as GpuPdfPermissions,
 };
 use glyphst_pdf_render_cpu::{CpuRenderer, CpuViewportRequest};
 use glyphst_pdf_render_wgpu::{
@@ -454,15 +454,17 @@ struct GpuPdfDocumentInner {
     content_bounds: Mutex<ContentBoundsCache>,
 }
 
-#[derive(Default)]
 struct CompiledPageCache {
     entries: HashMap<PageIndex, CachedCompiledPage>,
     clock: u64,
+    bytes: u64,
+    byte_limit: u64,
 }
 
 struct CachedCompiledPage {
     page: Arc<CompiledPage>,
     last_used: u64,
+    bytes: u64,
 }
 
 #[derive(Default)]
@@ -518,6 +520,15 @@ impl ContentBoundsCache {
 }
 
 impl CompiledPageCache {
+    fn new(byte_limit: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            bytes: 0,
+            byte_limit,
+        }
+    }
+
     fn get(&mut self, index: PageIndex) -> Option<Arc<CompiledPage>> {
         self.clock = self.clock.wrapping_add(1).max(1);
         let entry = self.entries.get_mut(&index)?;
@@ -525,28 +536,45 @@ impl CompiledPageCache {
         Some(Arc::clone(&entry.page))
     }
 
-    fn insert(&mut self, index: PageIndex, page: Arc<CompiledPage>) -> Arc<CompiledPage> {
+    fn insert(
+        &mut self,
+        index: PageIndex,
+        page: Arc<CompiledPage>,
+        bytes: u64,
+    ) -> Arc<CompiledPage> {
         self.clock = self.clock.wrapping_add(1).max(1);
         if let Some(entry) = self.entries.get_mut(&index) {
             entry.last_used = self.clock;
             return Arc::clone(&entry.page);
         }
-        if self.entries.len() >= MAX_COMPILED_PAGE_CACHE_ENTRIES
-            && let Some(oldest) = self
+        // An oversized page can still be rendered; it must not flush useful cache entries.
+        if bytes > self.byte_limit {
+            return page;
+        }
+        while self.entries.len() >= MAX_COMPILED_PAGE_CACHE_ENTRIES
+            || self.bytes > self.byte_limit - bytes
+        {
+            let Some(oldest) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| *index)
-        {
-            self.entries.remove(&oldest);
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes -= entry.bytes;
+            }
         }
         self.entries.insert(
             index,
             CachedCompiledPage {
                 page: Arc::clone(&page),
                 last_used: self.clock,
+                bytes,
             },
         );
+        self.bytes += bytes;
         page
     }
 }
@@ -586,6 +614,7 @@ impl GpuPdfDocument {
             .context("failed to open PDF with the native GPU engine")?;
         let navigation = compiled_document_navigation(&document);
         let compiled_cache_root = (!document.is_encrypted()).then_some(cache_root).flatten();
+        let compiled = Mutex::new(CompiledPageCache::new(limits.max_cpu_cache_bytes));
         Ok(Self {
             inner: Arc::new(GpuPdfDocumentInner {
                 document,
@@ -593,7 +622,7 @@ impl GpuPdfDocument {
                 navigation,
                 compiled_cache_root,
                 cache_activity: AtomicU64::new(0),
-                compiled: Mutex::new(CompiledPageCache::default()),
+                compiled,
                 content_bounds: Mutex::new(ContentBoundsCache::default()),
             }),
         })
@@ -638,6 +667,19 @@ impl GpuPdfDocument {
 
     pub const fn compiled_cache_limit() -> usize {
         MAX_COMPILED_PAGE_CACHE_ENTRIES
+    }
+
+    /// Estimated bytes owned by cached compiled pages, excluding other live page references.
+    pub fn compiled_cache_bytes(&self) -> u64 {
+        self.inner
+            .compiled
+            .lock()
+            .map(|cache| cache.bytes)
+            .unwrap_or_default()
+    }
+
+    pub fn compiled_cache_byte_limit(&self) -> u64 {
+        self.inner.limits.max_cpu_cache_bytes
     }
 
     /// Current bounded lazy destination-bound cache occupancy.
@@ -703,12 +745,13 @@ impl GpuPdfDocument {
         if !cancellation.is_cancelled()
             && let Some(compiled) = self.load_compiled_page_cache(page, &options)
         {
+            let bytes = compiled.estimated_retained_bytes();
             let compiled = self
                 .inner
                 .compiled
                 .lock()
                 .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
-                .insert(page, compiled);
+                .insert(page, compiled, bytes);
             return Ok((compiled, true));
         }
 
@@ -717,12 +760,13 @@ impl GpuPdfDocument {
             .document
             .compile_page(page, options, cancellation)
             .with_context(|| format!("failed to compile native PDF page {}", page.get() + 1))?;
+        let bytes = compiled.estimated_retained_bytes();
         let compiled = self
             .inner
             .compiled
             .lock()
             .map_err(|_| anyhow!("native PDF page cache is poisoned"))?
-            .insert(page, compiled);
+            .insert(page, compiled, bytes);
         Ok((compiled, false))
     }
 
@@ -3666,6 +3710,95 @@ trailer <</Root 1 0 R>>
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!first_hit);
         assert!(second_hit);
+        assert_eq!(
+            document.compiled_cache_bytes(),
+            first.estimated_retained_bytes()
+        );
+        assert_eq!(document.compiled_cache_byte_limit(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn encrypted_documents_never_create_a_compiled_disk_cache() {
+        use base64::Engine as _;
+
+        let encoded = include_str!("../../pdf/tests/fixtures/dummy-encrypted.pdf.b64")
+            .split_whitespace()
+            .collect::<String>();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("fixture");
+        let snapshot = DocumentSnapshot::from_pdf_bytes("encrypted.pdf", bytes)
+            .with_password(glyphst_pdf::DocumentPassword::new("123456"));
+        let cache_root = std::env::temp_dir().join(format!(
+            "glyphst-encrypted-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let document = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("open encrypted PDF");
+        assert!(document.is_encrypted());
+        assert!(document.inner.compiled_cache_root.is_none());
+        assert!(
+            document
+                .compiled_page_cache_path(PageIndex::new(0))
+                .is_none()
+        );
+        let compiled = document
+            .compile_page(0, &CancellationToken::new())
+            .expect("compile encrypted page");
+        document
+            .persist_compiled_page_cache(&compiled)
+            .expect("skip encrypted cache write");
+        assert!(!cache_root.exists());
+    }
+
+    #[test]
+    fn compiled_cache_enforces_bytes_lru_and_oversized_admission() {
+        let snapshot =
+            DocumentSnapshot::from_bytes("cache.pdf", DocumentFormat::Pdf, multipage_pdf(4));
+        let document = GpuPdfDocument::open(&snapshot).expect("open PDF");
+        let pages: Vec<_> = (0..4)
+            .map(|index| {
+                document
+                    .compile_page(index, &CancellationToken::new())
+                    .expect("compile page")
+            })
+            .collect();
+        let mut cache = CompiledPageCache::new(100);
+        cache.insert(PageIndex::new(0), Arc::clone(&pages[0]), 60);
+        cache.insert(PageIndex::new(1), Arc::clone(&pages[1]), 40);
+        assert_eq!(cache.bytes, 100);
+        let oversized = cache.insert(PageIndex::new(2), Arc::clone(&pages[2]), 101);
+        assert!(Arc::ptr_eq(&oversized, &pages[2]));
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.bytes, 100);
+        assert!(cache.get(PageIndex::new(2)).is_none());
+
+        cache.get(PageIndex::new(0)).expect("refresh first page");
+        cache.insert(PageIndex::new(2), Arc::clone(&pages[2]), 30);
+        assert!(cache.get(PageIndex::new(1)).is_none());
+        assert_eq!(cache.bytes, 90);
+        let reused = cache.insert(PageIndex::new(2), Arc::clone(&pages[3]), 99);
+        assert!(Arc::ptr_eq(&reused, &pages[2]));
+        assert_eq!(cache.bytes, 90);
+
+        cache.insert(PageIndex::new(3), Arc::clone(&pages[3]), 95);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, 95);
+        assert!(cache.get(PageIndex::new(0)).is_none());
+        assert!(cache.get(PageIndex::new(2)).is_none());
+
+        let mut disabled = CompiledPageCache::new(0);
+        disabled.insert(PageIndex::new(0), Arc::clone(&pages[0]), 1);
+        assert!(disabled.entries.is_empty());
+        let mut saturated = CompiledPageCache::new(u64::MAX);
+        saturated.insert(PageIndex::new(0), Arc::clone(&pages[0]), u64::MAX);
+        saturated.insert(PageIndex::new(1), Arc::clone(&pages[1]), 1);
+        assert_eq!(saturated.bytes, 1);
+        assert_eq!(saturated.entries.len(), 1);
     }
 
     #[test]

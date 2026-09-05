@@ -16,3 +16,6 @@ glyphst-pdf-render-wgpu.workspace = true
 gpui.workspace = true
 gpui_wgpu.workspace = true
 zstd.workspace = true
+
+[dev-dependencies]
+base64.workspace = true

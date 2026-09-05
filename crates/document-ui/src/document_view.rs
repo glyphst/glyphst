@@ -681,6 +681,8 @@ pub struct GpuCacheDebugSnapshot {
     pub frontend_preflight_scans: u64,
     pub compiled_pages: usize,
     pub compiled_page_limit: usize,
+    pub compiled_bytes: u64,
+    pub compiled_byte_limit: u64,
     pub content_bound_pages: usize,
     pub content_bound_page_limit: usize,
     pub prepared_pages: usize,
