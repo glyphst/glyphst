@@ -3320,7 +3320,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-core"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -3330,7 +3330,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-engine"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "ciborium",
  "glyphst-pdf-core",
@@ -3359,7 +3359,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-hayro"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "blake3",
  "glyphst-pdf-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-cpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "glyphst-pdf-core",
  "glyphst-pdf-scene",
@@ -3386,7 +3386,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "bytemuck",
  "glyphst-pdf-core",
@@ -3402,7 +3402,7 @@ dependencies = [
 [[package]]
 name = "glyphst-pdf-scene"
 version = "0.1.0"
-source = "git+https://github.com/glyphst/glyphst-pdf?rev=711f0edf3eae5a618e7dd51420af1e940bfbbd71#711f0edf3eae5a618e7dd51420af1e940bfbbd71"
+source = "git+https://github.com/glyphst/glyphst-pdf?rev=03ed85e3bb8bbd972069e579802171178d003db3#03ed85e3bb8bbd972069e579802171178d003db3"
 dependencies = [
  "blake3",
  "foldhash 0.2.0",
@@ -3702,7 +3702,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.6.0"
-source = "git+https://github.com/glyphst/gpui-kit?rev=a21cc84adf9673b2aaa7dc143e28de463aface48#a21cc84adf9673b2aaa7dc143e28de463aface48"
+source = "git+https://github.com/glyphst/gpui-kit?rev=e2722bf433c75ca3d6efb75036a4dcb2f2daf611#e2722bf433c75ca3d6efb75036a4dcb2f2daf611"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3738,7 +3738,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.6.0"
-source = "git+https://github.com/glyphst/gpui-kit?rev=a21cc84adf9673b2aaa7dc143e28de463aface48#a21cc84adf9673b2aaa7dc143e28de463aface48"
+source = "git+https://github.com/glyphst/gpui-kit?rev=e2722bf433c75ca3d6efb75036a4dcb2f2daf611#e2722bf433c75ca3d6efb75036a4dcb2f2daf611"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3780,7 +3780,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.6.0"
-source = "git+https://github.com/glyphst/gpui-kit?rev=a21cc84adf9673b2aaa7dc143e28de463aface48#a21cc84adf9673b2aaa7dc143e28de463aface48"
+source = "git+https://github.com/glyphst/gpui-kit?rev=e2722bf433c75ca3d6efb75036a4dcb2f2daf611#e2722bf433c75ca3d6efb75036a4dcb2f2daf611"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3791,7 +3791,7 @@ dependencies = [
 [[package]]
 name = "gpui-fps"
 version = "0.6.0"
-source = "git+https://github.com/glyphst/gpui-kit?rev=a21cc84adf9673b2aaa7dc143e28de463aface48#a21cc84adf9673b2aaa7dc143e28de463aface48"
+source = "git+https://github.com/glyphst/gpui-kit?rev=e2722bf433c75ca3d6efb75036a4dcb2f2daf611#e2722bf433c75ca3d6efb75036a4dcb2f2daf611"
 dependencies = [
  "core-graphics 0.24.0",
  "gpui",
@@ -3808,7 +3808,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.6.0"
-source = "git+https://github.com/glyphst/gpui-kit?rev=a21cc84adf9673b2aaa7dc143e28de463aface48#a21cc84adf9673b2aaa7dc143e28de463aface48"
+source = "git+https://github.com/glyphst/gpui-kit?rev=e2722bf433c75ca3d6efb75036a4dcb2f2daf611#e2722bf433c75ca3d6efb75036a4dcb2f2daf611"
 dependencies = [
  "anyhow",
  "gpui",
