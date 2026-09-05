@@ -36,13 +36,7 @@
         };
       mkRustToolchain =
         pkgs:
-        pkgs.rust-bin.stable.latest.default.override {
-          extensions = [
-            "clippy"
-            "rust-src"
-            "rustfmt"
-          ];
-        };
+        pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
     in
     {
       packages = forAllSystems (

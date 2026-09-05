@@ -118,5 +118,11 @@ mod tests {
                 .expect("component icon lookup")
                 .is_some()
         );
+        assert!(
+            assets
+                .load("icons/file-text.svg")
+                .expect("shared document icon lookup")
+                .is_some()
+        );
     }
 }

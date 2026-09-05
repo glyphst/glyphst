@@ -2431,7 +2431,7 @@ impl AiContextProvider for DocumentViewAiContextProvider {
                     };
                     format!(
                         "Reading progress: {}%",
-                        format_user_float((progress.clamp(0.0, 1.0) * 100.0) as f64)
+                        format_user_float(progress.clamp(0.0, 1.0) * 100.0)
                     )
                 }),
                 page_count: if document_view.capabilities.reflow {
