@@ -7,8 +7,6 @@ use super::*;
 
 pub(super) const LIBRARY_ITEMS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_items_v1");
-pub(super) const LIBRARY_ATTACHMENTS_V1_TABLE: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("library_attachments_v1");
 pub(super) const LIBRARY_ATTACHMENTS_V2_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_attachments_v2");
 pub(super) const LIBRARY_TAGS_V1_TABLE: TableDefinition<u64, &[u8]> =
@@ -19,13 +17,10 @@ pub(super) const LIBRARY_SAVED_VIEWS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_saved_views_v1");
 pub(super) const LIBRARY_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_collections_v1");
-pub(super) const LIBRARY_ITEM_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("library_item_collections_v1");
 pub(super) const LIBRARY_ITEM_LOCATIONS_V2_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_item_locations_v2");
 pub(super) const LIBRARY_CATALOG_STORAGE_VERSION: u8 = 1;
 pub(super) const MANAGED_LIBRARY_STORAGE_VERSION: u8 = 2;
-pub(super) const MANAGED_LIBRARY_MIGRATION_KEY: &str = "managed_library_v2_fresh";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LibraryAttachmentId(pub u64);

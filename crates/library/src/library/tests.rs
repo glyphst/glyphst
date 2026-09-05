@@ -100,6 +100,46 @@ fn current_storage_does_not_touch_a_legacy_database() {
 }
 
 #[test]
+fn current_storage_rejects_unsupported_schema_without_replacing_it() {
+    let path = temp_library_path("unsupported-schema");
+    let unsupported = CURRENT_STORAGE_SCHEMA_VERSION + 1;
+    {
+        let database = Database::create(&path).unwrap();
+        let write = database.begin_write().unwrap();
+        write
+            .open_table(STORAGE_METADATA_TABLE)
+            .unwrap()
+            .insert(STORAGE_SCHEMA_VERSION_KEY, unsupported)
+            .unwrap();
+        write.commit().unwrap();
+    }
+
+    let error = LibraryStore::open_for_test(path.clone())
+        .err()
+        .expect("unsupported schema must fail to open");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported library schema version")
+    );
+    assert!(!path.with_extension("managed-library").exists());
+    {
+        let database = Database::open(&path).unwrap();
+        let read = database.begin_read().unwrap();
+        assert_eq!(
+            read.open_table(STORAGE_METADATA_TABLE)
+                .unwrap()
+                .get(STORAGE_SCHEMA_VERSION_KEY)
+                .unwrap()
+                .unwrap()
+                .value(),
+            unsupported
+        );
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn history_is_deduplicated_and_sorted() {
     let mut library = Library::default();
     library.record_history_at(Path::new("/tmp/a.pdf"), position(1), 10);
@@ -139,7 +179,7 @@ fn stale_background_history_writes_do_not_overwrite_newer_positions() {
     let document_path = Path::new("/tmp/ordered-history.pdf");
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.record_history(document_path, position(1));
         let stale = store
             .history_entry_persistence_snapshot(document_path)
@@ -153,7 +193,7 @@ fn stale_background_history_writes_do_not_overwrite_newer_positions() {
         stale.persist().unwrap();
     }
 
-    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     assert_eq!(store.history_position(document_path).unwrap().page, 2);
     let _ = fs::remove_file(database_path);
 }
@@ -166,7 +206,7 @@ fn removes_missing_history_entries() {
     fs::write(&existing_path, b"%PDF-1.4\n").unwrap();
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.record_history(&existing_path, position(1));
         store.record_history(&missing_path, position(2));
 
@@ -190,7 +230,7 @@ fn removing_history_entries_never_deletes_document_files() {
     fs::write(&document_path, b"%PDF-1.4\n").unwrap();
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.record_history(&document_path, position(1));
         assert_eq!(
             store
@@ -202,7 +242,7 @@ fn removing_history_entries_never_deletes_document_files() {
         assert!(document_path.is_file());
     }
 
-    let reopened = LibraryStore::open(database_path.clone()).unwrap();
+    let reopened = LibraryStore::open_for_test(database_path.clone()).unwrap();
     assert!(reopened.history_entries().is_empty());
     assert!(document_path.is_file());
 
@@ -227,7 +267,7 @@ fn persists_history_bookmarks_and_highlights() {
     let ai_session_id;
 
     {
-        let mut store = LibraryStore::open(path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
         store.record_history(document_path, position(4));
         store.save().unwrap();
         bookmark_id = store
@@ -300,7 +340,7 @@ fn persists_history_bookmarks_and_highlights() {
     }
 
     {
-        let mut store = LibraryStore::open(path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
         assert_eq!(store.history_position(document_path).unwrap().page, 4);
         assert_eq!(store.bookmarks()[0].id, bookmark_id);
         let highlights = store.highlights_for(document_path);
@@ -330,7 +370,7 @@ fn persists_history_bookmarks_and_highlights() {
     }
 
     {
-        let store = LibraryStore::open(path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(path.clone()).unwrap();
         assert!(store.bookmarks().is_empty());
         assert!(store.highlights_for(document_path).is_empty());
         assert!(store.notes_for(document_path).is_empty());
@@ -350,7 +390,7 @@ fn undo_and_redo_cover_persistent_document_edits() {
         x1: 3.0,
         y1: 4.0,
     };
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
 
     let bookmark_id = store
         .add_bookmark(document_path, Some("Chapter".to_string()), position(1))
@@ -449,7 +489,7 @@ fn undo_restores_deleted_objects_with_stable_ids() {
         x1: 3.0,
         y1: 4.0,
     };
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     let bookmark_id = store
         .add_bookmark(document_path, Some("Bookmark".to_string()), position(1))
         .unwrap();
@@ -511,7 +551,7 @@ fn document_histories_are_independent_and_no_ops_preserve_redo() {
         x1: 3.0,
         y1: 4.0,
     };
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     let highlight_a = store
         .add_highlight(document_a, HighlightColor::Yellow, vec![rect], "a", "")
         .unwrap();
@@ -568,7 +608,7 @@ fn revisions_distinguish_document_content_from_global_bookmarks() {
         x1: 3.0,
         y1: 4.0,
     };
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
 
     let bookmark_id = store
         .add_bookmark(document_b, Some("Bookmark".to_string()), position(1))
@@ -628,7 +668,7 @@ fn revisions_distinguish_document_content_from_global_bookmarks() {
 fn bookmark_titles_are_automatic_customizable_and_undoable() {
     let database_path = temp_library_path("bookmark-titles");
     let document_path = Path::new("/tmp/bookmark-titles.pdf");
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
 
     let bookmark_id = store
         .add_bookmark(document_path, None, position(3))
@@ -660,7 +700,7 @@ fn bookmark_titles_are_automatic_customizable_and_undoable() {
     assert_eq!(store.bookmarks_for(document_path)[0].title, None);
 
     drop(store);
-    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     assert_eq!(store.bookmarks_for(document_path)[0].title, None);
 
     let _ = fs::remove_file(database_path);
@@ -670,7 +710,7 @@ fn bookmark_titles_are_automatic_customizable_and_undoable() {
 fn per_document_history_drops_oldest_edits() {
     let database_path = temp_library_path("document-edit-capacity");
     let document_path = Path::new("/tmp/document-edit-capacity.pdf");
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
 
     for index in 0..MAX_DOCUMENT_EDIT_HISTORY_ENTRIES + 1 {
         store
@@ -702,7 +742,7 @@ fn rotation_undo_preserves_other_document_preferences() {
         theme: glyphst_core::EpubTheme::Sepia,
         use_publisher_styles: false,
     };
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     store
         .set_document_target_language(document_path, "ja")
         .unwrap();
@@ -769,7 +809,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
     assert!(!unavailable.can_undo_document(document_path));
 
     let database_path = temp_library_path("conflicting-document-undo");
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     let note = store
         .add_note(
             document_path,
@@ -816,7 +856,7 @@ fn edit_history_is_bounded_and_not_persisted() {
     let database_path = temp_library_path("bounded-document-undo");
     let oldest_path = PathBuf::from("/tmp/bounded-document-0.pdf");
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         for index in 0..=MAX_DOCUMENT_EDIT_HISTORIES {
             let path = PathBuf::from(format!("/tmp/bounded-document-{index}.pdf"));
             store
@@ -830,206 +870,9 @@ fn edit_history_is_bounded_and_not_persisted() {
         ))));
     }
 
-    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     assert!(!store.can_undo_document(Path::new("/tmp/bounded-document-32.pdf")));
     assert_eq!(store.bookmarks().len(), MAX_DOCUMENT_EDIT_HISTORIES + 1);
-
-    let _ = fs::remove_file(database_path);
-}
-
-#[test]
-fn starts_global_ai_sessions_fresh_without_removing_v1_rows() {
-    let database_path = temp_library_path("ai-session-v1-compatibility");
-    let document_path = PathBuf::from("/tmp/v1-session.pdf");
-    let stored_session = StoredAiSessionV1 {
-        version: STORAGE_SCHEMA_VERSION,
-        id: 7,
-        path: StoredPathV1::from_path(&document_path),
-        title: "V1 session".to_string(),
-        page: 3,
-        messages: vec![StoredAiSessionMessageV1 {
-            role: AiSessionRole::User,
-            content: "Explain @current page text".to_string(),
-            request_content: Some("Explain the attached page text".to_string()),
-        }],
-        created: 10,
-        updated: 11,
-    };
-
-    {
-        let database = Database::create(&database_path).unwrap();
-        ensure_tables(&database).unwrap();
-        let write_txn = database.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(AI_SESSIONS_V1_TABLE).unwrap();
-            table
-                .insert(
-                    stored_session.id,
-                    encode(&stored_session).unwrap().as_slice(),
-                )
-                .unwrap();
-        }
-        {
-            let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
-            migrations
-                .insert(
-                    STORAGE_V1_MIGRATION_KEY,
-                    [STORAGE_SCHEMA_VERSION].as_slice(),
-                )
-                .unwrap();
-            migrations
-                .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
-                .unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert!(store.ai_sessions().is_empty());
-    }
-
-    {
-        let database = Database::open(&database_path).unwrap();
-        let read_txn = database.begin_read().unwrap();
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(AI_SESSIONS_V6_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        let v1_value = read_txn
-            .open_table(AI_SESSIONS_V1_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            decode::<StoredAiSessionV1>(v1_value.value())
-                .unwrap()
-                .messages
-                .len(),
-            1
-        );
-        assert!(
-            read_txn
-                .open_table(AI_SESSIONS_V6_TABLE)
-                .unwrap()
-                .get(stored_session.id)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert!(store.ai_sessions().is_empty());
-    }
-
-    let _ = fs::remove_file(database_path);
-}
-
-#[test]
-fn starts_global_ai_sessions_fresh_without_removing_v2_rows() {
-    #[derive(Serialize)]
-    struct HistoricalAiSessionMessageV2 {
-        role: AiSessionRole,
-        content: String,
-        request_content: Option<String>,
-        references: Vec<AiMentionReference>,
-    }
-
-    #[derive(Serialize)]
-    struct HistoricalAiSessionV2 {
-        version: u8,
-        id: u64,
-        path: StoredPathV1,
-        title: String,
-        page: usize,
-        messages: Vec<HistoricalAiSessionMessageV2>,
-        created: u64,
-        updated: u64,
-    }
-
-    let database_path = temp_library_path("ai-session-v2-compatibility");
-    let document_path = PathBuf::from("/tmp/genuine-v2-session.pdf");
-    let stored_session = HistoricalAiSessionV2 {
-        version: STORAGE_V2_VERSION,
-        id: 8,
-        path: StoredPathV1::from_path(&document_path),
-        title: "V2 session".to_string(),
-        page: 4,
-        messages: vec![HistoricalAiSessionMessageV2 {
-            role: AiSessionRole::User,
-            content: "Explain @selection twice".to_string(),
-            request_content: Some("Explain the attached selections".to_string()),
-            references: vec![AiMentionReference::Selection, AiMentionReference::Selection],
-        }],
-        created: 12,
-        updated: 13,
-    };
-
-    {
-        let database = Database::create(&database_path).unwrap();
-        ensure_tables(&database).unwrap();
-        let write_txn = database.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(AI_SESSIONS_V2_TABLE).unwrap();
-            table
-                .insert(
-                    stored_session.id,
-                    encode(&stored_session).unwrap().as_slice(),
-                )
-                .unwrap();
-        }
-        {
-            let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
-            migrations
-                .insert(
-                    STORAGE_V1_MIGRATION_KEY,
-                    [STORAGE_SCHEMA_VERSION].as_slice(),
-                )
-                .unwrap();
-            migrations
-                .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
-                .unwrap();
-            migrations
-                .insert(
-                    AI_SESSIONS_V2_MIGRATION_KEY,
-                    [STORAGE_V2_VERSION].as_slice(),
-                )
-                .unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert!(store.ai_sessions().is_empty());
-    }
-
-    {
-        let database = Database::open(&database_path).unwrap();
-        let read_txn = database.begin_read().unwrap();
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(AI_SESSIONS_V6_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        let v2_value = read_txn
-            .open_table(AI_SESSIONS_V2_TABLE)
-            .unwrap()
-            .get(stored_session.id)
-            .unwrap()
-            .unwrap();
-        let preserved = decode::<StoredAiSessionV2>(v2_value.value()).unwrap();
-        assert_eq!(preserved.messages[0].references.len(), 2);
-    }
 
     let _ = fs::remove_file(database_path);
 }
@@ -1056,7 +899,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
     ];
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
@@ -1081,7 +924,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let sessions = store.ai_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages[0].references, references);
@@ -1116,7 +959,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
     ];
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
@@ -1141,7 +984,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let sessions = store.ai_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].messages[0].occurrences, occurrences);
@@ -1170,7 +1013,7 @@ fn round_trips_v6_selected_page_snapshots() {
     ];
 
     let session_id = {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
@@ -1196,7 +1039,7 @@ fn round_trips_v6_selected_page_snapshots() {
     };
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let sessions = store.ai_sessions();
         assert_eq!(sessions[0].messages[0].occurrences, occurrences);
     }
@@ -1227,7 +1070,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
     let image;
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         image = store
             .install_ai_image(Some("figure.png"), "image/png", 12, 8, &bytes)
             .unwrap();
@@ -1296,7 +1139,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
         .join(format!("{}.png", image.asset_id));
     assert!(asset_path.is_file());
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let sessions = store.ai_sessions();
         let session = &sessions[0];
         assert_eq!(session.queued_messages.len(), 1);
@@ -1309,7 +1152,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
     }
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .save_ai_session(AiSession {
                 id: session_id,
@@ -1365,7 +1208,7 @@ fn round_trips_v3_region_occurrence_geometry() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
@@ -1392,7 +1235,7 @@ fn round_trips_v3_region_occurrence_geometry() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let sessions = store.ai_sessions();
         assert_eq!(
             sessions[0].messages[0].occurrences,
@@ -1472,29 +1315,6 @@ fn reader_sidebar_keeps_historical_variant_encoding_compatible() {
 }
 
 #[test]
-fn legacy_bookmark_labels_map_to_automatic_or_custom_titles() {
-    let automatic = LegacyBookmark {
-        id: 1,
-        path: PathBuf::from("/tmp/automatic-title.pdf"),
-        label: String::new(),
-        position: StoredDocumentPositionV1::from(&position(2)),
-        created: 1,
-    }
-    .into_domain();
-    let custom = LegacyBookmark {
-        id: 2,
-        path: PathBuf::from("/tmp/custom-title.pdf"),
-        label: "Chapter 3".to_string(),
-        position: StoredDocumentPositionV1::from(&position(3)),
-        created: 2,
-    }
-    .into_domain();
-
-    assert_eq!(automatic.title, None);
-    assert_eq!(custom.title.as_deref(), Some("Chapter 3"));
-}
-
-#[test]
 fn persists_sidebar_widths() {
     let path = temp_library_path("sidebar-widths");
     let widths = SidebarWidths {
@@ -1506,12 +1326,12 @@ fn persists_sidebar_widths() {
     };
 
     {
-        let mut store = LibraryStore::open(path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
         store.set_sidebar_widths(widths).unwrap();
     }
 
     {
-        let store = LibraryStore::open(path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(path.clone()).unwrap();
         assert_eq!(store.sidebar_widths(), Some(widths));
     }
 
@@ -1550,12 +1370,12 @@ fn persists_document_browser_size() {
     };
 
     {
-        let mut store = LibraryStore::open(path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
         store.set_document_browser_size(size).unwrap();
     }
 
     {
-        let store = LibraryStore::open(path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(path.clone()).unwrap();
         assert_eq!(store.document_browser_size(), Some(size));
     }
 
@@ -1585,11 +1405,11 @@ fn persists_application_wide_home_preferences() {
     };
 
     {
-        let mut store = LibraryStore::open(path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
         store.set_home_preferences(preferences.clone()).unwrap();
     }
 
-    let store = LibraryStore::open(path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(path.clone()).unwrap();
     assert_eq!(store.home_preferences(), &preferences);
 
     let _ = fs::remove_file(path);
@@ -1715,11 +1535,11 @@ fn persists_reader_session_with_duplicate_document_tabs() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.set_reader_session(session.clone()).unwrap();
     }
 
-    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     assert_eq!(store.reader_session(), Some(&session));
 
     let _ = fs::remove_file(database_path);
@@ -1756,7 +1576,7 @@ fn loads_v1_reader_sessions_without_translation_metadata() {
 
     {
         let database = Database::create(&database_path).unwrap();
-        ensure_tables(&database).unwrap();
+        ensure_current_tables(&database).unwrap();
         let write_txn = database.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(UI_STATE_V1_TABLE).unwrap();
@@ -1764,22 +1584,10 @@ fn loads_v1_reader_sessions_without_translation_metadata() {
                 .insert(READER_SESSION_KEY, encode(&stored).unwrap().as_slice())
                 .unwrap();
         }
-        {
-            let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
-            migrations
-                .insert(
-                    STORAGE_V1_MIGRATION_KEY,
-                    [STORAGE_SCHEMA_VERSION].as_slice(),
-                )
-                .unwrap();
-            migrations
-                .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
-                .unwrap();
-        }
         write_txn.commit().unwrap();
     }
 
-    let store = LibraryStore::open(database_path.clone()).unwrap();
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     let session = store.reader_session().unwrap();
     assert_eq!(session.windows.len(), 1);
     assert!(session.windows[0].translation_sessions.is_empty());
@@ -1793,7 +1601,7 @@ fn persists_document_target_language() {
     let document_path = Path::new("/tmp/translated.pdf");
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .set_document_target_language(document_path, " Zh-Hans ")
             .unwrap();
@@ -1804,7 +1612,7 @@ fn persists_document_target_language() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.document_target_language(document_path).as_deref(),
             Some("zh-hans")
@@ -1935,7 +1743,7 @@ fn clears_epub_reader_preferences_and_preserves_target_language() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .set_document_target_language(document_path, "ja")
             .unwrap();
@@ -1952,7 +1760,7 @@ fn clears_epub_reader_preferences_and_preserves_target_language() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.epub_reader_preferences(document_path), None);
         assert_eq!(
             store.document_target_language(document_path).as_deref(),
@@ -1978,7 +1786,7 @@ fn preference_setters_preserve_other_document_fields() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .set_document_rotation(document_path, DocumentRotation::Degrees90)
             .unwrap();
@@ -2044,7 +1852,7 @@ fn preference_setters_preserve_other_document_fields() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.document_target_language(document_path).as_deref(),
             Some("ja")
@@ -2072,7 +1880,7 @@ fn persists_document_rotation_round_trip() {
     let document_path = Path::new("/tmp/rotated.pdf");
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .set_document_rotation(document_path, DocumentRotation::Degrees270)
             .unwrap();
@@ -2083,7 +1891,7 @@ fn persists_document_rotation_round_trip() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.document_rotation(document_path),
             DocumentRotation::Degrees270
@@ -2099,7 +1907,7 @@ fn persists_document_page_layout_round_trip() {
     let document_path = Path::new("/tmp/two-column.pdf");
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.document_page_layout(document_path),
             DocumentPageLayout::SingleColumn
@@ -2112,179 +1920,10 @@ fn persists_document_page_layout_round_trip() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.document_page_layout(document_path),
             DocumentPageLayout::TwoColumn
-        );
-    }
-
-    let _ = fs::remove_file(database_path);
-}
-
-#[test]
-fn migrates_v2_document_preferences_with_default_rotation() {
-    let database_path = temp_library_path("document-preferences-v2-migration");
-    let document_path = PathBuf::from("/tmp/v2-preferences.epub");
-    let epub = EpubReaderPreferences {
-        font_size: 19.0,
-        line_height: 1.7,
-        horizontal_margin: 40.0,
-        max_content_width: 680.0,
-        theme: glyphst_core::EpubTheme::Sepia,
-        use_publisher_styles: false,
-    };
-    let stored_preferences = StoredDocumentPreferencesV2 {
-        version: STORAGE_V2_VERSION,
-        path: StoredPathV1::from_path(&document_path),
-        target_language: "ja".to_string(),
-        epub: Some(epub),
-    };
-
-    {
-        let database = Database::create(&database_path).unwrap();
-        ensure_tables(&database).unwrap();
-        let write_txn = database.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(DOCUMENT_PREFERENCES_V2_TABLE).unwrap();
-            let key = history_key(&document_path);
-            table
-                .insert(
-                    key.as_slice(),
-                    encode(&stored_preferences).unwrap().as_slice(),
-                )
-                .unwrap();
-        }
-        {
-            let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
-            migrations
-                .insert(
-                    STORAGE_V1_MIGRATION_KEY,
-                    [STORAGE_SCHEMA_VERSION].as_slice(),
-                )
-                .unwrap();
-            migrations
-                .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
-                .unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert_eq!(
-            store.document_target_language(&document_path).as_deref(),
-            Some("ja")
-        );
-        assert_eq!(store.epub_reader_preferences(&document_path), Some(epub));
-        assert_eq!(
-            store.document_rotation(&document_path),
-            DocumentRotation::default()
-        );
-        assert_eq!(
-            store.document_page_layout(&document_path),
-            DocumentPageLayout::SingleColumn
-        );
-    }
-
-    {
-        let database = Database::open(&database_path).unwrap();
-        let read_txn = database.begin_read().unwrap();
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(DOCUMENT_PREFERENCES_V3_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        let key = history_key(&document_path);
-        let value = read_txn
-            .open_table(DOCUMENT_PREFERENCES_V3_TABLE)
-            .unwrap()
-            .get(key.as_slice())
-            .unwrap()
-            .unwrap();
-        let migrated = decode::<StoredDocumentPreferencesV3>(value.value()).unwrap();
-        assert_eq!(migrated.target_language, "ja");
-        assert_eq!(migrated.epub, Some(epub));
-        assert_eq!(migrated.rotation, DocumentRotation::default());
-
-        assert!(
-            read_txn
-                .open_table(STORAGE_MIGRATIONS_TABLE)
-                .unwrap()
-                .get(DOCUMENT_PREFERENCES_V4_MIGRATION_KEY)
-                .unwrap()
-                .is_some()
-        );
-        let value = read_txn
-            .open_table(DOCUMENT_PREFERENCES_V4_TABLE)
-            .unwrap()
-            .get(key.as_slice())
-            .unwrap()
-            .unwrap();
-        let migrated = decode::<StoredDocumentPreferencesV4>(value.value()).unwrap();
-        assert_eq!(migrated.page_layout, DocumentPageLayout::SingleColumn);
-    }
-
-    let _ = fs::remove_file(database_path);
-}
-
-#[test]
-fn migrates_v3_document_preferences_with_default_page_layout() {
-    let database_path = temp_library_path("document-preferences-v3-migration");
-    let document_path = PathBuf::from("/tmp/v3-preferences.pdf");
-    let stored_preferences = StoredDocumentPreferencesV3 {
-        version: DOCUMENT_PREFERENCES_V3_VERSION,
-        path: StoredPathV1::from_path(&document_path),
-        target_language: "zh-cn".to_string(),
-        epub: None,
-        rotation: DocumentRotation::Degrees90,
-    };
-
-    {
-        let database = Database::create(&database_path).unwrap();
-        ensure_tables(&database).unwrap();
-        let write_txn = database.begin_write().unwrap();
-        let key = history_key(&document_path);
-        write_txn
-            .open_table(DOCUMENT_PREFERENCES_V3_TABLE)
-            .unwrap()
-            .insert(
-                key.as_slice(),
-                encode(&stored_preferences).unwrap().as_slice(),
-            )
-            .unwrap();
-        let mut migrations = write_txn.open_table(STORAGE_MIGRATIONS_TABLE).unwrap();
-        migrations
-            .insert(
-                STORAGE_V1_MIGRATION_KEY,
-                [STORAGE_SCHEMA_VERSION].as_slice(),
-            )
-            .unwrap();
-        migrations
-            .insert(STORAGE_V2_MIGRATION_KEY, [STORAGE_V2_VERSION].as_slice())
-            .unwrap();
-        migrations
-            .insert(
-                DOCUMENT_PREFERENCES_V3_MIGRATION_KEY,
-                [DOCUMENT_PREFERENCES_V3_VERSION].as_slice(),
-            )
-            .unwrap();
-        drop(migrations);
-        write_txn.commit().unwrap();
-    }
-
-    {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
-        assert_eq!(
-            store.document_rotation(&document_path),
-            DocumentRotation::Degrees90
-        );
-        assert_eq!(
-            store.document_page_layout(&document_path),
-            DocumentPageLayout::SingleColumn
         );
     }
 
@@ -2305,7 +1944,7 @@ fn epub_preferences_do_not_create_a_target_language_override() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .set_epub_reader_preferences(document_path, preferences)
             .unwrap();
@@ -2313,7 +1952,7 @@ fn epub_preferences_do_not_create_a_target_language_override() {
     }
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.document_target_language(document_path), None);
         assert_eq!(
             store.epub_reader_preferences(document_path),
@@ -2324,7 +1963,7 @@ fn epub_preferences_do_not_create_a_target_language_override() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.document_target_language(document_path), None);
         assert_eq!(store.epub_reader_preferences(document_path), None);
     }
@@ -2353,7 +1992,7 @@ fn persists_epub_positions_annotations_and_preferences() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.record_history(&document_path, position.clone());
         store
             .add_bookmark(
@@ -2389,7 +2028,7 @@ fn persists_epub_positions_annotations_and_preferences() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(
             store.history_position(&document_path),
             Some(position.clone())
@@ -2427,7 +2066,7 @@ fn serializes_non_utf8_paths_without_loss() {
     };
 
     assert_eq!(
-        decode::<StoredHistoryEntryV1>(&encode(&StoredHistoryEntryV1::from(&entry)).unwrap())
+        decode::<StoredHistoryEntryV2>(&encode(&StoredHistoryEntryV2::from(&entry)).unwrap())
             .unwrap()
             .into_domain()
             .unwrap(),
@@ -2442,8 +2081,8 @@ fn serializes_non_utf8_paths_without_loss() {
         page_layout: DocumentPageLayout::default(),
     };
     assert_eq!(
-        decode::<StoredDocumentPreferencesV1>(
-            &encode(&StoredDocumentPreferencesV1::from(&preferences)).unwrap()
+        decode::<StoredDocumentPreferencesV4>(
+            &encode(&StoredDocumentPreferencesV4::from(&preferences)).unwrap()
         )
         .unwrap()
         .into_domain()
@@ -2470,7 +2109,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store.record_history(&document_path, position(1));
         store.save().unwrap();
         store
@@ -2518,7 +2157,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let normalized = normalize_path(&document_path);
         assert_eq!(store.history_entries()[0].path, normalized);
         assert_eq!(store.bookmarks()[0].path, normalized);
@@ -2540,7 +2179,7 @@ fn catalog_persists_items_tags_saved_views_and_trash() {
     fs::write(&document_path, b"%PDF-1.4\n").unwrap();
 
     let item_id = {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let mut metadata = LibraryItemMetadata::for_path(&document_path);
         metadata.title = "A Research Paper".to_string();
         metadata.creators.push(LibraryCreator {
@@ -2574,7 +2213,7 @@ fn catalog_persists_items_tags_saved_views_and_trash() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.library_items().len(), 1);
         assert_eq!(store.library_items()[0].title, "A Research Paper");
         assert_eq!(store.library_tags()[0].name, "Machine Learning");
@@ -2618,7 +2257,7 @@ fn catalog_persists_nested_folders_and_single_parent_locations() {
     fs::write(&second_path, b"%PDF-1.4\nsecond").unwrap();
 
     let (first_id, second_id, papers_id, ml_id, books_id) = {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let LibraryAddOutcome::Added(first_id) = store
             .add_linked_item(&first_path, LibraryItemMetadata::for_path(&first_path))
             .unwrap()
@@ -2666,7 +2305,7 @@ fn catalog_persists_nested_folders_and_single_parent_locations() {
     };
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.library_collections().len(), 3);
         assert_eq!(
             store
@@ -2707,7 +2346,7 @@ fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
     fs::write(&new_path, b"%PDF-1.4\nnew").unwrap();
 
     {
-        let mut store = LibraryStore::open(database_path.clone()).unwrap();
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         let LibraryAddOutcome::Added(item_id) = store
             .add_linked_item(&old_path, LibraryItemMetadata::for_path(&old_path))
             .unwrap()
@@ -2730,7 +2369,7 @@ fn relinking_catalog_item_moves_path_backed_reader_data_atomically() {
     }
 
     {
-        let store = LibraryStore::open(database_path.clone()).unwrap();
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         assert_eq!(store.library_items().len(), 1);
         let managed_path = store.library.library_attachments[0].path.clone();
         assert_ne!(managed_path, normalize_path(&new_path));
@@ -2903,7 +2542,7 @@ fn managed_import_copies_content_deduplicates_and_deletes_only_owned_files() {
     fs::write(&first_source, content).unwrap();
     fs::write(&duplicate_source, content).unwrap();
 
-    let mut store = LibraryStore::open(database_path.clone()).unwrap();
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
     let LibraryAddOutcome::Added(item_id) = store
         .add_linked_item(&first_source, LibraryItemMetadata::for_path(&first_source))
         .unwrap()
@@ -3058,4 +2697,30 @@ fn deleting_a_folder_trashes_its_items_and_restore_recreates_the_path() {
 }
 
 #[cfg(unix)]
-mod migrations;
+#[test]
+fn history_path_keys_do_not_collide_for_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let database_path = temp_library_path("history-key-collision");
+    let raw_path = PathBuf::from(std::ffi::OsString::from_vec(vec![
+        b'/', b't', b'm', b'p', b'/', 0xff, b'.', b'p', b'd', b'f',
+    ]));
+    let replacement_path = PathBuf::from("/tmp/\u{fffd}.pdf");
+    assert_ne!(history_key(&raw_path), history_key(&replacement_path));
+
+    {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        store.record_history(&raw_path, position(1));
+        store.record_history(&replacement_path, position(2));
+        store.save().unwrap();
+    }
+
+    {
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        assert_eq!(store.history_entries().len(), 2);
+        assert_eq!(store.history_position(&raw_path), Some(position(1)));
+        assert_eq!(store.history_position(&replacement_path), Some(position(2)));
+    }
+
+    let _ = fs::remove_file(database_path);
+}

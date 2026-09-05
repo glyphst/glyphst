@@ -53,53 +53,11 @@ impl LibraryStore {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) fn open(path: PathBuf) -> Result<Self> {
-        let managed_root = path.with_extension("managed-library");
-        Self::open_with_root(path, managed_root)
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn open_for_test(path: PathBuf) -> Result<Self> {
-        Self::open(path)
-    }
-
-    fn open_with_root(path: PathBuf, managed_library_root: PathBuf) -> Result<Self> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            create_private_directory(parent)?;
-        }
-
-        let database = if path.exists() {
-            Database::open(&path).with_context(|| format!("failed to open {}", path.display()))?
-        } else {
-            Database::create(&path)
-                .with_context(|| format!("failed to create {}", path.display()))?
-        };
-        restrict_library_file(&path)?;
-        ensure_tables(&database)?;
-        initialize_managed_catalog(&database)?;
-        ensure_managed_library_directories(&managed_library_root)?;
-        let library = load_library(&database, &managed_library_root)?;
-
-        let store = Self {
-            library,
-            database: Some(Arc::new(database)),
-            managed_library_root: Some(managed_library_root),
-            ai_image_memory: HashMap::new(),
-            startup_error: None,
-            document_edit_histories: HashMap::new(),
-            next_document_edit_sequence: 0,
-            bookmarks_revision: 0,
-            history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
-            catalog_revision: 0,
-        };
-        if let Err(error) = store.prune_ai_session_rows() {
-            eprintln!("failed to prune expired AI sessions: {error:#}");
-        }
-        Ok(store)
+        let managed_root = path.with_extension("managed-library");
+        Self::open_current_with_root(path, managed_root)
     }
 
     pub(super) fn open_current_with_root(
