@@ -93,3 +93,82 @@ access, but that is not a general CPU or allocation bound on XML parsing.
 Do not describe the dependency graph as vulnerability-free. Remove the exceptions
 when the pinned Typst chain supports a fixed XML version (at least 0.41), and
 rerun the audit without the ignore configuration to verify that condition.
+
+The default audit policy also reports eight unmaintained-package warnings
+(`bincode`, `cgmath`, `instant`, `paste`, `rustls-pemfile`, `rustybuzz`,
+`ttf-parser`, and `yaml-rust`) and the `cgmath` unsoundness warning
+[RUSTSEC-2026-0197](https://rustsec.org/advisories/RUSTSEC-2026-0197.html).
+No new ignore entries were added for these warnings. A successful configured
+audit is not a warning-free dependency graph; those upstream dependency paths
+remain follow-up work.
+
+## Maintenance validation — 2026-09-05
+
+Validated on Linux x86_64 with Rust 1.97.1. The published dependency pins are
+GPUI Kit `08011ff8`, Glyphst PDF `03ed85e`, and Zed GPUI `19da5cb7`.
+
+- Glyphst: workspace/all-target/all-feature check, Clippy (`-D warnings`),
+  formatting, and 933 tests passed. A separate clean checkout passed the locked
+  workspace check without initializing references or using sibling overrides.
+- Glyphst PDF: formatting, Clippy, the source-size gate, all 534 tests with
+  `GLYPHST_PDF_REQUIRE_GPU=1`, and all `cargo deny --locked check` policies passed.
+- GPUI Kit: full-workspace/all-target check and Clippy passed. The workspace
+  test command used by platform CI (excluding the separately tested `gpui-shell`,
+  with `gpui-component-story/test-support`) passed 1,603 tests, with two existing
+  ignored doctests. The native-only shell-event regression test also passed.
+  Cross-platform CI is recorded in
+  [Kit maintenance run 33960173408](https://github.com/glyphst/gpui-kit/actions/runs/33960173408).
+- Both absolute-path and the README's relative-path local overrides resolved to
+  the intended siblings; removing the optional config restored the tracked
+  lockfile byte-for-byte. No override config was left behind.
+- Configured Glyphst audit passed with the exceptions and warnings above. Glyphst
+  and Glyphst PDF Nix expressions were syntax-checked and their inputs updated;
+  no derivations were built.
+  GitHub Actions are disabled in the Glyphst and Glyphst PDF repository settings;
+  those settings were not changed. Their local results are not remote CI results.
+
+Release regression runs used Intel Arc (MTL), Vulkan, and Mesa 26.2.1, with no
+concurrent Cargo builds or tests and no threshold changes. Reports remain in
+the external `../pdf-test-suite`, not in either source repository.
+
+The generated-v91 baseline used PDF `99789f6`; the updated engine is `03ed85e`.
+Both reports contain 81 entries at 3072×1920, with 50 static, 120 motion, and
+120 scroll frames. The same 23 entries fail the existing 512 MiB transient GPU
+target limit. All 58 image comparisons pass. Source fingerprints, reported scene
+and plan statistics, text/navigation diagnostics, error messages, image comparisons,
+and presentation-quality results match exactly between reports:
+
+- Baseline: `reports/generated-v91/run-1788597701573.json`.
+- Updated: `reports/generated-v91/run-1788602040945.json`.
+
+This is an unchanged failing acceptance gate, not a claim that the renderer's
+resource-limit problems are solved.
+
+The Reader baseline was rebuilt with Rust 1.97.1 at Glyphst `3c5d76b`, using its
+original Kit gitlink `f7fe3deb` and Zed pin `ff3270f1`; the measured updated Reader
+is `8fcff20` (Kit `a8c5ce01`). The final Kit `08011ff8` changes only the numeric
+draft test's platform-specific shortcut to the existing Select All action; it
+does not change the measured production implementation.
+Both used `interaction suite --profile common --repetitions 3` with
+matching workloads, pages, zooms, and windows. All Reader processes exited
+successfully, but all three workloads and all nine paired gates failed in both
+runs. The preview-quality (`CoherentPreview` instead of `Exact/ErrorBounded`)
+and camera-119 stroke-presentation failures already occur in the baseline.
+120 Hz timing failures also remain. Median interval p95 across the three
+repetitions, in milliseconds:
+
+| Workload | Baseline | Updated |
+| --- | ---: | ---: |
+| `no-margin-zoom` | 9.024 | 9.008 |
+| `zero2prod-page29-scroll` | 9.897 | 9.256 |
+| `zero2prod-page29-zoom` | 8.867 | 9.583 |
+
+These mixed timings do not establish a speedup or a blanket non-regression.
+Performance/quality acceptance is still failing and needs a separate renderer
+follow-up; none of its thresholds or failure conditions were relaxed.
+
+- Baseline: `reports/reader-interaction/run-1788600309895/summary.json`.
+- Updated: `reports/reader-interaction/run-1788602680411/summary.json`.
+
+The reports contain the measured Reader binary hashes. Reproduction logs and
+the rebuilt baseline binary are retained in `/tmp/glyphst-maintenance.fHOQca`.
