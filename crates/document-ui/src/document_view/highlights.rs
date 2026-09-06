@@ -122,6 +122,7 @@ impl DocumentView {
                     bounds,
                     source_bounds,
                     texture: texture.texture.handle().clone(),
+                    color_space: texture.texture.color_space(),
                 }
             })
             .collect()

@@ -36,8 +36,8 @@ pub use glyphst_pdf_render_wgpu::{
     VectorLodStatus as GpuVectorLodStatus,
 };
 use gpui::{
-    ExternalGpuContext, ExternalGpuDeviceToken, ExternalGpuRenderHandle, ExternalTextureHandle,
-    ExternalTextureWriteReservation,
+    ExternalGpuContext, ExternalGpuDeviceToken, ExternalGpuRenderHandle, ExternalTextureColorSpace,
+    ExternalTextureHandle, ExternalTextureWriteReservation,
 };
 use gpui_wgpu::{WgpuExternalContext, WgpuExternalRender, WgpuExternalRenderContext, wgpu};
 use std::{
@@ -3365,6 +3365,15 @@ impl fmt::Debug for GpuPageTexture {
 impl GpuPageTexture {
     pub fn handle(&self) -> &ExternalTextureHandle {
         &self.surface.handle
+    }
+
+    /// The encoding returned by sampling this presentation view.
+    pub fn color_space(&self) -> ExternalTextureColorSpace {
+        if self.surface._texture.format().is_srgb() {
+            ExternalTextureColorSpace::LinearSrgb
+        } else {
+            ExternalTextureColorSpace::Srgb
+        }
     }
 
     pub fn size(&self) -> [u32; 2] {

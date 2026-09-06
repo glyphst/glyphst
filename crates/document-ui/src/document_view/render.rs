@@ -780,7 +780,7 @@ impl Render for DocumentView {
                                                                 texture.texture.handle().clone(),
                                                                 1.0,
                                                                 ExternalTextureFilter::Linear,
-                                                                ExternalTextureColorSpace::LinearSrgb,
+                                                                texture.texture.color_space(),
                                                                 ExternalTextureAlphaMode::Opaque,
                                                             )
                                                     {
@@ -809,7 +809,7 @@ impl Render for DocumentView {
                                                         overlay.texture,
                                                         1.0,
                                                         ExternalTextureFilter::Linear,
-                                                        ExternalTextureColorSpace::LinearSrgb,
+                                                        overlay.color_space,
                                                         ExternalTextureAlphaMode::Opaque,
                                                         ExternalTextureColorEffect::InvertRgb,
                                                     )

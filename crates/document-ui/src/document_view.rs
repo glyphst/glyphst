@@ -1328,6 +1328,7 @@ struct LinkInvertOverlay {
     bounds: Bounds<Pixels>,
     source_bounds: Bounds<f32>,
     texture: ExternalTextureHandle,
+    color_space: ExternalTextureColorSpace,
 }
 
 #[derive(Clone, Copy)]
