@@ -557,24 +557,14 @@ impl GpuPdfState {
         if self.motion_active {
             return;
         }
-        let speculative_preparations = self
-            .pages
-            .iter()
-            .filter_map(|(page, state)| {
-                matches!(
-                    state,
-                    GpuPageState::Preparing {
-                        demand: GpuPreparationDemand {
-                            speculative: true,
-                            ..
-                        },
-                        ..
-                    }
-                )
-                .then_some(*page)
-            })
-            .collect::<Vec<_>>();
-        for page in speculative_preparations {
+        // Keep the nearest lookahead worker alive during scrolling so a page
+        // can finish preparation before it enters the viewport.
+        while self.active_speculative_preparations()
+            > speculative_preparation_limit(true, self.zoom_motion_active)
+        {
+            let Some(page) = self.worst_speculative_preparation() else {
+                break;
+            };
             self.cancel_active_preparation(page, true);
         }
 

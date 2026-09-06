@@ -75,7 +75,8 @@ impl DocumentView {
         true
     }
 
-    /// Returns diagnostics for the page or spread at the viewport center.
+    /// Returns diagnostics for every page in the latest viewport paint.
+    /// The page label continues to identify the page or spread at the center.
     ///
     /// Grid overview deliberately has no page section: its many thumbnails do
     /// not have one meaningful "current page", while the process-wide cache
@@ -116,7 +117,14 @@ impl DocumentView {
         let pages = if self.grid_overview_open {
             Vec::new()
         } else {
-            page_range
+            let mut page_indices = if self.viewport_render_debug.is_empty() {
+                page_range.collect::<Vec<_>>()
+            } else {
+                self.viewport_render_debug.keys().copied().collect()
+            };
+            page_indices.sort_unstable();
+            page_indices
+                .into_iter()
                 .filter(|page_idx| *page_idx < self.pages.len())
                 .map(|page_idx| self.page_render_debug_snapshot(page_idx, cache, configured_engine))
                 .collect()
@@ -202,6 +210,12 @@ impl DocumentView {
         let direct_submitted = gpu_presentation
             .as_ref()
             .is_some_and(|presentation| presentation.source == "direct-current");
+        let direct_render = gpu_presentation
+            .as_ref()
+            .filter(|presentation| presentation.source == "direct-current")
+            .and_then(|presentation| {
+                self.native_gpu_direct_render_snapshot(page_idx, presentation.camera_serial)
+            });
         let displayed = native_gpu_render
             .map(|(key, _)| key)
             .or_else(|| direct_submitted.then_some(requested).flatten())
@@ -227,7 +241,12 @@ impl DocumentView {
             requested_failed,
         );
 
-        let gpu = native_gpu_render.map(|(_, stats)| GpuPageRenderDebugSnapshot {
+        let render_stats = if direct_submitted {
+            direct_render.map(|render| render.stats)
+        } else {
+            native_gpu_render.map(|(_, stats)| stats)
+        };
+        let gpu = render_stats.map(|stats| GpuPageRenderDebugSnapshot {
             cpu_time: stats.cpu_time,
             frame_pool_wait_time: stats.frame_pool_wait_time,
             command_encoding_time: stats.command_encoding_time,
@@ -435,6 +454,7 @@ impl DocumentView {
         let page = &self.pages[page_idx];
 
         PageRenderDebugSnapshot {
+            direct_render,
             page_number: page_idx + 1,
             status,
             backend,

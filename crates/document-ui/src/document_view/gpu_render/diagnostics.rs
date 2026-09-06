@@ -60,6 +60,20 @@ impl DocumentView {
             .or(self.gpu_pdf.navigation_fallback.as_deref())
     }
 
+    pub(in super::super) fn native_gpu_direct_render_snapshot(
+        &self,
+        page: usize,
+        camera_serial: u64,
+    ) -> Option<GpuDirectRenderSnapshot> {
+        let cached = self
+            .gpu_pdf
+            .direct_renders
+            .get(&u32::try_from(page).ok()?)?;
+        (cached.identity.camera_serial == camera_serial)
+            .then(|| cached.receipt.render_snapshot())
+            .flatten()
+    }
+
     pub(in super::super) fn native_gpu_render(
         &self,
         page: usize,

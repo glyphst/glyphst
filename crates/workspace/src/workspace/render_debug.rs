@@ -1,8 +1,9 @@
 use glyphst_document_ui::document_view::{
-    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, GpuPresentationQuality,
-    GpuVectorCoverageStrategy, PageRenderBackendDebug, PageRenderDebugSnapshot,
-    PageRenderDebugStatus, RenderCacheDebugSnapshot, SynchronizedScrollDelta,
-    SynchronizedScrollMode, TextIndexDebugState, render_cache_debug_snapshot,
+    DocumentRenderDebugSnapshot, GpuCacheDebugSnapshot, GpuDirectRenderSnapshot,
+    GpuPresentationQuality, GpuVectorCoverageStrategy, PageRenderBackendDebug,
+    PageRenderDebugSnapshot, PageRenderDebugStatus, RenderCacheDebugSnapshot,
+    SynchronizedScrollDelta, SynchronizedScrollMode, TextIndexDebugState,
+    render_cache_debug_snapshot,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FrameEvent, FrameTiming, FrameTimingCollector, Hsla,
@@ -46,7 +47,7 @@ const TRACE_SETTLING_TIMEOUT: Duration = Duration::from_secs(15);
 const TRACE_ZOOM_FACTOR_PER_FRAME: f32 = 1.011_619_4;
 const TRACE_SCROLL_ACTIVATION_LIMIT: Duration = Duration::from_millis(150);
 const TRACE_VECTOR_LOD_MAX_UNDERPREPARED_FRAMES: usize = 30;
-const TRACE_REPORT_VERSION: u32 = 14;
+const TRACE_REPORT_VERSION: u32 = 15;
 
 struct RenderDebugCaptureNotification;
 
@@ -196,6 +197,7 @@ struct RenderDebugTraceFrame {
 
 #[derive(Clone, Debug)]
 struct RenderDebugTracePageFrame {
+    direct_render: Option<GpuDirectRenderSnapshot>,
     page_number: usize,
     backend: &'static str,
     source: Option<String>,
@@ -1149,6 +1151,7 @@ fn capture_render_debug_trace_frame(
             .pages
             .iter()
             .map(|page| RenderDebugTracePageFrame {
+                direct_render: page.direct_render,
                 page_number: page.page_number,
                 backend: page_backend_name(page.backend),
                 source: page
@@ -2025,7 +2028,7 @@ fn capture_report(
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     json!({
-        "schema_version": 18,
+        "schema_version": 19,
         "kind": "glyphst-reader-interaction",
         "captured_at": capture.captured_at,
         "capture_duration_ms": milliseconds(capture_duration),
@@ -2249,6 +2252,7 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
             "direct_callback": render_debug_trace_direct_callback_json(frame),
             "pages": frame.pages.iter().map(|page| json!({
                 "page_number": page.page_number,
+                "direct_render": page.direct_render.as_ref().map(render_debug_direct_snapshot_json),
                 "backend": page.backend,
                 "source": page.source,
                 "page_bounds": page.page_bounds,
@@ -2261,6 +2265,32 @@ fn render_debug_trace_report_json(trace: &RenderDebugTraceReport) -> Value {
                 "vector_lod_ready": page.vector_lod_ready,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+    })
+}
+
+fn render_debug_direct_snapshot_json(snapshot: &GpuDirectRenderSnapshot) -> Value {
+    let stats = snapshot.stats;
+    let region = snapshot.visible_region;
+    json!({
+        "camera_serial": snapshot.camera_serial,
+        "generation": stats.generation,
+        "visible_region": [region.x, region.y, region.width, region.height],
+        "root_transform": snapshot.root_transform,
+        "target_size": snapshot.target_size,
+        "target_origin": snapshot.target_origin,
+        "presentation_quality": presentation_quality_name(stats.presentation_quality),
+        "selected_stroke_lod": stats.selected_stroke_lod,
+        "active_stroke_lod_levels": stats.active_stroke_lod_levels,
+        "selected_stroke_segments": stats.selected_stroke_segments,
+        "target_visible_stroke_segments": stats.target_visible_stroke_segments,
+        "visible_stroke_tiles": stats.visible_stroke_tiles,
+        "max_visible_stroke_tile_segments": stats.max_visible_stroke_tile_segments,
+        "selected_vector_lod": stats.selected_vector_lod,
+        "vector_lod_deferred": stats.vector_lod_deferred,
+        "patch_lod_deferred": stats.patch_lod_deferred,
+        "motion_stroke_sample_mask": stats.motion_stroke_sample_mask,
+        "dirty_tiles": stats.dirty_tiles,
+        "reprojected_frame": stats.reprojected_frame,
     })
 }
 

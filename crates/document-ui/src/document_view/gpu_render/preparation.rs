@@ -230,12 +230,14 @@ pub(super) fn gpu_preparation_targets(
     (ordered, nearest)
 }
 
-pub(super) fn speculative_preparation_allowed(
-    motion_active: bool,
-    background_paused: bool,
-    active_speculative: usize,
-) -> bool {
-    !background_paused && (!motion_active || active_speculative == 0)
+pub(super) fn speculative_preparation_limit(motion_active: bool, background_paused: bool) -> usize {
+    if background_paused {
+        0
+    } else if motion_active {
+        1
+    } else {
+        MAX_CONCURRENT_GPU_PAGE_PREPARATIONS
+    }
 }
 
 pub(super) fn pending_surface_priority(
@@ -550,9 +552,11 @@ impl DocumentView {
             return;
         };
         let motion_active = self.native_gpu_preparation_motion_active();
-        let speculative_background_paused =
-            motion_active || self.gpu_pdf.speculative_resume_task.is_some();
-        while speculative_background_paused && self.gpu_pdf.active_speculative_preparations() > 0 {
+        let speculative_limit = speculative_preparation_limit(
+            motion_active,
+            self.gpu_pdf.zoom_motion_active || self.gpu_pdf.speculative_resume_task.is_some(),
+        );
+        while self.gpu_pdf.active_speculative_preparations() > speculative_limit {
             let Some(page) = self.gpu_pdf.worst_speculative_preparation() else {
                 break;
             };
@@ -570,14 +574,7 @@ impl DocumentView {
                     !self.gpu_pdf.pages.contains_key(page)
                         && !self.gpu_pdf.terminal_pages.contains(page)
                 })
-                .filter(|(_, demand)| {
-                    !demand.speculative
-                        || speculative_preparation_allowed(
-                            motion_active,
-                            speculative_background_paused,
-                            active_speculative,
-                        )
-                })
+                .filter(|(_, demand)| !demand.speculative || active_speculative < speculative_limit)
                 .min_by_key(|(page, demand)| (demand.priority, demand.sequence, **page))
                 .map(|(page, demand)| (*page, *demand));
             let Some((page, demand)) = candidate else {

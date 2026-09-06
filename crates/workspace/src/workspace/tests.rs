@@ -263,15 +263,22 @@ fn document_footer_reserves_layout_and_exposes_progress_and_bookmark_actions(
 }
 
 fn write_minimal_pdf_with_height(path: &Path, height: u32) {
-    let page = format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 {height}] /Resources << >> /Contents 4 0 R >>"
-    );
-    let objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        page.as_str(),
-        "<< /Length 0 >>\nstream\n\nendstream",
+    write_minimal_pdf_pages(path, height, 1);
+}
+
+fn write_minimal_pdf_pages(path: &Path, height: u32, page_count: usize) {
+    let kids = (4..4 + page_count)
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"),
+        "<< /Length 0 >>\nstream\n\nendstream".to_owned(),
     ];
+    objects.extend((0..page_count).map(|_| format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 {height}] /Resources << >> /Contents 3 0 R >>"
+    )));
     let mut bytes = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, object) in objects.iter().enumerate() {
@@ -564,7 +571,7 @@ fn rendering_debug_toggles_a_transient_monitor_on_home(cx: &mut TestAppContext) 
 #[gpui::test]
 fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext) {
     let document_path = temporary_pdf_path("render-debug-capture");
-    write_minimal_pdf(&document_path);
+    write_minimal_pdf_pages(&document_path, 100, 2);
     cx.update(|cx| {
         gpui_component::init(cx);
         cx.set_reduce_motion(true);
@@ -588,6 +595,12 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
     cx.run_until_parked();
 
     workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .active_render_debug_document(cx)
+            .unwrap()
+            .update(cx, |document, cx| {
+                assert!(document.prepare_render_debug_trace_position(1, 0.5, cx));
+            });
         workspace.toggle_rendering_debug(window, cx);
     });
     cx.update(|window, cx| {
@@ -619,7 +632,7 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
         .and_then(|clipboard| clipboard.text())
         .expect("rendering capture JSON on clipboard");
     let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-    assert_eq!(report["schema_version"], 18);
+    assert_eq!(report["schema_version"], 19);
     assert_eq!(report["kind"], "glyphst-reader-interaction");
     assert!(report["application"]["binary_sha256"].is_null());
     assert!(report["trace"].is_null());
@@ -629,6 +642,16 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
     );
     assert!(report["frames"]["total_frames"].as_u64().unwrap() >= 1);
     assert!(report["document"]["gpu_counter_delta"].is_object());
+    assert_eq!(
+        report["document"]["end"]["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| page["page_number"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the capture must include visible neighbors outside the center page range"
+    );
     workspace.read_with(cx, |workspace, _| {
         assert!(workspace.rendering_debug_capture.is_none());
     });
@@ -739,8 +762,8 @@ fn scripted_zoom_trace_cancels_safely_and_restores_the_document(cx: &mut TestApp
         .and_then(|clipboard| clipboard.text())
         .expect("scripted rendering trace JSON on clipboard");
     let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-    assert_eq!(report["schema_version"], 18);
-    assert_eq!(report["trace"]["version"], 14);
+    assert_eq!(report["schema_version"], 19);
+    assert_eq!(report["trace"]["version"], 15);
     assert_eq!(report["trace"]["kind"], "zoom");
     assert_eq!(report["trace"]["completed_interaction_frames"], 0);
     assert_eq!(report["trace"]["completed_settling_frames"], 0);

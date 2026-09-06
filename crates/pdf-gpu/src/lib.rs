@@ -1590,6 +1590,18 @@ struct DirectRenderReceiptState {
     camera_serial: u64,
     generation: u64,
     outcome: AtomicU8,
+    snapshot: Mutex<Option<GpuDirectRenderSnapshot>>,
+}
+
+/// The latest successful execution of one direct page callback, after GPUI clipping.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuDirectRenderSnapshot {
+    pub camera_serial: u64,
+    pub visible_region: GpuPageRegion,
+    pub root_transform: [f64; 6],
+    pub target_size: [u32; 2],
+    pub target_origin: [u32; 2],
+    pub stats: GpuRenderStats,
 }
 
 /// Cloneable receipt that reports what happened to one direct GPUI draw.
@@ -1612,6 +1624,43 @@ impl GpuDirectRenderReceipt {
     #[must_use]
     pub fn outcome(&self) -> GpuDirectRenderOutcome {
         GpuDirectRenderOutcome::from_u8(self.state.outcome.load(Ordering::Acquire))
+    }
+
+    fn record_execution(
+        &self,
+        outcome: GpuDirectRenderOutcome,
+        snapshot: Option<GpuDirectRenderSnapshot>,
+    ) -> bool {
+        // Publish each execution before its first completion. The completion
+        // counters remain once-per-submission, while reused callbacks stay observable.
+        *self
+            .state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+        self.state
+            .outcome
+            .compare_exchange(
+                GpuDirectRenderOutcome::Pending.as_u8(),
+                outcome.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Cached callbacks can execute again with a different GPUI content mask.
+    /// Failed or superseded executions clear the previous successful snapshot.
+    #[must_use]
+    pub fn render_snapshot(&self) -> Option<GpuDirectRenderSnapshot> {
+        if self.outcome() != GpuDirectRenderOutcome::Encoded {
+            return None;
+        }
+        *self
+            .state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -1789,6 +1838,7 @@ impl GpuPdfRenderer {
                 camera_serial: request.camera_serial,
                 generation: request.generation,
                 outcome: AtomicU8::new(GpuDirectRenderOutcome::Pending.as_u8()),
+                snapshot: Mutex::new(None),
             }),
         };
         let render = self.context.render_handle(Arc::new(DirectPageRender {
@@ -2384,22 +2434,13 @@ struct DirectPageRender {
 }
 
 impl DirectPageRender {
-    fn finish(&self, outcome: GpuDirectRenderOutcome, stats: Option<([u32; 2], GpuRenderStats)>) {
-        if self
-            .receipt
-            .state
-            .outcome
-            .compare_exchange(
-                GpuDirectRenderOutcome::Pending.as_u8(),
-                outcome.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            self.renderer
-                .direct_render
-                .finish(self.request.camera_serial, outcome, stats);
+    fn finish(&self, outcome: GpuDirectRenderOutcome, snapshot: Option<GpuDirectRenderSnapshot>) {
+        if self.receipt.record_execution(outcome, snapshot) {
+            self.renderer.direct_render.finish(
+                self.request.camera_serial,
+                outcome,
+                snapshot.map(|snapshot| (snapshot.target_size, snapshot.stats)),
+            );
         }
     }
 }
@@ -2433,7 +2474,7 @@ fn direct_render_encoded<T>(result: std::result::Result<T, RenderError>) -> Resu
 
 impl WgpuExternalRender for DirectPageRender {
     fn render(&self, context: &mut WgpuExternalRenderContext<'_>) -> Result<()> {
-        let result = (|| -> Result<Option<([u32; 2], GpuRenderStats)>> {
+        let result = (|| -> Result<Option<GpuDirectRenderSnapshot>> {
             if context.target_format != self.renderer.output_format
                 || !output_format_supported(context.target_format)
             {
@@ -2492,7 +2533,16 @@ impl WgpuExternalRender for DirectPageRender {
                         context.encoder,
                     ),
             )
-            .map(|stats| stats.map(|stats| (engine_request.target_size, stats)))
+            .map(|stats| {
+                stats.map(|stats| GpuDirectRenderSnapshot {
+                    camera_serial: request.camera_serial,
+                    visible_region,
+                    root_transform: engine_request.root_transform.coefficients(),
+                    target_size: engine_request.target_size,
+                    target_origin,
+                    stats,
+                })
+            })
         })();
         let outcome = match result {
             Ok(Some(_)) => GpuDirectRenderOutcome::Encoded,
@@ -3497,16 +3547,58 @@ mod tests {
             camera_serial: 9,
             generation: 4,
             outcome: AtomicU8::new(GpuDirectRenderOutcome::Pending.as_u8()),
+            snapshot: Mutex::new(None),
         });
         let receipt = GpuDirectRenderReceipt { state };
         assert_eq!(receipt.camera_serial(), 9);
         assert_eq!(receipt.generation(), 4);
         assert_eq!(receipt.outcome(), GpuDirectRenderOutcome::Pending);
-        receipt
-            .state
-            .outcome
-            .store(GpuDirectRenderOutcome::Encoded.as_u8(), Ordering::Release);
+        assert!(receipt.render_snapshot().is_none());
+        let mut snapshot = GpuDirectRenderSnapshot {
+            camera_serial: 9,
+            visible_region: GpuPageRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 64,
+            },
+            root_transform: Transform::IDENTITY.coefficients(),
+            target_size: [32, 64],
+            target_origin: [10, 20],
+            stats: GpuRenderStats {
+                generation: 4,
+                ..GpuRenderStats::default()
+            },
+        };
+        let assert_snapshot = |expected: GpuDirectRenderSnapshot| {
+            let actual = receipt.render_snapshot().expect("encoded render snapshot");
+            assert_eq!(actual.camera_serial, expected.camera_serial);
+            assert_eq!(actual.visible_region, expected.visible_region);
+            assert_eq!(actual.root_transform, expected.root_transform);
+            assert_eq!(actual.target_size, expected.target_size);
+            assert_eq!(actual.target_origin, expected.target_origin);
+            assert_eq!(actual.stats.generation, expected.stats.generation);
+            assert_eq!(
+                actual.stats.selected_stroke_segments,
+                expected.stats.selected_stroke_segments
+            );
+        };
+        assert!(receipt.record_execution(GpuDirectRenderOutcome::Encoded, Some(snapshot)));
         assert_eq!(receipt.outcome(), GpuDirectRenderOutcome::Encoded);
+        assert_snapshot(snapshot);
+        snapshot.visible_region.width = 16;
+        snapshot.target_size[0] = 16;
+        snapshot.stats.selected_stroke_segments = 2;
+        assert!(!receipt.record_execution(GpuDirectRenderOutcome::Encoded, Some(snapshot)));
+        assert_snapshot(snapshot);
+        for outcome in [
+            GpuDirectRenderOutcome::Failed,
+            GpuDirectRenderOutcome::Superseded,
+        ] {
+            assert!(!receipt.record_execution(outcome, None));
+            assert!(receipt.render_snapshot().is_none());
+            assert_eq!(receipt.outcome(), GpuDirectRenderOutcome::Encoded);
+        }
     }
 
     #[test]

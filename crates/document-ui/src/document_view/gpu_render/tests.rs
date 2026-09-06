@@ -333,12 +333,43 @@ fn visible_pages_consume_the_speculative_cache_budget_first() {
 }
 
 #[test]
-fn zoom_motion_suspends_speculative_preparation() {
-    assert!(!speculative_preparation_allowed(true, true, 0));
-    assert!(!speculative_preparation_allowed(true, true, 1));
-    assert!(speculative_preparation_allowed(true, false, 0));
-    assert!(!speculative_preparation_allowed(true, false, 1));
-    assert!(speculative_preparation_allowed(false, false, 1));
+fn scrolling_preserves_one_lookahead_worker_and_zoom_suspends_it() {
+    assert_eq!(speculative_preparation_limit(true, true), 0);
+    assert_eq!(speculative_preparation_limit(false, true), 0);
+    assert_eq!(speculative_preparation_limit(true, false), 1);
+    assert_eq!(
+        speculative_preparation_limit(false, false),
+        MAX_CONCURRENT_GPU_PAGE_PREPARATIONS,
+    );
+
+    let mut state = GpuPdfState::default();
+    for (page, speculative) in [(4, false), (5, true), (6, true)] {
+        state.pages.insert(
+            page,
+            GpuPageState::Preparing {
+                generation: 1,
+                cancellation: GpuCancellationToken::new(),
+                demand: GpuPreparationDemand {
+                    priority: page as usize,
+                    speculative,
+                    sequence: u64::from(page),
+                },
+                _task: Task::ready(()),
+            },
+        );
+    }
+    state.begin_motion();
+    assert!(state.pages.contains_key(&4));
+    assert!(state.pages.contains_key(&5));
+    assert!(!state.pages.contains_key(&6));
+    assert_eq!(state.active_speculative_preparations(), 1);
+    assert_eq!(state.preparation_cancelled, 1);
+
+    state.begin_zoom_motion();
+    assert!(state.pages.contains_key(&4));
+    assert!(!state.pages.contains_key(&5));
+    assert_eq!(state.active_speculative_preparations(), 0);
+    assert_eq!(state.preparation_cancelled, 2);
 }
 
 #[test]

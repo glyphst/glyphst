@@ -68,7 +68,9 @@ use glyphst_pdf_gpu::{
     GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
     GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
 };
-pub use glyphst_pdf_gpu::{GpuPresentationQuality, GpuVectorCoverageStrategy};
+pub use glyphst_pdf_gpu::{
+    GpuDirectRenderSnapshot, GpuPresentationQuality, GpuVectorCoverageStrategy,
+};
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
     source_text_regions,
@@ -844,12 +846,13 @@ pub struct GpuPresentationDebugSnapshot {
 }
 
 /// Rendering and content diagnostics for one active page.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PageRenderDebugSnapshot {
     pub page_number: usize,
     pub status: PageRenderDebugStatus,
     pub backend: PageRenderBackendDebug,
     pub gpu: Option<GpuPageRenderDebugSnapshot>,
+    pub direct_render: Option<GpuDirectRenderSnapshot>,
     pub gpu_preparation: Option<GpuPagePreparationDebugSnapshot>,
     pub gpu_fallbacks: Vec<GpuFallbackDebugSnapshot>,
     pub gpu_warnings: Vec<GpuWarningDebugSnapshot>,
@@ -892,7 +895,7 @@ pub struct DocumentInteractionDebugSnapshot {
 }
 
 /// Rendering diagnostics for the active document viewport.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DocumentRenderDebugSnapshot {
     pub interaction: DocumentInteractionDebugSnapshot,
     pub page_label: String,
