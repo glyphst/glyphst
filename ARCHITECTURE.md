@@ -56,7 +56,7 @@ estimated cache ownership, not process RSS or pages still held by active callers
 Prepared GPU resources and presentation surfaces retain their independent limits.
 
 `COMPILED_PAGE_CACHE_VERSION` in the engine is the only semantic cache version
-authority. The host derives `compiled-v2` from it; version 1 is not read through
+authority. The host derives `compiled-v3` from it; older versions are not read through
 the new namespace and old records fail the engine version check. Existing old
 cache directories are left untouched. Checksums detect corruption, not malicious
 local writers. Source/options/page bindings and scene validation remain required.
