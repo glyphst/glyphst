@@ -1299,12 +1299,23 @@ fn compiled_link_interactions(
                 })
                 .collect::<Vec<_>>();
             let action = compiled_link_action(&link.action)?;
-            Ok(GpuLinkInteraction {
+            let mut interaction = GpuLinkInteraction {
                 annotation_bounds,
                 regions: regions.into(),
                 highlight_mode,
                 action,
-            })
+            };
+            if !link.visible {
+                // Keep the bounds and entry order for the MuPDF link mapping.
+                // A layer-hidden link must never hit, highlight, or activate.
+                interaction.regions = Arc::from([]);
+                interaction.highlight_mode = GpuLinkHighlightMode::None;
+                interaction.action = GpuLinkAction::NoOp {
+                    code: Arc::from("annotation-layer-hidden"),
+                    message: Arc::from("the link's annotation layer is hidden"),
+                };
+            }
+            Ok(interaction)
         })
         .collect::<std::result::Result<Vec<_>, _>>()
         .map(Arc::from)
@@ -4089,6 +4100,64 @@ trailer <</Root 1 0 R>>
                     highlight_mode: expected_mode,
                     action: GpuLinkAction::Uri(Arc::from("https://example.com")),
                 }]
+            );
+        }
+    }
+
+    #[test]
+    fn layer_hidden_links_keep_mapping_bounds_without_hits_or_actions() {
+        for hidden in [false, true] {
+            let bytes = String::from_utf8(link_pdf("/OC 6 0 R").to_vec())
+                .expect("ASCII fixture")
+                .replace("/Pages 2 0 R", &format!("/Pages 2 0 R/OCProperties<</OCGs[6 0 R]/D<</BaseState/{}>>>>", if hidden { "OFF" } else { "ON" }))
+                .replace("/Annots[5 0 R]", "/Annots[5 0 R 7 0 R]")
+                .replace("trailer", "6 0 obj <</Type/OCG/Name(Links)>> endobj\n7 0 obj <</Type/Annot/Subtype/Link/Rect[60 10 90 30]/Border[0 0 0]/H/I/A<</S/URI/URI(https://example.com/always)>>>> endobj\ntrailer");
+            let snapshot = DocumentSnapshot::from_bytes(
+                "annotation-layers.pdf",
+                DocumentFormat::Pdf,
+                Arc::<[u8]>::from(bytes.into_bytes()),
+            );
+            let document = GpuPdfDocument::open(&snapshot).expect("open annotation layers");
+            let page = document
+                .compile_page(0, &CancellationToken::new())
+                .expect("compile layers");
+            assert!(page.support().is_supported(), "{:#?}", page.support());
+            let interactions = compiled_link_interactions(&page).expect("map links");
+            assert_eq!(interactions.len(), 2);
+            assert_eq!(interactions[0].annotation_bounds, [10.0, 70.0, 50.0, 90.0]);
+            assert_eq!(interactions[0].contains_point(20.0, 80.0), !hidden);
+            assert_eq!(interactions[0].action.is_inert(), hidden);
+            assert_eq!(
+                interactions[0].highlight_mode,
+                if hidden {
+                    GpuLinkHighlightMode::None
+                } else {
+                    GpuLinkHighlightMode::Invert
+                }
+            );
+            assert_eq!(interactions[0].regions.is_empty(), hidden);
+            assert!(matches!(page.links()[0].action, EngineAction::Uri(_)));
+            assert!(interactions[1].contains_point(70.0, 80.0));
+            assert!(!interactions[1].action.is_inert());
+            let mupdf = snapshot.open().expect("open MuPDF mapping reference");
+            let mupdf_page = mupdf.inner().load_page(0).expect("MuPDF page");
+            let bounds = mupdf_page
+                .links()
+                .expect("MuPDF links")
+                .map(|link| {
+                    [
+                        f64::from(link.bounds.x0),
+                        f64::from(link.bounds.y0),
+                        f64::from(link.bounds.x1),
+                        f64::from(link.bounds.y1),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(bounds.len(), interactions.len());
+            assert!(
+                interactions
+                    .iter()
+                    .all(|interaction| bounds.contains(&interaction.annotation_bounds))
             );
         }
     }

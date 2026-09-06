@@ -56,12 +56,17 @@ estimated cache ownership, not process RSS or pages still held by active callers
 Prepared GPU resources and presentation surfaces retain their independent limits.
 
 `COMPILED_PAGE_CACHE_VERSION` in the engine is the only semantic cache version
-authority. The host derives `compiled-v3` from it; older versions are not read through
+authority. The host derives `compiled-v{version}` from it; older versions are not read through
 the new namespace and old records fail the engine version check. Existing old
 cache directories are left untouched. Checksums detect corruption, not malicious
 local writers. Source/options/page bindings and scene validation remain required.
 Encrypted documents never read or write compiled pages on disk. The existing
 bounded, idle, best-effort disk writer is unchanged.
+
+Annotation-layer visibility is compiled with the selected layer configuration
+and retained in the cache. Layer-hidden links keep their annotation bounds for
+the MuPDF geometry mapping, with empty hit regions, no press effect and an inert
+native action. Appearance-only layers do not disable a visible annotation's link.
 
 ## Dependency maintenance
 

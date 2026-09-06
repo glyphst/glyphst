@@ -851,6 +851,28 @@ trailer <</Root 1 0 R>>\n%%EOF"
     }
 
     #[test]
+    fn native_link_mapping_keeps_layer_hidden_placeholders() {
+        let links = [document_link(
+            0,
+            vec![Rect::new(10.0, 20.0, 30.0, 40.0)],
+            true,
+        )];
+        let hidden = GpuLinkInteraction {
+            annotation_bounds: [10.0, 20.0, 30.0, 40.0],
+            regions: Arc::from([]),
+            highlight_mode: GpuLinkHighlightMode::None,
+            action: GpuLinkAction::NoOp {
+                code: Arc::from("annotation-layer-hidden"),
+                message: Arc::from("hidden"),
+            },
+        };
+        assert_eq!(
+            DocumentView::native_link_mapping(0, &links, &[hidden]),
+            Some(vec![(0, 0)])
+        );
+    }
+
+    #[test]
     fn native_link_mapping_requires_all_explicit_annotations() {
         let links = [document_link(
             0,
