@@ -16,10 +16,17 @@ translation workflows, themes, and configurable keybindings.
 A lightweight, read-only file navigator with Yazi-inspired parent, current-directory, and preview
 panes. It supports Vim-style keyboard navigation and line-oriented UTF-8 text previews.
 
+## Documentation
+
+- [Architecture](ARCHITECTURE.md): ownership, persistence, GPU lifetimes, and dependencies.
+- [Next work](ROADMAP.md): prioritized follow-ups and completion criteria.
+- [Agent guidance](AGENTS.md): repository constraints and task-specific verification.
+
 ## Development
 
-The Rust version in `rust-toolchain.toml` (1.97.1) and GPUI's native libraries are needed. Glyphst Reader additionally
-requires MuPDF. On Linux, the Nix development shell provides the required libraries and tools.
+The Rust version in [rust-toolchain.toml](rust-toolchain.toml) and GPUI's native libraries
+are needed. Glyphst Reader additionally requires MuPDF. On Linux, the Nix
+development shell provides the required libraries and tools.
 
 ```sh
 nix develop
@@ -38,8 +45,7 @@ are optional research material, not build inputs.
 ### Working on maintained dependencies
 
 Keep independent checkouts beside this repository: `../gpui-kit` on `glyphst/main`,
-`../glyphst-pdf` on `main`, and `../zed` on `glyphst/main`. The former
-`dependencies/gpui-component` checkout has been replaced by `../gpui-kit`.
+`../glyphst-pdf` on `main`, and `../zed` on `glyphst/main`.
 `references/zed` is a read-only upstream reference, not our GPUI fork.
 
 For local development, put only the overrides you need in the ignored
@@ -84,7 +90,10 @@ GLYPHST_DEBUG_FILE_OPEN_MIN_MS=3000 cargo run -p glyphst-reader -- /path/to/docu
 
 Release builds ignore this variable.
 
-Run the standard checks with:
+### Verification
+
+For Rust behavior and dependency changes, run the standard checks with the
+pinned toolchain and published dependencies:
 
 ```sh
 cargo fmt --all -- --check
@@ -92,6 +101,17 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 cargo audit
 ```
+
+For renderer/integration behavior changes, also run the release engine and
+Reader gates in the [PDF benchmark guide](https://github.com/glyphst/glyphst-pdf/blob/main/docs/benchmarks.md)
+(`../glyphst-pdf/docs/benchmarks.md` locally). Keep original thresholds and report
+baseline failures separately. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)
+when dependencies change.
+
+Documentation-only changes need content/link checks and `git diff --check`.
+Do not repeat the full Rust/GPU checks for a prose edit. Benchmark artifacts stay
+in the external `../pdf-test-suite`; retain current decisions in the roadmap or
+architecture, and put run summaries in review messages.
 
 Install the configured pre-commit hooks with `prek install`.
 

@@ -1,45 +1,49 @@
 # Glyphst
 
-Glyphst is a workspace for desktop applications built with Rust, GPUI, and GPUI Kit's
-`gpui-component` compatibility facade. See `ARCHITECTURE.md` for ownership boundaries.
+Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 
-## Repository Layout
+## Working agreements
 
-- `crates/reader` and `crates/files` contain the application binaries.
-- The other crates in `crates/` contain shared UI, application services, and domain code.
-- `../gpui-kit` is the independent maintained UI fork; normal builds use its published Git pin.
-- `../glyphst-pdf` is the standalone PDF engine. `crates/pdf-gpu` is its GPUI adapter;
-  `crates/pdf` owns the MuPDF integration. Keep GPUI and MuPDF out of the standalone engine.
-- `../zed` is the maintained GPUI fork, distinct from the read-only `references/zed`.
-- `references/` contains shallow, read-only reference repositories: Zed, Zathura, Sioyek,
-  Catppuccin, Cherry Studio, Comet, Lucide, Niri, Retain PDF, Typst, and Yazi.
+- Carry the requested work through implementation and relevant verification.
+  Resolve routine choices; ask when missing information changes correctness or scope.
+- Prefer existing code and dependencies. Keep updates concise and distinguish
+  completed checks, baseline failures, and remaining limitations.
+- When asked to choose work, use [ROADMAP.md](ROADMAP.md). Verify the selected
+  entry against current code and evidence; update affected entries and remove
+  completed ones. An explicit user task takes precedence over the shortlist.
 
-Update a reference with `git submodule update --remote --depth 1 <path>`, then review and commit its
-gitlink.
+## Project constraints
 
-## GPUI Kit Policy
+- `reader` and `files` are entry points; shared UI, service, and domain owners
+  are described in [ARCHITECTURE.md](ARCHITECTURE.md).
+- `../glyphst-pdf` owns the standalone PDF engine. Keep GPUI integration in
+  `crates/pdf-gpu` and MuPDF in `crates/pdf`. Unsupported native semantics
+  require whole-page fallback.
+- Preserve task ownership, cancellation generations, paint order, resource
+  limits, and performance/quality gates when changing GPU work.
+- The library's production current-format opener also serves tests through
+  `LibraryStore::open_for_test`. Cleanup must not change on-disk formats or
+  restore obsolete migrators.
+- Compiled-page caches have count and estimated-byte limits. The engine's
+  `COMPILED_PAGE_CACHE_VERSION` controls their namespace; encrypted documents
+  must never use the compiled-page disk cache.
+- Normal builds use published Git pins. Preserve the GPUI Kit Rust aliases and
+  aligned GPUI revisions; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
+  when working on maintained forks. `references/` contains read-only reference
+  submodules, distinct from maintained sibling checkouts.
+- Do not build Nix derivations unless explicitly requested. Do not use cua-driver
+  on this Niri development environment.
 
-- Keep `main` as a fast-forward-only mirror of `upstream/main`.
-- Maintain Glyphst changes on `glyphst/main` and merge `upstream/main` into it regularly.
-- Keep composable widgets, styling workarounds, and application-specific keybindings in Glyphst.
-- Change the fork only when a feature requires GPUI Kit private internals or must alter a
-  component's internal event or render lifecycle.
-- Preserve the `gpui_component`, `gpui_component_assets`, and `gpui_fps` Rust aliases.
-- Keep GPUI revisions aligned across Glyphst and GPUI Kit. Publish Zed, then Kit/PDF,
-  then update Glyphst's Git pins. Local overrides are opt-in as described in `README.md`.
+## Verification and documentation
 
-## Validation and State
+Use the pinned Rust toolchain and the [checks in README](README.md#verification).
+Scale local checks to changed behavior; complete the standard checks for Rust
+behavior or dependency changes. For renderer/integration behavior changes, also
+follow the PDF engine's benchmark guide linked there. Once relevant checks pass,
+repeat or broaden them only for a new change, failure, or unresolved concern.
+Documentation-only edits need link/content checks, not a full Rust/GPU run.
 
-- Use `rust-toolchain.toml`, including in Nix. Run workspace fmt, Clippy with `-D warnings`,
-  and all-target/all-feature tests with `--locked`; review `cargo audit` exceptions.
-- Library tests use `LibraryStore::open_for_test`, which delegates to the production current-format
-  opener. Do not restore obsolete migrators or change current on-disk formats during cleanup.
-- GPU module splits must retain task ownership, cancellation generations, ordering, and whole-page
-  fallback. Keep performance/quality gates unchanged and distinguish baseline failures.
-- The compiled-page cache has count and estimated-byte limits. Its version comes from the PDF
-  engine's `COMPILED_PAGE_CACHE_VERSION`; encrypted documents must not use its disk cache.
-
-## Development Constraint
-
-1. Do not build Nix derivations unless explicitly requested.
-2. Do not use cua-driver since it doesn't support Niri wayland compositor (our dev env) well.
+Keep docs about current contracts and next actions. Put benchmark artifacts in
+`../pdf-test-suite` and run summaries in the final response or PR; do not add
+progress reports to the source tree. Retain a short evidence pointer or design
+rationale only when it informs current work.
