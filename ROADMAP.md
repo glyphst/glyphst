@@ -23,10 +23,14 @@ pass across three repetitions, but both builds have timing failures. A declared
 three-pair book-zoom check finds median interval p95 rising from 8.318 to
 10.509 ms, exceeding its 5% regression bound. The affected pages contain no
 images and GPU work counters match; the timing cause remains unresolved. A
-fresh baseline rebuild reproduces the frozen binary hash.
+fresh baseline rebuild reproduces the frozen binary hash. The subsequent
+content-diagnostics engine update passes all common-profile gates in three
+repetitions, as does its frozen baseline. Those runs do not reproduce the older
+failure, but do not identify its cause or repeat the declared paired experiment.
 
 Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`, and
-`reports/reader-interaction/run-1788783459558` and `run-1788785428149`.
+`reports/reader-interaction/run-1788783459558` and `run-1788785428149`. The newer
+passing comparison is `reports/content-diagnostics-2026-09-07/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
