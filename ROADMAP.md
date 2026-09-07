@@ -27,7 +27,7 @@ fresh baseline rebuild reproduces the frozen binary hash. The subsequent
 content-diagnostics engine update passes all common-profile gates in three
 repetitions, as does its frozen baseline. Those runs do not reproduce the older
 failure, but do not identify its cause or repeat the declared paired experiment.
-The typed-calculator integration check fails timing in seven of nine pairs on
+The sampled-function integration check fails timing in eight of nine pairs on
 both the candidate and its frozen predecessor. Both pass every non-timing gate; these
 runs reproduce the symptom without isolating its cause or establishing timing
 equivalence.
@@ -35,7 +35,7 @@ equivalence.
 Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`, and
 `reports/reader-interaction/run-1788783459558` and `run-1788785428149`. The newer
 passing comparison is `reports/content-diagnostics-2026-09-07/verification.md`.
-The current failing comparison is `reports/calculator-types-2026-09-08/verification.md`.
+The current failing comparison is `reports/sampled-functions-2026-09-08/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
