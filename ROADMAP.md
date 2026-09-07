@@ -4,7 +4,7 @@ A short ordered shortlist for tasks without a more specific user direction.
 Select one bounded step, verify its current premise, and finish its acceptance
 checks. Update affected entries when evidence changes; remove completed work
 rather than appending a progress history. Evidence below was reviewed on
-2026-09-07 against Glyphst `f7dae62` and PDF engine `7dc8f32`.
+2026-09-07; each entry identifies its relevant checkpoint or evidence.
 
 The [PDF roadmap](https://github.com/glyphst/glyphst-pdf/blob/main/ROADMAP.md)
 (`../glyphst-pdf/ROADMAP.md` locally) owns engine semantics and rendering work.
@@ -17,20 +17,23 @@ not build inputs. Reproduce the relevant check if that evidence is unavailable.
 
 **Owner:** `document-ui`, `pdf-gpu`, with engine coordination as needed.
 
-**Current evidence:** At the reviewed checkpoint all non-timing gates pass in
-the four common-profile runs from the regional-resolve comparison. Initial
-baseline/candidate runs include timing overruns; both complete repeat runs pass.
-Dense CAD performance remains open. The old universal common-profile quality
-failures are not the current baseline.
+**Current evidence:** The image-mipmap comparison uses Glyphst `1462afd`
+with engine `9bfef43` versus `541da46`. All common-profile non-timing gates
+pass across three repetitions, but both builds have timing failures. A declared
+three-pair book-zoom check finds median interval p95 rising from 8.318 to
+10.509 ms, exceeding its 5% regression bound. The affected pages contain no
+images and GPU work counters match; the timing cause remains unresolved. A
+fresh baseline rebuild reproduces the frozen binary hash.
 
-Evidence: `reports/transparency-performance-2026-09-07`, and
-`reports/reader-interaction/run-1788767916058`, `run-1788768031148`,
-`run-1788768185027`, and `run-1788768223082`. Dense-view evidence is in
+Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`, and
+`reports/reader-interaction/run-1788783459558` and `run-1788785428149`.
+Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
-**Next step:** Reproduce one dense zoom/pan workload, separate GPUI draw,
-final-color/presentation, and engine execution costs, then address the measured
-bottleneck. Keep the common profile as the integration regression gate.
+**Next step:** Resolve the book-zoom timing regression with matched release
+builds, separating deadline scheduling, GPUI draw, final-color/presentation,
+and engine execution costs. Then return to a dense zoom/pan workload. Keep
+the common profile as the integration regression gate.
 
 **Done when:** The selected workload meets its declared improvement criterion
 with matching release baselines, unchanged visual/camera/allocation checks,
