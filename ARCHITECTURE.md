@@ -27,6 +27,11 @@ uses its external-texture API, and keeps GPUI types outside the engine.
 Frontend preflight, compilation, and renderer preflight must succeed before a
 native page replaces MuPDF. A page never mixes engines or fallback raster islands.
 
+Native page bounds, links and destinations use cropped/rotated physical points
+(1/72 inch), matching MuPDF's reader geometry. The engine applies leaf-page
+UserUnit before supplying those coordinates; the host must not scale them again.
+Unsupported unit geometry follows the same whole-page fallback contract.
+
 ## Presentation and task lifetime
 
 Native preparation and rendering carry cancellation and device generations.

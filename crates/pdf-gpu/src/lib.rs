@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod user_unit_tests;
+
 use anyhow::{Context as _, Result, anyhow, bail};
 use glyphst_core::DocumentRotation;
 use glyphst_pdf::DocumentSnapshot;
