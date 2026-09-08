@@ -22,14 +22,14 @@ with engine `9bfef43` versus `541da46`. A declared three-pair book-zoom check
 finds median interval p95 rising from 8.318 to 10.509 ms, exceeding its 5%
 regression bound. The pages contain no images and GPU work counters match;
 the timing cause remains unresolved. Later common-profile checks have both
-passing and failing runs. The latest CPU transfer integration completes three
-repetitions, but five of nine candidate pairs and all nine frozen-predecessor
+passing and failing runs. The latest raw GPU transfer integration completes three
+repetitions, but eight of nine candidate pairs and seven of nine frozen-predecessor
 pairs fail timing gates. Both pass every non-timing gate with the
 `fixed-deadline-draw` driver. These runs do not resolve the original paired
 regression or establish compositor cadence.
 
 Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`. The recent
-failing comparison is `reports/transfer-cpu-samples-2026-09-08/verification.md`;
+failing comparison is `reports/raw-gpu-transfers-2026-09-08/verification.md`;
 the latest passing integration is `reports/retained-transfers-2026-09-08/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
