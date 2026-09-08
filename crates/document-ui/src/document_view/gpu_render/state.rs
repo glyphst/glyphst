@@ -212,7 +212,7 @@ pub(super) struct PatchLodTask {
 
 pub(super) struct VectorLodTask {
     pub(super) generation: u64,
-    pub(super) required_scale: f32,
+    pub(super) preferred_scale: f32,
     pub(super) cancellation: GpuCancellationToken,
     pub(super) _task: Task<()>,
 }

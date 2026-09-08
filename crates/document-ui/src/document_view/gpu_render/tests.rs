@@ -20,12 +20,23 @@ fn vector_refinement_prepares_the_requested_camera_scale_once() {
     assert_eq!(next_vector_lod_scale(4_096.0, 8_192.0), Some(8_192.0));
     assert_eq!(next_vector_lod_scale(8.0, 8.0), None);
     assert_eq!(next_vector_lod_scale(8_192.0, 16_384.0), Some(16_384.0));
-    assert_eq!(motion_vector_lod_scale(10.0, 2.0, 8.0, 8.0), 40.4);
-    assert_eq!(motion_vector_lod_scale(10.0, 8.0, 2.0, 8.0), 10.0);
-    assert_eq!(motion_vector_lod_scale(10.0, 2.0, 2.1, 8.0), 20.2);
+    assert_eq!(preferred_vector_lod_scale(10.0, 2.0, 8.0, 8.0, false), 40.4);
+    assert_eq!(preferred_vector_lod_scale(10.0, 8.0, 2.0, 8.0, false), 10.0);
+    assert_eq!(preferred_vector_lod_scale(10.0, 2.0, 2.1, 8.0, false), 20.2);
+    assert_eq!(
+        preferred_vector_lod_scale(44.59375, 1.0, 1.0, 8.0, true),
+        90.07938
+    );
+    assert_eq!(preferred_vector_lod_scale(10.0, 8.0, 8.0, 8.0, true), 10.0);
+    assert_eq!(
+        preferred_vector_lod_scale(f64::from(f32::MAX), 1.0, 1.0, 8.0, true),
+        f32::MAX
+    );
     assert!(vector_lod_request_covers(20_000.0, 19_689.184));
     assert!(!vector_lod_request_covers(8.0, 19_689.184));
-    assert!(vector_lod_request_covers(53.0, 54.0));
+    assert!(!vector_lod_request_covers(53.0, 54.0));
+    assert!(vector_lod_request_covers(90.07938, 44.688));
+    assert!(!vector_lod_request_covers(90.07938, 91.0));
     assert!(!vector_lod_request_covers(53.0, 107.0));
 }
 

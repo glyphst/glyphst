@@ -48,6 +48,13 @@ Camera identity includes the page, serial, transform, clipped region, and target
 geometry. Interaction diagnostics must describe actual execution for every
 visible page, including neighbors entering the viewport.
 
+When visible demand exceeds the prepared vector scale, refinement keeps the
+required camera scale separate from preferred zoom headroom. Settled pages
+reserve the same bounded headroom as increasing cameras. A headroom preparation
+that exceeds a resource limit may retry once at the required scale; cancellation
+and semantic failures do not retry. Worker reuse compares its target against
+actual camera demand, and generation checks still govern page replacement.
+
 The engine performs an explicit final-color conversion. The adapter preserves
 sRGB versus ordinary UNORM texture-view encoding when GPUI samples cached
 surfaces. Native interactive presentation does not read page pixels back to the

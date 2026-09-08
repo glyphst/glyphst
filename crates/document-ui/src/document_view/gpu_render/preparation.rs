@@ -22,35 +22,43 @@ pub(super) fn next_vector_lod_scale(available: f32, requested: f64) -> Option<f3
     (requested.is_finite() && requested > available).then_some(requested)
 }
 
-pub(super) fn motion_vector_lod_scale(
+pub(super) fn preferred_vector_lod_scale(
     requested: f64,
     zoom: f32,
     target_zoom: f32,
     max_zoom: f32,
-) -> f64 {
+    settled: bool,
+) -> f32 {
+    let bounded = |scale: f64| scale.min(f64::from(f32::MAX)) as f32;
     if !requested.is_finite()
         || zoom <= 0.0
         || !zoom.is_finite()
         || !target_zoom.is_finite()
         || !max_zoom.is_finite()
     {
-        return requested;
+        return bounded(requested);
     }
-    if target_zoom <= zoom {
-        return requested;
+    if !settled && target_zoom <= zoom {
+        return bounded(requested);
     }
-    let projected = requested * f64::from(target_zoom / zoom);
+    // A settled high-fit-scale page needs the same bounded lookahead as an
+    // increasing camera. Otherwise its first zoom step outgrows preparation.
+    let projected = requested * f64::from(target_zoom.min(max_zoom) / zoom);
     let headroom = requested * f64::from((max_zoom / zoom).clamp(1.0, 2.0));
-    requested.max(projected.max(headroom) * 1.01)
+    let preferred = projected.max(headroom);
+    bounded(if preferred > requested {
+        preferred * 1.01
+    } else {
+        requested
+    })
 }
 
 pub(super) fn vector_lod_request_covers(existing: f32, required: f32) -> bool {
-    // Requests reserve up to 2x camera headroom. Reuse that worker until the
-    // live demand actually reaches its prepared scale instead of cancelling
-    // it for every small increase in the speculative headroom target.
+    // Compare the worker's target with actual demand, not with a moving
+    // headroom target. No assumption about the headroom multiplier is needed.
     existing.is_finite()
         && required.is_finite()
-        && f64::from(existing) * 2.0 >= f64::from(required) * 0.999_999
+        && f64::from(existing) >= f64::from(required) * 0.999_999
 }
 
 pub(super) fn presented_refinement_page_count(
@@ -868,6 +876,13 @@ impl DocumentView {
                             Arc::clone(&pending.prepared),
                             Arc::clone(&pending.renderer),
                             required_scale,
+                            preferred_vector_lod_scale(
+                                status.requested_scale,
+                                self.zoom,
+                                self.target_zoom,
+                                MAX_ZOOM,
+                                true,
+                            ),
                             cx,
                         );
                     }
@@ -1353,20 +1368,19 @@ impl DocumentView {
         prepared: Arc<PreparedGpuPage>,
         renderer: Arc<GpuPdfRenderer>,
         required_scale: f32,
+        preferred_scale: f32,
         cx: &mut Context<Self>,
     ) {
         if self
             .gpu_pdf
             .vector_lod_tasks
             .get(&page)
-            .is_some_and(|task| vector_lod_request_covers(task.required_scale, required_scale))
+            .is_some_and(|task| vector_lod_request_covers(task.preferred_scale, required_scale))
             || self
                 .gpu_pdf
                 .vector_lod_failures
                 .get(&page)
-                .is_some_and(|failure| {
-                    vector_lod_request_covers(failure.required_scale, required_scale)
-                })
+                .is_some_and(|failure| failure.required_scale.to_bits() == required_scale.to_bits())
         {
             return;
         }
@@ -1400,7 +1414,12 @@ impl DocumentView {
             let result = cx
                 .background_spawn(async move {
                     worker_renderer
-                        .prepare_vector_lod(&worker_page, required_scale, &worker_cancellation)
+                        .prepare_vector_lod(
+                            &worker_page,
+                            required_scale,
+                            preferred_scale,
+                            &worker_cancellation,
+                        )
                         .map_err(|error| format!("{error:#}"))
                 })
                 .await;
@@ -1463,7 +1482,7 @@ impl DocumentView {
             page,
             VectorLodTask {
                 generation,
-                required_scale,
+                preferred_scale,
                 cancellation,
                 _task: task,
             },

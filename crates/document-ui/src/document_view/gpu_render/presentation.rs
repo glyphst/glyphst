@@ -1181,21 +1181,21 @@ impl DocumentView {
         if !speculative
             && let Some(status) = camera_vector_lod_status
             && !status.ready
-            && let Some(required_scale) = next_vector_lod_scale(
-                status.available_scale,
-                motion_vector_lod_scale(
-                    status.requested_scale,
-                    self.zoom,
-                    self.target_zoom,
-                    MAX_ZOOM,
-                ),
-            )
+            && let Some(required_scale) =
+                next_vector_lod_scale(status.available_scale, status.requested_scale)
         {
             self.start_native_gpu_vector_lod_prepare(
                 page,
                 Arc::clone(&prepared),
                 Arc::clone(&renderer),
                 required_scale,
+                preferred_vector_lod_scale(
+                    status.requested_scale,
+                    self.zoom,
+                    self.target_zoom,
+                    MAX_ZOOM,
+                    settled,
+                ),
                 cx,
             );
         }
@@ -1458,6 +1458,13 @@ impl DocumentView {
                         Arc::clone(&prepared),
                         Arc::clone(&renderer),
                         required_scale,
+                        preferred_vector_lod_scale(
+                            vector_lod_status.requested_scale,
+                            self.zoom,
+                            self.target_zoom,
+                            MAX_ZOOM,
+                            true,
+                        ),
                         cx,
                     );
                 }

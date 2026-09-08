@@ -8,6 +8,7 @@
 
 #[cfg(test)]
 mod user_unit_tests;
+mod vector_lod;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use glyphst_core::DocumentRotation;
@@ -2030,10 +2031,13 @@ impl GpuPdfRenderer {
     /// The caller keeps presenting `page` and swaps in this result only after
     /// successful completion, so resource pressure or cancellation cannot
     /// invalidate coherent pixels already on screen.
+    /// `preferred_scale` reserves lookahead; if it exceeds a preparation
+    /// resource limit, retry once at the current camera's `required_scale`.
     pub fn prepare_vector_lod(
         &self,
         page: &PreparedGpuPage,
-        scale: f32,
+        required_scale: f32,
+        preferred_scale: f32,
         cancellation: &CancellationToken,
     ) -> Result<Arc<PreparedGpuPage>> {
         if self.is_device_lost() {
@@ -2043,14 +2047,20 @@ impl GpuPdfRenderer {
             bail!("the prepared PDF page belongs to a stale GPU generation");
         }
         let started = Instant::now();
-        let gpu = self
-            .renderer
-            .prepare_interactive_at_scale_with_cancellation(
-                page.compiled.scene(),
-                scale,
-                cancellation,
-            )
-            .map_err(|error| anyhow!(error).context("failed to prepare native PDF vector LOD"))?;
+        let gpu = vector_lod::prepare_with_headroom(
+            required_scale,
+            preferred_scale,
+            cancellation,
+            |scale| {
+                self.renderer
+                    .prepare_interactive_at_scale_with_cancellation(
+                        page.compiled.scene(),
+                        scale,
+                        cancellation,
+                    )
+            },
+        )
+        .map_err(|error| anyhow!(error).context("failed to prepare native PDF vector LOD"))?;
         let mut timings = page.timings;
         let elapsed = started.elapsed();
         timings.gpu_prepare = elapsed;
