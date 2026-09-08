@@ -3965,6 +3965,79 @@ trailer <</Root 1 0 R>>
     }
 
     #[test]
+    fn raw_transfer_disk_cache_restores_reset_ownership_and_native_export() {
+        let content = "/Inverse gs 0.25 g 0 0 32 32 re f /Zero gs 0.5 g 16 0 16 32 re f";
+        let bytes = format!(
+            "%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 32 32]/Resources<</ExtGState<</Inverse<</TR 5 0 R>>/Zero<</ca 0>>>>>>/Contents 4 0 R>> endobj\n\
+4 0 obj <</Length {}>> stream\n{content}\nendstream endobj\n\
+5 0 obj <</FunctionType 2/Domain[0 1]/C0[1]/C1[0]/N 1>> endobj\n\
+trailer <</Root 1 0 R>>\n%%EOF",
+            content.len()
+        );
+        let snapshot = DocumentSnapshot::from_pdf_bytes("raw-transfer.pdf", bytes.into_bytes());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let cache_root = std::env::temp_dir().join(format!(
+            "glyphst-raw-transfer-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        let cancellation = CancellationToken::new();
+        let first = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("open raw transfer PDF");
+        assert!(
+            first
+                .frontend_diagnostics(0)
+                .expect("frontend scan")
+                .is_empty()
+        );
+        let (compiled, hit) = first
+            .compile_page_with_cache_status(0, &cancellation)
+            .expect("compile raw source");
+        assert!(!hit);
+        assert!(compiled.support().is_supported());
+        assert!(compiled.scene().requires_transfer_regions());
+        let fingerprint = compiled.scene().fingerprint();
+        first
+            .persist_compiled_page_cache(&compiled)
+            .expect("persist raw cache");
+        let path = first
+            .compiled_page_cache_path(PageIndex::new(0))
+            .expect("cache path");
+        assert!(path.is_file());
+        drop(compiled);
+        drop(first);
+        let reopened = GpuPdfDocument::open_with_compiled_cache(&snapshot, &cache_root)
+            .expect("reopen raw PDF");
+        let (restored, hit) = reopened
+            .compile_page_with_cache_status(0, &cancellation)
+            .expect("restore raw cache");
+        assert!(hit);
+        assert_eq!(restored.scene().fingerprint(), fingerprint);
+        assert!(restored.scene().requires_transfer_regions());
+        assert!(restored.support().is_supported());
+        assert_eq!(reopened.compiled_cache_entries(), 1);
+        assert_eq!(
+            reopened.compiled_cache_bytes(),
+            restored.estimated_retained_bytes()
+        );
+        let image = reopened
+            .render_page_image(0, DocumentRotation::Degrees0, 1.0, &cancellation)
+            .expect("native raw export");
+        assert_eq!([image.width, image.height], [32, 32]);
+        for (i, pixel) in image.rgba.chunks_exact(4).enumerate() {
+            let gray = if i % 32 < 16 { 191 } else { 64 };
+            assert!(pixel[..3].iter().all(|value| value.abs_diff(gray) <= 1));
+            assert_eq!(pixel[3], 255);
+        }
+        drop(reopened);
+        fs::remove_dir_all(cache_root).expect("remove test cache");
+    }
+
+    #[test]
     fn native_cpu_page_export_honors_reader_rotation_without_gpu_readback() {
         let snapshot =
             DocumentSnapshot::from_bytes("native-export.pdf", DocumentFormat::Pdf, minimal_pdf());

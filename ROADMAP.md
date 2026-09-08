@@ -22,22 +22,32 @@ with engine `9bfef43` versus `541da46`. A declared three-pair book-zoom check
 finds median interval p95 rising from 8.318 to 10.509 ms, exceeding its 5%
 regression bound. The pages contain no images and GPU work counters match;
 the timing cause remains unresolved. Later common-profile checks have both
-passing and failing runs. The latest raw GPU transfer integration completes three
-repetitions, but eight of nine candidate pairs and seven of nine frozen-predecessor
-pairs fail timing gates. Both pass every non-timing gate with the
+passing and failing runs. The latest public transfer-region integration completes
+three repetitions, but eight of nine pairs fail timing gates for both the candidate
+and frozen predecessor. Both pass every non-timing gate with the
 `fixed-deadline-draw` driver. These runs do not resolve the original paired
 regression or establish compositor cadence.
 
+A focused 32-point public transfer-region page also reports `CoherentPreview`
+at the first zoom increment in all three repetitions: demand rises from 44.594
+to 44.688 pixels per point before the prepared geometry catches up. A control
+with only transfer entries removed also fails around the first zoom on the
+frozen predecessor, with missing direct-render callbacks. These distinct
+failures leave preparation/presentation acceptance open; they do not establish
+equivalent behavior between the two routes.
+
 Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`. The recent
-failing comparison is `reports/raw-gpu-transfers-2026-09-08/verification.md`;
+failing comparison is `reports/public-transfer-regions-2026-09-08/verification.md`;
 the latest passing integration is `reports/retained-transfers-2026-09-08/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
-**Next step:** Resolve the book-zoom timing regression with matched release
-builds, separating deadline scheduling, GPUI draw, final-color/presentation,
-and engine execution costs. Then return to a dense zoom/pan workload. Keep
-the common profile as the integration regression gate.
+**Next step:** Resolve the first-zoom preparation boundary without weakening
+geometry quality, cancellation or resource limits. Then resolve the book-zoom
+timing regression with matched release builds, separating deadline scheduling,
+GPUI draw, final-color/presentation, and engine execution costs. Return to a
+dense zoom/pan workload after these checks. Keep the common profile as the
+integration regression gate.
 
 **Done when:** The selected workload meets its declared improvement criterion
 with matching release baselines, unchanged visual/camera/allocation checks,
