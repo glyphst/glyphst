@@ -35,7 +35,7 @@ equivalence.
 Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`, and
 `reports/reader-interaction/run-1788783459558` and `run-1788785428149`. The newer
 passing comparison is `reports/content-diagnostics-2026-09-07/verification.md`.
-The current failing comparison is `reports/sampled-functions-2026-09-08/verification.md`.
+The current failing comparison is `reports/exponential-stitching-2026-09-08/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
