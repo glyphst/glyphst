@@ -18,24 +18,17 @@ not build inputs. Reproduce the relevant check if that evidence is unavailable.
 **Owner:** `document-ui`, `pdf-gpu`, with engine coordination as needed.
 
 **Current evidence:** The image-mipmap comparison uses Glyphst `1462afd`
-with engine `9bfef43` versus `541da46`. All common-profile non-timing gates
-pass across three repetitions, but both builds have timing failures. A declared
-three-pair book-zoom check finds median interval p95 rising from 8.318 to
-10.509 ms, exceeding its 5% regression bound. The affected pages contain no
-images and GPU work counters match; the timing cause remains unresolved. A
-fresh baseline rebuild reproduces the frozen binary hash. The subsequent
-content-diagnostics engine update passes all common-profile gates in three
-repetitions, as does its frozen baseline. Those runs do not reproduce the older
-failure, but do not identify its cause or repeat the declared paired experiment.
-The sampled-function integration check fails timing in eight of nine pairs on
-both the candidate and its frozen predecessor. Both pass every non-timing gate; these
-runs reproduce the symptom without isolating its cause or establishing timing
-equivalence.
+with engine `9bfef43` versus `541da46`. A declared three-pair book-zoom check
+finds median interval p95 rising from 8.318 to 10.509 ms, exceeding its 5%
+regression bound. The pages contain no images and GPU work counters match;
+the timing cause remains unresolved. Later common-profile checks have both
+passing and failing runs. The transfer-function integration passes all nine
+pairs across three repetitions with the `fixed-deadline-draw` driver. This
+does not repeat the original paired experiment or establish compositor cadence.
 
-Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`, and
-`reports/reader-interaction/run-1788783459558` and `run-1788785428149`. The newer
-passing comparison is `reports/content-diagnostics-2026-09-07/verification.md`.
-The current failing comparison is `reports/exponential-stitching-2026-09-08/verification.md`.
+Evidence: `reports/image-mipmap-area-2026-09-07/verification.md`. The recent
+failing comparison is `reports/exponential-stitching-2026-09-08/verification.md`;
+the latest passing integration is `reports/transfer-functions-2026-09-08/verification.md`.
 Dense CAD performance also remains open; its evidence is in
 `reports/inactive-stroke-draws-2026-09-06`.
 
