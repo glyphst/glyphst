@@ -32,6 +32,13 @@ Native page bounds, links and destinations use cropped/rotated physical points
 UserUnit before supplying those coordinates; the host must not scale them again.
 Unsupported unit geometry follows the same whole-page fallback contract.
 
+MuPDF context clones share stylesheet settings across threads.
+[Document opening](crates/pdf/src/document.rs) serializes configuration. PDF
+opens preserve the user CSS allocation and enable document styles for rich-text
+appearances, avoiding repeated writes when already enabled. EPUB stylesheet
+and publisher-style settings still have process-wide ownership; concurrent
+documents cannot rely on independent EPUB style policies.
+
 ## Presentation and task lifetime
 
 Native preparation and rendering carry cancellation and device generations.

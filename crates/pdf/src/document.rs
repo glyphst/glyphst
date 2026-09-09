@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -330,8 +330,24 @@ fn document_format(path: &Path) -> Result<DocumentFormat> {
         .with_context(|| format!("unsupported document type: {}", path.display()))
 }
 
+// Cloned MuPDF contexts share both stylesheet settings. Serialize configuration
+// and avoid rewriting an unchanged flag while other PDF threads consume it.
+static STYLE_CONFIGURATION_LOCK: Mutex<()> = Mutex::new(());
+
 fn configure_context(format: DocumentFormat, layout: DocumentLayout) -> Result<()> {
+    let _configuration = STYLE_CONFIGURATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("MuPDF style configuration lock poisoned"))?;
     let mut context = mupdf::Context::get();
+    // PDF rich-text appearances need document styles, but use their own CSS.
+    // Replacing the shared user stylesheet here can free an allocation being
+    // consumed by EPUB layout. EPUB settings still have process-wide ownership.
+    if format == DocumentFormat::Pdf {
+        if !context.use_document_css() {
+            context.set_use_document_css(true);
+        }
+        return Ok(());
+    }
     match (format, layout) {
         (DocumentFormat::Epub, DocumentLayout::Reflow(layout)) => {
             let layout: EpubLayout = layout.sanitized();
@@ -358,6 +374,10 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::*;
+
+    // These two tests intentionally change the shared EPUB stylesheet. PDF
+    // tests run alongside them and must preserve its allocation.
+    static EPUB_STYLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn encrypted_pdf_bytes() -> Vec<u8> {
         let encoded = include_str!("../tests/fixtures/dummy-encrypted.pdf.b64")
@@ -459,7 +479,40 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_pdf_opens_preserve_user_css_and_enable_pdf_rich_text_styles() {
+        let _styles = EPUB_STYLE_TEST_LOCK.lock().unwrap();
+        let mut context = mupdf::Context::get();
+        let css = "body { font-size: 19pt; }";
+        {
+            let _configuration = STYLE_CONFIGURATION_LOCK.lock().unwrap();
+            context.set_user_css(css).unwrap();
+            context.set_use_document_css(false);
+        }
+        let snapshot = DocumentSnapshot::from_pdf_bytes("encrypted.pdf", encrypted_pdf_bytes())
+            .with_password(DocumentPassword::new("123456"));
+
+        assert_eq!(snapshot.open().unwrap().inner().page_count().unwrap(), 1);
+        assert_eq!(context.user_css(), Some(css));
+        assert!(context.use_document_css());
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let snapshot = &snapshot;
+                scope.spawn(move || {
+                    for _ in 0..16 {
+                        let document = snapshot.open().unwrap();
+                        assert_eq!(document.inner().page_count().unwrap(), 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(context.user_css(), Some(css));
+        assert!(context.use_document_css());
+    }
+
+    #[test]
     fn opens_and_reflows_epub_fixture() {
+        let _styles = EPUB_STYLE_TEST_LOCK.lock().unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.epub");
         let snapshot = DocumentSnapshot::read(path).unwrap();
         let narrow = snapshot
