@@ -78,6 +78,7 @@
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo-audit
+              cargo-nextest
               mold
               pkg-config
               prek

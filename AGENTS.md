@@ -36,14 +36,10 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 
 ## Verification and documentation
 
-Use the pinned Rust toolchain and the [checks in README](README.md#verification).
-Scale local checks to changed behavior; complete the standard checks for Rust
-behavior or dependency changes. For renderer/integration behavior changes, also
-follow the PDF engine's benchmark guide linked there. Once relevant checks pass,
-repeat or broaden them only for a new change, failure, or unresolved concern.
-Documentation-only edits need link/content checks, not a full Rust/GPU run.
+Workspace-wide rules (single active session, check tiers, evidence, disk) are in
+`../AGENTS.md`. Run `script/check.sh quick` for code changes and
+`script/check.sh gate` before a PR or engine pin bump; add `--local` to build
+against sibling checkouts. Documentation-only edits need link/content checks.
 
-Keep docs about current contracts and next actions. Put benchmark artifacts in
-`../pdf-test-suite` and run summaries in the final response or PR; do not add
-progress reports to the source tree. Retain a short evidence pointer or design
-rationale only when it informs current work.
+Keep docs about current contracts and next actions; put run summaries in the
+commit message or PR, not in the source tree.

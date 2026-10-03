@@ -92,26 +92,20 @@ Release builds ignore this variable.
 
 ### Verification
 
-For Rust behavior and dependency changes, run the standard checks with the
-pinned toolchain and published dependencies:
+`script/check.sh` runs the tiered checks inside the Nix shell and records step
+logs and timings under `../pdf-test-suite/reports/checks/`:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
-cargo audit
+script/check.sh quick          # fmt, clippy, tests
+script/check.sh gate           # + doctests, cargo audit, release Reader, interaction gate
+script/check.sh gate --local   # same, against sibling checkouts (.cargo/config.local.toml)
 ```
 
-For renderer/integration behavior changes, also run the release engine and
-Reader gates in the [PDF benchmark guide](https://github.com/glyphst/glyphst-pdf/blob/main/docs/benchmarks.md)
-(`../glyphst-pdf/docs/benchmarks.md` locally). Keep original thresholds and report
-baseline failures separately. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)
-when dependencies change.
-
-Documentation-only changes need content/link checks and `git diff --check`.
-Do not repeat the full Rust/GPU checks for a prose edit. Benchmark artifacts stay
-in the external `../pdf-test-suite`; retain current decisions in the roadmap or
-architecture, and put run summaries in review messages.
+`gate` runs the engine's Reader interaction profile inside a private headless
+compositor, so it can run unattended. Keep original thresholds and report baseline
+failures separately. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)
+when dependencies change. Documentation-only changes need content/link checks
+and `git diff --check`.
 
 Install the configured pre-commit hooks with `prek install`.
 
