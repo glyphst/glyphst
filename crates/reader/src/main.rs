@@ -54,6 +54,7 @@ const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 // wake-up jitter does not turn a healthy 120 Hz application into a coin-flip
 // failure. The report still gates the observed p95 against the real budget.
 const AUTOMATED_TRACE_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const AUTOMATED_TRACE_TIMER_LEAD: Duration = Duration::from_micros(500);
 const AUTOMATED_TRACE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTOMATED_TRACE_TOTAL_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -337,7 +338,16 @@ fn run_automated_render_trace(
             next_frame_at += AUTOMATED_TRACE_FRAME_INTERVAL;
             let now = Instant::now();
             if next_frame_at > now {
-                cx.background_executor().timer(next_frame_at - now).await;
+                // Resume before the deadline so executor/timer wake latency
+                // does not become apparent rendering time. The bounded final
+                // wait keeps the same cadence and still exposes late draws.
+                let sleep = (next_frame_at - now).saturating_sub(AUTOMATED_TRACE_TIMER_LEAD);
+                if !sleep.is_zero() {
+                    cx.background_executor().timer(sleep).await;
+                }
+                while Instant::now() < next_frame_at {
+                    std::hint::spin_loop();
+                }
             } else {
                 // Never burst through missed deadlines: a slow draw should be
                 // visible as a long interval, not followed by synthetic catch-up.
