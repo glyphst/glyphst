@@ -354,6 +354,7 @@ fn run_automated_render_trace(
                 };
                 let diagnostic = cx.update(|cx| {
                     workspace.update(cx, |workspace, window, cx| {
+                        window.set_platform_frame_wake_suppressed(false);
                         let progress = workspace.automated_render_debug_trace_progress();
                         if trace_started {
                             workspace.cancel_automated_render_debug_trace(
@@ -440,10 +441,14 @@ fn run_automated_render_trace(
                         ));
                     }
                 };
-                if matches!(
+                let owns_drawing = matches!(
                     poll,
                     AutomatedTracePoll::Started | AutomatedTracePoll::Running(_)
-                ) {
+                );
+                cx.with_window(workspace.entity().entity_id(), |window, _| {
+                    window.set_platform_frame_wake_suppressed(owns_drawing);
+                });
+                if owns_drawing {
                     let draw_started_at = Instant::now();
                     if cx
                         .with_window(workspace.entity().entity_id(), |window, cx| {
