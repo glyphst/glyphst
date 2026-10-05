@@ -202,7 +202,9 @@ fn quick_open_focuses_the_first_visible_item_and_navigates_immediately(cx: &mut 
         }
 
         this.search_input.update(cx, |input, cx| {
-            input.set_value("b", window, cx);
+            // Search includes parent paths, whose temporary directory name
+            // can also contain the single letter "b".
+            input.set_value("b.pdf", window, cx);
         });
         this.update_filter(cx);
         assert_eq!(this.focused_item, NewTabItemKey::Document(paths[1].clone()));

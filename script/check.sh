@@ -11,6 +11,7 @@
 #   --keep-going  run every step and report all failures
 # Environment: GLYPHST_PDF_REPO (default ../glyphst-pdf),
 #              GLYPHST_PDF_SUITE_ROOT (default ../pdf-test-suite)
+#              GLYPHST_READER_REPETITIONS (default 3, range 3..100)
 #
 # Each run writes step logs and summary.json to <suite>/reports/checks/reader-<tier>-<time>/.
 
@@ -27,6 +28,11 @@ shift || true
 keep_going=0
 cargo_config=()
 locked=(--locked)
+reader_repetitions=${GLYPHST_READER_REPETITIONS:-3}
+if [[ ! ${reader_repetitions} =~ ^([3-9]|[1-9][0-9]|100)$ ]]; then
+    printf 'GLYPHST_READER_REPETITIONS must be an integer in 3..100\n' >&2
+    exit 2
+fi
 for argument in "$@"; do
     case ${argument} in
         --keep-going) keep_going=1 ;;
@@ -63,7 +69,8 @@ write_summary() {
         printf '{"tier":"reader-%s","status":"%s","revision":"%s","dirty":%s,"local_deps":%s,' \
             "${tier}" "$1" "$(git rev-parse HEAD)" "${dirty}" \
             "$( ((${#cargo_config[@]})) && echo true || echo false)"
-        printf '"seconds":%d,"steps":[' "$(($(date +%s) - started_at))"
+        printf '"seconds":%d,"reader_repetitions":%d,"steps":[' \
+            "$(($(date +%s) - started_at))" "${reader_repetitions}"
         local IFS=,
         printf '%s' "${steps_json[*]}"
         printf ']}\n'
@@ -119,25 +126,26 @@ with_perf_lock() {
 printf 'check %s at %s%s\n' "${tier}" "$(git rev-parse --short HEAD)" \
     "$( ((${#cargo_config[@]})) && echo ' (local sibling dependencies)')"
 step fmt cargo fmt --all -- --check
-step clippy cargo "${cargo_config[@]}" clippy --workspace --all-targets --all-features \
+# External Cargo commands only receive configuration placed after the subcommand.
+step clippy cargo clippy "${cargo_config[@]}" --workspace --all-targets --all-features \
     "${locked[@]}" -- -D warnings
-step tests cargo "${cargo_config[@]}" nextest run --workspace --all-targets --all-features \
+step tests cargo nextest run "${cargo_config[@]}" --workspace --all-targets --all-features \
     "${locked[@]}" --no-fail-fast
 
 if [[ ${tier} == gate ]]; then
     reader="${repo}/target/release/glyphst-reader"
-    step doctests cargo "${cargo_config[@]}" test --doc --workspace --all-features \
+    step doctests cargo test "${cargo_config[@]}" --doc --workspace --all-features \
         "${locked[@]}"
     step audit cargo audit
     step disk bash "${engine}/scripts/disk-check.sh"
-    step reader-build cargo "${cargo_config[@]}" build --release "${locked[@]}" -p glyphst-reader
+    step reader-build cargo build "${cargo_config[@]}" --release "${locked[@]}" -p glyphst-reader
     # The engine keeps its own build flags; this shell's mold RUSTFLAGS would
     # invalidate its cache.
     step engine-tools-build env -u RUSTFLAGS -u IN_NIX_SHELL bash -c "cd '${engine}' && \
         nix develop -c cargo build --release --locked -p glyphst-pdf-tools"
     step reader-interaction with_perf_lock "${engine}/scripts/headless-session.sh" -- \
         "${engine}/target/release/glyphst-pdf-tools" interaction suite --reader "${reader}" \
-        --suite-root "${suite_root}" --profile common --repetitions 3
+        --suite-root "${suite_root}" --profile common --repetitions "${reader_repetitions}"
 fi
 
 finish

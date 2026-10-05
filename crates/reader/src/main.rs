@@ -323,6 +323,32 @@ enum AutomatedTracePoll {
     Failed(String),
 }
 
+async fn wait_for_automated_trace_frame(
+    next_frame_at: &mut Instant,
+    executor: &gpui::BackgroundExecutor,
+) {
+    *next_frame_at += AUTOMATED_TRACE_FRAME_INTERVAL;
+    let now = Instant::now();
+    let missed_deadline = *next_frame_at <= now;
+    // A late draw must still yield to the platform event loop. Otherwise one
+    // slow presentation can keep this task runnable and starve buffer-release
+    // events, making subsequent presentations block as well.
+    let sleep = next_frame_at
+        .saturating_duration_since(now)
+        .saturating_sub(AUTOMATED_TRACE_TIMER_LEAD)
+        .max(AUTOMATED_TRACE_TIMER_LEAD);
+    executor.timer(sleep).await;
+    if missed_deadline {
+        // Resume the cadence at the actual draw time, without catch-up bursts.
+        *next_frame_at = Instant::now();
+    } else {
+        // Keep ordinary timer wake latency outside the fixed draw deadline.
+        while Instant::now() < *next_frame_at {
+            std::hint::spin_loop();
+        }
+    }
+}
+
 fn run_automated_render_trace(
     workspace: WorkspaceWindowHandle,
     request: instance::RenderTraceRequest,
@@ -335,24 +361,7 @@ fn run_automated_render_trace(
         let mut last_progress_log = Instant::now();
         let mut next_frame_at = Instant::now();
         loop {
-            next_frame_at += AUTOMATED_TRACE_FRAME_INTERVAL;
-            let now = Instant::now();
-            if next_frame_at > now {
-                // Resume before the deadline so executor/timer wake latency
-                // does not become apparent rendering time. The bounded final
-                // wait keeps the same cadence and still exposes late draws.
-                let sleep = (next_frame_at - now).saturating_sub(AUTOMATED_TRACE_TIMER_LEAD);
-                if !sleep.is_zero() {
-                    cx.background_executor().timer(sleep).await;
-                }
-                while Instant::now() < next_frame_at {
-                    std::hint::spin_loop();
-                }
-            } else {
-                // Never burst through missed deadlines: a slow draw should be
-                // visible as a long interval, not followed by synthetic catch-up.
-                next_frame_at = now;
-            }
+            wait_for_automated_trace_frame(&mut next_frame_at, cx.background_executor()).await;
             let elapsed = Instant::now().saturating_duration_since(started_at);
             if (!trace_started && elapsed >= AUTOMATED_TRACE_START_TIMEOUT)
                 || elapsed >= AUTOMATED_TRACE_TOTAL_TIMEOUT
@@ -909,6 +918,31 @@ mod tests {
         ReaderTranslationSession,
     };
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn overdue_trace_frames_yield_between_draws(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+
+        let completed = Rc::new(Cell::new(0));
+        let executor = cx.executor();
+        let _task = cx.foreground_executor().spawn({
+            let completed = completed.clone();
+            async move {
+                for _ in 0..3 {
+                    let mut deadline = Instant::now() - Duration::from_secs(1);
+                    wait_for_automated_trace_frame(&mut deadline, &executor).await;
+                    completed.set(completed.get() + 1);
+                }
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(completed.get(), 0);
+        for expected in 1..=3 {
+            cx.executor().advance_clock(AUTOMATED_TRACE_TIMER_LEAD);
+            cx.run_until_parked();
+            assert_eq!(completed.get(), expected);
+        }
+    }
 
     fn temporary_pdf_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
