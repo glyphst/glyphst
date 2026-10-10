@@ -8,12 +8,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
     {
       nixpkgs,
       rust-overlay,
+      crane,
       ...
     }:
     let
@@ -37,13 +40,9 @@
         system:
         let
           pkgs = mkPkgs system;
-          rustToolchain = mkRustToolchain pkgs;
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
-          };
+          craneLib = (crane.mkLib pkgs).overrideToolchain mkRustToolchain;
           glyphstReader = pkgs.callPackage ./nix/package.nix {
-            inherit rustPlatform;
+            inherit craneLib;
           };
         in
         {

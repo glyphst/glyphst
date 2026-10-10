@@ -1,6 +1,7 @@
 {
   lib,
   stdenv,
+  craneLib,
   rustPlatform,
   pkg-config,
   clang,
@@ -43,10 +44,14 @@
     fontDirectories = [ ];
     includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
   };
-in
-  rustPlatform.buildRustPackage {
+  # crane vendors every Cargo.lock source in its own directory, so the crates.io
+  # hayro/moxcms crates (Typst, image) and the engine's same-version forks coexist.
+  # Git dependencies use builtins.fetchGit with the evaluating user's credentials,
+  # which the private engine repository requires.
+  commonArgs = {
     pname = "glyphst-reader";
     version = workspaceCargo.workspace.package.version;
+    strictDeps = true;
 
     src = lib.fileset.toSource {
       root = ../.;
@@ -58,15 +63,8 @@ in
       ];
     };
 
-    cargoLock = {
-      lockFile = ../Cargo.lock;
-      allowBuiltinFetchGit = true;
-    };
-
-    cargoBuildFlags = [
-      "-p"
-      "glyphst-reader"
-    ];
+    cargoExtraArgs = "--locked -p glyphst-reader";
+    doCheck = false;
 
     nativeBuildInputs = [
       clang
@@ -105,22 +103,25 @@ in
     env.LIBCLANG_PATH = "${libclang.lib}/lib";
     NIX_LDFLAGS = "-rpath ${lib.makeLibraryPath runtimeLibraries}";
     dontPatchELF = stdenv.hostPlatform.isLinux;
+  };
+in
+  craneLib.buildPackage (commonArgs
+    // {
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-    doCheck = false;
+      postInstall = ''
+        mkdir -p $out/share/glyphst-reader/pdf-translation
+        cp -R crates/pdf-translation/assets/. $out/share/glyphst-reader/pdf-translation/
+        wrapProgram $out/bin/glyphst-reader \
+          --set FONTCONFIG_FILE ${fontsConf} \
+          --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
+        install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
+      '';
 
-    postInstall = ''
-      mkdir -p $out/share/glyphst-reader/pdf-translation
-      cp -R crates/pdf-translation/assets/. $out/share/glyphst-reader/pdf-translation/
-      wrapProgram $out/bin/glyphst-reader \
-        --set FONTCONFIG_FILE ${fontsConf} \
-        --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
-      install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
-    '';
-
-    meta = {
-      description = "A GPUI-based PDF and EPUB reader";
-      license = lib.licenses.agpl3Only;
-      mainProgram = "glyphst-reader";
-      platforms = lib.platforms.linux;
-    };
-  }
+      meta = {
+        description = "A GPUI-based PDF and EPUB reader";
+        license = lib.licenses.agpl3Only;
+        mainProgram = "glyphst-reader";
+        platforms = lib.platforms.linux;
+      };
+    })
