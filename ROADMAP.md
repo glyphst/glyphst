@@ -34,8 +34,9 @@ solely from ordinary first-page rendering.
 [architecture rationale](ARCHITECTURE.md#dependency-audit) retain two quick-xml
 exceptions. The reviewed audit also reports unmaintained `bincode`, `cgmath`,
 `instant`, `paste`, `rustls-pemfile`, `rustybuzz`, `ttf-parser`, and `yaml-rust`,
-plus cgmath advisory RUSTSEC-2026-0197. These are dated observations, not a
-fresh audit result.
+plus cgmath advisory RUSTSEC-2026-0197. A refreshed audit on 2026-10-11, after
+the dependency upgrades, reports the same nine allowed warnings; quick-xml
+0.38.4 is still reachable only through Typst 0.15.1, the latest release.
 
 **Next step:** Refresh advisories and identify the currently reachable dependency
 paths. When the pinned Typst chain supports a fixed quick-xml version (at least

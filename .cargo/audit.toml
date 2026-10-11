@@ -1,6 +1,6 @@
 [advisories]
 ignore = [
-  # Reviewed 2026-09-05: quick-xml 0.38.4 remains through citationberg 0.7.0 ->
+  # Reviewed 2026-10-11: quick-xml 0.38.4 remains through citationberg 0.7.0 ->
   # hayagriva 0.10.1 -> typst-library 0.15.1. GPUI and direct Mermaid paths are fixed.
   # This is runtime CSL parsing, not a build-only dependency. Keep the exception
   # explicit until the pinned Typst chain can use quick-xml >=0.41;
