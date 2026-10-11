@@ -14,7 +14,7 @@ use futures::{
     channel::{mpsc, oneshot},
 };
 use gpui::{App, AppContext as _, Global};
-use rand::RngCore as _;
+use rand::Rng as _;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

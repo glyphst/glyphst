@@ -68,7 +68,7 @@ impl LibraryStore {
         if width == 0 || height == 0 || bytes.is_empty() {
             return Err(anyhow!("AI image is empty or has invalid dimensions"));
         }
-        let asset_id = format!("{:x}", Sha256::digest(bytes));
+        let asset_id = glyphst_core::lower_hex(Sha256::digest(bytes));
         let image = AiSessionImage {
             asset_id: asset_id.clone(),
             name: name
@@ -237,7 +237,7 @@ fn validate_ai_image_bytes(image: &AiSessionImage, bytes: &[u8]) -> Result<()> {
             "managed AI image length does not match its reference"
         ));
     }
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = glyphst_core::lower_hex(Sha256::digest(bytes));
     if actual != image.asset_id {
         return Err(anyhow!(
             "managed AI image hash does not match its reference"

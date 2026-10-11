@@ -147,7 +147,10 @@ fn credential_url(path: &Path) -> String {
     let path = normalize_path(path);
     let mut hasher = Sha256::new();
     hash_path(&mut hasher, &path);
-    format!("{CREDENTIAL_URL_PREFIX}{:x}", hasher.finalize())
+    format!(
+        "{CREDENTIAL_URL_PREFIX}{}",
+        glyphst_core::lower_hex(hasher.finalize())
+    )
 }
 
 #[cfg(unix)]

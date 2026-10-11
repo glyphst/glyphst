@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 
 pub mod paths;
 
+/// Lowercase hexadecimal encoding, as digest identifiers are stored.
+pub fn lower_hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write as _;
+    let bytes = bytes.as_ref();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DocumentFormat {
     Pdf,
@@ -646,5 +657,14 @@ mod tests {
         assert_eq!(reference.regions[0].x0, 1.0);
         assert_eq!(reference.regions[1].page, PageIndex(2));
         assert_eq!(reference.regions[1].y0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod lower_hex_tests {
+    #[test]
+    fn encodes_each_byte_as_two_lowercase_digits() {
+        assert_eq!(super::lower_hex([0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+        assert_eq!(super::lower_hex([]), "");
     }
 }

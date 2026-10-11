@@ -32,9 +32,9 @@ unsafe_code = "deny"
 [workspace.dependencies]
 anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
-dirs = "6"
+dirs = "7"
 futures = "0.3"
 gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = [
     "wayland",
@@ -60,7 +60,7 @@ markdown = "1.0"
 mupdf = "0.7"
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "blocking", "multipart"] }
-rand = "0.9"
+rand = "0.10"
 ratex-layout = "=0.1.9"
 ratex-parser = "=0.1.9"
 ratex-svg = { version = "=0.1.9", features = ["embed-fonts"] }
@@ -69,7 +69,7 @@ regex = "1"
 rust-embed = { version = "8", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 smallvec = "1"
 tikv-jemalloc-sys = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tikv-jemallocator = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
@@ -87,7 +87,7 @@ unicode-properties = { version = "0.1", default-features = false, features = ["g
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
-zstd = "0.13"
+zstd = "0.14"
 ztracing = { package = "gpui-pre-ztracing", version = "=0.3.8" }
 
 [profile.dev.package.tikv-jemalloc-sys]

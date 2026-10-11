@@ -3662,7 +3662,7 @@ fn request_fingerprints_for_source(
 }
 
 fn source_sha256(source_bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(source_bytes))
+    glyphst_core::lower_hex(Sha256::digest(source_bytes))
 }
 
 fn cached_source_matches(
