@@ -299,7 +299,7 @@ impl Workspace {
         let pointer_x = (event.event.position.x - event.bounds.left())
             .as_f32()
             .clamp(0.0, workspace_width);
-        let tool_rail_width = if self.active_pane.read(cx).active_document_view().is_some() {
+        let tool_rail_width = if self.active_pane(cx).active_document_view(cx).is_some() {
             TOOL_RAIL_WIDTH
         } else {
             0.0
@@ -377,14 +377,6 @@ impl Workspace {
         deferred(handle).into_any_element()
     }
 
-    fn all_document_views(&self, cx: &Context<Self>) -> Vec<Entity<DocumentView>> {
-        self.pane_group
-            .panes()
-            .into_iter()
-            .flat_map(|pane| pane.read(cx).document_views())
-            .collect()
-    }
-
     fn close_document_sidebar_content(&self, sidebar: DocumentSidebar, cx: &mut Context<Self>) {
         for document_view in self.all_document_views(cx) {
             document_view.update(cx, |document_view, cx| {
@@ -455,8 +447,8 @@ impl Workspace {
     }
 
     fn sync_visible_document_docks(&self, snapshot: DocumentDockSnapshot, cx: &mut Context<Self>) {
-        for pane in self.pane_group.panes() {
-            if let Some(document_view) = pane.read(cx).active_document_view() {
+        for pane in self.panes(cx) {
+            if let Some(document_view) = pane.active_document_view(cx) {
                 document_view.update(cx, |document_view, cx| {
                     document_view.set_dock_snapshot(snapshot, cx);
                 });
@@ -752,19 +744,24 @@ impl Workspace {
     pub(super) fn render_body(
         &mut self,
         theme: ThemeColor,
-        dim_inactive_panes: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let active_document_view = self.active_pane.read(cx).active_document_view();
+        let active_pane = self.active_pane(cx);
+        let active_document_view = active_pane.active_document_view(cx);
         if self.zen_mode {
             if let Some(document_view) = active_document_view.as_ref() {
                 document_view.update(cx, |document_view, cx| {
                     document_view.set_dock_snapshot(DocumentDockSnapshot::default(), cx);
                 });
             }
-            let focus_handle = self.active_pane.read(cx).focus_handle();
-            if let Some(content) = self.active_pane.read(cx).active_zen_mode_content() {
+            let zen_tab = active_pane
+                .active_tab()
+                .filter(|tab| tab.read(cx).supports_zen_mode())
+                .cloned();
+            if let Some(tab) = zen_tab {
+                let focus_handle = tab.read(cx).focus_handle(cx);
+                let content = tab.into_any_element();
                 return div()
                     .id("workspace-zen-surface")
                     .debug_selector(|| "workspace-zen-surface".to_string())
@@ -795,7 +792,7 @@ impl Workspace {
         let dock_document_view = self
             .dock_document_target(cx)
             .map(|(_, document_view)| document_view);
-        let loading = self.active_pane.read(cx).active_tab_is_loading();
+        let loading = active_pane.active_tab_is_loading(cx);
         let document_docks_visible = dock_document_view.is_some();
         let tool_rail_visible = dock_document_view.is_some();
         let mut snapshot = self.docks.snapshot(
@@ -812,9 +809,16 @@ impl Workspace {
         if animating {
             window.request_animation_frame();
         }
-        let center =
-            self.pane_group
-                .render(&self.active_pane, theme, dim_inactive_panes, window, cx);
+        // Each pane pads itself by half the gap between panes, so the dock
+        // area reaches that far past the column for the outer panes to line
+        // up with the docks beside them.
+        let center = div()
+            .absolute()
+            .top(px(-PANE_SURFACE_MARGIN))
+            .right(px(-PANE_SURFACE_MARGIN))
+            .bottom(px(-PANE_SURFACE_MARGIN))
+            .left(px(-PANE_SURFACE_MARGIN))
+            .child(self.dock_area.clone());
         let mut main_panels = Vec::with_capacity(2);
 
         if let Some(document_view) = dock_document_view.as_ref() {
@@ -924,6 +928,7 @@ impl Workspace {
                 div()
                     .id("workspace-dock-center")
                     .debug_selector(|| "workspace-dock-center".to_string())
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()

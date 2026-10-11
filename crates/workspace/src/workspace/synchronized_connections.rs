@@ -34,7 +34,8 @@ impl Workspace {
     pub(super) fn synchronized_connection_tab_state(
         &self,
         connection: &SynchronizedConnection,
-        pane_id: EntityId,
+        source_pane: Option<PaneId>,
+        pane_id: PaneId,
         tab_id: EntityId,
         is_document: bool,
     ) -> SynchronizedConnectionTabState {
@@ -66,7 +67,7 @@ impl Workspace {
 
         let group_number = self.synchronized_connection_display_number(connection.group);
         let pane_is_represented = match connection.group {
-            SynchronizedConnectionGroup::New(_) => pane_id == connection.source_pane.entity_id(),
+            SynchronizedConnectionGroup::New(_) => source_pane == Some(pane_id),
             SynchronizedConnectionGroup::Existing(group_id) => !self
                 .synchronized_tabs
                 .can_add_member(group_id, tab_id, pane_id),
@@ -85,22 +86,16 @@ impl Workspace {
         tab_id: EntityId,
         cx: &Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        for pane in self.pane_group.panes() {
-            if !pane.read(cx).has_tab_id(tab_id) {
-                continue;
-            }
-            let tab_bounds = pane.read(cx).tab_bounds(tab_id)?;
-            let center = tab_bounds.center();
-            if self
-                .pane_group
-                .bounding_box_for_pane(&pane)
-                .is_some_and(|pane_bounds| !pane_bounds.contains(&center))
-            {
-                return None;
-            }
-            return Some(tab_bounds);
+        let pane = self.pane_for_tab(tab_id, cx)?;
+        let tab_bounds = self.tab_bounds(tab_id)?;
+        let center = tab_bounds.center();
+        if self
+            .bounding_box_for_pane(pane)
+            .is_some_and(|pane_bounds| !pane_bounds.contains(&center))
+        {
+            return None;
         }
-        None
+        Some(tab_bounds)
     }
 
     pub(super) fn synchronized_connection_node(
@@ -189,10 +184,7 @@ impl Workspace {
             .synchronized_connection
             .as_ref()
             .is_some_and(|connection| {
-                !connection
-                    .source_pane
-                    .read(cx)
-                    .has_tab_id(connection.source_tab)
+                self.tab_item(connection.source_tab, cx).is_none()
                     || matches!(
                         connection.group,
                         SynchronizedConnectionGroup::Existing(group_id)
@@ -209,16 +201,19 @@ impl Workspace {
             .values()
             .flat_map(|pair| [pair.source_id, pair.translated_id])
             .collect::<HashSet<_>>();
-        for pane in self.pane_group.panes() {
-            let pane_id = pane.entity_id();
-            let tab_ids = pane.read(cx).tab_ids();
-            let mut presentation = PaneSynchronizedPresentation::default();
-            if let Some(connection) = &self.synchronized_connection {
-                presentation.connection_color_slot =
-                    Some(self.synchronized_connection_color_slot(connection.group));
-                presentation.recently_added = connection.recently_added;
-            }
-            for tab_id in tab_ids {
+        let source_pane = self
+            .synchronized_connection
+            .as_ref()
+            .and_then(|connection| self.pane_for_tab(connection.source_tab, cx));
+        let mut presentation = SynchronizedPresentation::default();
+        if let Some(connection) = &self.synchronized_connection {
+            presentation.connection_color_slot =
+                Some(self.synchronized_connection_color_slot(connection.group));
+            presentation.recently_added = connection.recently_added;
+        }
+        for pane in self.panes(cx) {
+            for tab in pane.tabs() {
+                let tab_id = tab.entity_id();
                 if let Some(group) = self.synchronized_tabs.summary_for_tab(tab_id) {
                     presentation.group_by_tab.insert(tab_id, group);
                 }
@@ -231,34 +226,33 @@ impl Workspace {
                 if let Some(connection) = &self.synchronized_connection {
                     let state = self.synchronized_connection_tab_state(
                         connection,
-                        pane_id,
+                        source_pane,
+                        pane.id(),
                         tab_id,
-                        pane.read(cx).tab_is_document(tab_id),
+                        tab.read(cx).is_document(),
                     );
                     presentation.connection_tabs.insert(tab_id, state);
                 }
             }
-            pane.update(cx, |pane, cx| {
-                pane.set_synchronized_presentation(presentation, cx);
-            });
         }
+        self.synchronized_presentation = presentation;
         cx.notify();
     }
 
     pub(super) fn start_new_synchronized_group(
         &mut self,
-        source_pane: Entity<Pane>,
         source_tab: gpui::EntityId,
         cx: &mut Context<Self>,
     ) {
-        if !source_pane.read(cx).tab_is_document(source_tab)
+        if !self
+            .tab_item(source_tab, cx)
+            .is_some_and(|tab| tab.read(cx).is_document())
             || self.synchronized_tabs.group_for_tab(source_tab).is_some()
         {
             return;
         }
         let reserved = self.synchronized_tabs.reserve_group();
-        let cursor = source_pane
-            .read(cx)
+        let cursor = self
             .tab_bounds(source_tab)
             .map(|bounds| bounds.center())
             .unwrap_or_else(|| point(px(0.0), px(0.0)));
@@ -266,7 +260,6 @@ impl Workspace {
         self.fading_synchronized_connection = None;
         self.synchronized_connection = Some(SynchronizedConnection {
             source_tab,
-            source_pane,
             group: SynchronizedConnectionGroup::New(reserved),
             cursor,
             animation_started_at: now,
@@ -279,7 +272,6 @@ impl Workspace {
 
     pub(super) fn start_connecting_synchronized_group(
         &mut self,
-        source_pane: Entity<Pane>,
         source_tab: gpui::EntityId,
         group_id: SynchronizedGroupId,
         cx: &mut Context<Self>,
@@ -288,8 +280,7 @@ impl Workspace {
             return;
         }
         self.synchronized_tabs.select_for_tab(source_tab);
-        let cursor = source_pane
-            .read(cx)
+        let cursor = self
             .tab_bounds(source_tab)
             .map(|bounds| bounds.center())
             .unwrap_or_else(|| point(px(0.0), px(0.0)));
@@ -298,7 +289,6 @@ impl Workspace {
         self.fading_synchronized_connection = None;
         self.synchronized_connection = Some(SynchronizedConnection {
             source_tab,
-            source_pane,
             group: SynchronizedConnectionGroup::Existing(group_id),
             cursor,
             animation_started_at: now,
@@ -328,7 +318,7 @@ impl Workspace {
 
     pub(super) fn handle_synchronized_tab_click(
         &mut self,
-        pane: &Entity<Pane>,
+        pane: PaneId,
         tab_id: gpui::EntityId,
         was_active: bool,
         window: &mut Window,
@@ -336,20 +326,22 @@ impl Workspace {
     ) {
         if let Some(connection) = self.synchronized_connection.as_ref() {
             let source_tab = connection.source_tab;
-            let source_pane = connection.source_pane.clone();
+            let Some(source_pane) = self.pane_for_tab(source_tab, cx) else {
+                return;
+            };
             let connection_group = connection.group;
-            let target_pane_id = pane.entity_id();
-            if tab_id == source_tab || !pane.read(cx).tab_is_document(tab_id) {
+            let target_pane_id = pane;
+            if tab_id == source_tab || !self.pane(pane, cx).tab_is_document(tab_id, cx) {
                 return;
             }
             let now = Instant::now();
             let (added_group, first_edge) = match connection_group {
                 SynchronizedConnectionGroup::New(reserved) => {
-                    if target_pane_id == source_pane.entity_id()
+                    if target_pane_id == source_pane
                         || !self.synchronized_tabs.commit_reserved_group(
                             reserved,
                             source_tab,
-                            source_pane.entity_id(),
+                            source_pane,
                             tab_id,
                             target_pane_id,
                         )
@@ -410,24 +402,22 @@ impl Workspace {
     pub(super) fn activate_synchronized_group(
         &mut self,
         group_id: SynchronizedGroupId,
-        initiating_pane: &Entity<Pane>,
+        initiating_pane: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let members = self.synchronized_tabs.member_tabs(group_id);
-        for pane in self.pane_group.panes() {
+        for pane in self.panes(cx) {
             let member = members
                 .iter()
-                .find(|tab_id| pane.read(cx).has_tab_id(**tab_id))
+                .find(|tab_id| pane.has_tab_id(**tab_id))
                 .copied();
             if let Some(tab_id) = member {
-                pane.update(cx, |pane, cx| {
-                    pane.activate_tab_by_id(tab_id, false, window, cx);
-                });
+                self.activate_tab(pane.id(), tab_id, false, window, cx);
             }
         }
-        self.active_pane = initiating_pane.clone();
-        initiating_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        self.active_pane = initiating_pane;
+        self.focus_pane(initiating_pane, window, cx);
         cx.notify();
     }
 
@@ -463,10 +453,9 @@ impl Workspace {
     }
 
     pub(super) fn tab_is_displayed(&self, tab_id: EntityId, cx: &App) -> bool {
-        self.pane_group
-            .panes()
+        self.panes(cx)
             .into_iter()
-            .any(|pane| pane.read(cx).active_tab_id() == Some(tab_id))
+            .any(|pane| pane.active_tab_id() == Some(tab_id))
     }
 
     pub(super) fn document_view_for_tab(
@@ -474,10 +463,8 @@ impl Workspace {
         tab_id: EntityId,
         cx: &App,
     ) -> Option<Entity<DocumentView>> {
-        self.pane_group
-            .panes()
-            .into_iter()
-            .find_map(|pane| pane.read(cx).document_view_for_id(tab_id))
+        self.tab_item(tab_id, cx)
+            .and_then(|tab| tab.read(cx).document_view())
     }
 
     pub(super) fn synchronize_live_translation_viewport_anchor(
@@ -588,17 +575,15 @@ impl Workspace {
                 }
             }
             let Some(pane) = self
-                .pane_group
-                .panes()
-                .into_iter()
-                .find(|pane| pane.read(cx).has_tab_id(member_tab))
+                .pane_for_tab(member_tab, cx)
+                .map(|pane| self.pane(pane, cx))
             else {
                 continue;
             };
-            if pane.read(cx).active_tab_id() != Some(member_tab) {
+            if pane.active_tab_id() != Some(member_tab) {
                 continue;
             }
-            if let Some(document_view) = pane.read(cx).document_view_for_id(member_tab) {
+            if let Some(document_view) = pane.document_view_for_id(member_tab, cx) {
                 document_view.update(cx, |document_view, cx| {
                     document_view.apply_synchronized_scroll_delta(delta, cx);
                 });
@@ -769,16 +754,17 @@ impl Workspace {
         cx: &App,
     ) -> Option<(SynchronizedConnectionTabState, Bounds<Pixels>)> {
         let connection = self.synchronized_connection.as_ref()?;
-        for pane in self.pane_group.panes() {
+        let source_pane = self.pane_for_tab(connection.source_tab, cx);
+        for pane in self.panes(cx) {
             if self
-                .pane_group
-                .bounding_box_for_pane(&pane)
+                .bounding_box_for_pane(pane.id())
                 .is_some_and(|pane_bounds| !pane_bounds.contains(&connection.cursor))
             {
                 continue;
             }
-            for tab_id in pane.read(cx).tab_ids() {
-                let Some(tab_bounds) = pane.read(cx).tab_bounds(tab_id) else {
+            for tab in pane.tabs() {
+                let tab_id = tab.entity_id();
+                let Some(tab_bounds) = self.tab_bounds(tab_id) else {
                     continue;
                 };
                 if !tab_bounds.contains(&connection.cursor) {
@@ -787,9 +773,10 @@ impl Workspace {
                 return Some((
                     self.synchronized_connection_tab_state(
                         connection,
-                        pane.entity_id(),
+                        source_pane,
+                        pane.id(),
                         tab_id,
-                        pane.read(cx).tab_is_document(tab_id),
+                        tab.read(cx).is_document(),
                     ),
                     tab_bounds,
                 ));

@@ -3551,7 +3551,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.1"
-source = "git+https://github.com/glyphst/gpui-kit?rev=445e735e6dbd63bb9e7599090e1db25e1951f245#445e735e6dbd63bb9e7599090e1db25e1951f245"
+source = "git+https://github.com/glyphst/gpui-kit?rev=31bbf56ac1cfd42a73f4034a545501bf3e2ba23a#31bbf56ac1cfd42a73f4034a545501bf3e2ba23a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3591,7 +3591,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.1"
-source = "git+https://github.com/glyphst/gpui-kit?rev=445e735e6dbd63bb9e7599090e1db25e1951f245#445e735e6dbd63bb9e7599090e1db25e1951f245"
+source = "git+https://github.com/glyphst/gpui-kit?rev=31bbf56ac1cfd42a73f4034a545501bf3e2ba23a#31bbf56ac1cfd42a73f4034a545501bf3e2ba23a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3637,7 +3637,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.1"
-source = "git+https://github.com/glyphst/gpui-kit?rev=445e735e6dbd63bb9e7599090e1db25e1951f245#445e735e6dbd63bb9e7599090e1db25e1951f245"
+source = "git+https://github.com/glyphst/gpui-kit?rev=31bbf56ac1cfd42a73f4034a545501bf3e2ba23a#31bbf56ac1cfd42a73f4034a545501bf3e2ba23a"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3648,7 +3648,7 @@ dependencies = [
 [[package]]
 name = "gpui-fps"
 version = "0.7.1"
-source = "git+https://github.com/glyphst/gpui-kit?rev=445e735e6dbd63bb9e7599090e1db25e1951f245#445e735e6dbd63bb9e7599090e1db25e1951f245"
+source = "git+https://github.com/glyphst/gpui-kit?rev=31bbf56ac1cfd42a73f4034a545501bf3e2ba23a#31bbf56ac1cfd42a73f4034a545501bf3e2ba23a"
 dependencies = [
  "core-graphics 0.24.0",
  "gpui-pre",
@@ -3665,7 +3665,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.1"
-source = "git+https://github.com/glyphst/gpui-kit?rev=445e735e6dbd63bb9e7599090e1db25e1951f245#445e735e6dbd63bb9e7599090e1db25e1951f245"
+source = "git+https://github.com/glyphst/gpui-kit?rev=31bbf56ac1cfd42a73f4034a545501bf3e2ba23a#31bbf56ac1cfd42a73f4034a545501bf3e2ba23a"
 dependencies = [
  "anyhow",
  "gpui-pre",

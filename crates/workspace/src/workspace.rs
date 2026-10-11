@@ -1,6 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -21,19 +24,27 @@ use glyphst_ui::{
     style::{apply_window_background, shell_background},
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId, ExternalPaths,
-    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, PromptButton, PromptLevel, Render, SharedString, WeakEntity,
-    Window, WindowAppearance, bounds, canvas, div, fill, point, prelude::*, px, size,
+    Anchor, AnyElement, App, Axis, Bounds, Context, DismissEvent, DragMoveEvent, Entity, EntityId,
+    ExternalPaths, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptButton, PromptLevel, Render, SharedString,
+    Subscription, WeakEntity, Window, WindowAppearance, anchored, bounds, canvas, deferred, div,
+    fill, point, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, ThemeColor, WindowExt as _, menu::PopupMenu, notification::Notification,
+    ActiveTheme as _, ThemeColor, WindowExt as _,
+    dock::{
+        BasePanelView as PanelView, DockArea, DockEvent, DockPlacement, DragPanel, InsertTarget,
+        NodeId, PaneNode, PaneRef, PanelId,
+    },
+    menu::{PopupMenu, PopupMenuItem},
+    notification::Notification,
 };
 use gpui_fps::{FpsMonitor, FpsOverlay};
 
 mod ai;
 mod chrome;
 mod docks;
+mod panes;
 mod render_debug;
 mod session;
 mod synchronized_connections;
@@ -59,16 +70,19 @@ use crate::{
         ExternalDocumentDropFeedback, classify_external_document_paths,
         render_external_document_drop_overlay,
     },
+    icons::IconName,
     library::{
-        DocumentPosition, ReaderSidebar, ReaderSynchronizedGroup, ReaderTranslationSession,
-        ReaderWindowBounds, ReaderWindowSession, ReaderWindowState, normalize_path,
+        DocumentPosition, ReaderPaneSession, ReaderPaneTree, ReaderSidebar, ReaderSplitAxis,
+        ReaderSynchronizedGroup, ReaderTabKind, ReaderTranslationSession, ReaderWindowBounds,
+        ReaderWindowSession, ReaderWindowState, normalize_path,
     },
     new_tab::{NewTab, NewTabEvent},
     pane::{
-        DraggedTab, Pane, PaneDropTarget, PaneEvent, PaneGroup, PaneSynchronizedPresentation,
+        PANE_DIRECTION_PROBE_DISTANCE, PANE_MIN_SIZE, PANE_SURFACE_MARGIN, Pane, PaneGeometry,
+        PaneId, PaneLayout, PaneTabBounds, RESIZE_STEP, ReaderDockSkin,
         RecentlyAddedSynchronizedTab, SplitDirection, SplitDown, SplitHorizontal, SplitLeft,
         SplitRight, SplitUp, SplitVertical, SynchronizedConnectionInvalidReason,
-        SynchronizedConnectionTabState, TabTransfer,
+        SynchronizedConnectionTabState, SynchronizedPresentation,
     },
     picker::{Picker, PickerEvent},
     settings::{SettingsStore, WindowSettings, setup_ui_font, sync_component_theme},
@@ -76,6 +90,7 @@ use crate::{
         ReservedSynchronizedGroup, SynchronizedConnectionNode, SynchronizedGroupId,
         SynchronizedTabRegistry, closest_synchronized_tab, synchronized_connection_tree,
     },
+    tab_item::{TabItem, TabItemEvent},
     theme::{ThemeAppearance, ThemeAppearanceMode},
     theme_selector::{ThemeSelector, ThemeSelectorDelegate},
 };
@@ -83,6 +98,7 @@ use crate::{
 use ai::WorkspaceAiContextProvider;
 use chrome::{WorkspaceMenu, WorkspaceTitleBar, build_popup_menu};
 use docks::WorkspaceDockState;
+use panes::TabContextMenu;
 use render_debug::RenderDebugCapture;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -126,7 +142,8 @@ struct WorkspaceTranslationState {
 
 #[derive(Default)]
 struct WorkspaceRestoreState {
-    tab_ids: HashMap<u64, (EntityId, EntityId)>,
+    /// Session tab id to the restored tab's id.
+    tab_ids: HashMap<u64, EntityId>,
     pending_documents: usize,
     dock_document_tab: Option<u64>,
     synchronized_groups: Vec<ReaderSynchronizedGroup>,
@@ -135,8 +152,13 @@ struct WorkspaceRestoreState {
 }
 
 pub struct Workspace {
-    pane_group: PaneGroup,
-    active_pane: Entity<Pane>,
+    dock_area: Entity<DockArea>,
+    active_pane: PaneId,
+    pane_geometry: Rc<RefCell<PaneGeometry>>,
+    tab_subscriptions: HashMap<EntityId, [Subscription; 2]>,
+    synchronized_presentation: SynchronizedPresentation,
+    tab_context_menu: Option<TabContextMenu>,
+    pane_external_drop: Option<(PaneId, ExternalDocumentDropFeedback)>,
     surface_mode: WorkspaceSurfaceMode,
     zen_mode: bool,
     home_view: Entity<NewTab>,
@@ -152,7 +174,7 @@ pub struct Workspace {
     title_bar_menu_expanded: bool,
     title_bar_open_menu: Option<WorkspaceMenu>,
     title_bar_popup_menu: Option<Entity<PopupMenu>>,
-    dragged_tab_outside_window: Option<DraggedTab>,
+    dragged_tab_outside_window: Option<DragPanel>,
     external_document_drop_feedback: Option<ExternalDocumentDropFeedback>,
     synchronized_tabs: SynchronizedTabRegistry,
     restore: WorkspaceRestoreState,
@@ -178,7 +200,6 @@ enum SynchronizedConnectionGroup {
 
 struct SynchronizedConnection {
     source_tab: EntityId,
-    source_pane: Entity<Pane>,
     group: SynchronizedConnectionGroup,
     cursor: Point<Pixels>,
     animation_started_at: Instant,
@@ -265,11 +286,11 @@ enum PendingTranslationSplitStage {
     OpeningSource {
         source_path: PathBuf,
         translated_path: PathBuf,
-        source_pane: Entity<Pane>,
+        source_pane: PaneId,
     },
     OpeningTranslated {
         original: Entity<DocumentView>,
-        translated_pane: Entity<Pane>,
+        translated_pane: PaneId,
     },
 }
 
@@ -285,13 +306,6 @@ pub struct WorkspaceCallbacks {
     pub open_settings_window: fn(&mut App),
 }
 
-#[derive(Clone)]
-struct TabDestination {
-    pane: Entity<Pane>,
-    target: PaneDropTarget,
-    index: usize,
-}
-
 impl Workspace {
     pub fn new(
         initial_path: Option<PathBuf>,
@@ -301,28 +315,34 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let document_translation_jobs = cx.new(DocumentTranslationManager::new);
-        let jobs = document_translation_jobs.clone();
-        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
-        let mut workspace = Self::with_pane(
-            pane.clone(),
+        let initial_tab = initial_path.as_ref().and_then(|path| {
+            TabItem::open_document(
+                path,
+                initial_position,
+                None,
+                None,
+                document_translation_jobs.clone(),
+                window,
+                cx,
+            )
+            .inspect_err(|error| eprintln!("failed to open initial document: {error:#}"))
+            .ok()
+        });
+        let opened = initial_tab.is_some();
+        let tab = initial_tab
+            .unwrap_or_else(|| TabItem::new_tab(document_translation_jobs.clone(), window, cx));
+        let mut workspace = Self::with_layout(
+            Some(PaneLayout::Pane {
+                tabs: vec![tab],
+                active_ix: 0,
+            }),
             document_translation_jobs,
             callbacks,
             window,
             cx,
         );
-        match initial_path {
-            Some(path) => {
-                if let Err(error) =
-                    workspace.focus_or_open_document(path, initial_position, true, window, cx)
-                {
-                    eprintln!("failed to open initial document: {error:#}");
-                    pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
-                }
-            }
-            None => {
-                pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
-                workspace.enter_home(window, cx);
-            }
+        if !opened && initial_path.is_none() {
+            workspace.enter_home(window, cx);
         }
         workspace
     }
@@ -333,13 +353,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let document_translation_jobs = cx.new(DocumentTranslationManager::new);
-        let jobs = document_translation_jobs.clone();
-        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), jobs));
-        Self::with_pane(pane, document_translation_jobs, callbacks, window, cx)
+        Self::with_layout(None, document_translation_jobs, callbacks, window, cx)
     }
 
-    fn with_pane(
-        pane: Entity<Pane>,
+    fn with_layout(
+        layout: Option<PaneLayout>,
         document_translation_jobs: Entity<DocumentTranslationManager>,
         callbacks: WorkspaceCallbacks,
         window: &mut Window,
@@ -350,9 +368,10 @@ impl Workspace {
         let home_view = cx.new(|cx| NewTab::new_home(home_focus_handle, window, cx));
         let docks = WorkspaceDockState::new(cx);
         let ai_context_provider = WorkspaceAiContextProvider::new(cx.weak_entity());
-        let initial_ai_page_state = pane
-            .read(cx)
-            .active_document_view()
+        let initial_ai_page_state = layout
+            .as_ref()
+            .and_then(|layout| layout.tabs().into_iter().next())
+            .and_then(|tab| tab.read(cx).document_view())
             .and_then(|document| {
                 crate::document_view::DocumentViewAiContextProvider::new(&document).page_state(cx)
             })
@@ -370,9 +389,21 @@ impl Workspace {
         let window_settings = cx.global::<SettingsStore>().settings.window;
         let transparency_enabled = window_settings.transparency_enabled_by_default();
         apply_window_background(window, window_settings, transparency_enabled);
-        let workspace = Self {
-            pane_group: PaneGroup::new(pane.clone()),
-            active_pane: pane.clone(),
+        let pane_geometry = Rc::new(RefCell::new(PaneGeometry::default()));
+        let dock_area = Self::create_dock_area(pane_geometry.clone(), window, cx);
+        let empty_center = dock_area
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .map(|tree| PaneId::from(tree.root().id()))
+            .expect("a dock area always has a center");
+        let mut workspace = Self {
+            dock_area: dock_area.clone(),
+            active_pane: empty_center,
+            pane_geometry,
+            tab_subscriptions: HashMap::new(),
+            synchronized_presentation: SynchronizedPresentation::default(),
+            tab_context_menu: None,
+            pane_external_drop: None,
             surface_mode: WorkspaceSurfaceMode::Panes,
             zen_mode: false,
             home_view: home_view.clone(),
@@ -411,6 +442,31 @@ impl Workspace {
         };
 
         cx.subscribe_in(
+            &dock_area,
+            window,
+            |this, _, event: &DockEvent, window, cx| {
+                this.handle_dock_event(event, window, cx);
+            },
+        )
+        .detach();
+        if let Some(layout) = layout {
+            for tab in layout.tabs() {
+                workspace.adopt_tab(&tab, window, cx);
+            }
+            let active_tab = match &layout {
+                PaneLayout::Pane { tabs, active_ix } => tabs.get(*active_ix).cloned(),
+                PaneLayout::Split { .. } => layout.tabs().into_iter().next(),
+            };
+            let dock_layout = layout.into_dock_layout(cx);
+            dock_area.update(cx, |area, cx| area.set_center(dock_layout, window, cx));
+            if let Some(pane) =
+                active_tab.and_then(|tab| workspace.pane_for_tab(tab.entity_id(), cx))
+            {
+                workspace.active_pane = pane;
+            }
+        }
+
+        cx.subscribe_in(
             &home_view,
             window,
             |this, _, event: &NewTabEvent, window, cx| match event {
@@ -439,7 +495,6 @@ impl Workspace {
         )
         .detach();
 
-        workspace.subscribe_to_pane(&pane, window, cx);
         cx.observe(&document_translation_jobs, |_, _, cx| cx.notify())
             .detach();
         if let Some(activity_center) = ActivityCenter::try_global(cx) {
@@ -456,7 +511,7 @@ impl Workspace {
                     cx.spawn_in(window, async move |this, cx| {
                         _ = this.update_in(cx, |this, window, cx| {
                             let replace_active_new_tab =
-                                this.active_pane.read(cx).active_tab_is_new_tab();
+                                this.active_pane(cx).active_tab_is_new_tab(cx);
                             if let Err(error) = this.focus_or_open_document_for_job(
                                 path,
                                 None,
@@ -553,7 +608,7 @@ impl Workspace {
                     cx.spawn_in(window, async move |this, cx| {
                         _ = this.update_in(cx, |this, window, cx| {
                             let replace_active_new_tab =
-                                this.active_pane.read(cx).active_tab_is_new_tab();
+                                this.active_pane(cx).active_tab_is_new_tab(cx);
                             if let Err(error) = this.focus_or_open_document(
                                 path,
                                 None,
@@ -623,8 +678,14 @@ impl Workspace {
         cx.on_release(|this, cx| {
             this.ai_panel
                 .update(cx, |panel, cx| panel.save_current_session(cx));
-            for pane in this.pane_group.panes() {
-                pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
+            for item in this.all_tab_items(cx) {
+                crate::tab_item::flush_tab(&item, cx);
+            }
+            let area = this.dock_area.entity_id();
+            if let Some(areas) = cx.try_global::<panes::WorkspaceDockAreas>()
+                && areas.contains(area)
+            {
+                cx.update_global::<panes::WorkspaceDockAreas, _>(|areas, _| areas.remove(area));
             }
         })
         .detach();
@@ -638,7 +699,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let replace_active_new_tab = self.active_pane.read(cx).active_tab_is_new_tab();
+        let replace_active_new_tab = self.active_pane(cx).active_tab_is_new_tab(cx);
         self.focus_or_open_document(path, None, replace_active_new_tab, window, cx)?;
         self.surface_mode = WorkspaceSurfaceMode::Panes;
         self.home_previous_focus_handle = None;
@@ -652,25 +713,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target_pane = self.active_pane.clone();
-        self.open_external_document_paths_in_pane(paths, &target_pane, window, cx);
+        let target_pane = self.active_pane;
+        self.open_external_document_paths_in_pane(paths, target_pane, window, cx);
     }
 
     fn open_external_document_paths_in_pane(
         &mut self,
         paths: &[PathBuf],
-        target_pane: &Entity<Pane>,
+        target_pane: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.external_document_drop_feedback = None;
+        self.pane_external_drop = None;
         if paths.is_empty() {
             cx.notify();
             return;
         }
 
         let classified = classify_external_document_paths(paths);
-        let target_pane = target_pane.clone();
         let mut opened_count = 0usize;
         let mut failed_count = 0usize;
         let mut last_opened_path = None;
@@ -682,7 +743,9 @@ impl Workspace {
         }
 
         for path in classified.supported {
-            self.active_pane = target_pane.clone();
+            if self.panes(cx).iter().any(|pane| pane.id() == target_pane) {
+                self.active_pane = target_pane;
+            }
             match self.open_document_in_active_pane(path.clone(), None, window, cx) {
                 Ok(()) => {
                     opened_count += 1;
@@ -698,10 +761,7 @@ impl Workspace {
         if let Some(path) = last_opened_path
             && let Some((pane, tab_ix)) = self.document_location(&path, cx)
         {
-            self.active_pane = pane.clone();
-            pane.update(cx, |pane, cx| {
-                pane.activate_existing_document(tab_ix, None, false, window, cx);
-            });
+            self.activate_existing_document(pane, tab_ix, None, false, window, cx);
             self.surface_mode = WorkspaceSurfaceMode::Panes;
             self.home_previous_focus_handle = None;
         }
@@ -765,206 +825,8 @@ impl Workspace {
         (self.callbacks.open_settings_window)(cx);
     }
 
-    fn subscribe_to_pane(&self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
-        let pane_for_events = pane.clone();
-        cx.subscribe_in(
-            pane,
-            window,
-            move |this, _, event: &PaneEvent, window, cx| match event {
-                PaneEvent::Activate => {
-                    if this.active_pane != pane_for_events {
-                        this.active_pane = pane_for_events.clone();
-                    }
-                    this.exit_zen_mode_for_unsupported_active_tab(cx);
-                    this.record_document_context(&pane_for_events, cx);
-                    cx.notify();
-                }
-                PaneEvent::OpenFile => {
-                    this.active_pane = pane_for_events.clone();
-                    this.open_file(window, cx);
-                }
-                PaneEvent::OpenDocument {
-                    path,
-                    position,
-                    replace_active_new_tab,
-                } => {
-                    this.active_pane = pane_for_events.clone();
-                    let result = if *replace_active_new_tab {
-                        this.open_document_in_active_pane(
-                            path.clone(),
-                            position.clone(),
-                            window,
-                            cx,
-                        )
-                    } else {
-                        this.focus_or_open_document(
-                            path.clone(),
-                            position.clone(),
-                            false,
-                            window,
-                            cx,
-                        )
-                    };
-                    if let Err(error) = result {
-                        eprintln!("failed to open document: {error:#}");
-                    }
-                }
-                PaneEvent::ExternalPathsDropped(paths) => {
-                    this.open_external_document_paths_in_pane(paths, &pane_for_events, window, cx);
-                }
-                PaneEvent::DocumentOpenFinished { job_id, result } => {
-                    if !this.continue_translation_split_open(*job_id, result.clone(), window, cx) {
-                        this.translations.manager.update(cx, |jobs, cx| {
-                            jobs.finish_open(*job_id, result.clone(), cx);
-                        });
-                    }
-                }
-                PaneEvent::RestoredDocumentFinished {
-                    session_tab_id,
-                    document_tab_id,
-                } => {
-                    if let Some(document_tab_id) = document_tab_id {
-                        this.restore.tab_ids.insert(
-                            *session_tab_id,
-                            (*document_tab_id, pane_for_events.entity_id()),
-                        );
-                    } else {
-                        this.restore.tab_ids.remove(session_tab_id);
-                    }
-                    this.restore.pending_documents =
-                        this.restore.pending_documents.saturating_sub(1);
-                    if this.restore.pending_documents == 0 {
-                        this.finish_reader_session_restore(window, cx);
-                    } else {
-                        cx.notify();
-                    }
-                }
-                PaneEvent::DocumentPasswordAuthenticated { path, password } => {
-                    let workspace = cx.entity().downgrade();
-                    let path = path.clone();
-                    let password = password.clone();
-                    window.defer(cx, move |window, cx| {
-                        let Some(workspace) = workspace.upgrade() else {
-                            return;
-                        };
-                        workspace.update(cx, |workspace, cx| {
-                            for pane in workspace.pane_group.panes() {
-                                pane.update(cx, |pane, cx| {
-                                    pane.unlock_pending_documents_with_password(
-                                        &path,
-                                        password.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        });
-                    });
-                }
-                PaneEvent::OpenSettings => this.open_settings_window(cx),
-                PaneEvent::DocumentSidebarNavigation(document_view_id) => {
-                    if pane_for_events.update(cx, |pane, cx| {
-                        pane.activate_tab_by_id(*document_view_id, true, window, cx)
-                    }) {
-                        this.active_pane = pane_for_events.clone();
-                        this.record_document_context(&pane_for_events, cx);
-                        cx.notify();
-                    }
-                }
-                PaneEvent::TabDrop {
-                    dragged_tab,
-                    target,
-                } => {
-                    this.active_pane = pane_for_events.clone();
-                    this.handle_dragged_tab_drop(
-                        &pane_for_events,
-                        dragged_tab.as_ref(),
-                        target.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                PaneEvent::CloseTab(tab_id) => {
-                    if let Some(tab_ix) = pane_for_events.read(cx).tab_ix_for_entity_id(*tab_id) {
-                        this.close_tab_in_pane(&pane_for_events, Some(tab_ix), window, cx);
-                    }
-                }
-                PaneEvent::DuplicateTab(tab_ix) => {
-                    this.active_pane = pane_for_events.clone();
-                    this.duplicate_tab_in_pane(&pane_for_events, *tab_ix, window, cx);
-                }
-                PaneEvent::TabClicked { tab_id, was_active } => {
-                    this.active_pane = pane_for_events.clone();
-                    this.record_document_context(&pane_for_events, cx);
-                    this.handle_synchronized_tab_click(
-                        &pane_for_events,
-                        *tab_id,
-                        *was_active,
-                        window,
-                        cx,
-                    );
-                }
-                PaneEvent::CreateSynchronizedGroup(tab_id) => {
-                    this.start_new_synchronized_group(pane_for_events.clone(), *tab_id, cx);
-                }
-                PaneEvent::ConnectMoreSynchronizedTabs(tab_id) => {
-                    if let Some(group_id) = this.synchronized_tabs.group_for_tab(*tab_id) {
-                        this.start_connecting_synchronized_group(
-                            pane_for_events.clone(),
-                            *tab_id,
-                            group_id,
-                            cx,
-                        );
-                    }
-                }
-                PaneEvent::SetSynchronizedScrollPaused { tab_id, paused } => {
-                    if !this.is_live_translation_pair_tab(*tab_id)
-                        && this.synchronized_tabs.set_paused(*tab_id, *paused)
-                    {
-                        this.refresh_synchronized_tab_presentation(cx);
-                    }
-                }
-                PaneEvent::LeaveSynchronizedGroup(tab_id) => {
-                    this.synchronized_tabs.leave_group(*tab_id);
-                    this.refresh_synchronized_tab_presentation(cx);
-                }
-                PaneEvent::FinishSynchronizedConnection => {
-                    this.finish_synchronized_connection(cx);
-                }
-                PaneEvent::DocumentScrolled { tab_id, delta } => {
-                    this.propagate_synchronized_scroll(*tab_id, *delta, cx);
-                }
-            },
-        )
-        .detach();
-
-        let pane_for_focus = pane.clone();
-        let focus_handle = pane.read(cx).focus_handle();
-        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
-            if this.active_pane != pane_for_focus {
-                this.active_pane = pane_for_focus.clone();
-            }
-            this.exit_zen_mode_for_unsupported_active_tab(cx);
-            this.record_document_context(&pane_for_focus, cx);
-            cx.notify();
-        })
-        .detach();
-
-        let pane_for_observe = pane.clone();
-        cx.observe(pane, move |this, _, cx| {
-            this.refresh_live_translation_pair_activity(cx);
-            if this.active_pane == pane_for_observe {
-                this.exit_zen_mode_for_unsupported_active_tab(cx);
-                this.record_document_context(&pane_for_observe, cx);
-                cx.notify();
-            }
-        })
-        .detach();
-    }
-
     fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let active_pane = self.active_pane.clone();
-        active_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        self.focus_pane(self.active_pane, window, cx);
     }
 
     fn update_active_document_view(
@@ -975,7 +837,7 @@ impl Workspace {
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
-        if let Some(document_view) = self.active_pane.read(cx).active_document_view() {
+        if let Some(document_view) = self.active_pane(cx).active_document_view(cx) {
             document_view.update(cx, update);
         }
     }
@@ -1000,7 +862,7 @@ impl Workspace {
     }
 
     fn exit_zen_mode_for_unsupported_active_tab(&mut self, cx: &mut Context<Self>) {
-        if self.zen_mode && !self.active_pane.read(cx).active_tab_supports_zen_mode() {
+        if self.zen_mode && !self.active_pane(cx).active_tab_supports_zen_mode(cx) {
             self.leave_zen_mode(cx);
         }
     }
@@ -1011,7 +873,7 @@ impl Workspace {
             return;
         }
         if self.surface_mode != WorkspaceSurfaceMode::Panes
-            || self.active_pane.read(cx).active_document_view().is_none()
+            || self.active_pane(cx).active_document_view(cx).is_none()
         {
             return;
         }
@@ -1034,7 +896,7 @@ impl Workspace {
         self.close_theme_selector(window, cx);
         self.home_previous_focus_handle = window
             .focused(cx)
-            .or_else(|| Some(self.active_pane.read(cx).focus_handle()));
+            .or_else(|| self.active_pane(cx).focus_handle(cx));
         self.surface_mode = WorkspaceSurfaceMode::Home;
         self.home_view.read(cx).focus_handle().focus(window, cx);
         cx.notify();
@@ -1067,35 +929,32 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let path = normalize_path(&path);
-        let active_pane = self.active_pane.clone();
-        let replace_active_new_tab = active_pane.read(cx).active_tab_is_new_tab();
-        if let Some(tab_ix) = active_pane.read(cx).document_tab_ix(&path, cx) {
-            active_pane.update(cx, |pane, cx| {
-                pane.activate_existing_document(
-                    tab_ix,
-                    position,
-                    replace_active_new_tab,
-                    window,
-                    cx,
-                );
-            });
-        } else {
-            active_pane.update(cx, |pane, cx| {
-                pane.focus_or_open_document(path, position, replace_active_new_tab, window, cx)
-            })?;
-        }
+        let active_pane = self.active_pane;
+        let replace_active_new_tab = self.pane(active_pane, cx).active_tab_is_new_tab(cx);
+        self.open_document_in_pane(
+            active_pane,
+            path,
+            position,
+            replace_active_new_tab,
+            None,
+            window,
+            cx,
+        )?;
         self.surface_mode = WorkspaceSurfaceMode::Panes;
         self.home_previous_focus_handle = None;
         cx.notify();
         Ok(())
     }
 
-    fn record_document_context(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
-        let Some(document_view) = pane.read(cx).active_document_view() else {
+    fn record_document_context(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        let pane = self.pane(pane, cx);
+        let Some(tab_id) = pane
+            .active_tab()
+            .filter(|tab| tab.read(cx).is_document())
+            .map(Entity::entity_id)
+        else {
             return;
         };
-        let tab_id = document_view.entity_id();
         if self.document_context_mru.first().copied() == Some(tab_id) {
             return;
         }
@@ -1104,106 +963,91 @@ impl Workspace {
         self.document_context_mru.insert(0, tab_id);
     }
 
+    /// The pane displaying the document tab `tab_id`, with its view.
     fn document_target_for_id(
         &self,
         tab_id: EntityId,
         cx: &App,
-    ) -> Option<(Entity<Pane>, Entity<DocumentView>)> {
-        self.pane_group.panes().into_iter().find_map(|pane| {
-            let document_view = pane.read(cx).active_document_view()?;
-            (document_view.entity_id() == tab_id).then_some((pane, document_view))
+    ) -> Option<(PaneId, Entity<DocumentView>)> {
+        self.panes(cx).into_iter().find_map(|pane| {
+            (pane.active_tab_id() == Some(tab_id))
+                .then(|| pane.active_document_view(cx))
+                .flatten()
+                .map(|document_view| (pane.id(), document_view))
         })
     }
 
-    fn dock_document_target(&self, cx: &App) -> Option<(Entity<Pane>, Entity<DocumentView>)> {
+    fn dock_document_target(&self, cx: &App) -> Option<(PaneId, Entity<DocumentView>)> {
         self.document_context_mru
             .iter()
             .find_map(|tab_id| self.document_target_for_id(*tab_id, cx))
             .or_else(|| {
-                self.active_pane
-                    .read(cx)
-                    .active_document_view()
-                    .map(|document_view| (self.active_pane.clone(), document_view))
+                self.active_pane(cx)
+                    .active_document_view(cx)
+                    .map(|document_view| (self.active_pane, document_view))
             })
             .or_else(|| {
-                self.pane_group.panes().into_iter().find_map(|pane| {
-                    pane.read(cx)
-                        .active_document_view()
-                        .map(|document_view| (pane, document_view))
+                self.panes(cx).into_iter().find_map(|pane| {
+                    pane.active_document_view(cx)
+                        .map(|document_view| (pane.id(), document_view))
                 })
             })
     }
 
+    /// The tab id of the dock's document, for the session.
+    fn dock_document_tab_id(&self, cx: &App) -> Option<EntityId> {
+        let (pane, _) = self.dock_document_target(cx)?;
+        self.pane(pane, cx).active_tab_id()
+    }
+
     fn prune_document_context(&mut self, cx: &mut Context<Self>) {
         let document_ids = self
-            .pane_group
-            .panes()
+            .all_tab_items(cx)
             .into_iter()
-            .flat_map(|pane| {
-                pane.read(cx)
-                    .document_views()
-                    .into_iter()
-                    .map(|document_view| document_view.entity_id())
-            })
+            .filter(|tab| tab.read(cx).is_document())
+            .map(|tab| tab.entity_id())
             .collect::<HashSet<_>>();
         self.document_context_mru
             .retain(|tab_id| document_ids.contains(tab_id));
         if self.document_context_mru.is_empty()
-            && let Some((_, document_view)) = self.dock_document_target(cx)
+            && let Some(tab_id) = self.dock_document_tab_id(cx)
         {
-            self.document_context_mru.push(document_view.entity_id());
+            self.document_context_mru.push(tab_id);
         }
     }
 
     fn focus_dock_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((pane, document_view)) = self.dock_document_target(cx) else {
+        let Some((pane, _)) = self.dock_document_target(cx) else {
             return;
         };
-        let tab_id = document_view.entity_id();
-        if pane.update(cx, |pane, cx| {
-            pane.activate_tab_by_id(tab_id, true, window, cx)
-        }) {
-            self.active_pane = pane.clone();
-            self.record_document_context(&pane, cx);
+        let Some(tab_id) = self.pane(pane, cx).active_tab_id() else {
+            return;
+        };
+        if self.activate_tab(pane, tab_id, true, window, cx) {
+            self.active_pane = pane;
+            self.record_document_context(pane, cx);
             cx.notify();
         }
-    }
-
-    fn sync_tab_bar_visibility(&mut self, cx: &mut Context<Self>) {
-        let force_show_tab_bar = self.pane_group.panes().len() > 1;
-        for pane in self.pane_group.panes() {
-            pane.update(cx, |pane, cx| {
-                pane.set_force_show_tab_bar(force_show_tab_bar, cx);
-            });
-        }
-    }
-
-    fn create_empty_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
-        let document_translation_jobs = self.translations.manager.clone();
-        let pane = cx.new(|cx| Pane::empty(cx.focus_handle(), document_translation_jobs));
-        self.subscribe_to_pane(&pane, window, cx);
-        pane
     }
 
     fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.exit_zen_mode(window, cx);
         self.set_title_bar_menu_expanded(false, cx);
         if self.surface_mode == WorkspaceSurfaceMode::Home
-            && self.active_pane.read(cx).active_tab_is_new_tab()
+            && self.active_pane(cx).active_tab_is_new_tab(cx)
         {
             self.leave_home(window, cx);
             return;
         }
-        self.leave_home(window, cx);
-        let active_pane = self.active_pane.clone();
-        active_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+        let active_pane = self.active_pane;
+        self.open_new_tab_in_pane(active_pane, window, cx);
     }
 
     pub fn open_keymap_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.exit_zen_mode(window, cx);
         self.leave_home(window, cx);
-        let active_pane = self.active_pane.clone();
-        active_pane.update(cx, |pane, cx| pane.open_keymap_tab(window, cx));
+        let active_pane = self.active_pane;
+        self.open_keymap_tab_in_pane(active_pane, window, cx);
     }
 
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1211,9 +1055,8 @@ impl Workspace {
         self.close_command_palette(window, cx);
         self.close_theme_selector(window, cx);
         let active_path = self
-            .active_pane
-            .read(cx)
-            .active_document_view()
+            .active_pane(cx)
+            .active_document_view(cx)
             .map(|view| view.read(cx).path().to_path_buf());
         let initial_dir = suggested_open_directory(active_path.as_deref(), cx);
         let dialog = prompt_for_paths(window, cx, open_document_options(initial_dir));
@@ -1245,27 +1088,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let path = normalize_path(&path);
-        if let Some((pane, tab_ix)) = self.document_location(&path, cx) {
-            self.active_pane = pane.clone();
-            pane.update(cx, |pane, cx| {
-                pane.activate_existing_document(
-                    tab_ix,
-                    position,
-                    replace_active_new_tab,
-                    window,
-                    cx,
-                );
-            });
-            self.surface_mode = WorkspaceSurfaceMode::Panes;
-            self.home_previous_focus_handle = None;
-            cx.notify();
-            return Ok(());
-        }
-
-        let active_pane = self.active_pane.clone();
-        active_pane.update(cx, |pane, cx| {
-            pane.focus_or_open_document(path, position, replace_active_new_tab, window, cx)
-        })?;
+        let pane = self
+            .document_location(&path, cx)
+            .map_or(self.active_pane, |(pane, _)| pane);
+        self.open_document_in_pane(
+            pane,
+            path,
+            position,
+            replace_active_new_tab,
+            None,
+            window,
+            cx,
+        )?;
+        self.active_pane = pane;
         self.surface_mode = WorkspaceSurfaceMode::Panes;
         self.home_previous_focus_handle = None;
         cx.notify();
@@ -1282,47 +1117,34 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let path = normalize_path(&path);
-        if let Some((pane, tab_ix)) = self.document_location(&path, cx) {
-            self.active_pane = pane.clone();
-            pane.update(cx, |pane, cx| {
-                pane.activate_existing_document(
-                    tab_ix,
-                    position,
-                    replace_active_new_tab,
-                    window,
-                    cx,
-                );
-                pane.associate_open_job(tab_ix, job_id, cx);
-            });
-            cx.notify();
-            return Ok(());
-        }
-
-        let active_pane = self.active_pane.clone();
-        active_pane.update(cx, |pane, cx| {
-            pane.focus_or_open_document_for_job(
-                path,
-                position,
-                replace_active_new_tab,
-                job_id,
-                window,
-                cx,
-            )
-        })?;
+        let pane = self
+            .document_location(&path, cx)
+            .map_or(self.active_pane, |(pane, _)| pane);
+        self.open_document_in_pane(
+            pane,
+            path,
+            position,
+            replace_active_new_tab,
+            Some(job_id),
+            window,
+            cx,
+        )?;
+        self.active_pane = pane;
+        cx.notify();
         Ok(())
     }
 
-    fn document_location(&self, path: &Path, cx: &Context<Self>) -> Option<(Entity<Pane>, usize)> {
+    fn document_location(&self, path: &Path, cx: &App) -> Option<(PaneId, usize)> {
         let path = normalize_path(path);
-        if let Some(ix) = self.active_pane.read(cx).document_tab_ix(&path, cx) {
-            return Some((self.active_pane.clone(), ix));
+        if let Some(ix) = self.active_pane(cx).document_tab_ix(&path, cx) {
+            return Some((self.active_pane, ix));
         }
-        self.pane_group.panes().into_iter().find_map(|pane| {
-            if pane == self.active_pane {
+        self.panes(cx).into_iter().find_map(|pane| {
+            if pane.id() == self.active_pane {
                 return None;
             }
-            let ix = pane.read(cx).document_tab_ix(&path, cx)?;
-            Some((pane, ix))
+            let ix = pane.document_tab_ix(&path, cx)?;
+            Some((pane.id(), ix))
         })
     }
 
@@ -1331,38 +1153,17 @@ impl Workspace {
             return;
         }
         self.set_title_bar_menu_expanded(false, cx);
-        let active_pane = self.active_pane.clone();
-        self.close_tab_in_pane(&active_pane, None, window, cx);
+        let active_pane = self.active_pane;
+        self.close_tab_in_pane(active_pane, None, window, cx);
     }
 
     fn duplicate_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
-        let pane = self.active_pane.clone();
-        let tab_ix = pane.read(cx).active_tab_ix();
-        self.duplicate_tab_in_pane(&pane, tab_ix, window, cx);
-    }
-
-    fn duplicate_tab_in_pane(
-        &mut self,
-        pane: &Entity<Pane>,
-        tab_ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_title_bar_menu_expanded(false, cx);
-        match pane.update(cx, |pane, cx| {
-            pane.duplicate_document_tab(tab_ix, window, cx)
-        }) {
-            Ok(Some(_)) => {
-                self.active_pane = pane.clone();
-                self.refresh_synchronized_tab_presentation(cx);
-                cx.notify();
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("failed to duplicate document tab: {error:#}"),
-        }
+        let pane = self.active_pane;
+        let tab_ix = self.pane(pane, cx).active_tab_ix();
+        self.duplicate_tab_in_pane(pane, tab_ix, window, cx);
     }
 
     fn toggle_transparency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1373,18 +1174,19 @@ impl Workspace {
 
     fn close_tab_in_pane(
         &mut self,
-        pane: &Entity<Pane>,
+        pane: PaneId,
         tab_ix: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resolved_ix = tab_ix.unwrap_or_else(|| pane.read(cx).active_tab_ix());
-        let document_view = pane.read(cx).document_view_at(resolved_ix);
+        let snapshot = self.pane(pane, cx);
+        let resolved_ix = tab_ix.unwrap_or_else(|| snapshot.active_tab_ix());
+        let document_view = snapshot.document_view_at(resolved_ix, cx);
         if let Some(document_view) = document_view
             && let Some(session_id) = document_view.read(cx).translation_session_id()
+            && let Some(tab_id) = snapshot.tab_id_at(resolved_ix)
         {
             let running = document_view.read(cx).translation_session_is_running();
-            let tab_id = document_view.entity_id();
             if running {
                 let answer = window.prompt(
                     PromptLevel::Warning,
@@ -1399,7 +1201,6 @@ impl Workspace {
                     ],
                     cx,
                 );
-                let pane = pane.clone();
                 cx.spawn_in(window, async move |this, cx| {
                     let Ok(choice) = answer.await else {
                         return;
@@ -1418,8 +1219,10 @@ impl Workspace {
                             });
                         }
                         this.unregister_live_translation_pair(session_id, cx);
-                        if let Some(tab_ix) = pane.read(cx).tab_ix_for_entity_id(tab_id) {
-                            this.close_tab_in_pane_now(&pane, Some(tab_ix), window, cx);
+                        if let Some(pane) = this.pane_for_tab(tab_id, cx)
+                            && let Some(tab_ix) = this.pane(pane, cx).tab_ix_for_entity_id(tab_id)
+                        {
+                            this.close_tab_in_pane_now(pane, Some(tab_ix), window, cx);
                         }
                     });
                 })
@@ -1434,120 +1237,16 @@ impl Workspace {
         self.close_tab_in_pane_now(pane, Some(resolved_ix), window, cx);
     }
 
-    fn close_tab_in_pane_now(
-        &mut self,
-        pane: &Entity<Pane>,
-        tab_ix: Option<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane_was_active = self.active_pane == *pane;
-        let closed_tab_id = match tab_ix {
-            Some(tab_ix) => pane.read(cx).tab_id_at(tab_ix),
-            None => pane.read(cx).active_tab_id(),
-        };
-        if let Some(tab_id) = closed_tab_id {
-            self.unregister_live_translation_pairs_for_tab(tab_id, cx);
-            self.synchronized_tabs.remove_tab(tab_id);
-            if self
-                .synchronized_connection
-                .as_ref()
-                .is_some_and(|connection| connection.source_tab == tab_id)
-            {
-                self.synchronized_connection = None;
-            }
-        }
-        let empty = pane.update(cx, |pane, cx| match tab_ix {
-            Some(tab_ix) => pane.close_tab_at(tab_ix, cx),
-            None => pane.close_active_tab(cx),
-        });
-        if empty {
-            self.handle_empty_pane(pane, window, cx);
-        } else if pane_was_active {
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        }
-        self.exit_zen_mode_for_unsupported_active_tab(cx);
-        self.prune_document_context(cx);
-        self.refresh_synchronized_tab_presentation(cx);
-        cx.notify();
-    }
-
-    fn handle_empty_pane(
-        &mut self,
-        pane: &Entity<Pane>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pane_group.panes().len() <= 1 {
-            pane.update(cx, |pane, cx| {
-                pane.ensure_new_tab(window, cx);
-                pane.focus(window, cx);
-            });
-            self.active_pane = pane.clone();
-            self.enter_home(window, cx);
-            return;
-        }
-
-        self.remove_pane(pane, window, cx);
-    }
-
-    fn remove_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
-        let pane_was_active = self.active_pane == *pane;
-        let panes = self.pane_group.panes();
-        let remove_ix = panes
-            .iter()
-            .position(|candidate| candidate == pane)
-            .unwrap_or(0);
-        let removed_tab_ids = pane.read(cx).tab_ids();
-        for tab_id in removed_tab_ids {
-            self.unregister_live_translation_pairs_for_tab(tab_id, cx);
-            self.synchronized_tabs.remove_tab(tab_id);
-        }
-        if self
-            .synchronized_connection
-            .as_ref()
-            .is_some_and(|connection| connection.source_pane == *pane)
-        {
-            self.synchronized_connection = None;
-        }
-        self.cancel_pending_translation_splits_for_pane(pane, cx);
-        if !self.pane_group.remove(pane, cx) {
-            return;
-        }
-
-        let remaining = self.pane_group.panes();
-        if remaining.is_empty() {
-            window.remove_window();
-            return;
-        }
-
-        self.sync_tab_bar_visibility(cx);
-        if pane_was_active {
-            let active_ix = remove_ix.min(remaining.len() - 1);
-            self.active_pane = remaining[active_ix].clone();
-            self.active_pane
-                .update(cx, |pane, cx| pane.focus(window, cx));
-        }
-        self.exit_zen_mode_for_unsupported_active_tab(cx);
-        self.prune_document_context(cx);
-        self.refresh_synchronized_tab_presentation(cx);
-        cx.notify();
-    }
-
-    fn cancel_pending_translation_splits_for_pane(
-        &mut self,
-        pane: &Entity<Pane>,
-        cx: &mut Context<Self>,
-    ) {
+    fn cancel_pending_translation_splits_for_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         let mut cancelled = Vec::new();
         self.translations.pending_splits.retain(|pending| {
             let matches = match &pending.stage {
                 PendingTranslationSplitStage::OpeningSource { source_pane, .. } => {
-                    source_pane == pane
+                    *source_pane == pane
                 }
                 PendingTranslationSplitStage::OpeningTranslated {
                     translated_pane, ..
-                } => translated_pane == pane,
+                } => *translated_pane == pane,
             };
             if matches {
                 cancelled.push(pending.job_id);
@@ -1576,26 +1275,27 @@ impl Workspace {
             return;
         }
         self.set_title_bar_menu_expanded(false, cx);
-        let active_pane = self.active_pane.clone();
-        let (initial_path, initial_position) = active_pane
-            .read(cx)
+        let active_pane = self.active_pane;
+        let jobs = self.translations.manager.clone();
+        let item = self
+            .active_pane(cx)
             .active_document_state(cx)
-            .map(|(path, position)| (Some(path), Some(position)))
-            .unwrap_or((None, None));
-        let new_pane = self.create_empty_pane(window, cx);
-        self.pane_group
-            .split(&active_pane, &new_pane, direction, cx);
-        self.active_pane = new_pane.clone();
-        self.sync_tab_bar_visibility(cx);
-        if let Some(path) = initial_path
-            && let Err(error) = new_pane.update(cx, |pane, cx| {
-                pane.focus_or_open_document(path, initial_position, true, window, cx)
-            })
-        {
-            eprintln!("failed to open document in split pane: {error:#}");
-            new_pane.update(cx, |pane, cx| pane.ensure_new_tab(window, cx));
-        }
-        new_pane.update(cx, |pane, cx| pane.focus(window, cx));
+            .and_then(|(path, position)| {
+                TabItem::open_document(&path, Some(position), None, None, jobs, window, cx)
+                    .inspect_err(|error| {
+                        eprintln!("failed to open document in split pane: {error:#}")
+                    })
+                    .ok()
+            });
+        let item = match item {
+            Some(item) => {
+                self.adopt_tab(&item, window, cx);
+                item
+            }
+            None => self.new_tab_item(window, cx),
+        };
+        self.split_with_tab(active_pane, &item, direction, window, cx);
+        crate::tab_item::focus_tab(&item, window, cx);
         cx.notify();
     }
 
@@ -1613,10 +1313,11 @@ impl Workspace {
                 "open the source document before opening its live translation"
             ));
         };
-        source_pane.update(cx, |pane, cx| {
-            pane.activate_existing_document(tab_ix, None, false, window, cx);
-        });
-        let Some(original) = source_pane.read(cx).active_document_view() else {
+        self.activate_existing_document(source_pane, tab_ix, None, false, window, cx);
+        let source = self.pane(source_pane, cx);
+        let (Some(source_tab), Some(original)) =
+            (source.active_tab_id(), source.active_document_view(cx))
+        else {
             return Err(anyhow::anyhow!("translation source is still opening"));
         };
         let snapshot = self
@@ -1638,32 +1339,41 @@ impl Workspace {
             glyphst_settings::DocumentTranslationMode::Auto
             | glyphst_settings::DocumentTranslationMode::Background => SplitDirection::Down,
         };
-        let translated_pane = self.create_empty_pane(window, cx);
-        self.pane_group
-            .split(&source_pane, &translated_pane, direction, cx);
-        let translated = translated_pane.update(cx, |pane, cx| {
-            pane.open_translation_duplicate(&original, session_id, window, cx)
-        });
-        let translated = match translated {
-            Ok(translated) => translated,
-            Err(error) => {
-                self.remove_pane(&translated_pane, window, cx);
-                return Err(error);
-            }
+        let item = TabItem::duplicate_document(
+            &original,
+            Some(session_id),
+            self.translations.manager.clone(),
+            window,
+            cx,
+        )?;
+        let Some(translated) = item.read(cx).document_view() else {
+            return Err(anyhow::anyhow!("the translated view did not open"));
         };
+        self.adopt_tab(&item, window, cx);
+        let Some(translated_pane) = self.split_with_tab(source_pane, &item, direction, window, cx)
+        else {
+            self.release_tab(item.entity_id());
+            return Err(anyhow::anyhow!("the translated view could not be placed"));
+        };
+        let translated_tab = item.entity_id();
         _ = self.synchronized_tabs.connect_tab_to_source_group(
-            original.entity_id(),
-            source_pane.entity_id(),
-            translated.entity_id(),
-            translated_pane.entity_id(),
+            source_tab,
+            source_pane,
+            translated_tab,
+            translated_pane,
         );
         original.update(cx, |view, cx| {
             view.attach_translation_source_mirror(session_id, cx);
         });
-        self.register_live_translation_pair(session_id, original, translated, window, cx);
-        self.active_pane = translated_pane.clone();
-        self.sync_tab_bar_visibility(cx);
-        translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+        self.register_live_translation_pair(
+            session_id,
+            (source_tab, original),
+            (translated_tab, translated),
+            window,
+            cx,
+        );
+        self.active_pane = translated_pane;
+        crate::tab_item::focus_tab(&item, window, cx);
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
         Ok(())
@@ -1773,11 +1483,9 @@ impl Workspace {
     ) -> Result<()> {
         let source_path = normalize_path(&source_path);
         if let Some((source_pane, tab_ix)) = self.document_location(&source_path, cx) {
-            self.active_pane = source_pane.clone();
-            source_pane.update(cx, |pane, cx| {
-                pane.activate_existing_document(tab_ix, None, false, window, cx);
-            });
-            let Some(original) = source_pane.read(cx).active_document_view() else {
+            self.active_pane = source_pane;
+            self.activate_existing_document(source_pane, tab_ix, None, false, window, cx);
+            let Some(original) = self.pane(source_pane, cx).active_document_view(cx) else {
                 return Err(anyhow::anyhow!(
                     "translation source is still opening; retry when it is ready"
                 ));
@@ -1792,7 +1500,7 @@ impl Workspace {
             );
         }
 
-        let source_pane = self.active_pane.clone();
+        let source_pane = self.active_pane;
         self.translations
             .pending_splits
             .push(PendingTranslationSplit {
@@ -1800,20 +1508,19 @@ impl Workspace {
                 stage: PendingTranslationSplitStage::OpeningSource {
                     source_path: source_path.clone(),
                     translated_path,
-                    source_pane: source_pane.clone(),
+                    source_pane,
                 },
             });
-        let replace_active_new_tab = source_pane.read(cx).active_tab_is_new_tab();
-        if let Err(error) = source_pane.update(cx, |pane, cx| {
-            pane.focus_or_open_document_for_job(
-                source_path,
-                None,
-                replace_active_new_tab,
-                job_id,
-                window,
-                cx,
-            )
-        }) {
+        let replace_active_new_tab = self.pane(source_pane, cx).active_tab_is_new_tab(cx);
+        if let Err(error) = self.open_document_in_pane(
+            source_pane,
+            source_path,
+            None,
+            replace_active_new_tab,
+            Some(job_id),
+            window,
+            cx,
+        ) {
             self.translations
                 .pending_splits
                 .retain(|pending| pending.job_id != job_id);
@@ -1827,43 +1534,40 @@ impl Workspace {
         job_id: DocumentTranslationId,
         original: Entity<DocumentView>,
         translated_path: PathBuf,
-        source_pane: Entity<Pane>,
+        source_pane: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         self.exit_zen_mode(window, cx);
-        let translated_pane = self.create_empty_pane(window, cx);
-        self.pane_group
-            .split(&source_pane, &translated_pane, SplitDirection::Right, cx);
-        self.active_pane = translated_pane.clone();
-        self.sync_tab_bar_visibility(cx);
-
         let position = original.read(cx).current_document_position();
+        let item = TabItem::open_document(
+            &translated_path,
+            Some(position),
+            None,
+            Some(job_id),
+            self.translations.manager.clone(),
+            window,
+            cx,
+        )?;
+        self.adopt_tab(&item, window, cx);
+        let Some(translated_pane) =
+            self.split_with_tab(source_pane, &item, SplitDirection::Right, window, cx)
+        else {
+            self.release_tab(item.entity_id());
+            return Err(anyhow::anyhow!(
+                "the translated document could not be placed"
+            ));
+        };
         self.translations
             .pending_splits
             .push(PendingTranslationSplit {
                 job_id,
                 stage: PendingTranslationSplitStage::OpeningTranslated {
                     original,
-                    translated_pane: translated_pane.clone(),
+                    translated_pane,
                 },
             });
-        if let Err(error) = translated_pane.update(cx, |pane, cx| {
-            pane.focus_or_open_document_for_job(
-                translated_path,
-                Some(position),
-                true,
-                job_id,
-                window,
-                cx,
-            )
-        }) {
-            self.translations
-                .pending_splits
-                .retain(|pending| pending.job_id != job_id);
-            self.remove_pane(&translated_pane, window, cx);
-            return Err(error);
-        }
+        crate::tab_item::focus_tab(&item, window, cx);
         cx.notify();
         Ok(())
     }
@@ -1889,7 +1593,7 @@ impl Workspace {
                 translated_pane, ..
             } = pending.stage
             {
-                self.remove_pane(&translated_pane, window, cx);
+                self.remove_pane(translated_pane, window, cx);
             }
             self.translations.manager.update(cx, |jobs, cx| {
                 jobs.finish_open(job_id, Err(error), cx);
@@ -1906,12 +1610,16 @@ impl Workspace {
                 let result = self
                     .document_location(&source_path, cx)
                     .and_then(|(source_pane, tab_ix)| {
-                        source_pane.update(cx, |pane, cx| {
-                            pane.activate_existing_document(tab_ix, None, false, window, cx);
-                        });
-                        source_pane
-                            .read(cx)
-                            .active_document_view()
+                        self.activate_existing_document(
+                            source_pane,
+                            tab_ix,
+                            None,
+                            false,
+                            window,
+                            cx,
+                        );
+                        self.pane(source_pane, cx)
+                            .active_document_view(cx)
                             .map(|original| (original, source_pane))
                     })
                     .ok_or_else(|| anyhow::anyhow!("translation source did not finish opening"))
@@ -1935,8 +1643,12 @@ impl Workspace {
                 original,
                 translated_pane,
             } => {
-                let Some(translated) = translated_pane.read(cx).active_document_view() else {
-                    self.remove_pane(&translated_pane, window, cx);
+                let translated_snapshot = self.pane(translated_pane, cx);
+                let (Some(translated_tab), Some(_)) = (
+                    translated_snapshot.active_tab_id(),
+                    translated_snapshot.active_document_view(cx),
+                ) else {
+                    self.remove_pane(translated_pane, window, cx);
                     self.translations.manager.update(cx, |jobs, cx| {
                         jobs.finish_open(
                             job_id,
@@ -1946,20 +1658,17 @@ impl Workspace {
                     });
                     return true;
                 };
-                if let Some(original_pane) = self
-                    .pane_group
-                    .panes()
-                    .into_iter()
-                    .find(|pane| pane.read(cx).has_tab_id(original.entity_id()))
+                if let Some(original_tab) = self.tab_id_for_document(&original, cx)
+                    && let Some(original_pane) = self.pane_for_tab(original_tab, cx)
                 {
                     _ = self.synchronized_tabs.connect_tab_to_source_group(
-                        original.entity_id(),
-                        original_pane.entity_id(),
-                        translated.entity_id(),
-                        translated_pane.entity_id(),
+                        original_tab,
+                        original_pane,
+                        translated_tab,
+                        translated_pane,
                     );
                 }
-                translated_pane.update(cx, |pane, cx| pane.focus(window, cx));
+                self.focus_pane(translated_pane, window, cx);
                 self.translations.manager.update(cx, |jobs, cx| {
                     jobs.finish_open(job_id, Ok(()), cx);
                 });
@@ -1970,16 +1679,26 @@ impl Workspace {
         true
     }
 
+    /// The tab showing `document_view`.
+    fn tab_id_for_document(
+        &self,
+        document_view: &Entity<DocumentView>,
+        cx: &App,
+    ) -> Option<EntityId> {
+        self.all_tab_items(cx)
+            .into_iter()
+            .find(|tab| tab.read(cx).document_view().as_ref() == Some(document_view))
+            .map(|tab| tab.entity_id())
+    }
+
     fn register_live_translation_pair(
         &mut self,
         session_id: DocumentTranslationId,
-        original: Entity<DocumentView>,
-        translated: Entity<DocumentView>,
+        (source_id, original): (EntityId, Entity<DocumentView>),
+        (translated_id, translated): (EntityId, Entity<DocumentView>),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let source_id = original.entity_id();
-        let translated_id = translated.entity_id();
         let conflicts = self
             .translations
             .live_pairs
@@ -2112,12 +1831,10 @@ impl Workspace {
 
         // A session can be interrupted between attaching its source mirror
         // and registering the pair. Clean that narrow partial-open state too.
-        for pane in self.pane_group.panes() {
-            for view in pane.read(cx).document_views() {
-                view.update(cx, |view, cx| {
-                    view.detach_translation_source_mirror(session_id, cx);
-                });
-            }
+        for view in self.all_document_views(cx) {
+            view.update(cx, |view, cx| {
+                view.detach_translation_source_mirror(session_id, cx);
+            });
         }
     }
 
@@ -2144,14 +1861,10 @@ impl Workspace {
             return;
         }
         let active_tabs = self
-            .pane_group
-            .panes()
+            .panes(cx)
             .into_iter()
-            .filter_map(|pane| {
-                pane.read(cx)
-                    .active_document_view()
-                    .map(|view| view.entity_id())
-            })
+            .filter(|pane| pane.active_document_view(cx).is_some())
+            .filter_map(|pane| pane.active_tab_id())
             .collect::<HashSet<_>>();
         let stale = self
             .translations
@@ -2190,10 +1903,10 @@ impl Workspace {
         }
     }
 
-    fn activate_pane(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_pane = pane.clone();
+    fn activate_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_pane = pane;
         self.exit_zen_mode_for_unsupported_active_tab(cx);
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
+        self.focus_pane(pane, window, cx);
         cx.notify();
     }
 
@@ -2206,10 +1919,7 @@ impl Workspace {
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
-        if let Some(pane) = self
-            .pane_group
-            .find_pane_in_direction(&self.active_pane, direction)
-        {
+        if let Some(pane) = self.find_pane_in_direction(self.active_pane, direction, cx) {
             self.activate_pane(pane, window, cx);
         }
     }
@@ -2218,62 +1928,20 @@ impl Workspace {
         if self.surface_mode != WorkspaceSurfaceMode::Panes {
             return;
         }
-        let panes = self.pane_group.panes();
+        let panes = self.panes(cx);
         if panes.len() <= 1 {
             return;
         }
         let active_ix = panes
             .iter()
-            .position(|pane| pane == &self.active_pane)
+            .position(|pane| pane.id() == self.active_pane)
             .unwrap_or(0);
         let next_ix = if reverse {
             active_ix.checked_sub(1).unwrap_or(panes.len() - 1)
         } else {
             (active_ix + 1) % panes.len()
         };
-        self.activate_pane(panes[next_ix].clone(), window, cx);
-    }
-
-    fn swap_pane_in_direction(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        self.leave_zen_mode(cx);
-        if self.surface_mode != WorkspaceSurfaceMode::Panes {
-            return;
-        }
-        if let Some(target) = self
-            .pane_group
-            .find_pane_in_direction(&self.active_pane, direction)
-        {
-            self.pane_group.swap(&self.active_pane, &target);
-            cx.notify();
-        }
-    }
-
-    fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        self.leave_zen_mode(cx);
-        if self.surface_mode != WorkspaceSurfaceMode::Panes {
-            return;
-        }
-        if self
-            .pane_group
-            .move_to_border(&self.active_pane, direction, cx)
-        {
-            cx.notify();
-        }
-    }
-
-    fn resize_active_pane(
-        &mut self,
-        direction: SplitDirection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.exit_zen_mode(window, cx);
-        if self.surface_mode != WorkspaceSurfaceMode::Panes {
-            return;
-        }
-        self.pane_group
-            .resize(&self.active_pane, direction, window, cx);
-        cx.notify();
+        self.activate_pane(panes[next_ix].id(), window, cx);
     }
 
     fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2282,11 +1950,10 @@ impl Workspace {
             return;
         }
         let sessions = self
-            .pane_group
-            .panes()
+            .panes(cx)
             .into_iter()
-            .filter(|pane| *pane != self.active_pane)
-            .flat_map(|pane| pane.read(cx).translation_sessions(cx))
+            .filter(|pane| pane.id() != self.active_pane)
+            .flat_map(|pane| pane.translation_sessions(cx))
             .collect::<Vec<_>>();
         let has_running = sessions.iter().any(|(_, running)| *running);
         if has_running {
@@ -2345,37 +2012,34 @@ impl Workspace {
     }
 
     fn close_other_panes_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for pane in self.pane_group.panes() {
-            if pane != self.active_pane {
-                self.cancel_pending_translation_splits_for_pane(&pane, cx);
-                for tab_id in pane.read(cx).tab_ids() {
-                    self.unregister_live_translation_pairs_for_tab(tab_id, cx);
-                    self.synchronized_tabs.remove_tab(tab_id);
-                }
+        let others = self
+            .panes(cx)
+            .into_iter()
+            .filter(|pane| pane.id() != self.active_pane)
+            .collect::<Vec<_>>();
+        for pane in others {
+            self.cancel_pending_translation_splits_for_pane(pane.id(), cx);
+            for item in pane.tabs() {
+                let tab_id = item.entity_id();
+                self.unregister_live_translation_pairs_for_tab(tab_id, cx);
+                self.synchronized_tabs.remove_tab(tab_id);
                 if self
                     .synchronized_connection
                     .as_ref()
-                    .is_some_and(|connection| connection.source_pane == pane)
+                    .is_some_and(|connection| connection.source_tab == tab_id)
                 {
                     self.synchronized_connection = None;
                 }
-                pane.update(cx, |pane, cx| pane.flush_all_tabs(cx));
+                crate::tab_item::flush_tab(item, cx);
+                self.dock_area.update(cx, |area, cx| {
+                    area.remove_panel(item.clone(), window, cx);
+                });
+                self.release_tab(tab_id);
             }
         }
-        self.pane_group.retain_only(self.active_pane.clone());
-        self.sync_tab_bar_visibility(cx);
-        self.active_pane
-            .update(cx, |pane, cx| pane.focus(window, cx));
+        self.focus_active_pane(window, cx);
+        self.prune_document_context(cx);
         self.refresh_synchronized_tab_presentation(cx);
-        cx.notify();
-    }
-
-    fn reset_pane_sizes(&mut self, cx: &mut Context<Self>) {
-        self.leave_zen_mode(cx);
-        if self.surface_mode != WorkspaceSurfaceMode::Panes {
-            return;
-        }
-        self.pane_group.reset_pane_sizes(cx);
         cx.notify();
     }
 
@@ -2400,329 +2064,6 @@ impl Workspace {
         sync_component_theme(cx);
     }
 
-    fn handle_dragged_tab_drop(
-        &mut self,
-        target_pane: &Entity<Pane>,
-        dragged_tab: &DraggedTab,
-        target: PaneDropTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.clear_dragged_tab_outside_window();
-
-        if dragged_tab.source_pane == *target_pane
-            && matches!(target, PaneDropTarget::Tab(_) | PaneDropTarget::Append)
-        {
-            let to = self.drop_index(target_pane, &target, cx);
-            target_pane.update(cx, |pane, cx| {
-                pane.move_dragged_tab(dragged_tab, to, window, cx)
-            });
-            return;
-        }
-        if dragged_tab.source_pane == *target_pane
-            && matches!(target, PaneDropTarget::Content(None))
-        {
-            target_pane.update(cx, |pane, cx| {
-                pane.activate_dragged_tab(dragged_tab, window, cx)
-            });
-            return;
-        }
-
-        if !dragged_tab
-            .source_pane
-            .read(cx)
-            .has_tab_id(dragged_tab.tab_id)
-        {
-            return;
-        }
-
-        let destination = TabDestination {
-            pane: target_pane.clone(),
-            target: target.clone(),
-            index: self.drop_index(target_pane, &target, cx),
-        };
-
-        if dragged_tab.source_window.window_id() == window.window_handle().window_id() {
-            if self.move_tab_to_destination(
-                &dragged_tab.source_pane,
-                dragged_tab.tab_id,
-                destination,
-                window,
-                cx,
-            ) {
-                self.complete_transferred_tab_removal(&dragged_tab.source_pane, window, cx);
-            }
-        } else {
-            let Some(source_window) =
-                WorkspaceWindowHandle::from_root(dragged_tab.source_window, cx)
-            else {
-                eprintln!("failed to move tab: source workspace is unavailable");
-                return;
-            };
-            let result = source_window.update(cx, |source, source_window, cx| {
-                let transfer = dragged_tab.source_pane.update(cx, |pane, cx| {
-                    pane.take_tab_for_transfer(dragged_tab.tab_id, cx)
-                });
-                if transfer.is_some() {
-                    source.complete_transferred_tab_removal(
-                        &dragged_tab.source_pane,
-                        source_window,
-                        cx,
-                    );
-                }
-                transfer
-            });
-            let transfer = match result {
-                Ok(Some(transfer)) => transfer,
-                Ok(None) => return,
-                Err(error) => {
-                    eprintln!("failed to move tab from source window: {error:#}");
-                    return;
-                }
-            };
-            self.insert_transferred_tab(
-                &destination.pane,
-                destination.target,
-                destination.index,
-                transfer,
-                window,
-                cx,
-            );
-            let _ = source_window.update(cx, |source, _, cx| {
-                source.synchronized_tabs.remove_tab(dragged_tab.tab_id);
-                if source
-                    .synchronized_connection
-                    .as_ref()
-                    .is_some_and(|connection| connection.source_tab == dragged_tab.tab_id)
-                {
-                    source.synchronized_connection = None;
-                }
-                source.refresh_synchronized_tab_presentation(cx);
-            });
-        }
-
-        cx.notify();
-    }
-
-    fn drop_index(
-        &self,
-        target_pane: &Entity<Pane>,
-        target: &PaneDropTarget,
-        cx: &Context<Self>,
-    ) -> usize {
-        match target {
-            PaneDropTarget::Tab(ix) => *ix,
-            PaneDropTarget::Append
-            | PaneDropTarget::Content(None)
-            | PaneDropTarget::Content(Some(_)) => target_pane.read(cx).len(),
-        }
-    }
-
-    fn move_tab_to_destination(
-        &mut self,
-        source_pane: &Entity<Pane>,
-        tab_id: gpui::EntityId,
-        destination: TabDestination,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !matches!(destination.target, PaneDropTarget::Content(Some(_)))
-            && !self
-                .synchronized_tabs
-                .can_move_tab(tab_id, destination.pane.entity_id())
-        {
-            return false;
-        }
-        let transfer = source_pane.update(cx, |pane, cx| pane.take_tab_for_transfer(tab_id, cx));
-        let Some(transfer) = transfer else {
-            return false;
-        };
-
-        self.insert_transferred_tab(
-            &destination.pane,
-            destination.target,
-            destination.index,
-            transfer,
-            window,
-            cx,
-        );
-        if let Some(actual_pane) = self
-            .pane_group
-            .panes()
-            .into_iter()
-            .find(|pane| pane.read(cx).has_tab_id(tab_id))
-        {
-            self.synchronized_tabs
-                .move_tab(tab_id, actual_pane.entity_id());
-            if let Some(connection) = self.synchronized_connection.as_mut()
-                && connection.source_tab == tab_id
-            {
-                connection.source_pane = actual_pane;
-            }
-        }
-        self.refresh_synchronized_tab_presentation(cx);
-        true
-    }
-
-    fn insert_transferred_tab(
-        &mut self,
-        target_pane: &Entity<Pane>,
-        target: PaneDropTarget,
-        to: usize,
-        transfer: TabTransfer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match target {
-            PaneDropTarget::Content(Some(direction)) => {
-                self.exit_zen_mode(window, cx);
-                let new_pane = self.create_empty_pane(window, cx);
-                new_pane.update(cx, |pane, cx| {
-                    pane.insert_transferred_tab(transfer, to, window, cx)
-                });
-                self.pane_group.split(target_pane, &new_pane, direction, cx);
-                self.active_pane = new_pane;
-            }
-            PaneDropTarget::Tab(_) | PaneDropTarget::Append | PaneDropTarget::Content(None) => {
-                target_pane.update(cx, |pane, cx| {
-                    pane.insert_transferred_tab(transfer, to, window, cx);
-                });
-                self.active_pane = target_pane.clone();
-            }
-        }
-        self.sync_tab_bar_visibility(cx);
-        cx.notify();
-    }
-
-    fn complete_transferred_tab_removal(
-        &mut self,
-        pane: &Entity<Pane>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if pane.read(cx).len() == 0 {
-            if self.pane_group.panes().len() <= 1 {
-                window.remove_window();
-            } else {
-                self.remove_pane(pane, window, cx);
-            }
-        } else {
-            self.sync_tab_bar_visibility(cx);
-            cx.notify();
-        }
-    }
-
-    fn track_dragged_tab_outside_window(
-        &mut self,
-        event: &DragMoveEvent<DraggedTab>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let dragged_tab = event.drag(cx).clone();
-        if dragged_tab.source_window.window_id() != window.window_handle().window_id() {
-            self.dragged_tab_outside_window = None;
-            return;
-        }
-
-        if !dragged_tab
-            .source_pane
-            .read(cx)
-            .has_tab_id(dragged_tab.tab_id)
-        {
-            self.dragged_tab_outside_window = None;
-            return;
-        }
-
-        self.dragged_tab_outside_window =
-            (!event.bounds.contains(&event.event.position)).then_some(dragged_tab);
-    }
-
-    fn clear_dragged_tab_outside_window(&mut self) {
-        self.dragged_tab_outside_window = None;
-    }
-
-    fn detach_dragged_tab(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(dragged_tab) = self.dragged_tab_outside_window.take() else {
-            return;
-        };
-        if dragged_tab.source_window.window_id() != window.window_handle().window_id() {
-            return;
-        }
-        if !dragged_tab
-            .source_pane
-            .read(cx)
-            .has_tab_id(dragged_tab.tab_id)
-        {
-            return;
-        }
-
-        let bounds = Self::detached_window_bounds(event, window);
-        let destination =
-            match (self.callbacks.open_workspace_window)(WorkspaceWindowRequest { bounds }, cx) {
-                Ok(window) => window,
-                Err(error) => {
-                    eprintln!("failed to tear tab into new window: {error:#}");
-                    return;
-                }
-            };
-
-        let transfer = dragged_tab.source_pane.update(cx, |pane, cx| {
-            pane.take_tab_for_transfer(dragged_tab.tab_id, cx)
-        });
-        let Some(transfer) = transfer else {
-            return;
-        };
-        let mut transfer = Some(transfer);
-        let inserted = destination.update(cx, |destination, destination_window, cx| {
-            let Some(transfer) = transfer.take() else {
-                return false;
-            };
-            destination.accept_detached_tab(transfer, destination_window, cx);
-            true
-        });
-        if !matches!(inserted, Ok(true)) {
-            if let Some(transfer) = transfer {
-                dragged_tab
-                    .source_pane
-                    .update(cx, |pane, cx| pane.restore_transferred_tab(transfer, cx));
-            }
-            if let Err(error) = inserted {
-                eprintln!("failed to insert detached tab: {error:#}");
-            }
-            return;
-        }
-
-        self.complete_transferred_tab_removal(&dragged_tab.source_pane, window, cx);
-        self.synchronized_tabs.remove_tab(dragged_tab.tab_id);
-        self.refresh_synchronized_tab_presentation(cx);
-        cx.stop_propagation();
-    }
-
-    fn accept_detached_tab(
-        &mut self,
-        transfer: TabTransfer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane = self.active_pane.clone();
-        self.insert_transferred_tab(&pane, PaneDropTarget::Append, 0, transfer, window, cx);
-    }
-
-    fn detached_window_bounds(event: &MouseUpEvent, window: &Window) -> gpui::Bounds<Pixels> {
-        let source_bounds = window.bounds();
-        let origin = point(
-            source_bounds.origin.x + event.position.x - px(160.0),
-            source_bounds.origin.y + event.position.y - px(16.0),
-        );
-
-        gpui::Bounds::new(origin, source_bounds.size)
-    }
-
     fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.is_some() {
             self.close_command_palette(window, cx);
@@ -2731,7 +2072,8 @@ impl Workspace {
 
         let previous_focus_handle = window
             .focused(cx)
-            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+            .or_else(|| self.active_pane(cx).focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone());
         let actions = window
             .available_actions(cx)
             .into_iter()
@@ -2778,7 +2120,8 @@ impl Workspace {
         let previous_focus_handle = self
             .command_palette_previous_focus_handle
             .take()
-            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+            .or_else(|| self.active_pane(cx).focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone());
         let action = action.boxed_clone();
         cx.notify();
         window.defer(cx, move |window, cx| {
@@ -2801,7 +2144,8 @@ impl Workspace {
 
         let previous_focus_handle = window
             .focused(cx)
-            .unwrap_or_else(|| self.active_pane.read(cx).focus_handle());
+            .or_else(|| self.active_pane(cx).focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone());
 
         let (themes, selection, system_appearance, selected_ix) = {
             let store = cx.global::<SettingsStore>();
@@ -2919,7 +2263,7 @@ impl Workspace {
     }
 
     fn active_tab_label(&self, cx: &Context<Self>) -> Option<SharedString> {
-        self.active_pane.read(cx).active_tab_label(cx)
+        self.active_pane(cx).active_tab_label(cx)
     }
 
     fn render_top_aligned_overlay(
@@ -2960,15 +2304,13 @@ impl Render for Workspace {
             apply_window_background(window, window_settings, self.transparency_enabled);
         }
         let shell = shell_background(theme, window_settings, self.transparency_enabled);
-        let dim_inactive_panes = cx
-            .global::<SettingsStore>()
-            .settings
-            .behavior
-            .dim_inactive_panes;
+        if !cx.has_active_drag() {
+            self.pane_external_drop = None;
+        }
         self.exit_zen_mode_for_unsupported_active_tab(cx);
         let zen_mode = self.zen_mode;
         let active_document_view = (self.surface_mode == WorkspaceSurfaceMode::Panes)
-            .then(|| self.active_pane.read(cx).active_document_view())
+            .then(|| self.active_pane(cx).active_document_view(cx))
             .flatten();
         let active_pdf_is_presentation = active_document_view
             .as_ref()
@@ -2996,7 +2338,7 @@ impl Render for Workspace {
         let body = if self.surface_mode == WorkspaceSurfaceMode::Home {
             self.render_home_body(theme, window, cx)
         } else {
-            self.render_body(theme, dim_inactive_panes, window, cx)
+            self.render_body(theme, window, cx)
         };
         let rendering_debug = self.render_rendering_debug(cx);
         div()
@@ -3054,9 +2396,9 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
-            .on_drag_move::<DraggedTab>(cx.listener(
-                |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
-                    this.track_dragged_tab_outside_window(event, window, cx);
+            .on_drag_move::<DragPanel>(cx.listener(
+                |this, event: &DragMoveEvent<DragPanel>, _, cx| {
+                    this.track_dragged_tab_outside_window(event, cx);
                 },
             ))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
@@ -3151,29 +2493,29 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ActivatePreviousPane, window, cx| {
                 this.activate_next_pane(true, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapPaneLeft, _, cx| {
-                this.swap_pane_in_direction(SplitDirection::Left, cx);
+            .on_action(cx.listener(|this, _: &SwapPaneLeft, window, cx| {
+                this.swap_pane_in_direction(SplitDirection::Left, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapPaneRight, _, cx| {
-                this.swap_pane_in_direction(SplitDirection::Right, cx);
+            .on_action(cx.listener(|this, _: &SwapPaneRight, window, cx| {
+                this.swap_pane_in_direction(SplitDirection::Right, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapPaneUp, _, cx| {
-                this.swap_pane_in_direction(SplitDirection::Up, cx);
+            .on_action(cx.listener(|this, _: &SwapPaneUp, window, cx| {
+                this.swap_pane_in_direction(SplitDirection::Up, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapPaneDown, _, cx| {
-                this.swap_pane_in_direction(SplitDirection::Down, cx);
+            .on_action(cx.listener(|this, _: &SwapPaneDown, window, cx| {
+                this.swap_pane_in_direction(SplitDirection::Down, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &MovePaneLeft, _, cx| {
-                this.move_pane_to_border(SplitDirection::Left, cx);
+            .on_action(cx.listener(|this, _: &MovePaneLeft, window, cx| {
+                this.move_pane_to_border(SplitDirection::Left, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &MovePaneRight, _, cx| {
-                this.move_pane_to_border(SplitDirection::Right, cx);
+            .on_action(cx.listener(|this, _: &MovePaneRight, window, cx| {
+                this.move_pane_to_border(SplitDirection::Right, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &MovePaneUp, _, cx| {
-                this.move_pane_to_border(SplitDirection::Up, cx);
+            .on_action(cx.listener(|this, _: &MovePaneUp, window, cx| {
+                this.move_pane_to_border(SplitDirection::Up, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &MovePaneDown, _, cx| {
-                this.move_pane_to_border(SplitDirection::Down, cx);
+            .on_action(cx.listener(|this, _: &MovePaneDown, window, cx| {
+                this.move_pane_to_border(SplitDirection::Down, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
                 this.resize_active_pane(SplitDirection::Left, window, cx);
@@ -3190,8 +2532,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CloseOtherPanes, window, cx| {
                 this.close_other_panes(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ResetPaneSizes, _, cx| {
-                this.reset_pane_sizes(cx);
+            .on_action(cx.listener(|this, _: &ResetPaneSizes, window, cx| {
+                this.reset_pane_sizes(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_theme_mode))
             .on_action(cx.listener(Self::toggle_theme_selector))
@@ -3220,6 +2562,7 @@ impl Render for Workspace {
                     .children(rendering_debug),
             )
             .children(synchronized_connection)
+            .children(self.render_tab_context_menu())
             .when(self.quick_ask_visible, |this| {
                 this.when_some(self.quick_ask.clone(), |this, quick_ask| {
                     this.child(self.render_quick_ask_overlay(quick_ask, window, cx))
@@ -3244,5 +2587,7 @@ impl Render for Workspace {
     }
 }
 
+#[cfg(test)]
+mod pane_tests;
 #[cfg(test)]
 mod tests;

@@ -26,6 +26,7 @@ pub mod new_tab;
 pub mod pane;
 mod pdf_password_store;
 mod synchronized_tabs;
+mod tab_item;
 pub mod theme_selector;
 pub mod workspace;
 

@@ -576,28 +576,35 @@ impl Workspace {
     }
 
     pub(super) fn ai_context_snapshot(&self, cx: &App) -> WorkspaceAiSnapshot {
-        let all = self
-            .pane_group
-            .panes()
+        let tabs = self
+            .all_tab_items(cx)
             .into_iter()
-            .flat_map(|pane| pane.read(cx).document_views())
+            .filter_map(|tab| {
+                let document = tab.read(cx).document_view()?;
+                Some((tab.entity_id(), document))
+            })
             .collect::<Vec<_>>();
-        let active_document = self.active_pane.read(cx).active_document_view();
+        let document_for_tab = |id: &EntityId| {
+            tabs.iter()
+                .find(|(tab_id, _)| tab_id == id)
+                .map(|(_, document)| document.clone())
+        };
+        let all = tabs
+            .iter()
+            .map(|(_, document)| document.clone())
+            .collect::<Vec<_>>();
+        let active_document = self.active_pane(cx).active_document_view(cx);
         let current_document = self
             .document_context_mru
             .iter()
-            .find_map(|id| {
-                all.iter()
-                    .find(|document| document.entity_id() == *id)
-                    .cloned()
-            })
+            .find_map(document_for_tab)
             .or_else(|| active_document.clone())
             .or_else(|| all.first().cloned());
 
         let mut open_documents = Vec::with_capacity(all.len());
         for id in &self.document_context_mru {
-            if let Some(document) = all.iter().find(|document| document.entity_id() == *id) {
-                open_documents.push(document.clone());
+            if let Some(document) = document_for_tab(id) {
+                open_documents.push(document);
             }
         }
         if let Some(active_document) = active_document {

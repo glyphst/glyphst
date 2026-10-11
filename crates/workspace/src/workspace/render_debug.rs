@@ -104,7 +104,7 @@ impl Workspace {
 
     pub(super) fn active_render_debug_document(&self, cx: &App) -> Option<Entity<DocumentView>> {
         (self.surface_mode == WorkspaceSurfaceMode::Panes)
-            .then(|| self.active_pane.read(cx).active_document_view())
+            .then(|| self.active_pane(cx).active_document_view(cx))
             .flatten()
     }
 

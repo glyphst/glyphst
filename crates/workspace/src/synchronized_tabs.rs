@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use glyphst_library::ReaderSynchronizedGroup;
 use gpui::{EntityId, Pixels, Point};
 
-use crate::theme::SYNCHRONIZED_GROUP_COLOR_COUNT;
+use crate::{pane::PaneId, theme::SYNCHRONIZED_GROUP_COLOR_COUNT};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SynchronizedConnectionNode {
@@ -117,7 +117,7 @@ struct SynchronizedGroup {
     id: SynchronizedGroupId,
     display_number: u64,
     color_slot: usize,
-    members: HashMap<EntityId, EntityId>,
+    members: HashMap<EntityId, PaneId>,
 }
 
 #[derive(Default)]
@@ -191,9 +191,9 @@ impl SynchronizedTabRegistry {
     pub(crate) fn create_group(
         &mut self,
         source_tab: EntityId,
-        source_pane: EntityId,
+        source_pane: PaneId,
         target_tab: EntityId,
-        target_pane: EntityId,
+        target_pane: PaneId,
     ) -> Option<SynchronizedGroupId> {
         if source_tab == target_tab
             || source_pane == target_pane
@@ -210,9 +210,9 @@ impl SynchronizedTabRegistry {
     pub(crate) fn connect_tab_to_source_group(
         &mut self,
         source_tab: EntityId,
-        source_pane: EntityId,
+        source_pane: PaneId,
         target_tab: EntityId,
-        target_pane: EntityId,
+        target_pane: PaneId,
     ) -> Option<SynchronizedGroupId> {
         if let Some(group_id) = self.group_for_tab(source_tab) {
             self.add_member(group_id, target_tab, target_pane)
@@ -226,9 +226,9 @@ impl SynchronizedTabRegistry {
         &mut self,
         reserved: ReservedSynchronizedGroup,
         source_tab: EntityId,
-        source_pane: EntityId,
+        source_pane: PaneId,
         target_tab: EntityId,
-        target_pane: EntityId,
+        target_pane: PaneId,
     ) -> bool {
         if source_tab == target_tab
             || source_pane == target_pane
@@ -260,7 +260,7 @@ impl SynchronizedTabRegistry {
         &mut self,
         group_id: SynchronizedGroupId,
         tab_id: EntityId,
-        pane_id: EntityId,
+        pane_id: PaneId,
     ) -> bool {
         if self.memberships.contains_key(&tab_id) {
             return false;
@@ -285,7 +285,7 @@ impl SynchronizedTabRegistry {
         &self,
         group_id: SynchronizedGroupId,
         tab_id: EntityId,
-        pane_id: EntityId,
+        pane_id: PaneId,
     ) -> bool {
         !self.memberships.contains_key(&tab_id)
             && self.groups.get(&group_id).is_some_and(|group| {
@@ -296,7 +296,7 @@ impl SynchronizedTabRegistry {
             })
     }
 
-    pub(crate) fn can_move_tab(&self, tab_id: EntityId, destination_pane: EntityId) -> bool {
+    pub(crate) fn can_move_tab(&self, tab_id: EntityId, destination_pane: PaneId) -> bool {
         self.memberships.get(&tab_id).is_none_or(|group_id| {
             self.groups.get(group_id).is_none_or(|group| {
                 !group.members.iter().any(|(member_tab, member_pane)| {
@@ -306,17 +306,16 @@ impl SynchronizedTabRegistry {
         })
     }
 
-    pub(crate) fn move_tab(&mut self, tab_id: EntityId, destination_pane: EntityId) -> bool {
-        if !self.can_move_tab(tab_id, destination_pane) {
-            return false;
+    /// Record where every member tab now sits, after the layout changed. A
+    /// member `pane_of` cannot place keeps its last pane.
+    pub(crate) fn reassign_panes(&mut self, pane_of: impl Fn(EntityId) -> Option<PaneId>) {
+        for group in self.groups.values_mut() {
+            for (tab_id, pane_id) in &mut group.members {
+                if let Some(pane) = pane_of(*tab_id) {
+                    *pane_id = pane;
+                }
+            }
         }
-        if let Some(group_id) = self.memberships.get(&tab_id)
-            && let Some(group) = self.groups.get_mut(group_id)
-            && let Some(pane_id) = group.members.get_mut(&tab_id)
-        {
-            *pane_id = destination_pane;
-        }
-        true
     }
 
     pub(crate) fn remove_tab(&mut self, tab_id: EntityId) {
@@ -455,26 +454,34 @@ mod tests {
         EntityId::from(value)
     }
 
+    fn pane(value: u64) -> PaneId {
+        PaneId::from_u64(value)
+    }
+
     #[test]
     fn rejects_overlapping_groups_without_changing_existing_memberships() {
         let mut registry = SynchronizedTabRegistry::default();
-        let first = registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
-        let second = registry.create_group(id(3), id(13), id(4), id(14)).unwrap();
+        let first = registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
+        let second = registry
+            .create_group(id(3), pane(13), id(4), pane(14))
+            .unwrap();
 
         assert!(
             registry
-                .create_group(id(1), id(11), id(5), id(15))
+                .create_group(id(1), pane(11), id(5), pane(15))
                 .is_none()
         );
         assert!(
             registry
-                .create_group(id(5), id(15), id(2), id(12))
+                .create_group(id(5), pane(15), id(2), pane(12))
                 .is_none()
         );
-        assert!(!registry.can_add_member(first, id(3), id(16)));
-        assert!(!registry.add_member(first, id(3), id(16)));
+        assert!(!registry.can_add_member(first, id(3), pane(16)));
+        assert!(!registry.add_member(first, id(3), pane(16)));
         let reserved = registry.reserve_group();
-        assert!(!registry.commit_reserved_group(reserved, id(5), id(15), id(2), id(12)));
+        assert!(!registry.commit_reserved_group(reserved, id(5), pane(15), id(2), pane(12)));
 
         assert_eq!(registry.group_for_tab(id(1)), Some(first));
         assert_eq!(registry.group_for_tab(id(2)), Some(first));
@@ -494,22 +501,22 @@ mod tests {
     fn connects_a_target_to_the_sources_existing_group_or_creates_one() {
         let mut registry = SynchronizedTabRegistry::default();
         let first = registry
-            .connect_tab_to_source_group(id(1), id(11), id(2), id(12))
+            .connect_tab_to_source_group(id(1), pane(11), id(2), pane(12))
             .unwrap();
 
         assert_eq!(
-            registry.connect_tab_to_source_group(id(1), id(11), id(3), id(13)),
+            registry.connect_tab_to_source_group(id(1), pane(11), id(3), pane(13)),
             Some(first)
         );
         assert_eq!(registry.group_summary(first).unwrap().member_count, 3);
         assert_eq!(registry.group_for_tab(id(3)), Some(first));
 
         let second = registry
-            .connect_tab_to_source_group(id(4), id(14), id(5), id(15))
+            .connect_tab_to_source_group(id(4), pane(14), id(5), pane(15))
             .unwrap();
         assert_ne!(second, first);
         assert_eq!(
-            registry.connect_tab_to_source_group(id(1), id(11), id(4), id(14)),
+            registry.connect_tab_to_source_group(id(1), pane(11), id(4), pane(14)),
             None
         );
         assert_eq!(registry.group_for_tab(id(4)), Some(second));
@@ -518,9 +525,15 @@ mod tests {
     #[test]
     fn display_numbers_reuse_gaps_without_reusing_internal_ids() {
         let mut registry = SynchronizedTabRegistry::default();
-        let first = registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
-        let second = registry.create_group(id(3), id(13), id(4), id(14)).unwrap();
-        let third = registry.create_group(id(5), id(15), id(6), id(16)).unwrap();
+        let first = registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
+        let second = registry
+            .create_group(id(3), pane(13), id(4), pane(14))
+            .unwrap();
+        let third = registry
+            .create_group(id(5), pane(15), id(6), pane(16))
+            .unwrap();
 
         assert_eq!(registry.group_summary(first).unwrap().display_number, 1);
         assert_eq!(registry.group_summary(second).unwrap().display_number, 2);
@@ -530,9 +543,11 @@ mod tests {
         assert_eq!(registry.group_summary(third).unwrap().display_number, 3);
         registry.leave_group(id(5));
         assert_eq!(registry.current_group(), Some(first));
-        let fourth = registry.create_group(id(7), id(17), id(8), id(18)).unwrap();
+        let fourth = registry
+            .create_group(id(7), pane(17), id(8), pane(18))
+            .unwrap();
         let fifth = registry
-            .create_group(id(9), id(19), id(10), id(20))
+            .create_group(id(9), pane(19), id(10), pane(20))
             .unwrap();
 
         assert_eq!(registry.group_summary(first).unwrap().display_number, 1);
@@ -548,9 +563,9 @@ mod tests {
         let groups = (0..SYNCHRONIZED_GROUP_COLOR_COUNT)
             .map(|index| {
                 let tab = index as u64 * 2 + 1;
-                let pane = index as u64 * 2 + 101;
+                let pane_id = index as u64 * 2 + 101;
                 registry
-                    .create_group(id(tab), id(pane), id(tab + 1), id(pane + 1))
+                    .create_group(id(tab), pane(pane_id), id(tab + 1), pane(pane_id + 1))
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -565,7 +580,7 @@ mod tests {
 
         registry.leave_group(id(1));
         let replacement = registry
-            .create_group(id(1001), id(1101), id(1002), id(1102))
+            .create_group(id(1001), pane(1101), id(1002), pane(1102))
             .unwrap();
         assert_eq!(registry.group_summary(replacement).unwrap().color_slot, 0);
     }
@@ -573,17 +588,21 @@ mod tests {
     #[test]
     fn enforces_one_member_of_a_group_per_pane() {
         let mut registry = SynchronizedTabRegistry::default();
-        let group = registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
+        let group = registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
 
-        assert!(!registry.can_add_member(group, id(3), id(12)));
-        assert!(!registry.add_member(group, id(3), id(12)));
-        assert!(registry.add_member(group, id(3), id(13)));
+        assert!(!registry.can_add_member(group, id(3), pane(12)));
+        assert!(!registry.add_member(group, id(3), pane(12)));
+        assert!(registry.add_member(group, id(3), pane(13)));
     }
 
     #[test]
     fn removing_a_tab_dissolves_groups_smaller_than_two() {
         let mut registry = SynchronizedTabRegistry::default();
-        let group = registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
+        let group = registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
         registry.remove_tab(id(2));
 
         assert!(registry.group_summary(group).is_none());
@@ -594,7 +613,9 @@ mod tests {
     #[test]
     fn paused_state_clears_when_membership_is_removed_or_dissolved() {
         let mut registry = SynchronizedTabRegistry::default();
-        registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
+        registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
 
         assert!(!registry.set_paused(id(99), true));
         assert!(registry.set_paused(id(1), true));
@@ -604,7 +625,9 @@ mod tests {
         assert!(!registry.is_paused(id(1)));
         assert!(!registry.set_paused(id(1), true));
 
-        registry.create_group(id(1), id(11), id(3), id(13)).unwrap();
+        registry
+            .create_group(id(1), pane(11), id(3), pane(13))
+            .unwrap();
         assert!(registry.set_paused(id(1), true));
         registry.remove_tab(id(1));
         assert!(!registry.is_paused(id(1)));
@@ -613,14 +636,18 @@ mod tests {
     #[test]
     fn rejects_moves_into_a_pane_already_represented_by_the_tabs_group() {
         let mut registry = SynchronizedTabRegistry::default();
-        let first = registry.create_group(id(1), id(11), id(2), id(12)).unwrap();
-        let second = registry.create_group(id(3), id(13), id(4), id(14)).unwrap();
+        let first = registry
+            .create_group(id(1), pane(11), id(2), pane(12))
+            .unwrap();
+        let second = registry
+            .create_group(id(3), pane(13), id(4), pane(14))
+            .unwrap();
 
-        assert!(!registry.can_move_tab(id(1), id(12)));
-        assert!(registry.can_move_tab(id(1), id(13)));
-        assert!(registry.move_tab(id(1), id(13)));
-        assert!(!registry.can_add_member(first, id(5), id(13)));
-        assert!(registry.can_add_member(second, id(5), id(15)));
+        assert!(!registry.can_move_tab(id(1), pane(12)));
+        assert!(registry.can_move_tab(id(1), pane(13)));
+        registry.reassign_panes(|tab| (tab == id(1)).then(|| pane(13)));
+        assert!(!registry.can_add_member(first, id(5), pane(13)));
+        assert!(registry.can_add_member(second, id(5), pane(15)));
     }
 
     #[test]

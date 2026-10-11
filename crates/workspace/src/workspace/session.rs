@@ -10,43 +10,25 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let document_translation_jobs = cx.new(DocumentTranslationManager::new);
-        let restored = PaneGroup::restore(
-            &session.pane_tree,
-            document_translation_jobs.clone(),
-            window,
-            cx,
-        );
-        let first_pane = restored
-            .panes
-            .first()
-            .map(|(_, pane)| pane.clone())
-            .expect("restoring a pane tree always creates at least one pane");
-        let mut workspace = Self::with_pane(
-            first_pane.clone(),
+        let mut restored = RestoredLayout::default();
+        let layout = restored.layout(&session.pane_tree, &document_translation_jobs, window, cx);
+        let active_tab = restored
+            .pane_tabs
+            .iter()
+            .find(|(pane_id, _)| *pane_id == session.active_pane)
+            .or_else(|| restored.pane_tabs.first())
+            .map(|(_, tab)| tab.clone());
+        let mut workspace = Self::with_layout(
+            Some(layout),
             document_translation_jobs,
             callbacks,
             window,
             cx,
         );
-        workspace.pane_group = restored.pane_group;
-        workspace.active_pane = restored
-            .panes
-            .iter()
-            .find(|(id, _)| *id == session.active_pane)
-            .map(|(_, pane)| pane.clone())
-            .unwrap_or_else(|| first_pane.clone());
-        for (_, pane) in restored
-            .panes
-            .iter()
-            .filter(|(_, pane)| *pane != first_pane)
-        {
-            workspace.subscribe_to_pane(pane, window, cx);
+        if let Some(pane) = active_tab.and_then(|tab| workspace.pane_for_tab(tab.entity_id(), cx)) {
+            workspace.active_pane = pane;
         }
-        workspace.restore.tab_ids = restored
-            .tab_ids
-            .into_iter()
-            .map(|(session_id, tab_id, pane_id)| (session_id, (tab_id, pane_id)))
-            .collect();
+        workspace.restore.tab_ids = restored.tab_ids;
         workspace.restore.pending_documents = restored.pending_documents;
         workspace.restore.dock_document_tab = session.dock_document_tab;
         workspace.restore.synchronized_groups = session.synchronized_groups;
@@ -68,7 +50,6 @@ impl Workspace {
         if workspace.restore.pending_documents == 0 {
             workspace.finish_reader_session_restore(window, cx);
         }
-        workspace.sync_tab_bar_visibility(cx);
         workspace.focus_active_pane(window, cx);
         workspace
     }
@@ -86,7 +67,7 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> ReaderWindowSession {
-        let panes = self.pane_group.session_snapshot(&self.active_pane, cx);
+        let panes = self.pane_session_snapshot(cx);
         let window_bounds = window.window_bounds();
         let state = match window_bounds {
             gpui::WindowBounds::Windowed(_) => ReaderWindowState::Windowed,
@@ -142,13 +123,8 @@ impl Workspace {
             pane_tree: panes.pane_tree,
             active_pane: panes.active_pane,
             dock_document_tab: self
-                .dock_document_target(cx)
-                .and_then(|(_, document_view)| {
-                    panes
-                        .runtime_tab_ids
-                        .get(&document_view.entity_id())
-                        .copied()
-                }),
+                .dock_document_tab_id(cx)
+                .and_then(|tab_id| panes.runtime_tab_ids.get(&tab_id).copied()),
             left_sidebar: self.docks.left_sidebar.map(|sidebar| match sidebar {
                 DocumentSidebar::Thumbnails => ReaderSidebar::Thumbnails,
                 DocumentSidebar::Toc => ReaderSidebar::TableOfContents,
@@ -175,13 +151,9 @@ impl Workspace {
                 .tabs
                 .iter()
                 .filter_map(|session_id| {
-                    let (tab_id, pane_id) = self.restore.tab_ids.get(session_id).copied()?;
-                    let is_document = self
-                        .pane_group
-                        .panes()
-                        .into_iter()
-                        .find(|pane| pane.entity_id() == pane_id)
-                        .is_some_and(|pane| pane.read(cx).tab_is_document(tab_id));
+                    let tab_id = self.restore.tab_ids.get(session_id).copied()?;
+                    let pane_id = self.pane_for_tab(tab_id, cx)?;
+                    let is_document = self.pane(pane_id, cx).tab_is_document(tab_id, cx);
                     is_document.then_some((*session_id, tab_id, pane_id))
                 })
                 .collect::<Vec<_>>();
@@ -203,43 +175,31 @@ impl Workspace {
                 self.synchronized_tabs.add_member(group_id, tab_id, pane_id);
             }
             for paused_session_id in &group.paused_tabs {
-                if let Some((tab_id, _)) = self.restore.tab_ids.get(paused_session_id) {
+                if let Some(tab_id) = self.restore.tab_ids.get(paused_session_id) {
                     self.synchronized_tabs.set_paused(*tab_id, true);
                 }
             }
         }
         let translation_sessions = std::mem::take(&mut self.restore.translation_sessions);
         for session in translation_sessions {
-            let Some((source_tab_id, source_pane_id)) =
-                self.restore.tab_ids.get(&session.source_tab).copied()
-            else {
+            let Some(source_tab_id) = self.restore.tab_ids.get(&session.source_tab).copied() else {
                 continue;
             };
-            let Some((translated_tab_id, translated_pane_id)) =
+            let Some(translated_tab_id) =
                 self.restore.tab_ids.get(&session.translated_tab).copied()
             else {
                 continue;
             };
-            let source_pane = self
-                .pane_group
-                .panes()
-                .into_iter()
-                .find(|pane| pane.entity_id() == source_pane_id);
-            let translated_pane = self
-                .pane_group
-                .panes()
-                .into_iter()
-                .find(|pane| pane.entity_id() == translated_pane_id);
-            let (Some(source_pane), Some(translated_pane)) = (source_pane, translated_pane) else {
+            let (Some(source_pane_id), Some(translated_pane_id)) = (
+                self.pane_for_tab(source_tab_id, cx),
+                self.pane_for_tab(translated_tab_id, cx),
+            ) else {
                 continue;
             };
-            let Some(source) = source_pane.read(cx).document_view_for_id(source_tab_id) else {
+            let Some(source) = self.document_view_for_tab(source_tab_id, cx) else {
                 continue;
             };
-            let Some(translated) = translated_pane
-                .read(cx)
-                .document_view_for_id(translated_tab_id)
-            else {
+            let Some(translated) = self.document_view_for_tab(translated_tab_id, cx) else {
                 continue;
             };
             let source_language = match session.source_language.as_deref() {
@@ -306,22 +266,192 @@ impl Workspace {
                     translated_pane_id,
                 );
             }
-            self.register_live_translation_pair(session_id, source, translated, window, cx);
+            self.register_live_translation_pair(
+                session_id,
+                (source_tab_id, source),
+                (translated_tab_id, translated),
+                window,
+                cx,
+            );
         }
         if let Some(session_tab_id) = self.restore.dock_document_tab.take()
-            && let Some((tab_id, _)) = self.restore.tab_ids.get(&session_tab_id).copied()
+            && let Some(tab_id) = self.restore.tab_ids.get(&session_tab_id).copied()
             && self.document_target_for_id(tab_id, cx).is_some()
         {
             self.document_context_mru
                 .retain(|candidate| *candidate != tab_id);
             self.document_context_mru.insert(0, tab_id);
         } else {
-            let active_pane = self.active_pane.clone();
-            self.record_document_context(&active_pane, cx);
+            let active_pane = self.active_pane;
+            self.record_document_context(active_pane, cx);
         }
         self.prune_document_context(cx);
         self.restore.tab_ids.clear();
         self.refresh_synchronized_tab_presentation(cx);
         cx.notify();
+    }
+}
+
+/// What a session's pane tree restores to, before the dock installs it.
+#[derive(Default)]
+struct RestoredLayout {
+    /// Each restored pane's session id and its first tab.
+    pane_tabs: Vec<(u64, Entity<TabItem>)>,
+    tab_ids: HashMap<u64, EntityId>,
+    pending_documents: usize,
+    missing_documents: usize,
+}
+
+impl RestoredLayout {
+    fn layout(
+        &mut self,
+        tree: &ReaderPaneTree,
+        jobs: &Entity<DocumentTranslationManager>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PaneLayout {
+        match tree {
+            ReaderPaneTree::Pane(pane) => self.pane(pane, jobs, window, cx),
+            ReaderPaneTree::Split {
+                axis,
+                ratios,
+                children,
+            } if !children.is_empty() => {
+                let children = children
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, child)| {
+                        let share = ratios
+                            .get(ix)
+                            .copied()
+                            .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+                            .unwrap_or(1.0 / ratios.len().max(1) as f32);
+                        (self.layout(child, jobs, window, cx), share)
+                    })
+                    .collect::<Vec<_>>();
+                if children.len() == 1 {
+                    return children.into_iter().next().map(|(child, _)| child).unwrap();
+                }
+                PaneLayout::Split {
+                    axis: match axis {
+                        ReaderSplitAxis::Horizontal => Axis::Horizontal,
+                        ReaderSplitAxis::Vertical => Axis::Vertical,
+                    },
+                    children,
+                }
+            }
+            ReaderPaneTree::Split { .. } => self.pane(
+                &ReaderPaneSession {
+                    id: 1,
+                    tabs: Vec::new(),
+                    active_tab: None,
+                },
+                jobs,
+                window,
+                cx,
+            ),
+        }
+    }
+
+    fn pane(
+        &mut self,
+        session: &ReaderPaneSession,
+        jobs: &Entity<DocumentTranslationManager>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PaneLayout {
+        let mut tabs = Vec::new();
+        let mut session_ids = Vec::new();
+        for tab in &session.tabs {
+            let item = match &tab.kind {
+                ReaderTabKind::NewTab(state) => Some(TabItem::new_tab_with_session(
+                    state.clone(),
+                    jobs.clone(),
+                    window,
+                    cx,
+                )),
+                ReaderTabKind::Keymap => Some(TabItem::keymap(jobs.clone(), window, cx)),
+                ReaderTabKind::Document { path, position } => {
+                    if !path.exists() || !crate::tab_item::is_supported_document_path(path) {
+                        self.missing_documents += 1;
+                        None
+                    } else {
+                        match TabItem::open_document(
+                            path,
+                            Some(position.clone()),
+                            Some(tab.id),
+                            None,
+                            jobs.clone(),
+                            window,
+                            cx,
+                        ) {
+                            Ok(item) => {
+                                self.pending_documents += 1;
+                                Some(item)
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "failed to restore document {}: {error:#}",
+                                    path.display()
+                                );
+                                self.missing_documents += 1;
+                                None
+                            }
+                        }
+                    }
+                }
+            };
+            if let Some(item) = item {
+                self.tab_ids.insert(tab.id, item.entity_id());
+                session_ids.push(tab.id);
+                tabs.push(item);
+            }
+        }
+        if tabs.is_empty() {
+            tabs.push(TabItem::new_tab(jobs.clone(), window, cx));
+        }
+        let active_ix = session
+            .active_tab
+            .and_then(|active| session_ids.iter().position(|id| *id == active))
+            .unwrap_or(0)
+            .min(tabs.len() - 1);
+        self.pane_tabs.push((session.id, tabs[active_ix].clone()));
+        PaneLayout::Pane { tabs, active_ix }
+    }
+}
+
+pub(super) struct PaneSessionSnapshot {
+    pub(super) pane_tree: ReaderPaneTree,
+    pub(super) active_pane: u64,
+    pub(super) runtime_tab_ids: HashMap<EntityId, u64>,
+}
+
+impl Workspace {
+    pub(super) fn pane_session_snapshot(&self, cx: &App) -> PaneSessionSnapshot {
+        let mut next_pane_id = 0_u64;
+        let mut next_tab_id = 0_u64;
+        let mut active_pane = 0_u64;
+        let mut runtime_tab_ids = HashMap::new();
+        let active_tab = self.active_pane(cx).active_tab_id();
+        let pane_tree = match PaneLayout::of(&self.dock_area, cx) {
+            Some(layout) => layout.session_tree(
+                active_tab,
+                &mut next_pane_id,
+                &mut next_tab_id,
+                &mut active_pane,
+                &mut runtime_tab_ids,
+                cx,
+            ),
+            None => ReaderPaneTree::Pane(ReaderPaneSession {
+                id: 1,
+                tabs: Vec::new(),
+                active_tab: None,
+            }),
+        };
+        PaneSessionSnapshot {
+            pane_tree,
+            active_pane,
+            runtime_tab_ids,
+        }
     }
 }

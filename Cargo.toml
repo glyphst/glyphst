@@ -40,10 +40,10 @@ gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, fea
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-kit-assets" }
-gpui_base = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-base" }
-gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-fps" }
+gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-component" }
+gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-kit-assets" }
+gpui_base = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-base" }
+gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-fps" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", default-features = false, features = [
     "font-kit",
     "wayland",

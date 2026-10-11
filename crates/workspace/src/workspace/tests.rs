@@ -20,7 +20,7 @@ use gpui::{
 use gpui_component::{Root, WindowExt as _};
 
 use super::{
-    PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
+    SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
     SynchronizedConnectionCurve, SynchronizedConnectionGroup, SynchronizedConnectionInvalidReason,
     SynchronizedConnectionTabState, ToggleRenderingDebug, ToggleZenMode, Workspace,
     WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode,
@@ -49,6 +49,17 @@ fn unavailable_workspace_window(
 }
 
 fn ignore_settings_window(_: &mut gpui::App) {}
+
+/// The tab showing `document`.
+fn tab_of(
+    workspace: &Workspace,
+    document: &gpui::Entity<crate::document_view::DocumentView>,
+    cx: &gpui::App,
+) -> EntityId {
+    workspace
+        .tab_id_for_document(document, cx)
+        .expect("the document is in a tab")
+}
 
 #[test]
 fn live_translation_pair_requires_both_selected_tabs() {
@@ -506,7 +517,7 @@ fn documentless_workspace_starts_on_home_with_a_backing_new_tab(cx: &mut TestApp
 
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Home);
-        assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        assert!(workspace.active_pane(cx).active_tab_is_new_tab(cx));
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
@@ -710,17 +721,23 @@ fn zoom_actions_target_the_active_pane_and_show_a_local_transient_popup(cx: &mut
 
     let (left_pane, right_pane, left_document, right_document, zoom_step) =
         workspace.update_in(cx, |workspace, window, cx| {
-            let panes = workspace.pane_group.panes();
-            let left_pane = panes[0].clone();
-            let right_pane = panes[1].clone();
-            let left_document = left_pane.read(cx).active_document_view().unwrap();
-            let right_document = right_pane.read(cx).active_document_view().unwrap();
+            let panes = workspace.panes(cx);
+            let left_pane = panes[0].id();
+            let right_pane = panes[1].id();
+            let left_document = workspace
+                .pane(left_pane, cx)
+                .active_document_view(cx)
+                .unwrap();
+            let right_document = workspace
+                .pane(right_pane, cx)
+                .active_document_view(cx)
+                .unwrap();
 
             // Keep descendant focus on the right to reproduce the stale focus path that
             // previously consumed document actions, while the workspace source of truth is
             // the left pane.
-            right_pane.update(cx, |pane, cx| pane.focus(window, cx));
-            workspace.active_pane = left_pane.clone();
+            workspace.focus_pane(right_pane, window, cx);
+            workspace.active_pane = left_pane;
             cx.notify();
 
             (
@@ -764,14 +781,12 @@ fn zoom_actions_target_the_active_pane_and_show_a_local_transient_popup(cx: &mut
         .expect("zoom popup after a keyboard zoom");
     let left_bounds = workspace.read_with(cx, |workspace, _| {
         workspace
-            .pane_group
-            .bounding_box_for_pane(&left_pane)
+            .bounding_box_for_pane(left_pane)
             .expect("left pane bounds")
     });
     let right_bounds = workspace.read_with(cx, |workspace, _| {
         workspace
-            .pane_group
-            .bounding_box_for_pane(&right_pane)
+            .bounding_box_for_pane(right_pane)
             .expect("right pane bounds")
     });
     assert!(left_bounds.contains(&popup.center()));
@@ -1045,22 +1060,28 @@ fn workspace_ai_snapshot_prefers_document_focus_mru_over_active_pane(cx: &mut Te
     cx.run_until_parked();
 
     let (left_pane, right_pane) = workspace.update_in(cx, |workspace, window, cx| {
-        let panes = workspace.pane_group.panes();
-        let left_pane = panes[0].clone();
-        let right_pane = panes[1].clone();
-        workspace.active_pane = right_pane.clone();
-        right_pane
-            .update(cx, |pane, cx| {
-                pane.focus_or_open_document(right_path.clone(), None, false, window, cx)
-            })
+        let panes = workspace.panes(cx);
+        let left_pane = panes[0].id();
+        let right_pane = panes[1].id();
+        workspace.active_pane = right_pane;
+        workspace
+            .open_document_in_pane(
+                right_pane,
+                right_path.clone(),
+                None,
+                false,
+                None,
+                window,
+                cx,
+            )
             .unwrap();
         (left_pane, right_pane)
     });
     cx.run_until_parked();
 
     workspace.update_in(cx, |workspace, _, cx| {
-        workspace.record_document_context(&right_pane, cx);
-        workspace.active_pane = left_pane.clone();
+        workspace.record_document_context(right_pane, cx);
+        workspace.active_pane = left_pane;
         let snapshot = workspace.ai_context_snapshot(cx);
         assert_eq!(
             snapshot
@@ -1125,7 +1146,7 @@ fn workspace_ai_snapshot_prefers_document_focus_mru_over_active_pane(cx: &mut Te
     );
 
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.close_tab_in_pane_now(&right_pane, None, window, cx);
+        workspace.close_tab_in_pane_now(right_pane, None, window, cx);
     });
     cx.run_until_parked();
     workspace.read_with(cx, |workspace, cx| {
@@ -1194,7 +1215,7 @@ fn zen_mode_hides_workspace_chrome_preserves_state_and_restores_with_escape(
         let fullscreen = window.is_fullscreen();
         workspace.toggle_zen_mode(window, cx);
         assert!(workspace.zen_mode);
-        assert_eq!(workspace.pane_group.panes().len(), 2);
+        assert_eq!(workspace.panes(cx).len(), 2);
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
         assert!(workspace.docks.ai_panel_open);
         fullscreen
@@ -1242,7 +1263,7 @@ fn zen_mode_hides_workspace_chrome_preserves_state_and_restores_with_escape(
             .open_document_in_active_pane(second_path.clone(), None, window, cx)
             .unwrap();
         assert!(workspace.zen_mode);
-        assert!(workspace.active_pane.read(cx).active_tab_is_loading());
+        assert!(workspace.active_pane(cx).active_tab_is_loading(cx));
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
@@ -1265,9 +1286,9 @@ fn zen_mode_hides_workspace_chrome_preserves_state_and_restores_with_escape(
     assert!(cx.debug_bounds("document-open-loading").is_none());
 
     cx.simulate_keystrokes("escape");
-    workspace.read_with(cx, |workspace, _| {
+    workspace.read_with(cx, |workspace, cx| {
         assert!(!workspace.zen_mode);
-        assert_eq!(workspace.pane_group.panes().len(), 2);
+        assert_eq!(workspace.panes(cx).len(), 2);
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
         assert!(workspace.docks.ai_panel_open);
     });
@@ -1337,12 +1358,7 @@ fn home_toggle_preserves_the_document_workspace_and_requested_docks(cx: &mut Tes
         .expect("document navigation rail");
     let document_id = workspace.update_in(cx, |workspace, window, cx| {
         workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
-        let document_id = workspace
-            .active_pane
-            .read(cx)
-            .active_document_view()
-            .unwrap()
-            .entity_id();
+        let document_id = workspace.active_pane(cx).active_tab_id().unwrap();
         workspace.enter_home(window, cx);
         document_id
     });
@@ -1370,10 +1386,7 @@ fn home_toggle_preserves_the_document_workspace_and_requested_docks(cx: &mut Tes
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
-        assert_eq!(
-            workspace.active_pane.read(cx).active_tab_id(),
-            Some(document_id)
-        );
+        assert_eq!(workspace.active_pane(cx).active_tab_id(), Some(document_id));
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
@@ -1409,8 +1422,8 @@ fn closing_the_last_tab_enters_home_and_keeps_a_quick_open_tab(cx: &mut TestAppC
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Home);
-        assert_eq!(workspace.pane_group.panes().len(), 1);
-        assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        assert_eq!(workspace.panes(cx).len(), 1);
+        assert!(workspace.active_pane(cx).active_tab_is_new_tab(cx));
     });
 
     fs::remove_file(document_path).unwrap();
@@ -1448,12 +1461,12 @@ fn home_open_targets_the_previous_active_pane_even_when_document_exists_elsewher
     cx.run_until_parked();
 
     let (left_pane, right_pane) = workspace.update_in(cx, |workspace, window, cx| {
-        let panes = workspace.pane_group.panes();
-        let left_pane = panes[0].clone();
-        let right_pane = panes[1].clone();
-        right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
-        workspace.close_tab_in_pane_now(&right_pane, Some(0), window, cx);
-        workspace.active_pane = right_pane.clone();
+        let panes = workspace.panes(cx);
+        let left_pane = panes[0].id();
+        let right_pane = panes[1].id();
+        workspace.open_new_tab_in_pane(right_pane, window, cx);
+        workspace.close_tab_in_pane_now(right_pane, Some(0), window, cx);
+        workspace.active_pane = right_pane;
         workspace.enter_home(window, cx);
         (left_pane, right_pane)
     });
@@ -1468,14 +1481,14 @@ fn home_open_targets_the_previous_active_pane_even_when_document_exists_elsewher
         assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
         assert_eq!(workspace.active_pane, right_pane);
         assert!(
-            left_pane
-                .read(cx)
+            workspace
+                .pane(left_pane, cx)
                 .document_tab_ix(&document_path, cx)
                 .is_some()
         );
         assert!(
-            right_pane
-                .read(cx)
+            workspace
+                .pane(right_pane, cx)
                 .document_tab_ix(&document_path, cx)
                 .is_some()
         );
@@ -1544,9 +1557,9 @@ fn reader_session_restores_split_tabs_active_pane_and_docks(cx: &mut TestAppCont
     });
 
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(workspace.pane_group.panes().len(), 2);
-        assert_eq!(workspace.active_pane, workspace.pane_group.panes()[1]);
-        assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
+        assert_eq!(workspace.panes(cx).len(), 2);
+        assert_eq!(workspace.active_pane, workspace.panes(cx)[1].id());
+        assert_eq!(workspace.active_pane(cx).active_tab_ix(), 0);
         assert_eq!(
             workspace.docks.left_sidebar,
             Some(DocumentSidebar::Bookmarks)
@@ -1605,17 +1618,16 @@ fn encrypted_reader_session_unlocks_once_and_restores_its_translation(cx: &mut T
         assert!(workspace.translations.live_pairs.is_empty());
         assert!(
             workspace
-                .pane_group
-                .panes()
+                .panes(cx)
                 .iter()
-                .all(|pane| pane.read(cx).active_tab_is_loading())
+                .all(|pane| pane.active_tab_is_loading(cx))
         );
     });
 
-    let source_pane =
-        workspace.read_with(cx, |workspace, _| workspace.pane_group.panes()[0].clone());
-    source_pane.update_in(cx, |pane, window, cx| {
-        assert!(pane.submit_document_password_for_test(
+    let source_pane = workspace.read_with(cx, |workspace, cx| workspace.panes(cx)[0].id());
+    workspace.update_in(cx, |workspace, window, cx| {
+        assert!(workspace.submit_document_password_for_test(
+            source_pane,
             &document_path,
             "wrong-password",
             false,
@@ -1629,15 +1641,15 @@ fn encrypted_reader_session_unlocks_once_and_restores_its_translation(cx: &mut T
         assert!(workspace.translations.live_pairs.is_empty());
         assert!(
             workspace
-                .pane_group
-                .panes()
+                .panes(cx)
                 .iter()
-                .all(|pane| pane.read(cx).active_tab_is_loading())
+                .all(|pane| pane.active_tab_is_loading(cx))
         );
     });
 
-    source_pane.update_in(cx, |pane, window, cx| {
-        assert!(pane.submit_document_password_for_test(
+    workspace.update_in(cx, |workspace, window, cx| {
+        assert!(workspace.submit_document_password_for_test(
+            source_pane,
             &document_path,
             "123456",
             false,
@@ -1654,14 +1666,14 @@ fn encrypted_reader_session_unlocks_once_and_restores_its_translation(cx: &mut T
     workspace.read_with(cx, |workspace, cx| {
         assert!(!workspace.reader_session_restore_pending());
         assert_eq!(workspace.translations.live_pairs.len(), 1);
-        let panes = workspace.pane_group.panes();
-        let source = panes[0].read(cx).document_views()[0].clone();
-        let translated = panes[1].read(cx).document_views()[0].clone();
+        let panes = workspace.panes(cx);
+        let source = workspace.pane(panes[0].id(), cx).document_views(cx)[0].clone();
+        let translated = workspace.pane(panes[1].id(), cx).document_views(cx)[0].clone();
         assert!(source.read(cx).is_password_protected());
         assert!(translated.read(cx).is_password_protected());
         let (&session_id, pair) = workspace.translations.live_pairs.iter().next().unwrap();
-        assert_eq!(pair.source_id, source.entity_id());
-        assert_eq!(pair.translated_id, translated.entity_id());
+        assert_eq!(pair.source_id, tab_of(workspace, &source, cx));
+        assert_eq!(pair.translated_id, tab_of(workspace, &translated, cx));
         assert_eq!(
             translated.read(cx).translation_session_id(),
             Some(session_id)
@@ -1670,15 +1682,15 @@ fn encrypted_reader_session_unlocks_once_and_restores_its_translation(cx: &mut T
         assert_eq!(
             workspace
                 .synchronized_tabs
-                .group_for_tab(source.entity_id()),
+                .group_for_tab(tab_of(workspace, &source, cx)),
             workspace
                 .synchronized_tabs
-                .group_for_tab(translated.entity_id())
+                .group_for_tab(tab_of(workspace, &translated, cx))
         );
         assert!(
             workspace
                 .synchronized_tabs
-                .group_for_tab(source.entity_id())
+                .group_for_tab(tab_of(workspace, &source, cx))
                 .is_some()
         );
     });
@@ -1740,10 +1752,9 @@ fn encrypted_reader_session_uses_a_saved_password_for_both_translation_tabs(
         assert_eq!(workspace.translations.live_pairs.len(), 1);
         assert!(
             workspace
-                .pane_group
-                .panes()
+                .panes(cx)
                 .iter()
-                .all(|pane| pane.read(cx).document_views().len() == 1)
+                .all(|pane| pane.document_views(cx).len() == 1)
         );
     });
     assert!(password_store.is_known_saved(&document_path));
@@ -1833,11 +1844,11 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
 
     workspace.read_with(cx, |workspace, cx| {
         assert!(!workspace.reader_session_restore_pending());
-        let panes = workspace.pane_group.panes();
-        let left = panes[0].read(cx);
-        let right = panes[1].read(cx);
-        let left_views = left.document_views();
-        let right_views = right.document_views();
+        let panes = workspace.panes(cx);
+        let left = &panes[0];
+        let right = &panes[1];
+        let left_views = left.document_views(cx);
+        let right_views = right.document_views(cx);
         assert_eq!(left_views.len(), 2);
         assert_eq!(right_views.len(), 1);
         assert_ne!(left_views[0], left_views[1]);
@@ -1850,25 +1861,27 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
         );
         let left_group = workspace
             .synchronized_tabs
-            .group_for_tab(left_views[1].entity_id())
+            .group_for_tab(tab_of(workspace, &left_views[1], cx))
             .unwrap();
         assert_eq!(
             workspace
                 .synchronized_tabs
-                .group_for_tab(right_views[0].entity_id()),
+                .group_for_tab(tab_of(workspace, &right_views[0], cx)),
             Some(left_group)
         );
         assert!(
             !workspace
                 .synchronized_tabs
-                .is_paused(right_views[0].entity_id())
+                .is_paused(tab_of(workspace, &right_views[0], cx))
         );
-        assert!(right.synchronized_pause_locked(right_views[0].entity_id()));
-        assert!(left.synchronized_pause_locked(left_views[1].entity_id()));
+        let pause_locked = &workspace.synchronized_presentation.pause_locked_tabs;
+        assert!(right.has_tab_id(tab_of(workspace, &right_views[0], cx)));
+        assert!(pause_locked.contains(&tab_of(workspace, &right_views[0], cx)));
+        assert!(pause_locked.contains(&tab_of(workspace, &left_views[1], cx)));
         assert_eq!(workspace.translations.live_pairs.len(), 1);
         let (&session_id, pair) = workspace.translations.live_pairs.iter().next().unwrap();
-        assert_eq!(pair.source_id, left_views[1].entity_id());
-        assert_eq!(pair.translated_id, right_views[0].entity_id());
+        assert_eq!(pair.source_id, tab_of(workspace, &left_views[1], cx));
+        assert_eq!(pair.translated_id, tab_of(workspace, &right_views[0], cx));
         assert_eq!(
             right_views[0].read(cx).translation_session_id(),
             Some(session_id)
@@ -1974,6 +1987,9 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
             );
         });
 
+    // A split halves the pane it splits; keep the translated half wide
+    // enough to follow the source.
+    cx.simulate_resize(size(px(2400.0), px(900.0)));
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
@@ -1982,16 +1998,16 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
         _ = window.draw(cx);
     });
     workspace.update_in(cx, |workspace, _, cx| {
-            let third_pane = workspace.active_pane.clone();
-            let third = third_pane.read(cx).active_document_view().unwrap();
+            let third_pane = workspace.active_pane;
+            let third = workspace.pane(third_pane, cx).active_document_view(cx).unwrap();
             let group_id = workspace
                 .synchronized_tabs
-                .group_for_tab(source.entity_id())
+                .group_for_tab(tab_of(workspace, &source, cx))
                 .unwrap();
             assert!(workspace.synchronized_tabs.add_member(
                 group_id,
-                third.entity_id(),
-                third_pane.entity_id(),
+                tab_of(workspace, &third, cx),
+                third_pane,
             ));
             workspace.refresh_synchronized_tab_presentation(cx);
             let delta = SynchronizedScrollDelta {
@@ -2002,7 +2018,7 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
             third.update(cx, |view, cx| {
                 view.apply_synchronized_scroll_delta(delta, cx);
             });
-            workspace.propagate_synchronized_scroll(third.entity_id(), delta, cx);
+            workspace.propagate_synchronized_scroll(tab_of(workspace, &third, cx), delta, cx);
             assert_eq!(
                 workspace
                     .synchronized_tabs
@@ -2027,12 +2043,12 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
             assert!(
                 workspace
                     .synchronized_tabs
-                    .set_paused(third.entity_id(), true)
+                    .set_paused(tab_of(workspace, &third, cx), true)
             );
-            assert!(workspace.synchronized_tabs.is_paused(third.entity_id()));
+            assert!(workspace.synchronized_tabs.is_paused(tab_of(workspace, &third, cx)));
             workspace
                 .synchronized_tabs
-                .set_paused(third.entity_id(), false);
+                .set_paused(tab_of(workspace, &third, cx), false);
         });
 
     let (source, translated, translated_pane, translated_id, before) =
@@ -2040,14 +2056,14 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
             let pair = workspace.translations.live_pairs.values().next().unwrap();
             let source = pair.source.upgrade().unwrap();
             let translated = pair.translated.upgrade().unwrap();
-            let translated_id = translated.entity_id();
+            let translated_id = tab_of(workspace, &translated, cx);
             let translated_pane = workspace
-                .pane_group
-                .panes()
+                .panes(cx)
                 .into_iter()
-                .find(|pane| pane.read(cx).has_tab_id(translated_id))
-                .unwrap();
-            translated_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
+                .find(|pane| pane.has_tab_id(translated_id))
+                .unwrap()
+                .id();
+            workspace.open_new_tab_in_pane(translated_pane, window, cx);
 
             let before = translated.read(cx).current_document_position();
             source.update(cx, |view, cx| {
@@ -2074,11 +2090,9 @@ fn reader_session_restores_duplicate_documents_synchronization_and_translation(
         assert!((source_anchor.pdf_y - translated_anchor.pdf_y).abs() < 0.01);
     });
 
-    translated_pane.update(cx, |_, cx| {
-        cx.emit(PaneEvent::SetSynchronizedScrollPaused {
-            tab_id: translated_id,
-            paused: true,
-        });
+    let _ = translated_pane;
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_synchronized_scroll_paused(translated_id, true, cx);
     });
     cx.run_until_parked();
     workspace.update_in(cx, |workspace, window, cx| {
@@ -2122,35 +2136,41 @@ fn duplicate_tab_creates_an_independent_adjacent_view_without_stale_history(
     });
     cx.run_until_parked();
 
-    let source_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let source_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
     cx.run_until_parked();
     workspace.update_in(cx, |workspace, window, cx| {
-        let target_pane = workspace.active_pane.clone();
-        let source = source_pane.read(cx).active_document_view().unwrap();
-        let target = target_pane.read(cx).active_document_view().unwrap();
+        let target_pane = workspace.active_pane;
+        let source = workspace
+            .pane(source_pane, cx)
+            .active_document_view(cx)
+            .unwrap();
+        let target = workspace
+            .pane(target_pane, cx)
+            .active_document_view(cx)
+            .unwrap();
         assert!(
             workspace
                 .synchronized_tabs
                 .create_group(
-                    source.entity_id(),
-                    source_pane.entity_id(),
-                    target.entity_id(),
-                    target_pane.entity_id(),
+                    tab_of(workspace, &source, cx),
+                    source_pane,
+                    tab_of(workspace, &target, cx),
+                    target_pane,
                 )
                 .is_some()
         );
-        workspace.active_pane = source_pane.clone();
+        workspace.active_pane = source_pane;
         workspace.refresh_synchronized_tab_presentation(cx);
         workspace.duplicate_active_tab(window, cx);
     });
     let (pane, source, duplicate) = workspace.read_with(cx, |workspace, cx| {
-        let pane = workspace.active_pane.clone();
-        let views = pane.read(cx).document_views();
-        assert_eq!(pane.read(cx).len(), 2);
-        assert_eq!(pane.read(cx).active_tab_ix(), 1);
+        let pane = workspace.active_pane(cx);
+        let views = pane.document_views(cx);
+        assert_eq!(pane.len(), 2);
+        assert_eq!(pane.active_tab_ix(), 1);
         assert_eq!(views.len(), 2);
         assert_ne!(views[0].entity_id(), views[1].entity_id());
         assert_eq!(views[0].read(cx).path(), views[1].read(cx).path());
@@ -2161,16 +2181,16 @@ fn duplicate_tab_creates_an_independent_adjacent_view_without_stale_history(
         assert!(
             workspace
                 .synchronized_tabs
-                .group_for_tab(views[0].entity_id())
+                .group_for_tab(tab_of(workspace, &views[0], cx))
                 .is_some()
         );
         assert!(
             workspace
                 .synchronized_tabs
-                .group_for_tab(views[1].entity_id())
+                .group_for_tab(tab_of(workspace, &views[1], cx))
                 .is_none()
         );
-        (pane, views[0].clone(), views[1].clone())
+        (pane.id(), views[0].clone(), views[1].clone())
     });
 
     cx.update(|window, cx| {
@@ -2202,16 +2222,23 @@ fn duplicate_tab_creates_an_independent_adjacent_view_without_stale_history(
         workspace
             .focus_or_open_document(document_path.clone(), None, false, window, cx)
             .unwrap();
-        assert_eq!(pane.read(cx).len(), 2, "normal Open must still deduplicate");
         assert_eq!(
-            pane.read(cx).active_tab_id(),
-            Some(duplicate.entity_id()),
+            workspace.pane(pane, cx).len(),
+            2,
+            "normal Open must still deduplicate"
+        );
+        assert_eq!(
+            workspace.pane(pane, cx).active_tab_id(),
+            Some(tab_of(workspace, &duplicate, cx)),
             "normal Open should keep the active matching copy"
         );
 
-        workspace.close_tab_in_pane(&pane, Some(0), window, cx);
-        assert_eq!(pane.read(cx).len(), 1);
-        assert_eq!(pane.read(cx).active_tab_id(), Some(duplicate.entity_id()));
+        workspace.close_tab_in_pane(pane, Some(0), window, cx);
+        assert_eq!(workspace.pane(pane, cx).len(), 1);
+        assert_eq!(
+            workspace.pane(pane, cx).active_tab_id(),
+            Some(tab_of(workspace, &duplicate, cx))
+        );
         assert_eq!(
             cx.global::<LibraryStore>()
                 .history_position(&document_path)
@@ -2249,49 +2276,61 @@ fn disjoint_synchronized_groups_scroll_independently(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
     cx.run_until_parked();
-    let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Down, window, cx);
     });
     cx.run_until_parked();
-    let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.active_pane = top_left.clone();
+        workspace.active_pane = top_left;
         workspace.split_active_pane(SplitDirection::Down, window, cx);
     });
     cx.run_until_parked();
-    let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.simulate_resize(size(px(900.0), px(360.0)));
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
 
     workspace.update_in(cx, |workspace, window, cx| {
-        let top_left_document = top_left.read(cx).active_document_view().unwrap();
-        let bottom_left_document = bottom_left.read(cx).active_document_view().unwrap();
-        let top_right_document = top_right.read(cx).active_document_view().unwrap();
-        let bottom_right_document = bottom_right.read(cx).active_document_view().unwrap();
+        let top_left_document = workspace
+            .pane(top_left, cx)
+            .active_document_view(cx)
+            .unwrap();
+        let bottom_left_document = workspace
+            .pane(bottom_left, cx)
+            .active_document_view(cx)
+            .unwrap();
+        let top_right_document = workspace
+            .pane(top_right, cx)
+            .active_document_view(cx)
+            .unwrap();
+        let bottom_right_document = workspace
+            .pane(bottom_right, cx)
+            .active_document_view(cx)
+            .unwrap();
         let first_group = workspace
             .synchronized_tabs
             .create_group(
-                top_left_document.entity_id(),
-                top_left.entity_id(),
-                bottom_left_document.entity_id(),
-                bottom_left.entity_id(),
+                tab_of(workspace, &top_left_document, cx),
+                top_left,
+                tab_of(workspace, &bottom_left_document, cx),
+                bottom_left,
             )
             .unwrap();
         let second_group = workspace
             .synchronized_tabs
             .create_group(
-                top_right_document.entity_id(),
-                top_right.entity_id(),
-                bottom_right_document.entity_id(),
-                bottom_right.entity_id(),
+                tab_of(workspace, &top_right_document, cx),
+                top_right,
+                tab_of(workspace, &bottom_right_document, cx),
+                bottom_right,
             )
             .unwrap();
         workspace.refresh_synchronized_tab_presentation(cx);
@@ -2304,7 +2343,7 @@ fn disjoint_synchronized_groups_scroll_independently(cx: &mut TestAppContext) {
         let second_source_before = top_right_document.read(cx).current_document_position();
         let second_target_before = bottom_right_document.read(cx).current_document_position();
         workspace.propagate_synchronized_scroll(
-            top_left_document.entity_id(),
+            tab_of(workspace, &top_left_document, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2328,8 +2367,8 @@ fn disjoint_synchronized_groups_scroll_independently(cx: &mut TestAppContext) {
         );
 
         workspace.handle_synchronized_tab_click(
-            &top_left,
-            top_left_document.entity_id(),
+            top_left,
+            tab_of(workspace, &top_left_document, cx),
             true,
             window,
             cx,
@@ -2341,7 +2380,7 @@ fn disjoint_synchronized_groups_scroll_independently(cx: &mut TestAppContext) {
         let first_source_before = top_left_document.read(cx).current_document_position();
         let first_target_before = bottom_left_document.read(cx).current_document_position();
         workspace.propagate_synchronized_scroll(
-            top_right_document.entity_id(),
+            tab_of(workspace, &top_right_document, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2416,53 +2455,70 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
     cx.run_until_parked();
-    cx.simulate_resize(size(px(1200.0), px(300.0)));
+    // A split halves the pane it splits, so the third pane needs the width
+    // to show both of its tabs.
+    cx.simulate_resize(size(px(1600.0), px(300.0)));
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
 
     workspace.update_in(cx, |workspace, window, cx| {
-        let panes = workspace.pane_group.panes();
+        let panes = workspace.panes(cx);
         assert_eq!(panes.len(), 3);
-        let source = panes[0].read(cx).active_document_view().unwrap();
-        let target = panes[1].read(cx).active_document_view().unwrap();
+        let source = workspace
+            .pane(panes[0].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
+        let target = workspace
+            .pane(panes[1].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         let group_id = workspace
             .synchronized_tabs
             .create_group(
-                source.entity_id(),
-                panes[0].entity_id(),
-                target.entity_id(),
-                panes[1].entity_id(),
+                tab_of(workspace, &source, cx),
+                panes[0].id(),
+                tab_of(workspace, &target, cx),
+                panes[1].id(),
             )
             .unwrap();
         workspace.refresh_synchronized_tab_presentation(cx);
-        panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
-        workspace.handle_synchronized_tab_click(&panes[0], source.entity_id(), true, window, cx);
-        assert_eq!(panes[1].read(cx).active_tab_id(), Some(target.entity_id()));
+        workspace.open_new_tab_in_pane(panes[1].id(), window, cx);
+        workspace.handle_synchronized_tab_click(
+            panes[0].id(),
+            tab_of(workspace, &source, cx),
+            true,
+            window,
+            cx,
+        );
+        assert_eq!(
+            workspace.pane(panes[1].id(), cx).active_tab_id(),
+            Some(tab_of(workspace, &target, cx))
+        );
         let represented_document = panes[1]
-            .read(cx)
             .tab_ids()
             .into_iter()
             .find(|tab_id| {
-                *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                *tab_id != tab_of(workspace, &target, cx)
+                    && workspace
+                        .pane(panes[1].id(), cx)
+                        .tab_is_document(*tab_id, cx)
             })
             .unwrap();
-        let grouped_candidate = panes[2].read(cx).active_document_view().unwrap();
+        let grouped_candidate = workspace
+            .pane(panes[2].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         workspace
             .synchronized_tabs
             .create_group(
                 represented_document,
-                panes[1].entity_id(),
-                grouped_candidate.entity_id(),
-                panes[2].entity_id(),
+                panes[1].id(),
+                tab_of(workspace, &grouped_candidate, cx),
+                panes[2].id(),
             )
             .unwrap();
-        workspace.start_connecting_synchronized_group(
-            panes[0].clone(),
-            source.entity_id(),
-            group_id,
-            cx,
-        );
+        workspace.start_connecting_synchronized_group(tab_of(workspace, &source, cx), group_id, cx);
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
@@ -2471,41 +2527,46 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
     let original_edge = workspace.read_with(cx, |workspace, cx| {
         let connection = workspace.synchronized_connection.as_ref().unwrap();
         assert_eq!(connection.edges.len(), 1);
-        let panes = workspace.pane_group.panes();
-        let source = panes[0].read(cx).active_document_view().unwrap();
-        let target = panes[1].read(cx).active_document_view().unwrap();
+        let panes = workspace.panes(cx);
+        let source = workspace
+            .pane(panes[0].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
+        let target = workspace
+            .pane(panes[1].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         assert_eq!(
-            panes[0]
-                .read(cx)
-                .synchronized_connection_tab_state(source.entity_id()),
+            workspace.connection_tab_state_for_test(tab_of(workspace, &source, cx)),
             Some(SynchronizedConnectionTabState::Source)
         );
         assert_eq!(
-            panes[1]
-                .read(cx)
-                .synchronized_connection_tab_state(target.entity_id()),
+            workspace.connection_tab_state_for_test(tab_of(workspace, &target, cx)),
             Some(SynchronizedConnectionTabState::Member)
         );
         let non_document = panes[1]
-            .read(cx)
             .tab_ids()
             .into_iter()
-            .find(|tab_id| !panes[1].read(cx).tab_is_document(*tab_id))
+            .find(|tab_id| {
+                !workspace
+                    .pane(panes[1].id(), cx)
+                    .tab_is_document(*tab_id, cx)
+            })
             .unwrap();
         assert_eq!(
-            panes[1]
-                .read(cx)
-                .synchronized_connection_tab_state(non_document),
+            workspace.connection_tab_state_for_test(non_document),
             Some(SynchronizedConnectionTabState::Invalid(
                 SynchronizedConnectionInvalidReason::NonDocument
             ))
         );
         let represented_document = panes[1]
-            .read(cx)
             .tab_ids()
             .into_iter()
             .find(|tab_id| {
-                *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                *tab_id != tab_of(workspace, &target, cx)
+                    && workspace
+                        .pane(panes[1].id(), cx)
+                        .tab_is_document(*tab_id, cx)
             })
             .unwrap();
         let other_group_number = workspace
@@ -2514,20 +2575,19 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
             .unwrap()
             .display_number;
         assert_eq!(
-            panes[1]
-                .read(cx)
-                .synchronized_connection_tab_state(represented_document),
+            workspace.connection_tab_state_for_test(represented_document),
             Some(SynchronizedConnectionTabState::Invalid(
                 SynchronizedConnectionInvalidReason::AlreadyInGroup {
                     group_number: other_group_number
                 }
             ))
         );
-        let grouped_candidate = panes[2].read(cx).active_document_view().unwrap();
+        let grouped_candidate = workspace
+            .pane(panes[2].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         assert_eq!(
-            panes[2]
-                .read(cx)
-                .synchronized_connection_tab_state(grouped_candidate.entity_id()),
+            workspace.connection_tab_state_for_test(tab_of(workspace, &grouped_candidate, cx)),
             Some(SynchronizedConnectionTabState::Invalid(
                 SynchronizedConnectionInvalidReason::AlreadyInGroup {
                     group_number: other_group_number
@@ -2538,14 +2598,19 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
     });
 
     workspace.update_in(cx, |workspace, _, cx| {
-        let panes = workspace.pane_group.panes();
-        let target = panes[1].read(cx).active_document_view().unwrap();
+        let panes = workspace.panes(cx);
+        let target = workspace
+            .pane(panes[1].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         let represented_document = panes[1]
-            .read(cx)
             .tab_ids()
             .into_iter()
             .find(|tab_id| {
-                *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                *tab_id != tab_of(workspace, &target, cx)
+                    && workspace
+                        .pane(panes[1].id(), cx)
+                        .tab_is_document(*tab_id, cx)
             })
             .unwrap();
         workspace
@@ -2557,7 +2622,7 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         _ = window.draw(cx);
     });
     workspace.read_with(cx, |workspace, cx| {
-        let panes = workspace.pane_group.panes();
+        let panes = workspace.panes(cx);
         let connection = workspace.synchronized_connection.as_ref().unwrap();
         let group_number = match connection.group {
             SynchronizedConnectionGroup::Existing(group_id) => {
@@ -2569,36 +2634,42 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
             }
             SynchronizedConnectionGroup::New(_) => unreachable!(),
         };
-        let target = panes[1].read(cx).active_document_view().unwrap();
+        let target = workspace
+            .pane(panes[1].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         let represented_document = panes[1]
-            .read(cx)
             .tab_ids()
             .into_iter()
             .find(|tab_id| {
-                *tab_id != target.entity_id() && panes[1].read(cx).tab_is_document(*tab_id)
+                *tab_id != tab_of(workspace, &target, cx)
+                    && workspace
+                        .pane(panes[1].id(), cx)
+                        .tab_is_document(*tab_id, cx)
             })
             .unwrap();
         assert_eq!(
-            panes[1]
-                .read(cx)
-                .synchronized_connection_tab_state(represented_document),
+            workspace.connection_tab_state_for_test(represented_document),
             Some(SynchronizedConnectionTabState::Invalid(
                 SynchronizedConnectionInvalidReason::PaneAlreadyRepresented { group_number }
             ))
         );
-        let eligible = panes[2].read(cx).active_document_view().unwrap();
+        let eligible = workspace
+            .pane(panes[2].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         assert_eq!(
-            panes[2]
-                .read(cx)
-                .synchronized_connection_tab_state(eligible.entity_id()),
+            workspace.connection_tab_state_for_test(tab_of(workspace, &eligible, cx)),
             Some(SynchronizedConnectionTabState::Eligible)
         );
     });
 
     let eligible_bounds = workspace.read_with(cx, |workspace, cx| {
-        let pane = &workspace.pane_group.panes()[2];
-        let eligible = pane.read(cx).active_document_view().unwrap();
-        pane.read(cx).tab_bounds(eligible.entity_id()).unwrap()
+        let pane = &workspace.panes(cx)[2];
+        let eligible = pane.active_document_view(cx).unwrap();
+        workspace
+            .tab_bounds(tab_of(workspace, &eligible, cx))
+            .unwrap()
     });
     cx.simulate_mouse_move(eligible_bounds.center(), None, Modifiers::default());
     cx.update(|window, cx| {
@@ -2618,11 +2689,10 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         let connection = workspace.synchronized_connection.as_ref().unwrap();
         assert_eq!(connection.edges.len(), 2);
         assert!(connection.edges.contains(&original_edge));
-        let pane = &workspace.pane_group.panes()[2];
-        let added = pane.read(cx).active_document_view().unwrap();
+        let pane = &workspace.panes(cx)[2];
+        let added = pane.active_document_view(cx).unwrap();
         assert_eq!(
-            pane.read(cx)
-                .synchronized_connection_tab_state(added.entity_id()),
+            workspace.connection_tab_state_for_test(tab_of(workspace, &added, cx)),
             Some(SynchronizedConnectionTabState::Member)
         );
         let group_id = match connection.group {
@@ -2648,13 +2718,8 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
     cx.update(|_, cx| cx.set_reduce_motion(false));
     workspace.update_in(cx, |workspace, _, cx| {
         let group_id = workspace.synchronized_tabs.current_group().unwrap();
-        let source_pane = workspace.pane_group.panes()[0].clone();
-        let source_tab = source_pane
-            .read(cx)
-            .active_document_view()
-            .unwrap()
-            .entity_id();
-        workspace.start_connecting_synchronized_group(source_pane, source_tab, group_id, cx);
+        let source_tab = workspace.panes(cx)[0].active_tab_id().unwrap();
+        workspace.start_connecting_synchronized_group(source_tab, group_id, cx);
     });
     let position = point(px(30.0), px(120.0));
     cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
@@ -2664,12 +2729,18 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
     });
 
     workspace.update_in(cx, |workspace, window, cx| {
-        let panes = workspace.pane_group.panes();
-        let source = panes[0].read(cx).active_document_view().unwrap();
-        let target = panes[1].read(cx).active_document_view().unwrap();
+        let panes = workspace.panes(cx);
+        let source = workspace
+            .pane(panes[0].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
+        let target = workspace
+            .pane(panes[1].id(), cx)
+            .active_document_view(cx)
+            .unwrap();
         let before = target.read(cx).current_document_position();
         workspace.propagate_synchronized_scroll(
-            source.entity_id(),
+            tab_of(workspace, &source, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2683,12 +2754,12 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         assert!(
             workspace
                 .synchronized_tabs
-                .set_paused(target.entity_id(), true)
+                .set_paused(tab_of(workspace, &target, cx), true)
         );
         workspace.refresh_synchronized_tab_presentation(cx);
         let paused_target = target.read(cx).current_document_position();
         workspace.propagate_synchronized_scroll(
-            source.entity_id(),
+            tab_of(workspace, &source, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2701,12 +2772,12 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         assert!(
             workspace
                 .synchronized_tabs
-                .set_paused(target.entity_id(), false)
+                .set_paused(tab_of(workspace, &target, cx), false)
         );
         workspace.refresh_synchronized_tab_presentation(cx);
         assert_eq!(target.read(cx).current_document_position(), paused_target);
         workspace.propagate_synchronized_scroll(
-            source.entity_id(),
+            tab_of(workspace, &source, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2720,11 +2791,11 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         assert!(
             workspace
                 .synchronized_tabs
-                .set_paused(source.entity_id(), true)
+                .set_paused(tab_of(workspace, &source, cx), true)
         );
         workspace.refresh_synchronized_tab_presentation(cx);
         workspace.propagate_synchronized_scroll(
-            source.entity_id(),
+            tab_of(workspace, &source, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2736,14 +2807,14 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
         assert!(
             workspace
                 .synchronized_tabs
-                .set_paused(source.entity_id(), false)
+                .set_paused(tab_of(workspace, &source, cx), false)
         );
         workspace.refresh_synchronized_tab_presentation(cx);
 
-        panes[1].update(cx, |pane, cx| pane.open_new_tab(window, cx));
+        workspace.open_new_tab_in_pane(panes[1].id(), window, cx);
         let hidden_before = target.read(cx).current_document_position();
         workspace.propagate_synchronized_scroll(
-            source.entity_id(),
+            tab_of(workspace, &source, cx),
             SynchronizedScrollDelta {
                 x_pixels: 0.0,
                 y_pixels: 48.0,
@@ -2755,22 +2826,22 @@ fn synchronized_connection_renders_stable_network_and_supports_both_exit_paths(
     });
 
     workspace.update_in(cx, |workspace, window, cx| {
-        let panes = workspace.pane_group.panes();
-        let source_pane = panes[0].clone();
-        let target_pane = panes[1].clone();
+        let panes = workspace.panes(cx);
+        let source_pane = panes[0].id();
+        let target_pane = panes[1].id();
         let group_id = workspace.synchronized_tabs.current_group().unwrap();
         let target_tab = workspace
             .synchronized_tabs
             .member_tabs(group_id)
             .into_iter()
-            .find(|tab_id| target_pane.read(cx).has_tab_id(*tab_id))
+            .find(|tab_id| workspace.pane(target_pane, cx).has_tab_id(*tab_id))
             .unwrap();
-        let target_ix = target_pane
-            .read(cx)
+        let target_ix = workspace
+            .pane(target_pane, cx)
             .tab_ix_for_entity_id(target_tab)
             .unwrap();
-        workspace.close_tab_in_pane(&source_pane, None, window, cx);
-        workspace.close_tab_in_pane(&target_pane, Some(target_ix), window, cx);
+        workspace.close_tab_in_pane(source_pane, None, window, cx);
+        workspace.close_tab_in_pane(target_pane, Some(target_ix), window, cx);
         assert!(workspace.synchronized_tabs.current_group().is_none());
     });
     fs::remove_file(document_path).unwrap();
@@ -3291,11 +3362,11 @@ fn dropped_documents_open_in_order_and_report_skipped_items(cx: &mut TestAppCont
 
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.surface_mode, WorkspaceSurfaceMode::Panes);
-        let pane = workspace.active_pane.read(cx);
+        let pane = workspace.active_pane(cx);
         assert_eq!(pane.len(), 2);
         assert_eq!(pane.active_tab_ix(), 1);
         let paths = pane
-            .document_views()
+            .document_views(cx)
             .into_iter()
             .map(|view| view.read(cx).path().to_path_buf())
             .collect::<Vec<_>>();
@@ -3334,20 +3405,18 @@ fn pane_drop_opens_documents_in_the_hovered_inactive_pane(cx: &mut TestAppContex
     let workspace = root.read_with(cx, |root, _| {
         root.view().clone().downcast::<Workspace>().unwrap()
     });
-    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.leave_home(window, cx);
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
-    let previously_active_pane =
-        workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let previously_active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     let drop_position = workspace.read_with(cx, |workspace, _| {
         workspace
-            .pane_group
-            .bounding_box_for_pane(&hovered_pane)
+            .bounding_box_for_pane(hovered_pane)
             .expect("hovered pane bounds")
             .center()
     });
@@ -3371,17 +3440,20 @@ fn pane_drop_opens_documents_in_the_hovered_inactive_pane(cx: &mut TestAppContex
     workspace.update_in(cx, |workspace, window, cx| {
         assert_eq!(workspace.active_pane, hovered_pane);
         assert_eq!(window.notifications(cx).len(), 1);
-        let hovered = hovered_pane.read(cx);
+        let hovered = workspace.pane(hovered_pane, cx);
         assert_eq!(hovered.len(), 2);
         assert_eq!(hovered.active_tab_ix(), 1);
         let paths = hovered
-            .document_views()
+            .document_views(cx)
             .into_iter()
             .map(|view| view.read(cx).path().to_path_buf())
             .collect::<Vec<_>>();
         assert_eq!(paths, vec![first_path.clone(), second_path.clone()]);
-        let previous = previously_active_pane.read(cx);
-        assert_eq!(previous.len(), 0);
+        // Splitting a pane with no document opens a new tab in the new pane;
+        // the drop leaves it alone.
+        let previous = workspace.pane(previously_active_pane, cx);
+        assert_eq!(previous.len(), 1);
+        assert!(previous.active_tab_is_new_tab(cx));
     });
 
     fs::remove_file(first_path).unwrap();
@@ -3412,19 +3484,18 @@ fn unsupported_pane_drop_does_not_activate_the_hovered_pane(cx: &mut TestAppCont
     let workspace = root.read_with(cx, |root, _| {
         root.view().clone().downcast::<Workspace>().unwrap()
     });
-    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.leave_home(window, cx);
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
-    let active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     let drop_position = workspace.read_with(cx, |workspace, _| {
         workspace
-            .pane_group
-            .bounding_box_for_pane(&hovered_pane)
+            .bounding_box_for_pane(hovered_pane)
             .expect("hovered pane bounds")
             .center()
     });
@@ -3440,7 +3511,7 @@ fn unsupported_pane_drop_does_not_activate_the_hovered_pane(cx: &mut TestAppCont
     workspace.update_in(cx, |workspace, window, cx| {
         assert_eq!(workspace.active_pane, active_pane);
         assert_eq!(window.notifications(cx).len(), 1);
-        assert!(hovered_pane.read(cx).active_tab_is_new_tab());
+        assert!(workspace.pane(hovered_pane, cx).active_tab_is_new_tab(cx));
     });
 
     fs::remove_file(unsupported_path).unwrap();
@@ -3467,19 +3538,18 @@ fn external_drop_overlay_is_scoped_to_the_hovered_pane(cx: &mut TestAppContext) 
     let workspace = root.read_with(cx, |root, _| {
         root.view().clone().downcast::<Workspace>().unwrap()
     });
-    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let hovered_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.leave_home(window, cx);
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
-    let other_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let other_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     let drop_position = workspace.read_with(cx, |workspace, _| {
         workspace
-            .pane_group
-            .bounding_box_for_pane(&hovered_pane)
+            .bounding_box_for_pane(hovered_pane)
             .expect("hovered pane bounds")
             .center()
     });
@@ -3494,14 +3564,14 @@ fn external_drop_overlay_is_scoped_to_the_hovered_pane(cx: &mut TestAppContext) 
     let hovered_selector = Box::leak(
         format!(
             "pane-external-document-drop-overlay-{}-accepted",
-            hovered_pane.entity_id().as_u64()
+            hovered_pane.as_u64()
         )
         .into_boxed_str(),
     );
     let other_selector = Box::leak(
         format!(
             "pane-external-document-drop-overlay-{}-accepted",
-            other_pane.entity_id().as_u64()
+            other_pane.as_u64()
         )
         .into_boxed_str(),
     );
@@ -3511,12 +3581,10 @@ fn external_drop_overlay_is_scoped_to_the_hovered_pane(cx: &mut TestAppContext) 
     let (hovered_bounds, other_bounds) = workspace.read_with(cx, |workspace, _| {
         (
             workspace
-                .pane_group
-                .bounding_box_for_pane(&hovered_pane)
+                .bounding_box_for_pane(hovered_pane)
                 .expect("hovered pane bounds"),
             workspace
-                .pane_group
-                .bounding_box_for_pane(&other_pane)
+                .bounding_box_for_pane(other_pane)
                 .expect("other pane bounds"),
         )
     });
@@ -3671,13 +3739,13 @@ fn root_hosted_workspace_tabs_render_and_interact(cx: &mut TestAppContext) {
     let first_tab = cx.debug_bounds("pane-tab-0").unwrap().center();
     cx.simulate_click(first_tab, Modifiers::default());
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
+        assert_eq!(workspace.active_pane(cx).active_tab_ix(), 0);
     });
 
     let new_tab = cx.debug_bounds("pane-new-tab").unwrap().center();
     cx.simulate_click(new_tab, Modifiers::default());
     workspace.read_with(cx, |workspace, cx| {
-        let pane = workspace.active_pane.read(cx);
+        let pane = workspace.active_pane(cx);
         assert_eq!(pane.len(), 3);
         assert_eq!(pane.active_tab_ix(), 2);
     });
@@ -3688,7 +3756,7 @@ fn root_hosted_workspace_tabs_render_and_interact(cx: &mut TestAppContext) {
     let close_tab = cx.debug_bounds("pane-tab-close-2").unwrap().center();
     cx.simulate_click(close_tab, Modifiers::default());
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(workspace.active_pane.read(cx).len(), 2);
+        assert_eq!(workspace.active_pane(cx).len(), 2);
     });
 }
 
@@ -3712,12 +3780,12 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
     let workspace = root.read_with(cx, |root, _| {
         root.view().clone().downcast::<Workspace>().unwrap()
     });
-    let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let top_left = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.leave_home(window, cx);
         workspace.split_active_pane(SplitDirection::Right, window, cx);
     });
-    let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let top_right = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
@@ -3725,12 +3793,10 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
     let (initial_left_bounds, initial_right_bounds) = workspace.read_with(cx, |workspace, _| {
         (
             workspace
-                .pane_group
-                .bounding_box_for_pane(&top_left)
+                .bounding_box_for_pane(top_left)
                 .expect("left pane bounds"),
             workspace
-                .pane_group
-                .bounding_box_for_pane(&top_right)
+                .bounding_box_for_pane(top_right)
                 .expect("right pane bounds"),
         )
     });
@@ -3745,7 +3811,7 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Down, window, cx);
     });
-    let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let bottom_right = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
@@ -3753,12 +3819,10 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
     let (right_top_bounds, right_bottom_bounds) = workspace.read_with(cx, |workspace, _| {
         (
             workspace
-                .pane_group
-                .bounding_box_for_pane(&top_right)
+                .bounding_box_for_pane(top_right)
                 .expect("top-right pane bounds"),
             workspace
-                .pane_group
-                .bounding_box_for_pane(&bottom_right)
+                .bounding_box_for_pane(bottom_right)
                 .expect("bottom-right pane bounds"),
         )
     });
@@ -3769,27 +3833,22 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
     assert!(active_surface.top() - right_top_bounds.bottom() >= px(glyphst_ui::style::SURFACE_GAP));
 
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.active_pane = top_left.clone();
+        workspace.active_pane = top_left;
         workspace.split_active_pane(SplitDirection::Down, window, cx);
     });
-    let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane.clone());
+    let bottom_left = workspace.read_with(cx, |workspace, _| workspace.active_pane);
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
 
     let (top_left_bounds, top_right_bounds, bottom_left_bounds, bottom_right_bounds) = workspace
         .read_with(cx, |workspace, _| {
-            let bounds = |pane| {
-                workspace
-                    .pane_group
-                    .bounding_box_for_pane(pane)
-                    .expect("pane bounds")
-            };
+            let bounds = |pane| workspace.bounding_box_for_pane(pane).expect("pane bounds");
             (
-                bounds(&top_left),
-                bounds(&top_right),
-                bounds(&bottom_left),
-                bounds(&bottom_right),
+                bounds(top_left),
+                bounds(top_right),
+                bounds(bottom_left),
+                bounds(bottom_right),
             )
         });
     assert_eq!(top_right_bounds.left() - top_left_bounds.right(), px(4.0));
@@ -3802,24 +3861,18 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
         bottom_right_bounds.top() - top_right_bounds.bottom(),
         px(4.0)
     );
-    workspace.read_with(cx, |workspace, _| {
+    workspace.read_with(cx, |workspace, cx| {
         assert_eq!(
-            workspace
-                .pane_group
-                .find_pane_in_direction(&top_left, SplitDirection::Right),
-            Some(top_right.clone())
+            workspace.find_pane_in_direction(top_left, SplitDirection::Right, cx),
+            Some(top_right)
         );
         assert_eq!(
-            workspace
-                .pane_group
-                .find_pane_in_direction(&top_right, SplitDirection::Left),
-            Some(top_left.clone())
+            workspace.find_pane_in_direction(top_right, SplitDirection::Left, cx),
+            Some(top_left)
         );
         assert_eq!(
-            workspace
-                .pane_group
-                .find_pane_in_direction(&top_left, SplitDirection::Down),
-            Some(bottom_left.clone())
+            workspace.find_pane_in_direction(top_left, SplitDirection::Down, cx),
+            Some(bottom_left)
         );
     });
 
@@ -3895,7 +3948,7 @@ fn open_sidebar_survives_document_tab_changes(cx: &mut TestAppContext) {
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
-        assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 0);
+        assert_eq!(workspace.active_pane(cx).active_tab_ix(), 0);
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
@@ -3906,7 +3959,7 @@ fn open_sidebar_survives_document_tab_changes(cx: &mut TestAppContext) {
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
-        assert_eq!(workspace.active_pane.read(cx).active_tab_ix(), 1);
+        assert_eq!(workspace.active_pane(cx).active_tab_ix(), 1);
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
@@ -3941,12 +3994,7 @@ fn single_pane_new_tab_suspends_document_sidebar_but_keeps_global_ai(cx: &mut Te
     cx.run_until_parked();
 
     let document_id = workspace.update_in(cx, |workspace, window, cx| {
-        let document_id = workspace
-            .active_pane
-            .read(cx)
-            .active_document_view()
-            .unwrap()
-            .entity_id();
+        let document_id = workspace.active_pane(cx).active_tab_id().unwrap();
         workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
         workspace.toggle_ai_dock(window, cx);
         workspace.open_new_tab(window, cx);
@@ -3957,7 +4005,7 @@ fn single_pane_new_tab_suspends_document_sidebar_but_keeps_global_ai(cx: &mut Te
     });
 
     workspace.read_with(cx, |workspace, cx| {
-        assert!(workspace.active_pane.read(cx).active_tab_is_new_tab());
+        assert!(workspace.active_pane(cx).active_tab_is_new_tab(cx));
         assert!(workspace.dock_document_target(cx).is_none());
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
         assert!(workspace.docks.ai_panel_open);
@@ -3967,20 +4015,15 @@ fn single_pane_new_tab_suspends_document_sidebar_but_keeps_global_ai(cx: &mut Te
     assert!(cx.debug_bounds("toc-sidebar-content").is_none());
 
     workspace.update_in(cx, |workspace, window, cx| {
-        let pane = workspace.active_pane.clone();
-        assert!(pane.update(cx, |pane, cx| {
-            pane.activate_tab_by_id(document_id, true, window, cx)
-        }));
-        workspace.record_document_context(&pane, cx);
+        let pane = workspace.active_pane;
+        assert!(workspace.activate_tab(pane, document_id, true, window, cx));
+        workspace.record_document_context(pane, cx);
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(
-            workspace.active_pane.read(cx).active_tab_id(),
-            Some(document_id)
-        );
+        assert_eq!(workspace.active_pane(cx).active_tab_id(), Some(document_id));
     });
     assert!(cx.debug_bounds("workspace-left-dock").is_some());
     assert!(cx.debug_bounds("workspace-ai-dock").is_some());
@@ -4021,25 +4064,23 @@ fn closing_new_tab_in_inactive_pane_does_not_activate_it_or_hide_sidebar(cx: &mu
 
     let (left_pane, right_pane, left_document_id) =
         workspace.update_in(cx, |workspace, window, cx| {
-            let panes = workspace.pane_group.panes();
-            let left_pane = panes[0].clone();
-            let right_pane = panes[1].clone();
-            right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
-            workspace.active_pane = left_pane.clone();
-            left_pane.update(cx, |pane, cx| pane.focus(window, cx));
-            workspace.record_document_context(&left_pane, cx);
+            let panes = workspace.panes(cx);
+            let left_pane = panes[0].id();
+            let right_pane = panes[1].id();
+            workspace.open_new_tab_in_pane(right_pane, window, cx);
+            workspace.active_pane = left_pane;
+            workspace.focus_pane(left_pane, window, cx);
+            workspace.record_document_context(left_pane, cx);
             workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
-            let left_document_id = left_pane
-                .read(cx)
-                .active_document_view()
-                .unwrap()
-                .entity_id();
+            let left_document_id = workspace.pane(left_pane, cx).active_tab_id().unwrap();
             (left_pane, right_pane, left_document_id)
         });
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
-    assert!(right_pane.read_with(cx, |pane, _| pane.active_tab_is_new_tab()));
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace.pane(right_pane, cx).active_tab_is_new_tab(cx)
+    }));
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
     let close = cx
@@ -4052,12 +4093,7 @@ fn closing_new_tab_in_inactive_pane_does_not_activate_it_or_hide_sidebar(cx: &mu
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.active_pane, left_pane);
-        assert_eq!(
-            workspace
-                .dock_document_target(cx)
-                .map(|(_, document)| document.entity_id()),
-            Some(left_document_id)
-        );
+        assert_eq!(workspace.dock_document_tab_id(cx), Some(left_document_id));
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
@@ -4067,14 +4103,9 @@ fn closing_new_tab_in_inactive_pane_does_not_activate_it_or_hide_sidebar(cx: &mu
     });
     workspace.read_with(cx, |workspace, cx| {
         assert_eq!(workspace.active_pane, left_pane);
-        assert_eq!(right_pane.read(cx).len(), 1);
-        assert!(!right_pane.read(cx).active_tab_is_new_tab());
-        assert_eq!(
-            workspace
-                .dock_document_target(cx)
-                .map(|(_, document)| document.entity_id()),
-            Some(left_document_id)
-        );
+        assert_eq!(workspace.pane(right_pane, cx).len(), 1);
+        assert!(!workspace.pane(right_pane, cx).active_tab_is_new_tab(cx));
+        assert_eq!(workspace.dock_document_tab_id(cx), Some(left_document_id));
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
@@ -4113,21 +4144,20 @@ fn removing_dock_owner_pane_does_not_fall_back_to_hidden_document(cx: &mut TestA
 
     let (left_pane, right_pane, right_document_id) =
         workspace.update_in(cx, |workspace, window, cx| {
-            let panes = workspace.pane_group.panes();
-            let left_pane = panes[0].clone();
-            let right_pane = panes[1].clone();
-            let right_document_id = right_pane
-                .read(cx)
-                .active_document_view()
-                .expect("split document")
-                .entity_id();
-            right_pane.update(cx, |pane, cx| pane.open_new_tab(window, cx));
-            workspace.active_pane = left_pane.clone();
-            left_pane.update(cx, |pane, cx| pane.focus(window, cx));
-            workspace.record_document_context(&left_pane, cx);
+            let panes = workspace.panes(cx);
+            let left_pane = panes[0].id();
+            let right_pane = panes[1].id();
+            let right_document_id = workspace
+                .pane(right_pane, cx)
+                .active_tab_id()
+                .expect("split document");
+            workspace.open_new_tab_in_pane(right_pane, window, cx);
+            workspace.active_pane = left_pane;
+            workspace.focus_pane(left_pane, window, cx);
+            workspace.record_document_context(left_pane, cx);
             workspace.toggle_left_sidebar(DocumentSidebar::Toc, window, cx);
-            workspace.active_pane = right_pane.clone();
-            right_pane.update(cx, |pane, cx| pane.focus(window, cx));
+            workspace.active_pane = right_pane;
+            workspace.focus_pane(right_pane, window, cx);
             (left_pane, right_pane, right_document_id)
         });
     cx.update(|window, cx| {
@@ -4136,15 +4166,15 @@ fn removing_dock_owner_pane_does_not_fall_back_to_hidden_document(cx: &mut TestA
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.close_tab_in_pane_now(&left_pane, None, window, cx);
+        workspace.close_tab_in_pane_now(left_pane, None, window, cx);
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(workspace.pane_group.panes().len(), 1);
+        assert_eq!(workspace.panes(cx).len(), 1);
         assert_eq!(workspace.active_pane, right_pane);
-        assert!(right_pane.read(cx).active_tab_is_new_tab());
+        assert!(workspace.pane(right_pane, cx).active_tab_is_new_tab(cx));
         assert!(workspace.dock_document_target(cx).is_none());
         assert_eq!(workspace.docks.left_sidebar, Some(DocumentSidebar::Toc));
     });
@@ -4152,21 +4182,14 @@ fn removing_dock_owner_pane_does_not_fall_back_to_hidden_document(cx: &mut TestA
     assert!(cx.debug_bounds("toc-sidebar-content").is_none());
 
     workspace.update_in(cx, |workspace, window, cx| {
-        assert!(right_pane.update(cx, |pane, cx| {
-            pane.activate_tab_by_id(right_document_id, true, window, cx)
-        }));
-        workspace.record_document_context(&right_pane, cx);
+        assert!(workspace.activate_tab(right_pane, right_document_id, true, window, cx));
+        workspace.record_document_context(right_pane, cx);
     });
     cx.update(|window, cx| {
         _ = window.draw(cx);
     });
     workspace.read_with(cx, |workspace, cx| {
-        assert_eq!(
-            workspace
-                .dock_document_target(cx)
-                .map(|(_, document)| document.entity_id()),
-            Some(right_document_id)
-        );
+        assert_eq!(workspace.dock_document_tab_id(cx), Some(right_document_id));
     });
     assert!(cx.debug_bounds("toc-sidebar-content").is_some());
 
