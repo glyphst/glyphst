@@ -48,20 +48,21 @@ fallbacks are compatibility contracts.
 
 ## Dependency maintenance
 
-[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) identify published Zed
-and GPUI Kit revisions. Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml).
+[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin GPUI to an exact
+crates.io `gpui-pre` snapshot and GPUI Kit to a published fork revision. Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml).
 Sibling checkouts are optional; local overrides are described in
 [README](README.md#working-on-maintained-dependencies).
 
 For the maintained GPUI Kit fork, `main` is a fast-forward-only mirror of
-`upstream/main`; `glyphst/main` carries Glyphst patches and merges upstream.
-Keep composable widgets, styling workarounds, and application keybindings here.
-Change Kit when private internals or its event/render lifecycle require it.
-Preserve `gpui_component`, `gpui_component_assets`, and `gpui_fps` aliases;
+`upstream/main`; `glyphst/main` is upstream plus a short, explained delta listed
+in the fork's `AGENTS.md`. Prefer GPUI Kit components and upstream APIs; keep
+composable widgets, styling workarounds, and application keybindings here, and
+patch Kit only when it lacks a capability Glyphst needs. Preserve the
+`gpui_component`, `gpui_component_assets`, `gpui_base` and `gpui_fps` aliases;
 `gpui_component_assets` resolves to `gpui-kit-assets`.
 
-Keep GPUI revisions aligned across consumers. Publish Zed first, then Kit,
-then update Glyphst's pins. Exact renderer/compiler/math pins and major library
+The app's `gpui-pre` pin must equal the snapshot GPUI Kit requires; bump both
+together. Publish Kit, then update Glyphst's pins. Exact renderer/compiler/math pins and major library
 upgrades require compatibility work. Do not commit override-generated lockfile
 changes.
 

@@ -4,8 +4,9 @@ use glyphst_document_ui::document_view::{
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FrameEvent, FrameTiming, FrameTimingCollector, Hsla,
-    IntoElement as _, ParentElement as _, PresentTiming, Styled as _, WeakEntity, Window, WindowId,
-    div, hsla, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, PresentTiming,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowId, deferred, div,
+    hsla, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::{
     Disableable as _, Sizable as _,
@@ -29,6 +30,7 @@ const BAD: Hsla = hsla(0.00, 0.78, 0.67, 1.);
 const BORDER: Hsla = hsla(0., 0., 1., 0.14);
 const FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const MAX_RAW_FRAME_SAMPLES: usize = 4_096;
+const RENDER_DEBUG_PRIORITY: usize = 25;
 
 struct RenderDebugCaptureNotification;
 
@@ -44,18 +46,57 @@ pub(super) struct RenderDebugCapture {
 }
 
 impl Workspace {
+    /// The rendering HUD: GPUI Kit's FPS overlay plus Glyphst's cache, page
+    /// and capture diagnostics in a panel of their own.
+    pub(super) fn render_rendering_debug(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let monitor = self.rendering_debug.clone()?;
+        let workspace = cx.weak_entity();
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(FpsOverlay::new(&monitor).frame_budget(FRAME_BUDGET))
+                    .child(
+                        div()
+                            .id("render-debug-panel")
+                            .absolute()
+                            .bottom(px(8.))
+                            .right(px(8.))
+                            .w(px(420.))
+                            .max_h(relative(0.6))
+                            .overflow_y_scroll()
+                            .p_2()
+                            .rounded(px(6.))
+                            .bg(hsla(0., 0., 0.08, 0.88))
+                            .text_xs()
+                            .text_color(FOREGROUND)
+                            .occlude()
+                            .occlude()
+                            .child(render_footer(
+                                workspace,
+                                self.active_render_debug_document(cx),
+                                self.rendering_debug_capture.is_some(),
+                                cx,
+                            )),
+                    ),
+            )
+            // Above the application's floating overlays, below Kit
+            // notifications, so the capture controls receive their clicks.
+            .with_priority(RENDER_DEBUG_PRIORITY)
+            .into_any_element(),
+        )
+    }
+
     pub(super) fn toggle_rendering_debug(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rendering_debug.is_some() {
             self.rendering_debug = None;
             self.rendering_debug_capture = None;
         } else {
-            let workspace = cx.weak_entity();
             self.rendering_debug = Some(cx.new(|cx| {
                 FpsMonitor::new(window, cx)
                     .capacity(240)
                     .frame_budget(FRAME_BUDGET)
-                    .width(px(620.))
-                    .footer(move |window, cx| render_footer(workspace.clone(), window, cx))
             }));
         }
         cx.notify();
@@ -230,22 +271,13 @@ fn sanitize_report_file_component(value: &str, fallback: &str) -> String {
 
 fn render_footer(
     workspace: WeakEntity<Workspace>,
-    _window: &mut Window,
+    active_document: Option<Entity<DocumentView>>,
+    capture_active: bool,
     cx: &mut App,
 ) -> AnyElement {
     let cache = render_cache_debug_snapshot(cx);
-    let workspace_entity = workspace.upgrade();
-    let (active_document, capture_active) = workspace_entity
-        .as_ref()
-        .map(|workspace| {
-            let workspace = workspace.read(cx);
-            (
-                workspace.active_render_debug_document(cx),
-                workspace.rendering_debug_capture.is_some(),
-            )
-        })
-        .unwrap_or((None, false));
     let document = active_document.map(|document| document.read(cx).render_debug_snapshot(cx));
+    let document_available = document.is_some();
 
     div()
         .mt_1()
@@ -254,11 +286,6 @@ fn render_footer(
         .border_color(BORDER)
         .flex()
         .flex_col()
-        .child(render_capture_controls(
-            workspace,
-            capture_active,
-            document.is_some(),
-        ))
         .child(section_label("RENDER CACHE"))
         .child(reading(
             "RGBA",
@@ -284,6 +311,13 @@ fn render_footer(
             FOREGROUND,
         ))
         .when_some(document, render_document)
+        // Last, so the bottom-anchored panel keeps the control in place while
+        // the readings above it change.
+        .child(render_capture_controls(
+            workspace,
+            capture_active,
+            document_available,
+        ))
         .into_any_element()
 }
 

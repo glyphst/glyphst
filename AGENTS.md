@@ -22,8 +22,8 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 - The library's production current-format opener also serves tests through
   `LibraryStore::open_for_test`. Cleanup must not change on-disk formats or
   restore obsolete migrators.
-- Normal builds use published Git pins. Preserve the GPUI Kit Rust aliases and
-  aligned GPUI revisions; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
+- Normal builds use published pins: GPUI from the exact `gpui-pre` snapshot GPUI
+  Kit requires, GPUI Kit from its fork. Preserve the GPUI Kit Rust aliases; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
   when working on maintained forks. `references/` contains read-only reference
   submodules, distinct from maintained sibling checkouts.
 - Do not build Nix derivations unless explicitly requested. Do not use cua-driver

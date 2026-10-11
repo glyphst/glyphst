@@ -192,7 +192,6 @@ impl Render for NoteEditor {
                     .h(px(190.0))
                     .appearance(false)
                     .bordered(false)
-                    .focus_bordered(false)
                     .p_3(),
             )
             .child(

@@ -53,6 +53,48 @@ pub(super) fn mention_matches(query: &str) -> Vec<MentionMatch> {
     matches
 }
 
+/// Split a trailing page number from an `@` query: `page12` and `page(12)`
+/// both name page 12 and match the remaining text against mention labels.
+pub(super) fn split_mention_query_page(query: &str) -> (&str, Option<usize>) {
+    let trimmed = query.strip_suffix(')').unwrap_or(query);
+    let digits_start = trimmed
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(ix, _)| ix);
+    let Some(digits_start) = digits_start else {
+        return (query.strip_suffix('(').unwrap_or(query), None);
+    };
+    let prefix = &trimmed[..digits_start];
+    let prefix = prefix.strip_suffix('(').unwrap_or(prefix);
+    (prefix, trimmed[digits_start..].parse().ok())
+}
+
+/// The references the `@` menu offers for a query, best match first. A page
+/// number in the query restricts the menu to page mentions.
+pub(super) fn mention_menu_candidates(
+    query: &str,
+    current_page: usize,
+    page_count: usize,
+    available: impl Fn(MentionKind) -> bool,
+) -> Vec<MentionReference> {
+    let (label_query, page) = split_mention_query_page(query);
+    let last_page = page_count.max(1);
+    mention_matches(label_query)
+        .into_iter()
+        .filter(|candidate| available(candidate.kind))
+        .filter(|candidate| page.is_none() || candidate.kind.requires_page_number())
+        .map(|candidate| {
+            let page = candidate
+                .kind
+                .requires_page_number()
+                .then(|| page.unwrap_or(current_page).clamp(1, last_page));
+            MentionReference::new(candidate.kind, page)
+        })
+        .collect()
+}
+
 pub(super) fn mention_is_available(
     mention: MentionKind,
     page_count: usize,
@@ -78,6 +120,7 @@ pub(super) fn parse_composer_mentions(text: &str) -> Vec<ComposerMention> {
         .map(|(range, reference)| ComposerMention {
             reference,
             range,
+            token_id: SharedString::default(),
             captured: None,
         })
         .collect()
@@ -97,6 +140,7 @@ fn composer_mention_from_occurrence(
         return Some(ComposerMention {
             reference,
             range,
+            token_id: SharedString::default(),
             captured: Some(CapturedMention::Region(region_reference)),
         });
     }
@@ -107,6 +151,7 @@ fn composer_mention_from_occurrence(
         return Some(ComposerMention {
             reference,
             range,
+            token_id: SharedString::default(),
             captured: Some(CapturedMention::Pages(selected_pages_reference?)),
         });
     }
@@ -130,6 +175,7 @@ fn composer_mention_from_occurrence(
     Some(ComposerMention {
         reference,
         range,
+        token_id: SharedString::default(),
         captured,
     })
 }
@@ -277,6 +323,7 @@ pub(super) fn trimmed_composer_content(
         .map(|mention| ComposerMention {
             reference: mention.reference,
             range: mention.range.start - trimmed_start..mention.range.end - trimmed_start,
+            token_id: mention.token_id.clone(),
             captured: mention.captured.clone(),
         })
         .collect();
@@ -575,72 +622,6 @@ pub(super) fn adjust_composer_mentions(
             edited_range.start >= mention.range.end
         }
     });
-}
-
-pub(super) fn composer_page_digits_range(mention: &ComposerMention) -> Option<Range<usize>> {
-    if !mention.reference.kind.requires_page_number() {
-        return None;
-    }
-    let start = mention
-        .range
-        .start
-        .checked_add(mention.reference.kind.token().len() + 1)?;
-    let end = mention.range.end.checked_sub(1)?;
-    (start <= end).then_some(start..end)
-}
-
-/// Rebase explicit composer mentions after an input edit while preserving a
-/// page mention whose editable numeric subrange is being changed.
-///
-/// Ordinary text that happens to parse as a mention is intentionally not
-/// promoted here: only a previously explicit page mention can be restored.
-pub(super) fn adjust_composer_mentions_for_input_change(
-    mentions: &mut Vec<ComposerMention>,
-    edited_range: &Range<usize>,
-    inserted_len: usize,
-    new_content: &str,
-) {
-    let delta = inserted_len as isize - edited_range.len() as isize;
-    let page_mentions = mentions
-        .iter()
-        .filter_map(|mention| {
-            let digits = composer_page_digits_range(mention)?;
-            (digits.start <= edited_range.start && edited_range.end <= digits.end)
-                .then(|| (mention.clone(), digits))
-        })
-        .collect::<Vec<_>>();
-
-    adjust_composer_mentions(mentions, edited_range, inserted_len);
-
-    for (mut mention, old_digits) in page_mentions {
-        let Some(new_end) = mention.range.end.checked_add_signed(delta) else {
-            continue;
-        };
-        let new_range = mention.range.start..new_end;
-        let new_digits = old_digits.start..new_end.saturating_sub(1);
-        let prefix = format!("{}(", mention.reference.kind.token());
-        if new_range.end > new_content.len()
-            || new_digits.start > new_digits.end
-            || new_content.get(new_range.start..new_digits.start) != Some(prefix.as_str())
-            || new_content.get(new_digits.end..new_range.end) != Some(")")
-        {
-            continue;
-        }
-
-        let Some(digits) = new_content.get(new_digits.clone()) else {
-            continue;
-        };
-        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-        if let Ok(page) = digits.parse::<usize>() {
-            mention.reference = MentionReference::new(mention.reference.kind, Some(page));
-        }
-        mention.range = new_range;
-        mentions.push(mention);
-    }
-
-    mentions.sort_by_key(|mention| mention.range.start);
 }
 
 pub(super) fn request_prompt_without_mentions(text: &str, mentions: &[ComposerMention]) -> String {

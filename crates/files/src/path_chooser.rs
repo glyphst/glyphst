@@ -2080,8 +2080,8 @@ mod tests {
     struct TestHost;
 
     impl Render for TestHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().children(glyphst_ui::root::render_overlays(window, cx))
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
         }
     }
 

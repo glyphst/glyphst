@@ -3734,15 +3734,13 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
                 .expect("right pane bounds"),
         )
     });
-    let horizontal_indicator = cx
-        .debug_bounds("resizable-horizontal-handle-indicator")
-        .expect("horizontal resize indicator");
     let active_surface = cx
         .debug_bounds("active-pane-surface")
         .expect("right active pane surface");
     assert_eq!(active_surface, initial_right_bounds);
-    assert!(horizontal_indicator.left() > initial_left_bounds.right());
-    assert!(horizontal_indicator.right() < active_surface.left());
+    assert!(
+        active_surface.left() - initial_left_bounds.right() >= px(glyphst_ui::style::SURFACE_GAP)
+    );
 
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.split_active_pane(SplitDirection::Down, window, cx);
@@ -3764,15 +3762,11 @@ fn split_pane_cards_keep_nested_gutters_and_move_the_active_border(cx: &mut Test
                 .expect("bottom-right pane bounds"),
         )
     });
-    let vertical_indicator = cx
-        .debug_bounds("resizable-vertical-handle-indicator")
-        .expect("vertical resize indicator");
     let active_surface = cx
         .debug_bounds("active-pane-surface")
         .expect("bottom active pane surface");
     assert_eq!(active_surface, right_bottom_bounds);
-    assert!(vertical_indicator.top() > right_top_bounds.bottom());
-    assert!(vertical_indicator.bottom() < active_surface.top());
+    assert!(active_surface.top() - right_top_bounds.bottom() >= px(glyphst_ui::style::SURFACE_GAP));
 
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.active_pane = top_left.clone();

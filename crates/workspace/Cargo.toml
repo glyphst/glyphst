@@ -25,6 +25,7 @@ glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 gpui_component.workspace = true
+gpui_base.workspace = true
 gpui_fps.workspace = true
 image.workspace = true
 mupdf.workspace = true

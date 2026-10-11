@@ -1801,7 +1801,6 @@ impl DocumentView {
                         .max_w_full()
                         .menu_width(px(190.0))
                         .menu_max_h(px(260.0))
-                        .menu_priority(TRANSLATION_PANEL_POPOVER_PRIORITY)
                         .search_placeholder("Search languages"),
                 )
             });

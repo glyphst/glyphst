@@ -1,17 +1,12 @@
 use anyhow::{Result, anyhow};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, Context, Entity, IntoElement, Render, Window,
-    WindowHandle, WindowId, deferred,
+    AnyWindowHandle, App, AppContext, Context, Entity, Render, Window, WindowHandle, WindowId,
 };
 use gpui_component::Root;
 use std::{
     fmt,
     hash::{Hash, Hasher},
 };
-
-pub const ROOT_NOTIFICATION_PRIORITY: usize = 100;
-pub const ROOT_SHEET_PRIORITY: usize = 200;
-pub const ROOT_DIALOG_PRIORITY: usize = 210;
 
 /// A typed handle to a view hosted below a [`Root`] window.
 ///
@@ -130,31 +125,4 @@ where
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.root.hash(state);
     }
-}
-
-/// Collect the modal layers managed by the current window's [`Root`].
-pub fn render_overlays(window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
-    let mut overlays = Vec::with_capacity(3);
-    if let Some(sheet) = Root::render_sheet_layer(window, cx) {
-        overlays.push(
-            deferred(sheet)
-                .with_priority(ROOT_SHEET_PRIORITY)
-                .into_any_element(),
-        );
-    }
-    if let Some(dialog) = Root::render_dialog_layer(window, cx) {
-        overlays.push(
-            deferred(dialog)
-                .with_priority(ROOT_DIALOG_PRIORITY)
-                .into_any_element(),
-        );
-    }
-    if let Some(notification) = Root::render_notification_layer(window, cx) {
-        overlays.push(
-            deferred(notification)
-                .with_priority(ROOT_NOTIFICATION_PRIORITY)
-                .into_any_element(),
-        );
-    }
-    overlays
 }

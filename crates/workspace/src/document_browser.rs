@@ -443,10 +443,7 @@ impl DocumentBrowser {
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => {}
-            InputEvent::CompletionAccepted { .. }
-            | InputEvent::SpanHoverChanged { .. }
-            | InputEvent::Focus
-            | InputEvent::Blur => {}
+            InputEvent::Focus | InputEvent::Blur => {}
         }
     }
 

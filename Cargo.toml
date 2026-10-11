@@ -36,14 +36,15 @@ base64 = "0.22"
 chrono = "0.4"
 dirs = "6"
 futures = "0.3"
-gpui = { git = "https://github.com/glyphst/zed", rev = "04a79b674e6c244b1bbf4aa57e7ab2ae28345be0", package = "gpui", default-features = false, features = [
+gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "5251bd3978eb4adf2cf9a52e30432a153ba0bdc5", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "5251bd3978eb4adf2cf9a52e30432a153ba0bdc5", package = "gpui-kit-assets" }
-gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "5251bd3978eb4adf2cf9a52e30432a153ba0bdc5", package = "gpui-fps" }
-gpui_platform = { git = "https://github.com/glyphst/zed", rev = "04a79b674e6c244b1bbf4aa57e7ab2ae28345be0", package = "gpui_platform", default-features = false, features = [
+gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-component" }
+gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-kit-assets" }
+gpui_base = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-base" }
+gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "445e735e6dbd63bb9e7599090e1db25e1951f245", package = "gpui-fps" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", default-features = false, features = [
     "font-kit",
     "wayland",
     "x11",
@@ -87,7 +88,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 zstd = "0.13"
-ztracing = { git = "https://github.com/glyphst/zed", rev = "04a79b674e6c244b1bbf4aa57e7ab2ae28345be0" }
+ztracing = { package = "gpui-pre-ztracing", version = "=0.3.8" }
 
 [profile.dev.package.tikv-jemalloc-sys]
 opt-level = 2

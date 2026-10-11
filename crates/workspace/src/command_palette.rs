@@ -153,19 +153,19 @@ impl Render for CommandPalette {
                 });
             });
 
-        let next_state = self.state.clone();
-        let previous_state = self.state.clone();
         div()
             .key_context("CommandPalette Menu")
             .w(px(PALETTE_WIDTH))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .on_action(move |_: &menu::SelectNext, window, cx| {
-                next_state.update(cx, |state, cx| state.select_next(window, cx));
+            // Application menu bindings (e.g. Ctrl-N/Ctrl-P) drive the
+            // command list through GPUI Kit's own selection actions.
+            .on_action(|_: &menu::SelectNext, window, cx| {
+                window.dispatch_action(Box::new(gpui_base::actions::SelectDown), cx);
             })
-            .on_action(move |_: &menu::SelectPrev, window, cx| {
-                previous_state.update(cx, |state, cx| state.select_previous(window, cx));
+            .on_action(|_: &menu::SelectPrev, window, cx| {
+                window.dispatch_action(Box::new(gpui_base::actions::SelectUp), cx);
             })
             .child(command)
     }

@@ -386,7 +386,9 @@ impl Render for AiPanel {
             })
             .on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_paths_drag))
             .on_drop(cx.listener(Self::drop_external_paths))
-            .on_action(cx.listener(Self::on_composer_paste))
+            .capture_action(cx.listener(Self::on_mention_menu_up))
+            .capture_action(cx.listener(Self::on_mention_menu_down))
+            .capture_action(cx.listener(Self::on_mention_menu_escape))
             .on_action(cx.listener(Self::close))
             .child(
                 div()
@@ -603,11 +605,12 @@ impl Render for AiPanel {
                                             .px_2()
                                             .pt_1()
                                             .child(
-                                                Editor::new(&self.composer_input)
+                                                self.composer_textarea(&self.composer_input, cx)
                                                     .appearance(false)
                                                     .bordered(false)
                                                     .w_full(),
-                                            ),
+                                            )
+                                            .children(self.render_mention_menu(theme, cx)),
                                     )
                                     .when_some(validation_notice.clone(), |this, notice| {
                                         this.child(

@@ -61,6 +61,7 @@ use crate::{
 };
 
 pub(crate) const PANE_TAB_BAR_HEIGHT: f32 = 32.0;
+const PANE_TAB_GAP: f32 = 2.0;
 const PANE_TAB_MAX_WIDTH: f32 = 220.0;
 const PANE_TAB_MIN_WIDTH: f32 = 120.0;
 const PANE_DIRECTION_PROBE_DISTANCE: f32 = glyphst_ui::style::SURFACE_GAP + 1.0;
@@ -247,10 +248,7 @@ impl LoadingDocumentView {
             |this, _, event, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.submit_password(window, cx),
                 InputEvent::Change => cx.notify(),
-                InputEvent::CompletionAccepted { .. }
-                | InputEvent::SpanHoverChanged { .. }
-                | InputEvent::Focus
-                | InputEvent::Blur => {}
+                InputEvent::Focus | InputEvent::Blur => {}
             },
         )
         .detach();
@@ -493,7 +491,7 @@ impl Render for DraggedTab {
         ComponentTab::new()
             .label(self.label.clone())
             .selected(true)
-            .corner_radius(cx.theme().radius)
+            .rounded(cx.theme().radius)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
     }
@@ -2709,9 +2707,10 @@ impl Pane {
             .label(label.clone())
             .when_some(accessible_label, |this, label| this.aria_label(label))
             .suffix(suffix)
-            .corner_radius(cx.theme().radius)
+            .rounded(cx.theme().radius)
             .max_w(ui_rems(PANE_TAB_MAX_WIDTH))
             .min_w(ui_rems(PANE_TAB_MIN_WIDTH))
+            .when(tab_ix > 0, |this| this.ml(px(PANE_TAB_GAP)))
             .debug_selector(move || format!("pane-tab-{tab_ix}"))
             .on_prepaint(move |bounds, _, _| {
                 tab_bounds.borrow_mut().entry(tab_id).or_default().body = Some(bounds);
@@ -2839,7 +2838,6 @@ impl Pane {
             .w_full()
             .h(ui_rems(PANE_TAB_BAR_HEIGHT))
             .px(px(2.0))
-            .tab_gap(px(2.0))
             .selected_index(self.active_tab)
             .menu(true)
             .children(tabs)
@@ -3436,9 +3434,7 @@ impl Member {
                     members,
                     cx,
                 );
-                axis.state.update(cx, |state, cx| {
-                    state.restore_panel_ratios(ratios, cx);
-                });
+                axis.restore_ratios(ratios.clone());
                 Self::Axis(axis)
             }
             ReaderPaneTree::Split { .. } => {
@@ -3574,6 +3570,8 @@ pub(crate) struct PaneAxis {
     members: Vec<Member>,
     state: Entity<ResizableState>,
     bounding_boxes: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    /// Size ratios applied once the group has been laid out.
+    pending_ratios: Rc<RefCell<Option<Vec<f32>>>>,
 }
 
 impl PaneAxis {
@@ -3584,7 +3582,37 @@ impl PaneAxis {
             members,
             state: cx.new(|_| ResizableState::default()),
             bounding_boxes: Rc::new(RefCell::new(vec![None; len])),
+            pending_ratios: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Distribute the group's length by `ratios` on its next layout.
+    fn restore_ratios(&self, ratios: Vec<f32>) {
+        if ratios.len() == self.members.len() && ratios.iter().all(|ratio| *ratio > 0.0) {
+            *self.pending_ratios.borrow_mut() = Some(ratios);
+        }
+    }
+
+    fn apply_pending_ratios(&self, window: &mut Window, cx: &mut App) {
+        let Some(ratios) = self.pending_ratios.borrow().clone() else {
+            return;
+        };
+        let container = self.state.read(cx).container_size();
+        if container <= px(0.0) || self.state.read(cx).sizes().len() != ratios.len() {
+            window.request_animation_frame();
+            return;
+        }
+        self.pending_ratios.borrow_mut().take();
+        let total: f32 = ratios.iter().sum();
+        self.state.update(cx, |state, cx| {
+            for (ix, ratio) in ratios
+                .iter()
+                .enumerate()
+                .take(ratios.len().saturating_sub(1))
+            {
+                state.resize_panel(ix, container * (ratio / total), window, cx);
+            }
+        });
     }
 
     fn split(
@@ -3686,8 +3714,8 @@ impl PaneAxis {
     }
 
     fn reset_pane_sizes(&self, cx: &mut App) {
-        self.state
-            .update(cx, |state, cx| state.reset_panel_sizes(cx));
+        self.restore_ratios(vec![1.0; self.members.len()]);
+        self.state.update(cx, |_, cx| cx.notify());
         for member in &self.members {
             member.reset_pane_sizes(cx);
         }
@@ -3806,6 +3834,7 @@ impl PaneAxis {
         window: &mut Window,
         cx: &mut App,
     ) -> PaneRenderResult {
+        self.apply_pending_ratios(window, cx);
         let mut contains_active_pane = false;
         let min_size = match self.axis {
             Axis::Horizontal => px(HORIZONTAL_MIN_SIZE),
@@ -3829,15 +3858,25 @@ impl PaneAxis {
                     contains_active_pane = true;
                 }
                 let bounding_boxes = self.bounding_boxes.clone();
+                let gap = px(glyphst_ui::style::SURFACE_GAP);
+                let axis = self.axis;
                 let child = div()
-                    .relative()
                     .size_full()
-                    .on_prepaint(move |bounds, _, _| {
-                        if let Some(slot) = bounding_boxes.borrow_mut().get_mut(ix) {
-                            *slot = Some(bounds);
-                        }
+                    .when(ix > 0, |this| match axis {
+                        Axis::Horizontal => this.pl(gap),
+                        Axis::Vertical => this.pt(gap),
                     })
-                    .child(result.element);
+                    .child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .on_prepaint(move |bounds, _, _| {
+                                if let Some(slot) = bounding_boxes.borrow_mut().get_mut(ix) {
+                                    *slot = Some(bounds);
+                                }
+                            })
+                            .child(result.element),
+                    );
 
                 resizable_panel()
                     .size_range(min_size..Pixels::MAX)
@@ -3848,7 +3887,6 @@ impl PaneAxis {
         let element = ResizablePanelGroup::new(("pane-axis", basis))
             .with_state(&self.state)
             .axis(self.axis)
-            .gap(px(glyphst_ui::style::SURFACE_GAP))
             .children(panels)
             .into_any_element();
 

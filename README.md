@@ -44,9 +44,11 @@ are optional research material, not build inputs.
 
 ### Working on maintained dependencies
 
-Keep independent checkouts beside this repository: `../gpui-kit` on `glyphst/main`
-and `../zed` on `glyphst/main`.
-`references/zed` is a read-only upstream reference, not our GPUI fork.
+GPUI comes from the crates.io `gpui-pre` snapshots of Zed (`gpui-pre`,
+`gpui-pre-platform`, `gpui-pre-ztracing`), pinned to the exact version GPUI Kit
+uses. The only maintained fork is GPUI Kit: keep its checkout beside this
+repository at `../gpui-kit` on `glyphst/main`. `references/zed` is a read-only
+upstream reference.
 
 For local development, put only the overrides you need in the ignored
 `.cargo/config.local.toml`:
@@ -56,21 +58,16 @@ For local development, put only the overrides you need in the ignored
 gpui-component = { path = "../gpui-kit/crates/component" }
 gpui-kit-assets = { path = "../gpui-kit/crates/assets" }
 gpui-fps = { path = "../gpui-kit/crates/fps" }
-
-[patch."https://github.com/glyphst/zed"]
-gpui = { path = "../zed/crates/gpui" }
-gpui_platform = { path = "../zed/crates/gpui_platform" }
-gpui_macros = { path = "../zed/crates/gpui_macros" }
-reqwest_client = { path = "../zed/crates/reqwest_client" }
-ztracing = { path = "../zed/crates/ztracing" }
+gpui-base = { path = "../gpui-kit/crates/base" }
 ```
 
 Use `cargo --config .cargo/config.local.toml check --workspace --all-targets --all-features`.
 These overrides are opt-in; normal Cargo commands and CI do not load this file.
-Do not commit override-generated lockfile changes. Publish Zed before GPUI Kit,
-then publish GPUI Kit before updating this workspace's revisions. Omit the
-local config, run `cargo metadata --format-version 1` to restore Git resolution,
-and review the lockfile before the normal `--locked` checks.
+Do not commit override-generated lockfile changes; `cargo fmt` and other
+commands that run without the config resolve the published pins again. Publish
+GPUI Kit before updating this workspace's revisions. Omit the local config, run
+`cargo metadata --format-version 1` to restore Git resolution, and review the
+lockfile before the normal `--locked` checks.
 
 See [architecture and dependency boundaries](ARCHITECTURE.md) for ownership,
 persistence, cache limits, and the remaining dependency-audit exception.

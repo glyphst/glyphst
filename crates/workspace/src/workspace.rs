@@ -18,7 +18,6 @@ use glyphst_translation_ui::{
 };
 use glyphst_ui::{
     activity::ActivityCenter,
-    root::render_overlays,
     style::{apply_window_background, shell_background},
 };
 use gpui::{
@@ -2952,7 +2951,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
         let theme = cx.theme().colors;
         let window_settings = cx.global::<SettingsStore>().settings.window;
@@ -3000,10 +2998,7 @@ impl Render for Workspace {
         } else {
             self.render_body(theme, dim_inactive_panes, window, cx)
         };
-        let rendering_debug = self
-            .rendering_debug
-            .clone()
-            .map(|monitor| FpsOverlay::new(&monitor));
+        let rendering_debug = self.render_rendering_debug(cx);
         div()
             .id("workspace")
             .size_full()
@@ -3246,7 +3241,6 @@ impl Render for Workspace {
                     cx,
                 ))
             })
-            .children(root_overlays)
     }
 }
 

@@ -306,6 +306,144 @@ impl AiPanel {
             .into_any_element()
     }
 
+    /// The composer text area; hovering a mention token previews it.
+    pub(super) fn composer_textarea(
+        &self,
+        state: &Entity<TextareaState>,
+        cx: &mut Context<Self>,
+    ) -> Textarea {
+        let panel = cx.weak_entity();
+        let paste_panel = panel.clone();
+        Textarea::new(state)
+            .on_paste(move |clipboard, _, cx| {
+                paste_panel
+                    .update(cx, |this, cx| this.paste_composer_clipboard(clipboard, cx))
+                    .unwrap_or(false)
+            })
+            .on_token_hover(move |event: &InlineTokenHoverEvent, window, cx| {
+                let token_id = event.token().id().clone();
+                let bounds = event.bounds();
+                let hovered = event.is_hovered();
+                _ = panel.update(cx, |this, cx| {
+                    let target = hovered
+                        .then(|| {
+                            this.composer_mentions
+                                .iter()
+                                .find(|mention| mention.token_id == token_id)
+                                .cloned()
+                        })
+                        .flatten()
+                        .map(|mention| (bounds, mention));
+                    this.update_mention_preview(target, window, cx);
+                });
+            })
+    }
+
+    /// The `@` menu, placed above the composer while a mention query is open.
+    pub(super) fn render_mention_menu(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.mention_menu.as_ref()?;
+        let rows = menu
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                let selected = index == menu.selected;
+                div()
+                    .id(("ai-mention-menu-item", index))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .when(selected, |this| {
+                        this.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .hover(|this| this.bg(theme.accent))
+                    .child(Icon::new(Self::mention_icon(reference.kind)).xsmall())
+                    .child(div().flex_none().child(reference.display_text()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(reference.kind.description()),
+                    )
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.accept_mention_menu(Some(index), window, cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
+        Some(
+            deferred(
+                div()
+                    .id("ai-mention-menu")
+                    .absolute()
+                    .bottom_full()
+                    .left_0()
+                    .mb_1()
+                    .w(px(MENTION_MENU_WIDTH))
+                    .p_1()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .text_color(theme.popover_foreground)
+                    .shadow_md()
+                    .text_sm()
+                    .children(rows),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
+    pub(super) fn on_mention_menu_up(
+        &mut self,
+        _: &InputMoveUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mention_menu.is_some() {
+            self.move_mention_menu_selection(-1, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn on_mention_menu_down(
+        &mut self,
+        _: &InputMoveDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mention_menu.is_some() {
+            self.move_mention_menu_selection(1, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn on_mention_menu_escape(
+        &mut self,
+        _: &InputEscape,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mention_menu.take().is_some() {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_mention_preview(
         preview: MentionPreview,
         options: MentionPreviewRenderOptions,
@@ -649,7 +787,9 @@ impl AiPanel {
             .on_drag_move::<ExternalPaths>(cx.listener(Self::track_external_paths_drag))
             .on_drop(cx.listener(Self::drop_external_paths))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .on_action(cx.listener(Self::on_composer_paste))
+            .capture_action(cx.listener(Self::on_mention_menu_up))
+            .capture_action(cx.listener(Self::on_mention_menu_down))
+            .capture_action(cx.listener(Self::on_mention_menu_escape))
             .on_action(cx.listener(Self::close))
             .child(
                 div()
@@ -672,13 +812,14 @@ impl AiPanel {
                             .relative()
                             .min_h(px(32.0))
                             .child(
-                                Editor::new(&self.composer_input)
+                                self.composer_textarea(&self.composer_input, cx)
                                     .appearance(false)
                                     .bordered(false)
                                     .w_full()
                                     .px_3()
                                     .py_2(),
-                            ),
+                            )
+                            .children(self.render_mention_menu(theme, cx)),
                     )
                     .when_some(validation_notice, |this, notice| {
                         this.child(
@@ -1041,11 +1182,7 @@ impl AiPanel {
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         this.open_message_context_menu(
                             message_index,
-                            MarkdownContextMenuRequest {
-                                position: event.position,
-                                selected_text: None,
-                                link_url: None,
-                            },
+                            MarkdownContextMenuRequest::new(event.position),
                             window,
                             cx,
                         );
@@ -1107,10 +1244,15 @@ impl AiPanel {
                             })
                             .when(is_editing, |this| {
                                 this.child(
-                                    Editor::new(&self.edit_input)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .w_full(),
+                                    div()
+                                        .relative()
+                                        .child(
+                                            self.composer_textarea(&self.edit_input, cx)
+                                                .appearance(false)
+                                                .bordered(false)
+                                                .w_full(),
+                                        )
+                                        .children(self.render_mention_menu(theme, cx)),
                                 )
                             })
                             .when(!is_editing && is_loading, |this| {

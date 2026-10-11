@@ -133,18 +133,26 @@ fn wcag_contrast_ratio(a: Rgba, b: Rgba) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::proptest::prelude::*;
 
-    #[gpui::property_test]
-    fn sufficient_contrast_for_any_opaque_background(
-        #[strategy = Hsla::opaque_strategy()] bg: Hsla,
-    ) -> Result<(), TestCaseError> {
-        let text = text_color_for_background(bg);
-        let ratio = wcag_contrast_ratio(Rgba::from(bg), Rgba::from(text));
-        prop_assert!(
-            ratio >= 4.5,
-            "WCAG AA contrast ratio {ratio:.2} < 4.5 for bg {bg:?} -> text {text:?}",
-        );
-        Ok(())
+    #[test]
+    fn sufficient_contrast_for_any_opaque_background() {
+        for hue in 0..36 {
+            for saturation in 0..=10 {
+                for lightness in 0..=20 {
+                    let bg = gpui::hsla(
+                        hue as f32 / 36.0,
+                        saturation as f32 / 10.0,
+                        lightness as f32 / 20.0,
+                        1.0,
+                    );
+                    let text = text_color_for_background(bg);
+                    let ratio = wcag_contrast_ratio(Rgba::from(bg), Rgba::from(text));
+                    assert!(
+                        ratio >= 4.5,
+                        "WCAG AA contrast ratio {ratio:.2} < 4.5 for bg {bg:?} -> text {text:?}",
+                    );
+                }
+            }
+        }
     }
 }

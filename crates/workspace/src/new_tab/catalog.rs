@@ -324,10 +324,7 @@ impl NewTab {
                 self.activate_focused(cx)
             }
             InputEvent::PressEnter { .. } => {}
-            InputEvent::CompletionAccepted { .. }
-            | InputEvent::SpanHoverChanged { .. }
-            | InputEvent::Focus
-            | InputEvent::Blur => {}
+            InputEvent::Focus | InputEvent::Blur => {}
         }
     }
 

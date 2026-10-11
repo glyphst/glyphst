@@ -882,48 +882,26 @@ fn ordinary_edits_preserve_only_existing_explicit_mentions() {
 }
 
 #[test]
-fn page_digit_edits_preserve_explicit_mention_metadata() {
-    let mut mentions = parse_composer_mentions("@page(12)");
+fn mention_menu_parses_an_explicit_page_number() {
+    assert_eq!(split_mention_query_page("page12"), ("page", Some(12)));
+    assert_eq!(split_mention_query_page("page(7)"), ("page", Some(7)));
+    assert_eq!(split_mention_query_page("page("), ("page", None));
+    assert_eq!(split_mention_query_page("doc"), ("doc", None));
 
-    adjust_composer_mentions_for_input_change(&mut mentions, &(6..8), 1, "@page(3)");
-
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].range, 0..8);
-    assert_eq!(
-        mentions[0].reference,
-        MentionReference::new(MentionKind::Page, Some(3))
+    let all = |_: MentionKind| true;
+    let candidates = mention_menu_candidates("page12", 3, 40, all);
+    assert!(candidates.contains(&MentionReference::new(MentionKind::Page, Some(12))));
+    assert!(
+        candidates
+            .iter()
+            .all(|reference| reference.kind.requires_page_number())
     );
-    assert_eq!(composer_page_digits_range(&mentions[0]), Some(6..7));
-}
 
-#[test]
-fn empty_page_digit_edit_keeps_span_until_input_clamps_it() {
-    let mut mentions = parse_composer_mentions("@page(12)");
+    let candidates = mention_menu_candidates("page99", 3, 40, all);
+    assert!(candidates.contains(&MentionReference::new(MentionKind::Page, Some(40))));
 
-    adjust_composer_mentions_for_input_change(&mut mentions, &(6..8), 0, "@page()");
-
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].range, 0..7);
-    assert_eq!(
-        mentions[0].reference,
-        MentionReference::new(MentionKind::Page, Some(12))
-    );
-    assert_eq!(composer_page_digits_range(&mentions[0]), Some(6..6));
-
-    adjust_composer_mentions_for_input_change(&mut mentions, &(6..6), 1, "@page(1)");
-    assert_eq!(
-        mentions[0].reference,
-        MentionReference::new(MentionKind::Page, Some(1))
-    );
-}
-
-#[test]
-fn edits_outside_page_digits_remove_the_explicit_mention() {
-    let mut mentions = parse_composer_mentions("@page(12)");
-
-    adjust_composer_mentions_for_input_change(&mut mentions, &(2..3), 1, "@pxge(12)");
-
-    assert!(mentions.is_empty());
+    let candidates = mention_menu_candidates("pa", 3, 40, all);
+    assert!(candidates.contains(&MentionReference::new(MentionKind::Page, Some(3))));
 }
 
 #[test]
@@ -1531,6 +1509,7 @@ fn captured_document_context_wins_during_regeneration() {
     let mentions = [ComposerMention {
         reference: MentionReference::new(MentionKind::DocumentText, None),
         range: 0..9,
+        token_id: SharedString::default(),
         captured: Some(CapturedMention::Text("historical document".to_string())),
     }];
     let current = AiContext {

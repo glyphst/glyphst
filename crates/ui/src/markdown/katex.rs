@@ -14,7 +14,10 @@ use gpui::{
     AnyElement, App, Context, Hsla, ImageSource, IntoElement, RenderImage, Rgba, SharedString,
     StyledText, Task, TextStyle, WeakEntity, Window, div, img, prelude::*,
 };
-use gpui_component::text::{MarkdownExtensions, MarkdownNode, MarkdownParseContext, markdown_ast};
+use gpui_component::text::{
+    InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
+    MarkdownPlugin, markdown_ast,
+};
 use ratex_layout::{LayoutOptions, layout, to_display_list};
 use ratex_svg::{SvgOptions, render_to_svg};
 use ratex_types::{color::Color, math_style::MathStyle};
@@ -227,18 +230,55 @@ pub(super) fn add_extensions(
     extensions: MarkdownExtensions,
     markdown: WeakEntity<Markdown>,
 ) -> MarkdownExtensions {
-    let inline_markdown = markdown.clone();
     extensions
-        .math()
-        .inline_parser(parse_inline_math)
-        .inline_renderer(MATH_NODE_NAME, move |node, text_style, window, cx| {
-            render_math_node(inline_markdown.clone(), node, text_style, window, cx)
+        .latex_math_delimiters()
+        .plugin(InlineMathPlugin {
+            markdown: markdown.clone(),
         })
         .block_parser(parse_display_math)
         .block_renderer(MATH_NODE_NAME, move |node, window, cx| {
             let text_style = window.text_style();
             render_math_node(markdown.clone(), node, &text_style, window, cx)
         })
+}
+
+struct InlineMathPlugin {
+    markdown: WeakEntity<Markdown>,
+}
+
+impl MarkdownPlugin for InlineMathPlugin {
+    fn name(&self) -> &str {
+        MATH_NODE_NAME
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        parse_inline_math(node, cx)
+    }
+
+    fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let text_style = window.text_style();
+        render_math_node(self.markdown.clone(), node, &text_style, window, cx)
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<InlineElement> {
+        Some(InlineElement::new(render_math_node(
+            self.markdown.clone(),
+            node,
+            context.text_style(),
+            window,
+            cx,
+        )))
+    }
 }
 
 fn node_offset(node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> usize {
@@ -257,22 +297,19 @@ fn parse_inline_math(
         .map(str::to_string)
         .unwrap_or_else(|| format!("${}$", math.value));
     let mode = mode_for_inline_source(&source);
-    let node = MarkdownNode::new(
-        MATH_NODE_NAME,
-        MathNode {
-            contents: math.value.clone().into(),
-            source: source.clone().into(),
-            mode,
-            source_offset: node_offset(node, cx),
-        },
+    Some(
+        MarkdownNode::new(
+            MATH_NODE_NAME,
+            MathNode {
+                contents: math.value.clone().into(),
+                source: source.clone().into(),
+                mode,
+                source_offset: node_offset(node, cx),
+            },
+        )
+        .text(math.value.clone())
+        .markdown(source),
     )
-    .text(math.value.clone())
-    .markdown(source);
-    Some(if mode == MathMode::Display {
-        node.full_width()
-    } else {
-        node
-    })
 }
 
 fn parse_display_math(
@@ -542,7 +579,7 @@ w
 \]
 
 \[q\]";
-        let extensions = MarkdownExtensions::default().math();
+        let extensions = MarkdownExtensions::default().latex_math_delimiters();
         let occurrences = extract_math_occurrences(source, &extensions);
         assert_eq!(occurrences.len(), 5);
         assert_eq!(occurrences[0].0, "Inline ".len());
@@ -570,7 +607,7 @@ L_m+\min(n,T)
 }
 \tag{6}
 \]";
-        let extensions = MarkdownExtensions::default().math();
+        let extensions = MarkdownExtensions::default().latex_math_delimiters();
         let occurrences = extract_math_occurrences(source, &extensions);
 
         assert_eq!(occurrences.len(), 1);

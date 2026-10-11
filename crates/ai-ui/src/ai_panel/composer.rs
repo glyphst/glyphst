@@ -56,35 +56,6 @@ fn classify_external_ai_paths(paths: &[PathBuf]) -> ExternalAiDrop {
     drop
 }
 
-fn changed_range(old: &str, new: &str) -> (Range<usize>, usize) {
-    let mut prefix = old
-        .bytes()
-        .zip(new.bytes())
-        .take_while(|(old, new)| old == new)
-        .count();
-    while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
-        prefix -= 1;
-    }
-
-    let old_tail = &old[prefix..];
-    let new_tail = &new[prefix..];
-    let mut suffix = old_tail
-        .bytes()
-        .rev()
-        .zip(new_tail.bytes().rev())
-        .take_while(|(old, new)| old == new)
-        .count()
-        .min(old_tail.len())
-        .min(new_tail.len());
-    while suffix > 0
-        && (!old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix))
-    {
-        suffix -= 1;
-    }
-
-    (prefix..old.len() - suffix, new.len() - prefix - suffix)
-}
-
 impl AiPanel {
     pub(super) fn track_external_paths_drag(
         &mut self,
@@ -225,7 +196,7 @@ impl AiPanel {
         )
     }
 
-    pub(super) fn active_composer_input(&self) -> Entity<EditorState> {
+    pub(super) fn active_composer_input(&self) -> Entity<TextareaState> {
         if self.editing_turn.is_some() {
             self.edit_input.clone()
         } else {
@@ -235,7 +206,7 @@ impl AiPanel {
 
     pub(super) fn on_composer_input_event(
         &mut self,
-        input: &Entity<EditorState>,
+        input: &Entity<TextareaState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -245,66 +216,24 @@ impl AiPanel {
         }
         match event {
             InputEvent::Change => {
-                let (new_content, selected_range) = {
+                let (content, selected_range) = {
                     let input = input.read(cx);
-                    (input.value(), input.selected_range())
+                    (input.content(), input.selected_range())
                 };
-
-                let (range, inserted_len) = changed_range(&self.content, &new_content);
-                if range.start != range.end || inserted_len != 0 {
+                if content.text() != &self.content {
                     self.invalidate_mention_preview();
-                    adjust_composer_mentions_for_input_change(
-                        &mut self.composer_mentions,
-                        &range,
-                        inserted_len,
-                        &new_content,
-                    );
                 }
-                self.content = new_content;
+                self.sync_mentions_from_input(&content);
+                self.content = content.text().clone();
                 self.selected_range = selected_range;
                 self.selection_reversed = false;
                 self.marked_range = None;
                 self.clear_validation_notice();
-                self.sync_composer_spans(cx);
+                self.refresh_mention_menu(cx);
                 cx.notify();
             }
-            InputEvent::CompletionAccepted {
-                item,
-                inserted_range,
-                ..
-            } => {
-                let new_content = input.read(cx).value();
-                if new_content != self.content {
-                    let (range, inserted_len) = changed_range(&self.content, &new_content);
-                    adjust_composer_mentions_for_input_change(
-                        &mut self.composer_mentions,
-                        &range,
-                        inserted_len,
-                        &new_content,
-                    );
-                    self.content = new_content;
-                }
-                let editable_span = self.record_accepted_mention(item, inserted_range, cx);
-                self.sync_composer_spans(cx);
-                if let Some(span_range) = editable_span {
-                    input.update(cx, |input, cx| {
-                        input.activate_span_edit(span_range, window, cx);
-                    });
-                }
-            }
-            InputEvent::SpanHoverChanged { span_range, bounds } => {
-                let hovered =
-                    span_range
-                        .as_ref()
-                        .zip(bounds.as_ref())
-                        .and_then(|(range, bounds)| {
-                            self.composer_mentions
-                                .iter()
-                                .find(|mention| mention.range == *range)
-                                .cloned()
-                                .map(|mention| (*bounds, mention))
-                        });
-                self.update_mention_preview(hovered, window, cx);
+            InputEvent::PressEnter { shift, .. } if !shift && self.mention_menu.is_some() => {
+                self.accept_mention_menu(None, window, cx);
             }
             InputEvent::PressEnter { shift, .. } if !shift => {
                 match submit_action(
@@ -342,22 +271,18 @@ impl AiPanel {
         let active_input = self.active_composer_input();
         let value = active_input.read(cx).value();
         if value != self.content {
-            let content = self.content.clone();
             let selected_range = self.selected_range.clone();
+            let content = self.composer_input_content();
             active_input.update(cx, |input, cx| {
                 input.set_value(content, window, cx);
                 input.set_selected_range(selected_range, cx);
             });
-        }
-        self.sync_composer_spans(cx);
-    }
-
-    pub(super) fn sync_composer_spans(&self, cx: &mut Context<Self>) {
-        let spans = self.composer_input_spans();
-        let active_input = self.active_composer_input();
-        if active_input.read(cx).spans() != spans {
+        } else if active_input.read(cx).tokens() != self.composer_input_content().tokens() {
+            let selected_range = active_input.read(cx).selected_range();
+            let content = self.composer_input_content();
             active_input.update(cx, |input, cx| {
-                input.set_spans(spans, cx);
+                input.set_value(content, window, cx);
+                input.set_selected_range(selected_range, cx);
             });
         }
     }
@@ -430,6 +355,7 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         self.composer_mentions = mentions;
+        self.assign_mention_token_ids();
         self.composer_images = images;
         self.close_composer_menus();
         self.clear_validation_notice();
@@ -456,32 +382,18 @@ impl AiPanel {
         self.active_composer_input().read(cx).cursor()
     }
 
-    pub(super) fn on_composer_paste(
+    /// Attach a pasted image instead of inserting text. Returns whether the
+    /// paste was consumed.
+    pub(super) fn paste_composer_clipboard(
         &mut self,
-        _: &InputPaste,
-        window: &mut Window,
+        clipboard: &ClipboardItem,
         cx: &mut Context<Self>,
-    ) {
-        if !self
-            .active_composer_input()
-            .focus_handle(cx)
-            .is_focused(window)
-        {
-            cx.propagate();
-            return;
+    ) -> bool {
+        if !clipboard_prefers_image_content(clipboard) {
+            return false;
         }
-
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            cx.propagate();
-            return;
-        };
-        if !clipboard_prefers_image_content(&clipboard) {
-            cx.propagate();
-            return;
-        }
-
-        self.attach_clipboard_images(clipboard, cx);
-        cx.stop_propagation();
+        self.attach_clipboard_images(clipboard.clone(), cx);
+        true
     }
 
     pub(super) fn pick_user_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -52,8 +52,8 @@ use gpui::{
     Context, DismissEvent, DragMoveEvent, ElementId, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
     MouseDownEvent, ObjectFit, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, WeakEntity, Window, anchored,
-    canvas, deferred, div, img, point, prelude::*, px, transparent_black,
+    ScrollWheelEvent, SharedString, Subscription, Task, TextStyle, Window, anchored, canvas,
+    deferred, div, img, point, prelude::*, px, transparent_black,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, InteractiveElementExt as _, Selectable as _, Sizable as _,
@@ -61,17 +61,12 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariants as _},
     input::{
-        CompletionMenuOptions, CompletionProvider, CompletionTriggerEvent, Editor, EditorState,
-        Escape as InputEscape, Input, InputEvent, InputSpan, InputState, Paste as InputPaste, Rope,
-        RopeExt,
+        Escape as InputEscape, InlineToken, InlineTokenHoverEvent, Input, InputContent, InputEvent,
+        InputState, MoveDown as InputMoveDown, MoveUp as InputMoveUp, Textarea, TextareaState,
     },
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::{Popover, PopoverState},
-};
-use lsp_types::{
-    CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, Range as LspRange,
-    TextEdit,
 };
 
 pub const AI_PANEL_WIDTH: f32 = 360.0;
@@ -81,8 +76,7 @@ const MENTION_PREVIEW_WIDTH: f32 = 320.0;
 const MENTION_PREVIEW_TEXT_MAX_HEIGHT: f32 = 274.0;
 const MENTION_PREVIEW_WINDOW_MARGIN: f32 = 8.0;
 const MENTION_PREVIEW_BRIDGE_HEIGHT: f32 = 6.0;
-const MENTION_COMPLETION_MIN_WIDTH: f32 = 280.0;
-const MENTION_COMPLETION_MAX_WIDTH: f32 = 540.0;
+const MENTION_MENU_WIDTH: f32 = 300.0;
 const MAX_USER_IMAGES: usize = 8;
 const MAX_USER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_USER_IMAGE_DIMENSION: u32 = 16_384;
@@ -134,6 +128,8 @@ struct MentionMatch {
 struct ComposerMention {
     reference: MentionReference,
     range: Range<usize>,
+    /// ID of the inline token that shows this mention in the composer.
+    token_id: SharedString,
     captured: Option<CapturedMention>,
 }
 
@@ -368,14 +364,19 @@ enum CopyFeedbackTarget {
     Error,
 }
 
-struct MentionCompletionProvider {
-    panel: WeakEntity<AiPanel>,
+/// The `@` mention menu shown while the composer caret follows an `@` query.
+#[derive(Clone, Debug, PartialEq)]
+struct MentionMenu {
+    /// Source range of the `@` query that an accepted mention replaces.
+    range: Range<usize>,
+    candidates: Vec<MentionReference>,
+    selected: usize,
 }
 
 pub struct AiPanel {
     focus_handle: FocusHandle,
-    composer_input: Entity<EditorState>,
-    edit_input: Entity<EditorState>,
+    composer_input: Entity<TextareaState>,
+    edit_input: Entity<TextareaState>,
     model_search_input: Entity<InputState>,
     _composer_input_subscription: Subscription,
     _edit_input_subscription: Subscription,
@@ -413,6 +414,8 @@ pub struct AiPanel {
     sessions: Vec<AiSession>,
     view: AiPanelView,
     composer_mentions: Vec<ComposerMention>,
+    mention_menu: Option<MentionMenu>,
+    next_mention_token: u64,
     model_search_query: SharedString,
     model_menu_scroll: ScrollHandle,
     markdown_views: Vec<Entity<Markdown>>,
@@ -512,29 +515,16 @@ impl AiPanel {
             AiPanelMode::Sidebar => (3, 8),
             AiPanelMode::QuickAsk => (1, 4),
         };
-        let panel = cx.weak_entity();
-        let composer_provider = Rc::new(MentionCompletionProvider {
-            panel: panel.clone(),
-        });
-        let edit_provider = Rc::new(MentionCompletionProvider { panel });
         let composer_input = cx.new(|cx| {
-            let mut input = EditorState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(min_rows, max_rows)
-                .soft_wrap(true)
                 .submit_on_enter(true)
-                .passthrough_structured_paste(true)
-                .placeholder(tr("ai-ask-placeholder"));
-            input.lsp_mut().completion_provider = Some(composer_provider.clone());
-            input
+                .placeholder(tr("ai-ask-placeholder"))
         });
         let edit_input = cx.new(|cx| {
-            let mut input = EditorState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(1, usize::MAX)
-                .soft_wrap(true)
                 .submit_on_enter(true)
-                .passthrough_structured_paste(true);
-            input.lsp_mut().completion_provider = Some(edit_provider.clone());
-            input
         });
         let model_search_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(tr("ai-search-models-placeholder")));
@@ -590,6 +580,8 @@ impl AiPanel {
             sessions: init.sessions,
             view: AiPanelView::Chat,
             composer_mentions: Vec::new(),
+            mention_menu: None,
+            next_mention_token: 0,
             model_search_query: SharedString::default(),
             model_menu_scroll: ScrollHandle::new(),
             markdown_views: Vec::new(),
@@ -652,11 +644,8 @@ impl AiPanel {
         if self.close_message_context_menu(cx) {
             return;
         }
-        let active_input = self.active_composer_input();
-        let completion_closed = active_input.update(cx, |input, cx| {
-            input.route_overlay_action(Box::new(InputEscape), window, cx)
-        });
-        if completion_closed {
+        if self.mention_menu.take().is_some() {
+            cx.notify();
             return;
         }
         if self.editing_turn.is_some() {

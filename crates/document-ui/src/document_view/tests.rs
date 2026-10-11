@@ -14,13 +14,12 @@ use super::{
     TRANSLATION_PANEL_DEFAULT_TOP, TRANSLATION_PANEL_DOCK_DELAY,
     TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY, TRANSLATION_PANEL_EXPOSED_STRIP,
     TRANSLATION_PANEL_INITIAL_DOCK_DELAY, TRANSLATION_PANEL_MARGIN,
-    TRANSLATION_PANEL_OVERLAY_PRIORITY, TRANSLATION_PANEL_POPOVER_PRIORITY,
-    TRANSLATION_PANEL_PREFERRED_WIDTH, TRANSLATION_PANEL_RETRACT_DELAY,
-    TRANSLATION_PANEL_SNAP_ZONE, TextBlock, TextChunk, TextFormatBlock, TextIndexState, TextLine,
-    TranslationCardState, TranslationHoverAnimation, TranslationPanelSide, TranslationStatus,
-    TranslationViewRole, clamp_translation_panel_edge_y, clamp_translation_panel_position,
-    clear_copied_region_selection, context_highlight_target, default_translation_panel_position,
-    extend_text_selection,
+    TRANSLATION_PANEL_OVERLAY_PRIORITY, TRANSLATION_PANEL_PREFERRED_WIDTH,
+    TRANSLATION_PANEL_RETRACT_DELAY, TRANSLATION_PANEL_SNAP_ZONE, TextBlock, TextChunk,
+    TextFormatBlock, TextIndexState, TextLine, TranslationCardState, TranslationHoverAnimation,
+    TranslationPanelSide, TranslationStatus, TranslationViewRole, clamp_translation_panel_edge_y,
+    clamp_translation_panel_position, clear_copied_region_selection, context_highlight_target,
+    default_translation_panel_position, extend_text_selection,
     page_render::{
         raster_band_count, raster_band_ranges, should_show_page_loading,
         should_start_viewport_render,
@@ -1125,13 +1124,10 @@ fn translation_panel_wall_geometry_is_symmetric_and_delayed() {
 
 #[test]
 fn root_notifications_are_above_translation_overlays() {
-    let popover = std::hint::black_box(TRANSLATION_PANEL_POPOVER_PRIORITY);
     let overlay = std::hint::black_box(TRANSLATION_PANEL_OVERLAY_PRIORITY);
-    let notification = std::hint::black_box(glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY);
+    let notification = std::hint::black_box(gpui_component::NOTIFICATION_LAYER_PRIORITY);
     let hover_tools = std::hint::black_box(TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY);
     let drag = std::hint::black_box(TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY);
-    assert!(popover > overlay);
-    assert!(notification > popover);
     assert!(notification > overlay);
     assert!(notification > hover_tools);
     assert!(drag > notification);

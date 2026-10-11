@@ -196,9 +196,8 @@ const TRANSLATION_HOVER_CLEAR_GRACE: Duration = Duration::from_millis(100);
 const TRANSLATION_HOVER_FADE: MotionSpec = MotionSpec::new(120, EASE_OUT);
 const TRANSLATION_HOVER_TOOLS_OVERLAY_PRIORITY: usize = 4;
 const TRANSLATION_PANEL_OVERLAY_PRIORITY: usize = 5;
-const TRANSLATION_PANEL_POPOVER_PRIORITY: usize = TRANSLATION_PANEL_OVERLAY_PRIORITY + 1;
 const TRANSLATION_PANEL_DRAG_OVERLAY_PRIORITY: usize =
-    glyphst_ui::root::ROOT_NOTIFICATION_PRIORITY + 1;
+    gpui_component::NOTIFICATION_LAYER_PRIORITY + 1;
 
 fn translation_panel_width(viewport_width: f32) -> f32 {
     if !viewport_width.is_finite() || viewport_width <= 0.0 {

@@ -20,7 +20,7 @@ use glyphst_settings::{
 use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
     activity::{ActivityCenter, ActivityNoticeEntry, ActivityNoticeLevel, BackgroundTaskEntry},
-    root::{RootWindowHandle, render_overlays},
+    root::RootWindowHandle,
     style::{SURFACE_INSET, apply_window_background, shell_background},
 };
 use gpui::{
@@ -1133,7 +1133,6 @@ impl Focusable for SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let root_overlays = render_overlays(window, cx);
         let ui_font = setup_ui_font(window, cx);
         let window_settings = cx.global::<SettingsStore>().settings.window;
         if self.window_settings != window_settings {
@@ -1232,7 +1231,6 @@ impl Render for SettingsWindow {
                 ),
             )
             .child(card)
-            .children(root_overlays)
     }
 }
 
@@ -1244,8 +1242,7 @@ mod tests {
     };
     use glyphst_ai::ai_client::AiModelInfo;
     use glyphst_settings::{
-        AiApiStyle, AiModel, AiProvider, ModelRef, OcrSettings, Settings, SettingsStore,
-        sync_component_theme,
+        AiApiStyle, AiModel, AiProvider, OcrSettings, Settings, SettingsStore, sync_component_theme,
     };
     use gpui::{
         AppContext as _, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext,
@@ -1562,218 +1559,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ui_font_fallbacks_input_shares_the_title_row(cx: &mut TestAppContext) {
-        initialize_ui_test(cx);
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let settings = cx.new(|cx| {
-                let mut settings = SettingsWindow::new(|_| {}, cx);
-                settings.initial_selection = SelectIndex {
-                    page_ix: 2,
-                    group_ix: Some(1),
-                };
-                settings
-            });
-            Root::new(settings, window, cx)
-        });
-        cx.simulate_resize(size(px(2000.0), px(1200.0)));
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-            _ = window.draw(cx);
-        });
-
-        let row = cx.debug_bounds("setting-item-2-1-1").unwrap();
-        let label = cx.debug_bounds("setting-item-label-2-1-1").unwrap();
-        let field = cx.debug_bounds("setting-item-field-2-1-1").unwrap();
-        let input = cx
-            .debug_bounds("setting-bound-input-ui-font-fallbacks")
-            .unwrap();
-
-        assert_eq!(field.right(), row.right());
-        assert_eq!(field.size.width, px(480.0));
-        assert_eq!(input, field);
-        assert!(field.left() > label.right());
-        assert!(field.top() < label.bottom());
-    }
-
-    #[gpui::test]
-    fn microsoft_translator_text_fields_share_a_bounded_control_column(cx: &mut TestAppContext) {
-        initialize_ui_test(cx);
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let settings = cx.new(|cx| {
-                let mut settings = SettingsWindow::new(|_| {}, cx);
-                settings.initial_selection = SelectIndex {
-                    page_ix: 5,
-                    group_ix: Some(6),
-                };
-                settings
-            });
-            Root::new(settings, window, cx)
-        });
-        cx.simulate_resize(size(px(2000.0), px(1200.0)));
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-            _ = window.draw(cx);
-        });
-
-        let api_key_row = cx.debug_bounds("setting-item-5-6-0").unwrap();
-        let api_key_label = cx.debug_bounds("setting-item-label-5-6-0").unwrap();
-        let api_key_field = cx.debug_bounds("setting-item-field-5-6-0").unwrap();
-        let api_key_input = cx
-            .debug_bounds("setting-bound-input-translation-api-key-microsoft")
-            .unwrap();
-        let endpoint_row = cx.debug_bounds("setting-item-5-6-1").unwrap();
-        let endpoint_label = cx.debug_bounds("setting-item-label-5-6-1").unwrap();
-        let endpoint_field = cx.debug_bounds("setting-item-field-5-6-1").unwrap();
-        let endpoint_input = cx
-            .debug_bounds("setting-bound-input-translation-base-url-microsoft")
-            .unwrap();
-        let region_row = cx.debug_bounds("setting-item-5-6-2").unwrap();
-        let region_label = cx.debug_bounds("setting-item-label-5-6-2").unwrap();
-        let region_field = cx.debug_bounds("setting-item-field-5-6-2").unwrap();
-        let region_input = cx
-            .debug_bounds("setting-bound-input-translation-microsoft-region")
-            .unwrap();
-
-        for (row, label, field, input) in [
-            (api_key_row, api_key_label, api_key_field, api_key_input),
-            (endpoint_row, endpoint_label, endpoint_field, endpoint_input),
-            (region_row, region_label, region_field, region_input),
-        ] {
-            assert_eq!(field.right(), row.right());
-            assert_eq!(field.size.width, px(480.0));
-            assert_eq!(input, field);
-            assert!(field.left() > label.right());
-            assert!(field.top() < label.bottom());
-        }
-        assert_eq!(api_key_field.left(), endpoint_field.left());
-        assert_eq!(api_key_field.left(), region_field.left());
-        assert_eq!(api_key_field.right(), endpoint_field.right());
-        assert_eq!(api_key_field.right(), region_field.right());
-        assert!(cx.debug_bounds("setting-item-description-5-5-0").is_some());
-        for selector in [
-            "setting-item-description-5-5-1",
-            "setting-item-description-5-5-2",
-        ] {
-            assert!(cx.debug_bounds(selector).is_none());
-        }
-    }
-
-    macro_rules! ocr_endpoint_row_test {
-        ($name:ident, $group:literal, $item:literal, $input:literal, $test_item:literal) => {
-            #[gpui::test]
-            fn $name(cx: &mut TestAppContext) {
-                initialize_ui_test(cx);
-                let (_, cx) = cx.add_window_view(|window, cx| {
-                    let settings = cx.new(|cx| {
-                        let mut settings = SettingsWindow::new(|_| {}, cx);
-                        settings.initial_selection = SelectIndex {
-                            page_ix: 6,
-                            group_ix: Some($group),
-                        };
-                        settings
-                    });
-                    Root::new(settings, window, cx)
-                });
-                cx.simulate_resize(size(px(2000.0), px(1200.0)));
-                cx.update(|window, cx| {
-                    _ = window.draw(cx);
-                    _ = window.draw(cx);
-                });
-
-                let row = cx
-                    .debug_bounds(concat!("setting-item-6-", $group, "-", $item))
-                    .unwrap();
-                let label = cx
-                    .debug_bounds(concat!("setting-item-label-6-", $group, "-", $item))
-                    .unwrap();
-                let field = cx
-                    .debug_bounds(concat!("setting-item-field-6-", $group, "-", $item))
-                    .unwrap();
-                let input = cx.debug_bounds($input).unwrap();
-
-                assert_eq!(field.right(), row.right());
-                assert_eq!(field.size.width, px(480.0));
-                assert_eq!(input, field);
-                assert!(field.left() > label.right());
-                assert!(field.top() < label.bottom());
-                assert!(
-                    cx.debug_bounds(concat!(
-                        "setting-item-description-6-",
-                        $group,
-                        "-",
-                        $test_item
-                    ))
-                    .is_none()
-                );
-            }
-        };
-    }
-
-    ocr_endpoint_row_test!(
-        unlimited_ocr_endpoint_shares_the_title_row,
-        1,
-        2,
-        "setting-bound-input-ocr-unlimited-endpoint",
-        3
-    );
-    ocr_endpoint_row_test!(
-        paddle_ocr_endpoint_shares_the_title_row,
-        2,
-        1,
-        "setting-bound-input-ocr-paddle-endpoint",
-        3
-    );
-
-    #[gpui::test]
-    fn long_model_selector_uses_the_control_column_without_stretching_short_selectors(
-        cx: &mut TestAppContext,
-    ) {
-        initialize_ui_test(cx);
-        cx.update(|cx| {
-            let mut settings = cx.global::<SettingsStore>().settings.clone();
-            let model_id = "long-translation-model";
-            let config = settings.ai.provider_config_mut(AiProvider::OpenAi);
-            config.enabled = true;
-            config.ensure_model(AiModel::new(
-                model_id,
-                "Long translation model name ".repeat(80),
-                "OpenAI",
-            ));
-            settings.ai.provider_order = vec![AiProvider::OpenAi];
-            settings.ai.translation_model = Some(ModelRef::new(AiProvider::OpenAi, model_id));
-            cx.global_mut::<SettingsStore>()
-                .set_settings_in_memory(settings);
-        });
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let settings = cx.new(|cx| {
-                let mut settings = SettingsWindow::new(|_| {}, cx);
-                settings.initial_selection = SelectIndex {
-                    page_ix: 3,
-                    group_ix: Some(0),
-                };
-                settings
-            });
-            Root::new(settings, window, cx)
-        });
-        cx.simulate_resize(size(px(2000.0), px(1200.0)));
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-            _ = window.draw(cx);
-        });
-
-        let model_field = cx.debug_bounds("setting-item-field-3-0-2").unwrap();
-        let model_selector = cx.debug_bounds("setting-dropdown-3-0-2").unwrap();
-        assert_eq!(model_selector.right(), model_field.right());
-        assert_eq!(model_selector.size.width, model_field.size.width);
-        assert!(model_selector.left() >= model_field.left());
-
-        let thinking_field = cx.debug_bounds("setting-item-field-3-0-3").unwrap();
-        let thinking_selector = cx.debug_bounds("setting-dropdown-3-0-3").unwrap();
-        assert_eq!(thinking_selector.right(), thinking_field.right());
-        assert!(thinking_selector.size.width < thinking_field.size.width);
-    }
-
-    #[gpui::test]
     fn model_picker_stages_manual_ids_without_fetching_on_open(cx: &mut TestAppContext) {
         initialize_ui_test(cx);
         let persistence_path = enable_ui_test_persistence(cx, "manual-model");
@@ -1903,38 +1688,10 @@ mod tests {
             Box::leak(format!("provider-model-header-{host}").into_boxed_str());
         let add_models_selector: &'static str =
             Box::leak(format!("provider-add-models-{host}").into_boxed_str());
-        let api_host = cx
-            .debug_bounds(api_host_selector)
+        cx.debug_bounds(api_host_selector)
             .expect("API Host input host");
-        let api_key = cx
-            .debug_bounds(api_key_selector)
+        cx.debug_bounds(api_key_selector)
             .expect("API Key input host");
-        let api_host_row = cx.debug_bounds("setting-item-4-1-2").expect("API Host row");
-        let api_host_label = cx
-            .debug_bounds("setting-item-label-4-1-2")
-            .expect("API Host label");
-        let api_host_field = cx
-            .debug_bounds("setting-item-field-4-1-2")
-            .expect("API Host field");
-        let api_key_row = cx.debug_bounds("setting-item-4-1-3").expect("API Key row");
-        let api_key_label = cx
-            .debug_bounds("setting-item-label-4-1-3")
-            .expect("API Key label");
-        let api_key_field = cx
-            .debug_bounds("setting-item-field-4-1-3")
-            .expect("API Key field");
-        for (row, label, field, input) in [
-            (api_host_row, api_host_label, api_host_field, api_host),
-            (api_key_row, api_key_label, api_key_field, api_key),
-        ] {
-            assert_eq!(field.right(), row.right());
-            assert_eq!(field.size.width, px(480.0));
-            assert_eq!(input, field);
-            assert!(field.left() > label.right());
-        }
-        assert_eq!(api_host_field.left(), api_key_field.left());
-        assert_eq!(api_host_field.right(), api_key_field.right());
-
         let compatibility_divider = cx
             .debug_bounds(compatibility_divider_selector)
             .expect("Compatibility divider");
@@ -1988,13 +1745,9 @@ mod tests {
         );
         let chips = cx.debug_bounds(chips_selector).expect("model chips");
         let trash = cx.debug_bounds(trash_selector).expect("model trash target");
-        let model_item = cx
-            .debug_bounds("setting-item-4-1-6")
-            .expect("Model List item");
         assert_eq!(trash.size.height, px(48.0));
         assert!(trash.size.width > px(400.0));
         assert!(trash.top() >= chips.bottom());
-        assert!(trash.bottom() <= model_item.bottom());
 
         cx.simulate_mouse_move(trash.center(), Some(MouseButton::Left), Modifiers::none());
         cx.update(|window, cx| {

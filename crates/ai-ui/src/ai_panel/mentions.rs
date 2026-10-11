@@ -308,128 +308,6 @@ impl AiPanel {
     }
 }
 
-const MENTION_KIND_DATA_KEY: &str = "glyphst_mention_kind";
-const MENTION_START_DATA_KEY: &str = "glyphst_mention_start";
-const MENTION_END_DATA_KEY: &str = "glyphst_mention_end";
-const MENTION_PAGE_DATA_KEY: &str = "glyphst_mention_page";
-
-fn mention_kind_from_token(token: &str) -> Option<MentionKind> {
-    MentionKind::ALL
-        .into_iter()
-        .find(|kind| kind.token() == token)
-}
-
-fn empty_completions() -> Task<Result<CompletionResponse>> {
-    Task::ready(Ok(CompletionResponse::Array(Vec::new())))
-}
-
-impl CompletionProvider for MentionCompletionProvider {
-    fn completions(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _: CompletionContext,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> Task<Result<CompletionResponse>> {
-        let Some(panel) = self.panel.upgrade() else {
-            return empty_completions();
-        };
-        let panel = panel.read(cx);
-        let content = text.to_string();
-        let Some(source_range) = active_mention_range(
-            &content,
-            offset.min(content.len()),
-            &panel.composer_mentions,
-        ) else {
-            return empty_completions();
-        };
-        let query_start = source_range.start + '@'.len_utf8();
-        if query_start > source_range.end {
-            return empty_completions();
-        }
-
-        let query = &content[query_start..source_range.end];
-        let (has_selection, has_region, has_selected_pages) =
-            panel.current_mention_availability(cx);
-        let page_count = panel.page_count;
-        let page = panel.current_page.clamp(1, page_count.max(1));
-        let candidates = mention_matches(query)
-            .into_iter()
-            .filter(|candidate| {
-                mention_is_available(
-                    candidate.kind,
-                    page_count,
-                    has_selection,
-                    has_region,
-                    has_selected_pages,
-                )
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return empty_completions();
-        }
-
-        let edit_range = LspRange {
-            start: text.offset_to_position(source_range.start),
-            end: text.offset_to_position(source_range.end),
-        };
-        let items = candidates
-            .into_iter()
-            .map(|candidate| {
-                let kind = candidate.kind;
-                let token = if kind.requires_page_number() {
-                    MentionReference::new(kind, Some(page)).display_text()
-                } else {
-                    kind.token().to_string()
-                };
-                let (new_text, mention_range) =
-                    mention_insertion_text(&content, &source_range, &token);
-                CompletionItem {
-                    label: kind.token().to_string(),
-                    detail: Some(kind.description()),
-                    filter_text: Some(kind.token().to_string()),
-                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                        range: edit_range,
-                        new_text,
-                    })),
-                    data: Some(serde_json::json!({
-                        "glyphst_mention_kind": kind.token(),
-                        "glyphst_mention_start": mention_range.start,
-                        "glyphst_mention_end": mention_range.end,
-                        "glyphst_mention_page": kind.requires_page_number().then_some(page),
-                    })),
-                    ..Default::default()
-                }
-            })
-            .collect();
-        Task::ready(Ok(CompletionResponse::Array(items)))
-    }
-
-    fn completion_trigger_range(
-        &self,
-        text: &Rope,
-        cursor: usize,
-        _: CompletionTriggerEvent<'_>,
-        cx: &mut App,
-    ) -> Option<Range<usize>> {
-        let panel = self.panel.upgrade()?;
-        let panel = panel.read(cx);
-        active_mention_range(
-            &text.to_string(),
-            cursor.min(text.len()),
-            &panel.composer_mentions,
-        )
-    }
-
-    fn completion_menu_options(&self) -> CompletionMenuOptions {
-        CompletionMenuOptions {
-            min_width: px(MENTION_COMPLETION_MIN_WIDTH),
-            max_width: px(MENTION_COMPLETION_MAX_WIDTH),
-        }
-    }
-}
-
 impl AiPanel {
     fn current_region_snapshot(&self, cx: &App) -> Option<RegionImageReference> {
         self.context_provider
@@ -521,13 +399,11 @@ impl AiPanel {
 
         let cursor = self.cursor_offset(cx).min(self.content.len());
         self.invalidate_mention_preview();
-        let inserted_span = self.insert_mention_at_range(mention, cursor..cursor, cx);
+        let page = self.current_page.clamp(1, self.page_count.max(1));
+        let reference =
+            MentionReference::new(mention, mention.requires_page_number().then_some(page));
+        self.insert_mention_at_range(reference, cursor..cursor, cx);
         self.sync_composer_input(window, cx);
-        if let Some(span_range) = inserted_span {
-            self.active_composer_input().update(cx, |input, cx| {
-                input.activate_span_edit(span_range, window, cx);
-            });
-        }
     }
 
     fn capture_mention(
@@ -563,31 +439,25 @@ impl AiPanel {
 
     fn insert_mention_at_range(
         &mut self,
-        mention: MentionKind,
+        reference: MentionReference,
         range: Range<usize>,
         cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        let Some(captured) = self.capture_mention(mention, cx) else {
+    ) {
+        let Some(captured) = self.capture_mention(reference.kind, cx) else {
             cx.notify();
-            return None;
-        };
-        let page = self.current_page.clamp(1, self.page_count.max(1));
-        let token = if mention.requires_page_number() {
-            MentionReference::new(mention, Some(page)).display_text()
-        } else {
-            mention.token().to_string()
+            return;
         };
         let (new_text, relative_mention_range) =
-            mention_insertion_text(&self.content, &range, &token);
+            mention_insertion_text(&self.content, &range, &reference.display_text());
         let mention_start = range.start + relative_mention_range.start;
         let mention_end = range.start + relative_mention_range.end;
         let insertion_start = range.start;
         self.apply_regular_edit(range, &new_text);
-        let reference =
-            MentionReference::new(mention, mention.requires_page_number().then_some(page));
+        let token_id = self.new_mention_token_id();
         self.composer_mentions.push(ComposerMention {
             reference,
             range: mention_start..mention_end,
+            token_id,
             captured,
         });
         self.composer_mentions
@@ -597,9 +467,130 @@ impl AiPanel {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
-        mention
-            .requires_page_number()
-            .then_some(mention_start..mention_end)
+    }
+
+    fn new_mention_token_id(&mut self) -> SharedString {
+        self.next_mention_token += 1;
+        format!("mention:{}", self.next_mention_token).into()
+    }
+
+    /// Give every mention without a token ID (rebuilt from a sent message)
+    /// a fresh one, so each composer token maps back to exactly one mention.
+    pub(super) fn assign_mention_token_ids(&mut self) {
+        for ix in 0..self.composer_mentions.len() {
+            if self.composer_mentions[ix].token_id.is_empty() {
+                let token_id = self.new_mention_token_id();
+                self.composer_mentions[ix].token_id = token_id;
+            }
+        }
+    }
+
+    fn mention_token(mention: &ComposerMention) -> InlineToken {
+        let label = match mention.reference.page {
+            Some(page) if mention.reference.kind.requires_page_number() => {
+                format!("{} {page}", mention.reference.kind.label())
+            }
+            _ => mention.reference.kind.label().to_string(),
+        };
+        InlineToken::new(mention.token_id.clone(), mention.reference.display_text())
+            .with_label(label)
+    }
+
+    /// The composer text with one inline token per mention, as the input
+    /// should show it.
+    pub(super) fn composer_input_content(&self) -> InputContent {
+        self.composer_mentions.iter().fold(
+            InputContent::new(self.content.clone()),
+            |content, mention| {
+                content
+                    .with_token(mention.range.clone(), Self::mention_token(mention))
+                    .unwrap_or_else(|_| InputContent::new(self.content.clone()))
+            },
+        )
+    }
+
+    /// Re-read mention ranges from the input's tokens after the user edited
+    /// the text. A mention whose token was deleted is dropped.
+    pub(super) fn sync_mentions_from_input(&mut self, content: &InputContent) {
+        self.composer_mentions.retain_mut(|mention| {
+            let Some(span) = content
+                .tokens()
+                .iter()
+                .find(|span| span.token().id() == &mention.token_id)
+            else {
+                return false;
+            };
+            mention.range = span.range();
+            true
+        });
+        self.composer_mentions
+            .sort_by_key(|composer_mention| composer_mention.range.start);
+    }
+
+    /// Show, update or hide the `@` menu for the caret position.
+    pub(super) fn refresh_mention_menu(&mut self, cx: &App) {
+        let cursor = self.selected_range.end.min(self.content.len());
+        let Some(range) = (self.selected_range.is_empty())
+            .then(|| active_mention_range(&self.content, cursor, &self.composer_mentions))
+            .flatten()
+        else {
+            self.mention_menu = None;
+            return;
+        };
+        let query = &self.content[range.start + '@'.len_utf8()..range.end];
+        let (has_selection, has_region, has_selected_pages) = self.current_mention_availability(cx);
+        let page_count = self.page_count;
+        let candidates = mention_menu_candidates(query, self.current_page, page_count, |kind| {
+            mention_is_available(
+                kind,
+                page_count,
+                has_selection,
+                has_region,
+                has_selected_pages,
+            )
+        });
+        if candidates.is_empty() {
+            self.mention_menu = None;
+            return;
+        }
+        let selected = self
+            .mention_menu
+            .as_ref()
+            .filter(|menu| menu.range.start == range.start)
+            .map_or(0, |menu| menu.selected.min(candidates.len() - 1));
+        self.mention_menu = Some(MentionMenu {
+            range,
+            candidates,
+            selected,
+        });
+    }
+
+    pub(super) fn move_mention_menu_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(menu) = self.mention_menu.as_mut() {
+            let len = menu.candidates.len() as isize;
+            menu.selected = (menu.selected as isize + delta).rem_euclid(len) as usize;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn accept_mention_menu(
+        &mut self,
+        index: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.mention_menu.take() else {
+            return;
+        };
+        let Some(reference) = menu.candidates.get(index.unwrap_or(menu.selected)).copied() else {
+            return;
+        };
+        if reference.kind.requires_fixed_layout() {
+            self.update_current_page(cx);
+        }
+        self.invalidate_mention_preview();
+        self.insert_mention_at_range(reference, menu.range, cx);
+        self.sync_composer_input(window, cx);
     }
 
     pub(super) fn mention_icon(kind: MentionKind) -> IconName {
@@ -608,64 +599,5 @@ impl AiPanel {
         } else {
             IconName::FileText
         }
-    }
-
-    pub(super) fn composer_input_spans(&self) -> Vec<InputSpan> {
-        self.composer_mentions
-            .iter()
-            .map(|mention| {
-                let span = InputSpan::new(mention.range.clone(), mention.reference.kind.label())
-                    .icon(Self::mention_icon(mention.reference.kind));
-                if let Some(digits) = composer_page_digits_range(mention) {
-                    span.editable_unsigned_integer(digits, 1, self.page_count.max(1))
-                } else {
-                    span
-                }
-            })
-            .collect()
-    }
-
-    pub(super) fn record_accepted_mention(
-        &mut self,
-        item: &CompletionItem,
-        inserted_range: &Range<usize>,
-        cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        let data = item.data.as_ref().and_then(serde_json::Value::as_object)?;
-        let kind = data
-            .get(MENTION_KIND_DATA_KEY)
-            .and_then(serde_json::Value::as_str)
-            .and_then(mention_kind_from_token)?;
-        let relative_start = data
-            .get(MENTION_START_DATA_KEY)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())?;
-        let relative_end = data
-            .get(MENTION_END_DATA_KEY)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())?;
-        let start = inserted_range.start.checked_add(relative_start)?;
-        let end = inserted_range.start.checked_add(relative_end)?;
-        if start > end || end > inserted_range.end || end > self.content.len() {
-            return None;
-        }
-        let captured = self.capture_mention(kind, cx)?;
-        let page = data
-            .get(MENTION_PAGE_DATA_KEY)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok());
-        if kind.requires_page_number() && page.is_none() {
-            return None;
-        }
-
-        self.composer_mentions.push(ComposerMention {
-            reference: MentionReference::new(kind, page),
-            range: start..end,
-            captured,
-        });
-        self.composer_mentions
-            .sort_by_key(|composer_mention| composer_mention.range.start);
-        cx.notify();
-        kind.requires_page_number().then_some(start..end)
     }
 }

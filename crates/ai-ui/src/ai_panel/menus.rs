@@ -18,8 +18,8 @@ impl AiPanel {
             is_user: message.role == Role::User,
             can_mutate: !self.loading && self.editing_turn.is_none(),
             has_later_messages: message_index + 1 < self.messages.len(),
-            selected_text: request.selected_text,
-            link_url: request.link_url,
+            selected_text: request.selected_text().cloned(),
+            link_url: request.link_url().cloned(),
         };
         let panel = cx.entity();
         let action_context = self.focus_handle.clone();
@@ -41,7 +41,7 @@ impl AiPanel {
         })
         .detach();
         self.message_context_menu = Some(MessageContextMenu {
-            position: request.position,
+            position: request.position(),
             popup: popup.clone(),
         });
         popup.focus_handle(cx).focus(window, cx);
@@ -166,6 +166,7 @@ impl AiPanel {
     }
     pub(super) fn close_composer_menus(&mut self) {
         self.model_search_query = SharedString::default();
+        self.mention_menu = None;
     }
 
     fn select_model(&mut self, provider: AiProvider, model: String, cx: &mut Context<Self>) {
