@@ -410,3 +410,57 @@ fn keyboard_resize_moves_the_divider_by_a_step(cx: &mut TestAppContext) {
     });
     assert!((reset[0].as_f32() - reset[1].as_f32()).abs() < 1.0);
 }
+
+#[gpui::test]
+fn a_tab_dropped_on_another_window_moves_there(cx: &mut TestAppContext) {
+    let (source, source_cx) = workspace_with_tabs(2, cx);
+    let (source_area, tab) = source.read_with(source_cx, |workspace, cx| {
+        (
+            workspace.dock_area.entity_id(),
+            workspace.active_pane(cx).tab_ids()[0],
+        )
+    });
+
+    let callbacks = WorkspaceCallbacks {
+        open_workspace_window: unavailable_workspace_window,
+        open_settings_window: |_| {},
+    };
+    let (root, destination_cx) = cx.add_window_view(move |window, cx| {
+        let workspace = cx.new(|cx| Workspace::new_empty(callbacks, window, cx));
+        Root::new(workspace, window, cx)
+    });
+    let destination = root.read_with(destination_cx, |root, _| {
+        root.view().clone().downcast::<Workspace>().unwrap()
+    });
+    destination.update_in(destination_cx, |workspace, window, cx| {
+        let pane = workspace.active_pane;
+        workspace.open_new_tab_in_pane(pane, window, cx);
+    });
+    draw(destination_cx);
+    let target = destination.read_with(destination_cx, |workspace, _| workspace.active_pane);
+
+    destination.update_in(destination_cx, |workspace, window, cx| {
+        workspace.handle_panel_drop(
+            panel_id(tab),
+            Some(source_area),
+            InsertTarget::Tabs {
+                node: target.node(),
+                ix: None,
+                activate: true,
+            },
+            window,
+            cx,
+        );
+    });
+    draw(destination_cx);
+
+    destination.read_with(destination_cx, |workspace, cx| {
+        let pane = workspace.pane(target, cx);
+        assert_eq!(pane.len(), 2);
+        assert_eq!(pane.active_tab_id(), Some(tab));
+    });
+    source.read_with(cx, |workspace, cx| {
+        assert_eq!(workspace.active_pane(cx).len(), 1);
+        assert!(workspace.tab_item(tab, cx).is_none());
+    });
+}

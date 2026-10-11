@@ -9,46 +9,27 @@ rather than appending a progress history. Evidence below was reviewed on
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. Workspace layout on GPUI Kit dock
+## 1. Workspace layout smoke test
 
-**Owner:** `workspace` (panes, tabs, docks, session), with GPUI Kit fork patches
-where the dock lacks a capability.
+**Owner:** `workspace`.
 
-**Current evidence:** A component audit on 2026-10-11 found the rest of the UI
-layer already built on GPUI Kit: `ui::picker` renders through Kit `List` and
-`Input`, `ui::scrollbar` wraps Kit `Scrollbar`, `ui::markdown` wraps
-`TextView`, prompts and dialogs use Kit dialogs, and the settings window uses
-Kit setting items. `activity`, `sticky_items` and `entry_selection` are
-application behaviour without a Kit counterpart. The remaining duplication is
-the workspace's own layout system: `pane.rs` (3.9k lines), `workspace/docks.rs`,
-`synchronized_tabs.rs`, `workspace/synchronized_connections.rs` and
-`workspace/session.rs`, with about 4.7k lines of tests. GPUI Kit 0.7.1 ships a
-docking system (`gpui_base::dock`: `DockArea`, `LayoutTree`, `TabGroup`,
-`Panel`, `PanelRegistry`, drag with edge drop zones, zoom, `dump`/`load`) and a
-replaceable presentation (`DockAreaRenderer`).
+**Current evidence:** Panes and tabs run on the GPUI Kit dock (`DockArea`
+center, `TabItem` panels, the `pane::render` skin; GPUI Kit fork patch
+`dock: Let the host place, move and veto panel drops`). The session format is
+unchanged. Workspace tests drive tab drops, edge splits, synchronized-group
+vetoes, swaps, moves to a border, keyboard resizing, closing, restore and a
+move between windows through the host drop path. They do not cover pointer
+drags through the dock's drop zones, tear-off on Wayland, or the look of the
+pane cards and drop previews. The side docks stay the workspace's own: they
+show the active document's sidebar and the AI panel, not dockable panels.
 
-| Workspace feature | Kit dock mapping |
-| --- | --- |
-| Pane with document, new-tab and loading tabs | `TabGroup`; each tab view implements `Panel`/`PanelView` |
-| Nested splits, ratios, reset | Center `LayoutTree` splits, `split_at`, `set_split_sizes` |
-| Tab drag between panes and edge split | Built-in panel drag, `move_panel`, edge drop zones |
-| Tab title, suffix, menu | `Panel::title`, `title_suffix`, `dropdown_menu` |
-| Left document sidebar, right AI dock | `DockPlacement::Left`/`Right`, `toggle_dock`, `set_dock_size` |
-| Active outline, dimmed inactive panes, synchronized connection lines | An application `DockAreaRenderer` that also records tab bounds |
-| Session restore (`ReaderPaneTree`) | `DockAreaState` via `dump`/`load` and a `PanelRegistry`; format may change |
+**Next step:** The user runs `cargo run -p glyphst-reader --release -- <pdf>`
+and checks splits; dragging tabs within a pane, between panes and to edges;
+tearing a tab off and dragging it back; synchronized tabs and their lines;
+zen mode; the tab context menu; a password-protected PDF; and session restore
+after quitting.
 
-**Gaps to resolve:** dock open/close is not animated (the current docks
-tween their width); zen mode must hide tab bars through the renderer; restored
-documents open asynchronously, so a panel must exist before its document loads.
-
-**Next step:** Implement in the order side docks, tab panels, center splits,
-synchronized tabs and connections on the renderer, then session state, keeping
-`script/check.sh quick` green at each step and rewriting pane tests against the
-Kit dock.
-
-**Done when:** `pane.rs`, `PaneGroup` and the custom dock code are gone, every
-listed feature works on the Kit dock, session restore round-trips, and the
-user's smoke test of splits, tab drag, docks and synchronized tabs passes.
+**Done when:** that smoke test passes, or its findings are fixed with tests.
 
 ## 2. Long-document coordinate precision
 

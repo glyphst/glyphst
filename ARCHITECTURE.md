@@ -5,7 +5,7 @@
 | Owner | Responsibility |
 | --- | --- |
 | `reader`, `files` | Application entry points |
-| `workspace` | Panes, tabs, home/library browsing, window commands |
+| `workspace` | Panes and tabs (on the GPUI Kit dock), side docks, home/library browsing, window commands |
 | `document-ui` | Document views, interaction, and UI task lifetimes |
 | `ui`, `actions`, `keymap` | Shared widgets and application input |
 | `settings`, `settings-ui` | Settings data and its editor |
