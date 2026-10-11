@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use super::*;
 
@@ -36,8 +36,29 @@ impl TranslationCache {
         if !path.exists() {
             create_private_cache_file(path)?;
         }
-        let database =
-            Database::create(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let (database, replaced) = match Database::create(path) {
+            Ok(database) => (database, None),
+            Err(redb::DatabaseError::UpgradeRequired(version)) => {
+                // The cache is disposable, but keep the old file rather than
+                // deleting it; a fresh cache replaces it.
+                let aside = path.with_extension(format!("redb{version}-format"));
+                fs::rename(path, &aside)
+                    .with_context(|| format!("failed to move {} aside", path.display()))?;
+                create_private_cache_file(path)?;
+                let database = Database::create(path)
+                    .with_context(|| format!("failed to create {}", path.display()))?;
+                (database, Some(aside))
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to open {}", path.display()));
+            }
+        };
+        if let Some(aside) = replaced {
+            eprintln!(
+                "translation cache used an older database format; kept it at {}",
+                aside.display()
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

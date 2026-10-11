@@ -17,7 +17,7 @@ pub use glyphst_core::{
     HighlightColor, RegionImageReference, SemanticTextAnchor,
 };
 use gpui::Global;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

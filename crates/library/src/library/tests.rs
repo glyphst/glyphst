@@ -2724,3 +2724,26 @@ fn history_path_keys_do_not_collide_for_non_utf8_paths() {
 
     let _ = fs::remove_file(database_path);
 }
+
+#[test]
+fn an_older_redb_format_is_kept_aside_and_replaced() {
+    let path = temp_library_path("older-redb-format");
+    Database::create(&path).unwrap();
+    // Mark both transaction slots as redb file format 2, which redb 4 refuses
+    // with `UpgradeRequired` before reading anything else.
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[64] = 2;
+    bytes[64 + 128] = 2;
+    fs::write(&path, &bytes).unwrap();
+
+    let store = LibraryStore::open_for_test(path.clone()).unwrap();
+    assert!(store.startup_error().is_none());
+    let aside = path.with_extension("redb2-format");
+    assert_eq!(fs::read(&aside).unwrap(), bytes);
+
+    drop(store);
+    assert!(Database::open(&path).is_ok());
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&aside);
+    let _ = fs::remove_dir_all(path.with_extension("managed-library"));
+}

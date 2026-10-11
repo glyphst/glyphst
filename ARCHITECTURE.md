@@ -46,6 +46,11 @@ schema metadata is rejected without modification. Table names, serialization
 keys, schema metadata, managed-library layout, and current-format decode
 fallbacks are compatibility contracts.
 
+Glyphst carries no database migrations; there are no external users to
+preserve data for. When redb reports a file from an older file format
+(`UpgradeRequired`), the library and the translation cache rename it aside as
+`<name>.redb<version>-format` (never deleting it) and start a fresh database.
+
 ## Dependency maintenance
 
 [Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin GPUI to an exact

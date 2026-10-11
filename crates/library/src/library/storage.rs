@@ -70,12 +70,13 @@ impl LibraryStore {
             create_private_directory(parent)?;
         }
 
-        let database = if path.exists() {
-            Database::open(&path).with_context(|| format!("failed to open {}", path.display()))?
-        } else {
-            Database::create(&path)
-                .with_context(|| format!("failed to create {}", path.display()))?
-        };
+        let (database, replaced) = open_replacing_old_format(&path)?;
+        if let Some(aside) = replaced {
+            eprintln!(
+                "document library used an older database format; kept it at {} and started a new library",
+                aside.display()
+            );
+        }
         restrict_library_file(&path)?;
         ensure_current_tables(&database)?;
         ensure_managed_library_directories(&managed_library_root)?;
@@ -632,4 +633,39 @@ fn write_catalog_tables(
         }
     }
     Ok(())
+}
+
+/// Open a database, or replace one written in an older redb file format.
+///
+/// redb 4 cannot read files from redb 2 and Glyphst carries no migration, so
+/// such a file is renamed aside (never deleted) and a fresh database is
+/// created in its place. Returns the renamed file's path when that happened.
+pub(super) fn open_replacing_old_format(path: &Path) -> Result<(Database, Option<PathBuf>)> {
+    let opened = if path.exists() {
+        Database::open(path)
+    } else {
+        Database::create(path)
+    };
+    match opened {
+        Ok(database) => Ok((database, None)),
+        Err(redb::DatabaseError::UpgradeRequired(version)) => {
+            let mut aside = path.with_extension(format!("redb{version}-format"));
+            let mut suffix = 1;
+            while aside.exists() {
+                aside = path.with_extension(format!("redb{version}-format-{suffix}"));
+                suffix += 1;
+            }
+            fs::rename(path, &aside).with_context(|| {
+                format!(
+                    "failed to move {} aside to {}",
+                    path.display(),
+                    aside.display()
+                )
+            })?;
+            let database = Database::create(path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+            Ok((database, Some(aside)))
+        }
+        Err(error) => Err(error).with_context(|| format!("failed to open {}", path.display())),
+    }
 }

@@ -20,8 +20,8 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 - Preserve task ownership, cancellation, paint order, and render-cache limits
   when changing page rendering.
 - The library's production current-format opener also serves tests through
-  `LibraryStore::open_for_test`. Cleanup must not change on-disk formats or
-  restore obsolete migrators.
+  `LibraryStore::open_for_test`. Do not add migrators; a format change must keep
+  the old file (see the library persistence notes in ARCHITECTURE.md).
 - Normal builds use published pins: GPUI from the exact `gpui-pre` snapshot GPUI
   Kit requires, GPUI Kit from its fork. Preserve the GPUI Kit Rust aliases; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
   when working on maintained forks. `references/` contains read-only reference
