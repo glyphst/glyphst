@@ -38,7 +38,6 @@ impl DocumentView {
         reduce_motion: bool,
         window: &mut Window,
     ) -> PaintData {
-        let link_invert_overlays = self.link_invert_overlays(&pages);
         let (highlight_overlays, selected_highlight_borders) = self.highlight_overlays();
         let note_underlines = self.note_underlines();
         let selection_highlights = self.selection_highlights();
@@ -68,7 +67,6 @@ impl DocumentView {
 
         PaintData {
             pages,
-            link_invert_overlays,
             diff_flash_overlays,
             highlight_overlays,
             selected_highlight_borders,
@@ -199,89 +197,36 @@ impl DocumentView {
         self.viewport_render_keys.insert(key);
         self.update_render_cache_protection(cx);
 
-        let pdf_render_engine = cx
-            .global::<SettingsStore>()
-            .settings
-            .document_view
-            .pdf_render_engine;
-        let native_pdf =
-            self.format == DocumentFormat::Pdf && pdf_render_engine.uses_native_reader();
-        let native_key = if native_pdf {
-            self.native_gpu_render_key(page_idx, image_bounds, scale_factor)
-        } else {
-            key
-        };
-        let strict_native_pdf =
-            self.format == DocumentFormat::Pdf && pdf_render_engine.is_strict_native();
-        if strict_native_pdf {
-            self.pending_renders.clear();
-        }
-
-        if !native_pdf {
-            for adjacent_page in [
-                page_idx.checked_sub(1),
-                (page_idx + 1 < self.pages.len()).then_some(page_idx + 1),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let scale = self.presentation_scale_for_page(adjacent_page);
-                let image_bounds =
-                    self.presentation_image_bounds_for_page(adjacent_page, bounds, scale);
-                let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
-                let key = self.render_key(adjacent_page, image_bounds, scale_factor);
-                if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
-                    self.request_render(key, cx);
-                }
+        for adjacent_page in [
+            page_idx.checked_sub(1),
+            (page_idx + 1 < self.pages.len()).then_some(page_idx + 1),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let scale = self.presentation_scale_for_page(adjacent_page);
+            let image_bounds =
+                self.presentation_image_bounds_for_page(adjacent_page, bounds, scale);
+            let image_bounds = Self::pixel_aligned_image_bounds(image_bounds, scale_factor);
+            let key = self.render_key(adjacent_page, image_bounds, scale_factor);
+            if key.pixel_count() <= MAX_PREFETCH_RENDER_PIXELS {
+                self.request_render(key, cx);
             }
         }
 
         self.viewport_render_debug.clear();
-        let adjacent_gpu_page = self.prune_native_gpu_pages(&[page_idx], cx);
-        let gpu = self.native_gpu_paint(
-            native_key,
-            image_bounds,
-            bounds,
-            GpuSurfaceIntent::Visible,
-            window,
-            cx,
-        );
-        if let Some(adjacent_page) = adjacent_gpu_page {
-            let adjacent_scale = self.presentation_scale_for_page(adjacent_page);
-            let adjacent_bounds =
-                self.presentation_image_bounds_for_page(adjacent_page, bounds, adjacent_scale);
-            let adjacent_bounds = Self::pixel_aligned_image_bounds(adjacent_bounds, scale_factor);
-            let adjacent_key =
-                self.native_gpu_render_key(adjacent_page, adjacent_bounds, scale_factor);
-            self.warm_native_gpu_surface(
-                adjacent_key,
-                adjacent_bounds,
-                bounds,
-                adjacent_page > page_idx,
-                window,
-                cx,
-            );
-        }
-        let mupdf_allowed = u32::try_from(page_idx)
-            .is_ok_and(|page| self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine));
-        let (image, displayed) = if gpu.is_some() || !mupdf_allowed {
-            (None, None)
-        } else {
-            self.cached_or_request_viewport_render(key, true, cx)
-        };
+        let (image, displayed) = self.cached_or_request_viewport_render(key, true, cx);
         self.viewport_render_debug.insert(
             page_idx,
             ViewportPageRenderDebug {
-                requested: native_key,
+                requested: key,
                 displayed,
             },
         );
         self.assemble_paint_data(
             vec![PaintPage {
-                page_idx,
                 bounds: image_bounds,
                 image,
-                gpu,
             }],
             cx.global::<SettingsStore>().settings.behavior.reduce_motion,
             window,
@@ -307,7 +252,6 @@ impl DocumentView {
         self.viewport_width = viewport_width;
         self.viewport_height = viewport_height;
         if viewport_changed {
-            self.mark_native_gpu_motion(cx);
             self.translation_panel_viewport_changed();
         }
         self.schedule_reflow_for_viewport(viewport_width, cx);
@@ -388,21 +332,7 @@ impl DocumentView {
             .extend(visible_page_renders.iter().map(|(_, _, key)| *key));
         self.update_render_cache_protection(cx);
 
-        let pdf_render_engine = cx
-            .global::<SettingsStore>()
-            .settings
-            .document_view
-            .pdf_render_engine;
-        let native_pdf =
-            self.format == DocumentFormat::Pdf && pdf_render_engine.uses_native_reader();
-        let strict_native_pdf =
-            self.format == DocumentFormat::Pdf && pdf_render_engine.is_strict_native();
-        if strict_native_pdf {
-            self.pending_renders.clear();
-        }
-
-        if !native_pdf
-            && !self.dock_snapshot.layout_motion_active
+        if !self.dock_snapshot.layout_motion_active
             && let (Some((first, _, _)), Some((last, _, _))) =
                 (visible_page_renders.first(), visible_page_renders.last())
         {
@@ -422,45 +352,18 @@ impl DocumentView {
         }
 
         self.viewport_render_debug.clear();
-        let adjacent_gpu_page = self.prune_native_gpu_pages(&visible_pages, cx);
-        let adjacent_gpu_render = adjacent_gpu_page.map(|page_idx| {
-            let (image_bounds, key) =
-                self.image_bounds_and_render_key(page_idx, bounds, scale, scale_factor);
-            let forward = visible_pages.last().is_none_or(|last| page_idx > *last);
-            (key, image_bounds, forward)
-        });
         let mut pages = Vec::with_capacity(visible_page_renders.len());
         let mut has_rendered_page = false;
         for (page_idx, image_bounds, key) in visible_page_renders {
-            let native_key = if native_pdf {
-                self.native_gpu_render_key(page_idx, image_bounds, scale_factor)
-            } else {
-                key
-            };
-            let gpu = self.native_gpu_paint(
-                native_key,
-                image_bounds,
-                bounds,
-                GpuSurfaceIntent::Visible,
-                window,
+            let (image, fallback_key) = self.cached_or_request_viewport_render(
+                key,
+                !self.dock_snapshot.layout_motion_active,
                 cx,
             );
-            let mupdf_allowed = u32::try_from(page_idx).is_ok_and(|page| {
-                self.native_gpu_mupdf_placeholder_allowed(page, pdf_render_engine)
-            });
-            let (image, fallback_key) = if gpu.is_some() || !mupdf_allowed {
-                (None, None)
-            } else {
-                self.cached_or_request_viewport_render(
-                    key,
-                    !self.dock_snapshot.layout_motion_active,
-                    cx,
-                )
-            };
             self.viewport_render_debug.insert(
                 page_idx,
                 ViewportPageRenderDebug {
-                    requested: native_key,
+                    requested: key,
                     displayed: fallback_key,
                 },
             );
@@ -469,23 +372,17 @@ impl DocumentView {
             {
                 self.viewport_render_keys.insert(fallback_key);
             }
-            has_rendered_page |= image.is_some() || gpu.is_some();
+            has_rendered_page |= image.is_some();
             pages.push(PaintPage {
-                page_idx,
                 bounds: image_bounds,
                 image,
-                gpu,
             });
-        }
-        if let Some((key, image_bounds, forward)) = adjacent_gpu_render {
-            let native_key = self.native_gpu_render_key(key.page_idx, image_bounds, scale_factor);
-            self.warm_native_gpu_surface(native_key, image_bounds, bounds, forward, window, cx);
         }
         // Desired keys were protected before resolution so a final render can
         // land safely. Add the actual fallback keys as well so cache pressure
         // from thumbnails or adjacent pages cannot blank the animated view.
         self.update_render_cache_protection(cx);
-        if has_rendered_page && !strict_native_pdf {
+        if has_rendered_page {
             self.start_text_indexing(cx);
         }
 

@@ -20,9 +20,8 @@ use gpui::{
 use gpui_component::{Root, WindowExt as _};
 
 use super::{
-    PaneEvent, RenderDebugTraceKind, RenderDebugTracePhase, SplitDirection,
-    SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge, SynchronizedConnectionCurve,
-    SynchronizedConnectionGroup, SynchronizedConnectionInvalidReason,
+    PaneEvent, SplitDirection, SynchronizedConnectionAnchor, SynchronizedConnectionAnchorEdge,
+    SynchronizedConnectionCurve, SynchronizedConnectionGroup, SynchronizedConnectionInvalidReason,
     SynchronizedConnectionTabState, ToggleRenderingDebug, ToggleZenMode, Workspace,
     WorkspaceAiContextProvider, WorkspaceCallbacks, WorkspaceMenu, WorkspaceSurfaceMode,
     WorkspaceWindowHandle, WorkspaceWindowRequest, live_translation_pair_is_active,
@@ -599,7 +598,9 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
             .active_render_debug_document(cx)
             .unwrap()
             .update(cx, |document, cx| {
-                assert!(document.prepare_render_debug_trace_position(1, 0.5, cx));
+                for _ in 0..4 {
+                    document.zoom_out(cx);
+                }
             });
         workspace.toggle_rendering_debug(window, cx);
     });
@@ -632,16 +633,13 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
         .and_then(|clipboard| clipboard.text())
         .expect("rendering capture JSON on clipboard");
     let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-    assert_eq!(report["schema_version"], 19);
-    assert_eq!(report["kind"], "glyphst-reader-interaction");
-    assert!(report["application"]["binary_sha256"].is_null());
-    assert!(report["trace"].is_null());
+    assert_eq!(report["schema_version"], 20);
+    assert_eq!(report["kind"], "glyphst-reader-render-capture");
     assert_eq!(
         report["document"]["start"]["source_path"],
         document_path.to_string_lossy().as_ref()
     );
     assert!(report["frames"]["total_frames"].as_u64().unwrap() >= 1);
-    assert!(report["document"]["gpu_counter_delta"].is_object());
     assert_eq!(
         report["document"]["end"]["pages"]
             .as_array()
@@ -672,107 +670,6 @@ fn rendering_debug_capture_copies_a_versioned_pdf_report(cx: &mut TestAppContext
             .and_then(|clipboard| clipboard.text())
             .as_deref(),
         Some(report_text.as_str())
-    );
-
-    fs::remove_file(document_path).unwrap();
-}
-
-#[gpui::test]
-fn scripted_zoom_trace_cancels_safely_and_restores_the_document(cx: &mut TestAppContext) {
-    let document_path = temporary_pdf_path("render-debug-scripted-zoom");
-    write_minimal_pdf(&document_path);
-    cx.update(|cx| {
-        gpui_component::init(cx);
-        cx.set_reduce_motion(true);
-        cx.set_global(SettingsStore::memory());
-        cx.set_global(LibraryStore::memory());
-        cx.set_global(RenderCache::new());
-    });
-    let callbacks = WorkspaceCallbacks {
-        open_workspace_window: unavailable_workspace_window,
-        open_settings_window: ignore_settings_window,
-    };
-    let initial_path = document_path.clone();
-    let (root, cx) = cx.add_window_view(move |window, cx| {
-        let workspace =
-            cx.new(|cx| Workspace::new(Some(initial_path.clone()), None, callbacks, window, cx));
-        Root::new(workspace, window, cx)
-    });
-    let workspace = root.read_with(cx, |root, _| {
-        root.view().clone().downcast::<Workspace>().unwrap()
-    });
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        _ = window.draw(cx);
-    });
-    std::thread::sleep(Duration::from_millis(110));
-    cx.executor().advance_clock(Duration::from_millis(110));
-    cx.run_until_parked();
-    let original_position = workspace.read_with(cx, |workspace, cx| {
-        workspace
-            .active_render_debug_document(cx)
-            .unwrap()
-            .read(cx)
-            .current_document_position()
-    });
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.start_render_debug_trace(RenderDebugTraceKind::Zoom, window, cx);
-        assert!(workspace.rendering_debug_trace.is_some());
-    });
-    for _ in 0..10 {
-        cx.update(|window, cx| {
-            _ = window.simulate_next_frame(cx);
-            window.refresh();
-            _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-        if workspace.read_with(cx, |workspace, _| {
-            workspace
-                .rendering_debug_trace
-                .as_ref()
-                .is_some_and(|trace| trace.phase == RenderDebugTracePhase::Forward)
-        }) {
-            break;
-        }
-    }
-    workspace.update_in(cx, |workspace, window, cx| {
-        assert_eq!(
-            workspace
-                .rendering_debug_trace
-                .as_ref()
-                .map(|trace| trace.phase),
-            Some(RenderDebugTracePhase::Forward)
-        );
-        workspace.finish_render_debug_capture(window, cx);
-    });
-
-    workspace.read_with(cx, |workspace, cx| {
-        assert!(workspace.rendering_debug_trace.is_none());
-        assert!(workspace.rendering_debug_capture.is_none());
-        let restored = workspace
-            .active_render_debug_document(cx)
-            .unwrap()
-            .read(cx)
-            .current_document_position();
-        assert_eq!(restored, original_position);
-    });
-    let report_text = cx
-        .read_from_clipboard()
-        .and_then(|clipboard| clipboard.text())
-        .expect("scripted rendering trace JSON on clipboard");
-    let report: serde_json::Value = serde_json::from_str(&report_text).unwrap();
-    assert_eq!(report["schema_version"], 19);
-    assert_eq!(report["trace"]["version"], 15);
-    assert_eq!(report["trace"]["kind"], "zoom");
-    assert_eq!(report["trace"]["completed_interaction_frames"], 0);
-    assert_eq!(report["trace"]["completed_settling_frames"], 0);
-    assert_eq!(report["trace"]["cancelled"], true);
-    assert!(
-        report["trace"]["failure"]
-            .as_str()
-            .unwrap()
-            .contains("cancelled")
     );
 
     fs::remove_file(document_path).unwrap();

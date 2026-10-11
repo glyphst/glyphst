@@ -138,7 +138,6 @@ impl DocumentView {
             |this, _, cx| this.toggle_grid_overview(cx),
             cx,
         )
-        .disabled(self.strict_native_pdf(cx))
     }
 
     pub(super) fn render_two_column_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -153,7 +152,7 @@ impl DocumentView {
     }
 
     pub(super) fn toggle_region_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.capabilities.page_export || self.grid_overview_open || self.strict_native_pdf(cx) {
+        if !self.capabilities.page_export || self.grid_overview_open {
             return;
         }
         self.region_tool_active = !self.region_tool_active;
@@ -191,7 +190,6 @@ impl DocumentView {
             |this, _, cx| this.toggle_region_selection(cx),
             cx,
         )
-        .disabled(self.strict_native_pdf(cx))
         .tooltip(crate::fl!("pdf-region-select-tooltip"))
     }
 

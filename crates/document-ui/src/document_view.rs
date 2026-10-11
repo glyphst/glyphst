@@ -31,7 +31,7 @@ use crate::scrollbar::{ManualScrollHandle, ScrollbarHandle, WithScrollbar as _};
 use crate::search::{SearchBar, SearchBarSnapshot, SearchEvent};
 use crate::settings::{
     BehaviorSettings, CopyFormat, DocumentProgressDisplay, PageImageQuality, PageTextFormat,
-    PdfRenderEngine, SettingsStore, TranslationBoxCorner, ui_rems,
+    SettingsStore, TranslationBoxCorner, ui_rems,
 };
 use crate::smooth_scroll::advance_toward;
 use crate::theme::Theme;
@@ -59,18 +59,6 @@ use glyphst_pdf::{
     DocumentPassword, DocumentRenderSession, DocumentSnapshot, ReloadCoordinator,
     ReloadDisposition, RetainedDisplayList,
 };
-use glyphst_pdf_gpu::{
-    CancellationToken as GpuCancellationToken, FeatureId as GpuFeatureId, GpuActionResolutionError,
-    GpuDestinationView, GpuDirectRenderOutcome, GpuDirectRenderReceipt, GpuFallbackDiagnostic,
-    GpuFallbackSource, GpuLinkAction, GpuLinkHighlightMode, GpuLinkInteraction, GpuNamedAction,
-    GpuNavigationRoute, GpuOutlineItem, GpuPagePreparationTimings, GpuPagePresentation,
-    GpuPageRegion, GpuPageRenderOptions, GpuPageRenderOutcome, GpuPageRoute, GpuPageTexture,
-    GpuPaintRequest, GpuPatchLodPreparationStats, GpuPdfDocument, GpuPdfRenderer,
-    GpuPreparationStats, GpuRenderStats, GpuWarningDiagnostic, PreparedGpuPage,
-};
-pub use glyphst_pdf_gpu::{
-    GpuDirectRenderSnapshot, GpuPresentationQuality, GpuVectorCoverageStrategy,
-};
 use glyphst_pdf_translation_service::{
     BlockKind, BoundingBox, PdfTranslationPageTextLayer, PdfTranslationSessionRequest,
     source_text_regions,
@@ -93,15 +81,13 @@ use glyphst_ui::{
 };
 use gpui::{
     Anchor, AnyElement, AsyncApp, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, Corners,
-    DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, ExternalGpuDeviceToken,
-    ExternalGpuRenderHandle, ExternalTextureAlphaMode, ExternalTextureColorEffect,
-    ExternalTextureColorSpace, ExternalTextureFilter, ExternalTextureHandle, FocusHandle,
-    Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton,
-    PromptLevel, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Size, StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle,
-    Window, anchored, canvas, deferred, div, fill, hsla, linear_color_stop, linear_gradient,
-    outline, point, prelude::*, px, rgb, rgba, size, transparent_black, uniform_list,
+    DismissEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    Hsla, InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point as GpuiPoint, PromptButton, PromptLevel, Render, RenderImage,
+    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement, Task, TextStyle, UniformListScrollHandle, Window, anchored, canvas,
+    deferred, div, fill, hsla, linear_color_stop, linear_gradient, outline, point, prelude::*, px,
+    rgb, rgba, size, transparent_black, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName as ComponentIconName, IndexPath,
@@ -474,7 +460,6 @@ pub struct RenderCacheDebugSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageRenderDebugStatus {
     Exact,
-    RetainedGpu { exact_pending: bool },
     Fallback { exact_pending: bool },
     Pending,
     Failed,
@@ -516,350 +501,11 @@ pub struct PageRenderTimingDebugSnapshot {
     pub succeeded: bool,
 }
 
-/// Complete-page renderer currently presented for an active PDF page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageRenderBackendDebug {
-    MuPdf,
-    GlyphstGpu,
-    GlyphstPending,
-    GlyphstFailed,
-    MuPdfWhileGpuPending,
-    MuPdfFallback,
-}
-
-/// Metrics emitted by the retained native GPU renderer for its latest frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GpuPageRenderDebugSnapshot {
-    pub cpu_time: Duration,
-    pub frame_pool_wait_time: Duration,
-    pub command_encoding_time: Duration,
-    pub gpu_time: Option<Duration>,
-    pub host_to_device_bytes: u64,
-    pub passes_executed: u64,
-    pub command_buffers: u64,
-    pub vector_batches: u64,
-    pub procedural_stroke_batches: u64,
-    pub render_bundle_runs: u64,
-    pub culled_operations: u64,
-    pub culled_bundle_operations: u64,
-    pub retained_stroke_candidate_references: u64,
-    pub retained_stroke_cull_dispatches: u64,
-    pub retained_stroke_indirect_draws: u64,
-    pub retained_stroke_indirect_runs: u64,
-    pub retained_stroke_global_replay: bool,
-    pub motion_stroke_sample_mask: bool,
-    pub reprojected_frame: bool,
-    pub gradient_draws: u64,
-    pub image_draws: u64,
-    pub patch_lod_required_scale: String,
-    pub patch_lod_available_scale: String,
-    pub patch_lod_deferred: bool,
-    pub vector_lod_requested_scale: String,
-    pub vector_lod_available_scale: String,
-    pub vector_lod_deferred: bool,
-    pub reused_tiles: u64,
-    pub rendered_tiles: u64,
-    pub dirty_tiles: u64,
-    pub refinement_pending: bool,
-    pub presentation_quality: String,
-    pub scheduled_refinement_work: u64,
-    pub refinement_work_budget: u64,
-    pub selected_vector_lod: u32,
-    pub frame_pool_reused: bool,
-    pub frame_pool_grew: bool,
-    pub frame_pool_capacity_bytes: u64,
-    pub clip_state_changes: u64,
-    pub stencil_draws: u64,
-    pub compute_dispatches: u64,
-    pub offscreen_passes: u64,
-    pub mask_passes: u64,
-    pub composite_passes: u64,
-    pub backdrop_copies: u64,
-    pub transient_peak_bytes: u64,
-    pub transient_resident_bytes: u64,
-    pub transient_pool_reuses: u64,
-    pub generation: u64,
-    pub coverage_strategy: String,
-    pub retained_stroke_strategy: String,
-    pub motion_render_mode: String,
-}
-
-/// One page's retained preparation and residency accounting.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GpuPagePreparationDebugSnapshot {
-    pub frontend_preflight: Duration,
-    pub compile: Duration,
-    pub link_conversion: Duration,
-    pub gpu_prepare: Duration,
-    pub total: Duration,
-    pub compiled_cache_hit: bool,
-    pub elapsed: Duration,
-    pub host_to_device_bytes: u64,
-    pub resident_bytes: u64,
-    pub image_textures: u64,
-    pub alpha_textures: u64,
-    pub image_mip_levels: u64,
-    pub alpha_mip_levels: u64,
-    pub image_texture_bytes: u64,
-    pub mip_texture_bytes: u64,
-    pub gradient_tables: u64,
-    pub patch_shading_lod_levels: u64,
-    pub patch_shading_deferred_lod_levels: u64,
-    pub patch_shading_mesh_bytes: u64,
-    pub deferred_patch_lod_elapsed: Duration,
-    pub deferred_patch_lod_levels: u64,
-    pub deferred_patch_lod_bytes: u64,
-    pub vector_batches: u64,
-    pub vector_lod_levels: u64,
-    pub vector_lod_compacted: bool,
-    pub vector_vertices: u64,
-    pub vector_triangle_references: u64,
-    pub vector_reference_bytes: u64,
-    pub vector_compact_reference_lods: u64,
-    pub vector_indexed_reference_lods: u64,
-    pub vector_canonical_indices: u64,
-    pub vector_reference_segments: u64,
-    pub vector_instances: u64,
-    pub vector_bytes: u64,
-    pub procedural_stroke_batches: u64,
-    pub hairline_lod_levels: u64,
-    pub hairline_geometry_records: u64,
-    pub stroke_state_records: u64,
-    pub hairline_primitives: u64,
-    pub hairline_draws: u64,
-    pub hairline_bytes: u64,
-    pub hairline_chunks: u64,
-    pub procedural_stroke_lod_levels: u64,
-    pub procedural_stroke_primitives: u64,
-    pub procedural_stroke_draws: u64,
-    pub procedural_stroke_bytes: u64,
-    pub motion_stroke_lod_levels: u64,
-    pub motion_stroke_coarsest_segments: u64,
-    pub motion_stroke_lod_segments: u64,
-    pub motion_stroke_source_segments: u64,
-    pub motion_stroke_quadratic_segments: u64,
-    pub exact_stroke_segments: u64,
-    pub render_bundle_runs: u64,
-    pub render_bundle_operations: u64,
-    pub camera_program_partitions: u64,
-    pub camera_program_operations: u64,
-    pub retained_operations: u64,
-    pub flattened_opaque_knockout_groups: u64,
-    pub retained_form_resources: u64,
-    pub retained_form_instances: u64,
-    pub retained_type3_glyph_resources: u64,
-    pub retained_type3_glyph_instances: u64,
-    pub retained_tiling_pattern_resources: u64,
-    pub retained_tiling_pattern_instances: u64,
-    pub expanded_tiling_pattern_cells: u64,
-    pub retained_transparency_groups: u64,
-    pub retained_soft_mask_resources: u64,
-    pub retained_soft_mask_instances: u64,
-    pub retained_subscene_nodes: u64,
-    pub expanded_scene_nodes: u64,
-    pub unique_clip_paths: u64,
-    pub analytic_paths: u64,
-    pub analytic_segments: u64,
-    pub analytic_draws: u64,
-    pub analytic_groups: u64,
-    pub analytic_bvh_nodes: u64,
-    pub analytic_bytes: u64,
-    pub analytic_fallback: Option<String>,
-}
-
-/// Bounded native reader/GPU cache occupancy for the current document.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GpuCacheDebugSnapshot {
-    pub frontend_outline_fonts: usize,
-    pub frontend_outline_font_bytes: u64,
-    pub frontend_outline_font_hits: u64,
-    pub frontend_outline_font_misses: u64,
-    pub frontend_outline_font_evictions: u64,
-    pub frontend_objects: usize,
-    pub frontend_object_hits: u64,
-    pub frontend_object_misses: u64,
-    pub frontend_object_evictions: u64,
-    pub frontend_preflight_reports: usize,
-    pub frontend_preflight_scans: u64,
-    pub compiled_pages: usize,
-    pub compiled_page_limit: usize,
-    pub compiled_bytes: u64,
-    pub compiled_byte_limit: u64,
-    pub content_bound_pages: usize,
-    pub content_bound_page_limit: usize,
-    pub prepared_pages: usize,
-    pub prepared_page_limit: usize,
-    pub resident_bytes: u64,
-    pub resident_byte_limit: u64,
-    pub surface_count: usize,
-    pub surface_bytes: u64,
-    pub surface_byte_limit: u64,
-    pub continuity_surface_count: usize,
-    pub continuity_surface_bytes: u64,
-    pub surface_seed_tasks: usize,
-    pub surface_in_flight_bytes: u64,
-    pub surface_render_pending: usize,
-    pub surface_pending_peak: usize,
-    pub surface_renders_started: u64,
-    pub surface_renders_completed: u64,
-    pub surface_renders_coalesced: u64,
-    pub surface_renders_superseded: u64,
-    pub surface_renders_deferred: u64,
-    pub surface_renders_discarded: u64,
-    pub surface_render_cache_pressure: u64,
-    pub surface_scroll_reuses: u64,
-    pub surface_scroll_prefetches: u64,
-    pub surface_scroll_misses: u64,
-    pub surface_sharp_pan_cache_presentations: u64,
-    pub surface_zoom_reuses: u64,
-    pub surface_zoom_quality_refreshes: u64,
-    pub surface_zoom_coverage_refreshes: u64,
-    pub surface_zoom_settled_upgrades: u64,
-    pub surface_zoom_motion_reprojections: u64,
-    pub surface_zoom_motion_refreshes_suppressed: u64,
-    pub surface_zoom_motion_cancellations: u64,
-    pub surface_zoom_emergency_renders: u64,
-    pub surface_zoom_live_redraws: u64,
-    pub surface_zoom_cached_sharp_presentations: u64,
-    pub surface_zoom_live_failures: u64,
-    /// Backward-compatible total count of animation steps denied GPU admission.
-    pub surface_zoom_gpu_holds: u64,
-    pub surface_zoom_animation_steps: u64,
-    pub surface_zoom_admission_holds: u64,
-    pub surface_zoom_worker_holds: u64,
-    pub surface_zoom_sample_holds: u64,
-    pub surface_zoom_presentation_holds: u64,
-    pub surface_zoom_scaled_presentations: u64,
-    pub surface_zoom_target_reuses: u64,
-    pub surface_zoom_target_allocations: u64,
-    pub motion_render_jobs_started: u64,
-    pub motion_render_jobs_completed: u64,
-    pub motion_render_jobs_superseded: u64,
-    pub motion_render_jobs_pending: usize,
-    pub motion_render_jobs_peak: usize,
-    pub motion_render_detached_target_reuses: u64,
-    pub motion_render_inline_frames: u64,
-    pub motion_render_inline_failures: u64,
-    pub motion_render_callback_scheduled: u64,
-    pub motion_render_callback_executed: u64,
-    pub motion_render_callback_encoded: u64,
-    pub motion_render_callback_superseded: u64,
-    pub motion_render_callback_failures: u64,
-    pub motion_render_callback_scheduled_camera_serial: u64,
-    pub motion_render_callback_executed_camera_serial: u64,
-    pub motion_render_callback_encoded_camera_serial: u64,
-    pub motion_render_callback_cpu_time: Duration,
-    pub motion_render_callback_frame_pool_wait_time: Duration,
-    pub motion_render_callback_command_encoding_time: Duration,
-    pub motion_render_callback_frame_pool_grew: bool,
-    pub motion_render_callback_frame_pool_capacity_bytes: u64,
-    pub motion_render_callback_target_size: [u32; 2],
-    pub motion_render_callback_passes_executed: u64,
-    pub motion_render_callback_coverage_strategy: Option<GpuVectorCoverageStrategy>,
-    pub motion_render_callback_presentation_quality: Option<GpuPresentationQuality>,
-    pub motion_render_callback_transient_peak_bytes: u64,
-    pub motion_render_callback_transient_resident_bytes: u64,
-    pub motion_render_callback_render_bundle_runs: u64,
-    pub motion_render_callback_stencil_draws: u64,
-    pub motion_render_callback_retained_stroke_candidate_references: u64,
-    pub motion_render_callback_retained_stroke_cull_dispatches: u64,
-    pub motion_render_callback_retained_stroke_indirect_draws: u64,
-    pub motion_render_callback_retained_stroke_indirect_runs: u64,
-    pub motion_render_callback_selected_stroke_lod: u32,
-    pub motion_render_callback_active_stroke_lod_levels: u64,
-    pub motion_render_callback_selected_stroke_segments: u64,
-    pub motion_render_callback_target_visible_stroke_segments: u64,
-    pub motion_render_callback_visible_stroke_tiles: u64,
-    pub motion_render_callback_max_visible_stroke_tile_segments: u64,
-    pub camera_pan_inline_frames: u64,
-    pub camera_pan_admission_holds: u64,
-    pub motion_render_camera_serial: u64,
-    pub motion_render_presented_camera_serial: u64,
-    pub motion_render_camera_serial_mismatches: u64,
-    pub motion_render_camera_batch_commits: u64,
-    pub camera_target_reservations_started: u64,
-    pub camera_target_reservations_consumed: u64,
-    pub camera_target_reservations_released: u64,
-    pub camera_target_reservations_pending: usize,
-    pub motion_render_queue_latency_p95: Duration,
-    pub motion_render_queue_latency_max: Duration,
-    pub motion_render_execution_latency_p95: Duration,
-    pub motion_render_execution_latency_max: Duration,
-    pub motion_render_total_latency_p95: Duration,
-    pub motion_render_total_latency_max: Duration,
-    pub surface_warm_requests: u64,
-    pub surface_warm_hits: u64,
-    pub surface_warm_pages: usize,
-    pub surface_continuity_requests: u64,
-    pub surface_continuity_completed: u64,
-    pub surface_continuity_hits: u64,
-    pub surface_partial_reuses: u64,
-    pub surface_presentation_gaps: u64,
-    pub surface_incomplete_suppressed: u64,
-    pub surface_refinement_submissions: u64,
-    pub surface_atomic_swaps: u64,
-    pub surface_queue_latency_p95: Duration,
-    pub surface_ready_latency_p95: Duration,
-    pub surface_present_latency_p95: Duration,
-    /// Presented pages whose latest visible render still requests refinement.
-    pub refinement_pages: usize,
-    /// All retained pages with latent incremental tiles, including offscreen cache entries.
-    pub retained_refinement_pages: usize,
-    pub active_preparations: usize,
-    pub queued_preparations: usize,
-    pub speculative_preparations: usize,
-    pub completed_preparations: u64,
-    pub cancelled_preparations: u64,
-    pub motion_active: bool,
-    pub zoom_motion_active: bool,
-}
-
-/// One exact semantic or capability reason for routing the whole page to MuPDF.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GpuFallbackDebugSnapshot {
-    pub feature: String,
-    pub code: String,
-    pub message: String,
-    pub source: &'static str,
-}
-
-/// One deterministic native frontend repair that did not require fallback.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GpuWarningDebugSnapshot {
-    pub feature: String,
-    pub code: String,
-    pub message: String,
-}
-
-/// Geometry and source chosen for the latest native page paint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GpuPresentationDebugSnapshot {
-    pub source: String,
-    pub page_bounds: [f32; 4],
-    pub texture_bounds: Option<[f32; 4]>,
-    pub direct_bounds: Option<[f32; 4]>,
-    pub texture_physical_size: Option<[u32; 2]>,
-    pub camera_serial: u64,
-    pub vector_lod_requested_scale: Option<f64>,
-    pub vector_lod_available_scale: Option<f32>,
-    pub vector_lod_ready: Option<bool>,
-}
-
 /// Rendering and content diagnostics for one active page.
 #[derive(Clone, Debug)]
 pub struct PageRenderDebugSnapshot {
     pub page_number: usize,
     pub status: PageRenderDebugStatus,
-    pub backend: PageRenderBackendDebug,
-    pub gpu: Option<GpuPageRenderDebugSnapshot>,
-    pub direct_render: Option<GpuDirectRenderSnapshot>,
-    pub gpu_preparation: Option<GpuPagePreparationDebugSnapshot>,
-    pub gpu_fallbacks: Vec<GpuFallbackDebugSnapshot>,
-    pub gpu_warnings: Vec<GpuWarningDebugSnapshot>,
-    pub gpu_failure: Option<String>,
-    /// Non-routing failure from a stricter high-zoom vector refinement.
-    pub gpu_refinement_failure: Option<String>,
-    pub gpu_presentation: Option<GpuPresentationDebugSnapshot>,
     pub requested_raster: Option<RasterDebugSnapshot>,
     pub displayed_raster: Option<RasterDebugSnapshot>,
     pub cached_raster_bytes: u64,
@@ -876,7 +522,6 @@ pub struct PageRenderDebugSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentInteractionDebugSnapshot {
     pub source_path: PathBuf,
-    pub configured_engine: String,
     pub document_layout: String,
     pub page_layout: String,
     pub rotation: String,
@@ -902,10 +547,6 @@ pub struct DocumentRenderDebugSnapshot {
     pub pages: Vec<PageRenderDebugSnapshot>,
     pub pending_render_count: usize,
     pub pending_render_limit: usize,
-    pub gpu_cache: GpuCacheDebugSnapshot,
-    /// Document-level reasons for retaining MuPDF navigation. These never
-    /// change the rendering backend of a supported page.
-    pub gpu_navigation_fallbacks: Vec<GpuFallbackDebugSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -1292,44 +933,11 @@ impl mupdf::NativeDevice for ImageCollector {
 }
 
 struct PaintPage {
-    page_idx: usize,
     bounds: Bounds<Pixels>,
     image: Option<Arc<RenderImage>>,
-    gpu: Option<GpuPagePaint>,
-}
-
-struct GpuPagePaint {
-    texture: Option<GpuPaintTexture>,
-    direct: Option<GpuDirectPaint>,
-}
-
-#[derive(Clone)]
-struct GpuPaintTexture {
-    bounds: Bounds<Pixels>,
-    source_bounds: Bounds<f32>,
-    texture: GpuPageTexture,
-}
-
-#[derive(Clone)]
-struct GpuDirectPaint {
-    bounds: Bounds<Pixels>,
-    render: ExternalGpuRenderHandle,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GpuSurfaceIntent {
-    Visible,
-    AdjacentWarm,
 }
 
 type HighlightOverlay = (Bounds<Pixels>, HighlightColor);
-
-struct LinkInvertOverlay {
-    bounds: Bounds<Pixels>,
-    source_bounds: Bounds<f32>,
-    texture: ExternalTextureHandle,
-    color_space: ExternalTextureColorSpace,
-}
 
 #[derive(Clone, Copy)]
 struct DiffFlash {
@@ -1354,7 +962,6 @@ struct DiffFlashOverlay {
 
 struct PaintData {
     pages: Vec<PaintPage>,
-    link_invert_overlays: Vec<LinkInvertOverlay>,
     diff_flash_overlays: Vec<DiffFlashOverlay>,
     highlight_overlays: Vec<HighlightOverlay>,
     selected_highlight_borders: Vec<Bounds<Pixels>>,
@@ -1979,8 +1586,6 @@ struct DocumentLink {
     page_idx: usize,
     rects: Vec<Rect>,
     target: LinkTarget,
-    pdf_annotation: bool,
-    native_interaction_ix: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -1993,8 +1598,6 @@ struct TocEntry {
     target_top: Option<f32>,
     target_left: Option<f32>,
     navigable: bool,
-    native_action: Option<GpuLinkAction>,
-    initially_open: bool,
     color: Option<[f32; 3]>,
     italic: bool,
     bold: bool,
@@ -2244,7 +1847,6 @@ pub struct DocumentView {
     epub_style_panel_position: Option<GpuiPoint<Pixels>>,
     document_snapshot: Arc<DocumentSnapshot>,
     render_session: DocumentRenderSession,
-    gpu_pdf: gpu_render::GpuPdfState,
     page_render_sources: HashMap<usize, RevisionedPageRenderSource>,
     pages: Vec<DocumentPage>,
     page_count: usize,
@@ -2285,8 +1887,6 @@ pub struct DocumentView {
     target_zoom: f32,
     zoom_anchor: Option<ZoomAnchor>,
     last_animation_frame: Option<Instant>,
-    render_debug_fixed_frame_driver: bool,
-    render_debug_fixed_frame_armed: bool,
     zoom_popup_visible: bool,
     zoom_popup_hovered: bool,
     zoom_popup_generation: u64,
@@ -2605,7 +2205,6 @@ mod document;
 mod epub;
 mod export;
 mod geometry;
-mod gpu_render;
 mod highlights;
 mod history;
 mod hit_test;

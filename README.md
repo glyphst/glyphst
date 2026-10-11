@@ -44,8 +44,8 @@ are optional research material, not build inputs.
 
 ### Working on maintained dependencies
 
-Keep independent checkouts beside this repository: `../gpui-kit` on `glyphst/main`,
-`../glyphst-pdf` on `main`, and `../zed` on `glyphst/main`.
+Keep independent checkouts beside this repository: `../gpui-kit` on `glyphst/main`
+and `../zed` on `glyphst/main`.
 `references/zed` is a read-only upstream reference, not our GPUI fork.
 
 For local development, put only the overrides you need in the ignored
@@ -57,15 +57,9 @@ gpui-component = { path = "../gpui-kit/crates/component" }
 gpui-kit-assets = { path = "../gpui-kit/crates/assets" }
 gpui-fps = { path = "../gpui-kit/crates/fps" }
 
-[patch."https://github.com/glyphst/glyphst-pdf"]
-glyphst-pdf-engine = { path = "../glyphst-pdf/crates/engine" }
-glyphst-pdf-render-cpu = { path = "../glyphst-pdf/crates/render-cpu" }
-glyphst-pdf-render-wgpu = { path = "../glyphst-pdf/crates/render-wgpu" }
-
 [patch."https://github.com/glyphst/zed"]
 gpui = { path = "../zed/crates/gpui" }
 gpui_platform = { path = "../zed/crates/gpui_platform" }
-gpui_wgpu = { path = "../zed/crates/gpui_wgpu" }
 gpui_macros = { path = "../zed/crates/gpui_macros" }
 reqwest_client = { path = "../zed/crates/reqwest_client" }
 ztracing = { path = "../zed/crates/ztracing" }
@@ -74,7 +68,7 @@ ztracing = { path = "../zed/crates/ztracing" }
 Use `cargo --config .cargo/config.local.toml check --workspace --all-targets --all-features`.
 These overrides are opt-in; normal Cargo commands and CI do not load this file.
 Do not commit override-generated lockfile changes. Publish Zed before GPUI Kit,
-then publish GPUI Kit/PDF before updating this workspace's revisions. Omit the
+then publish GPUI Kit before updating this workspace's revisions. Omit the
 local config, run `cargo metadata --format-version 1` to restore Git resolution,
 and review the lockfile before the normal `--locked` checks.
 
@@ -93,17 +87,16 @@ Release builds ignore this variable.
 ### Verification
 
 `script/check.sh` runs the tiered checks inside the Nix shell and records step
-logs and timings under `../pdf-test-suite/reports/checks/`:
+logs and timings under `target/check-reports/`:
 
 ```sh
 script/check.sh quick          # fmt, clippy, tests
-script/check.sh gate           # + doctests, cargo audit, release Reader, interaction gate
+script/check.sh gate           # + doctests, cargo audit, release Reader build
 script/check.sh gate --local   # same, against sibling checkouts (.cargo/config.local.toml)
 ```
 
-`gate` runs the engine's Reader interaction profile inside a private headless
-compositor, so it can run unattended. Keep original thresholds and report baseline
-failures separately. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)
+Report baseline failures separately. The rendering debug panel's frame capture
+measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)
 when dependencies change. Documentation-only changes need content/link checks
 and `git diff --check`.
 

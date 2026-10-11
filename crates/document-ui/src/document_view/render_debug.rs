@@ -1,39 +1,14 @@
 use super::*;
 
-fn gpu_fallback_debug_snapshot(diagnostic: &GpuFallbackDiagnostic) -> GpuFallbackDebugSnapshot {
-    GpuFallbackDebugSnapshot {
-        feature: diagnostic.feature.to_string(),
-        code: diagnostic.code.clone(),
-        message: diagnostic.message.clone(),
-        source: match diagnostic.source {
-            GpuFallbackSource::Frontend => "frontend",
-            GpuFallbackSource::Renderer => "renderer",
-            GpuFallbackSource::Application => "application",
-        },
-    }
-}
-
-fn gpu_warning_debug_snapshot(diagnostic: &GpuWarningDiagnostic) -> GpuWarningDebugSnapshot {
-    GpuWarningDebugSnapshot {
-        feature: diagnostic.feature.to_string(),
-        code: diagnostic.code.clone(),
-        message: diagnostic.message.clone(),
-    }
-}
-
 fn page_render_debug_status(
     requested: Option<RenderKey>,
     displayed: Option<RenderKey>,
-    native_gpu_displayed: bool,
     exact_pending: bool,
     requested_failed: bool,
 ) -> PageRenderDebugStatus {
     match (requested, displayed) {
         (Some(requested), Some(displayed)) if requested == displayed => {
             PageRenderDebugStatus::Exact
-        }
-        (Some(_), Some(_)) if native_gpu_displayed => {
-            PageRenderDebugStatus::RetainedGpu { exact_pending }
         }
         (Some(_), Some(_)) => PageRenderDebugStatus::Fallback { exact_pending },
         (Some(_), None) if exact_pending => PageRenderDebugStatus::Pending,
@@ -50,31 +25,6 @@ pub fn render_cache_debug_snapshot(cx: &gpui::App) -> RenderCacheDebugSnapshot {
 }
 
 impl DocumentView {
-    /// Returns the loaded fixed-layout page count for an external performance
-    /// trace coordinator. A zero count means document loading has not produced
-    /// page geometry yet.
-    #[doc(hidden)]
-    pub fn render_debug_page_count(&self) -> usize {
-        self.page_count()
-    }
-
-    /// Places a developer performance trace at a deterministic page and zoom
-    /// without adding a jump-history entry.
-    #[doc(hidden)]
-    pub fn prepare_render_debug_trace_position(
-        &mut self,
-        page_number: usize,
-        zoom: f32,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !(1..=self.page_count()).contains(&page_number) || !zoom.is_finite() || zoom <= 0.0 {
-            return false;
-        }
-        self.set_zoom(zoom, cx);
-        self.navigate_to_pdf_destination(page_number - 1, None, None, cx);
-        true
-    }
-
     /// Returns diagnostics for every page in the latest viewport paint.
     /// The page label continues to identify the page or spread at the center.
     ///
@@ -85,15 +35,8 @@ impl DocumentView {
         let page_range = self.current_page_range();
         let page_label = Self::page_counter_label(page_range.clone(), self.pages.len());
         let cache = cx.try_global::<RenderCache>();
-        let configured_engine = cx
-            .global::<SettingsStore>()
-            .settings
-            .document_view
-            .pdf_render_engine;
-        let gpu_cache = self.native_gpu_cache_debug();
         let interaction = DocumentInteractionDebugSnapshot {
             source_path: self.path.clone(),
-            configured_engine: configured_engine.as_str().to_string(),
             document_layout: format!("{:?}", self.document_layout),
             page_layout: format!("{:?}", self.page_layout),
             rotation: format!("{:?}", self.rotation),
@@ -108,8 +51,7 @@ impl DocumentView {
             target_scroll_x_doc: self.target_scroll_x_doc,
             target_scroll_y_doc: self.target_scroll_y_doc,
             max_scroll_y_doc: self.max_scroll_y_doc(),
-            motion_active: gpu_cache.motion_active
-                || self.dock_snapshot.layout_motion_active
+            motion_active: self.dock_snapshot.layout_motion_active
                 || (self.target_zoom - self.zoom).abs() > f32::EPSILON
                 || (self.target_scroll_x_doc - self.scroll_x_doc).abs() > f64::EPSILON
                 || (self.target_scroll_y_doc - self.scroll_y_doc).abs() > f64::EPSILON,
@@ -126,7 +68,7 @@ impl DocumentView {
             page_indices
                 .into_iter()
                 .filter(|page_idx| *page_idx < self.pages.len())
-                .map(|page_idx| self.page_render_debug_snapshot(page_idx, cache, configured_engine))
+                .map(|page_idx| self.page_render_debug_snapshot(page_idx, cache))
                 .collect()
         };
 
@@ -136,59 +78,13 @@ impl DocumentView {
             pages,
             pending_render_count: self.pending_renders.len(),
             pending_render_limit: MAX_PENDING_PAGE_RENDERS,
-            gpu_cache,
-            gpu_navigation_fallbacks: self
-                .native_gpu_navigation_fallback_diagnostics()
-                .unwrap_or_default()
-                .iter()
-                .map(gpu_fallback_debug_snapshot)
-                .collect(),
         }
-    }
-
-    /// Applies one center-anchored zoom step for the developer interaction
-    /// trace runner. This deliberately enters the same animated zoom path as
-    /// wheel and keyboard input instead of mutating the rendered scale.
-    #[doc(hidden)]
-    pub fn apply_render_debug_zoom_factor(&mut self, factor: f32, cx: &mut Context<Self>) -> bool {
-        if !factor.is_finite() || factor <= 0.0 || self.grid_overview_open {
-            return false;
-        }
-        let previous = self.target_zoom;
-        self.set_zoom_target(
-            previous * factor,
-            [self.viewport_width / 2.0, self.viewport_height / 2.0],
-            cx,
-        );
-        (self.target_zoom - previous).abs() > f32::EPSILON
-    }
-
-    /// Restores the exact fixed-layout position saved before a developer
-    /// interaction trace without adding a jump-history entry.
-    #[doc(hidden)]
-    pub fn restore_render_debug_position(
-        &mut self,
-        position: DocumentPosition,
-        cx: &mut Context<Self>,
-    ) {
-        let zoom_changed = (self.zoom - position.zoom).abs() > f32::EPSILON;
-        self.restore_position(position);
-        if zoom_changed {
-            self.mark_native_gpu_zoom_motion(cx);
-        } else {
-            self.mark_native_gpu_motion(cx);
-        }
-        self.hovered_link = None;
-        self.pending_link = None;
-        self.schedule_position_save(cx);
-        cx.notify();
     }
 
     fn page_render_debug_snapshot(
         &self,
         page_idx: usize,
         cache: Option<&RenderCache>,
-        configured_engine: PdfRenderEngine,
     ) -> PageRenderDebugSnapshot {
         let viewport = self
             .reload_task
@@ -196,35 +92,12 @@ impl DocumentView {
             .then(|| self.viewport_render_debug.get(&page_idx).copied())
             .flatten();
         let requested = viewport.map(|viewport| viewport.requested);
-        let mupdf_displayed = viewport.and_then(|viewport| viewport.displayed);
-        let native_gpu_requested =
-            requested.is_some_and(|key| self.native_gpu_key_enabled(key, configured_engine));
-        let strict_native =
-            configured_engine.is_strict_native() && self.format == DocumentFormat::Pdf;
-        // A retained native texture remains the displayed backend while a
-        // newer scale/viewport request is rendered asynchronously. Preserve
-        // its key and stats here so the HUD does not mislabel that interval as
-        // a MuPDF placeholder merely because the keys differ.
-        let native_gpu_render = self.native_gpu_render(page_idx);
-        let gpu_presentation = self.native_gpu_presentation_debug(page_idx).cloned();
-        let direct_submitted = gpu_presentation
-            .as_ref()
-            .is_some_and(|presentation| presentation.source == "direct-current");
-        let direct_render = gpu_presentation
-            .as_ref()
-            .filter(|presentation| presentation.source == "direct-current")
-            .and_then(|presentation| {
-                self.native_gpu_direct_render_snapshot(page_idx, presentation.camera_serial)
-            });
-        let displayed = native_gpu_render
-            .map(|(key, _)| key)
-            .or_else(|| direct_submitted.then_some(requested).flatten())
-            .or(mupdf_displayed);
+        let displayed = viewport.and_then(|viewport| viewport.displayed);
         let exact_pending = requested.is_some_and(|requested| {
             self.pending_renders
                 .iter()
                 .any(|pending| pending.key == requested)
-        }) || (native_gpu_requested && self.native_gpu_pending(page_idx));
+        });
         let latest_attempt = self
             .reload_task
             .is_none()
@@ -233,194 +106,8 @@ impl DocumentView {
         let requested_failed = requested.is_some_and(|requested| {
             latest_attempt.is_some_and(|attempt| attempt.key == requested && !attempt.succeeded)
         });
-        let status = page_render_debug_status(
-            requested,
-            displayed,
-            native_gpu_render.is_some() || direct_submitted,
-            exact_pending,
-            requested_failed,
-        );
-
-        let render_stats = if direct_submitted {
-            direct_render.map(|render| render.stats)
-        } else {
-            native_gpu_render.map(|(_, stats)| stats)
-        };
-        let gpu = render_stats.map(|stats| GpuPageRenderDebugSnapshot {
-            cpu_time: stats.cpu_time,
-            frame_pool_wait_time: stats.frame_pool_wait_time,
-            command_encoding_time: stats.command_encoding_time,
-            gpu_time: stats.gpu_time,
-            host_to_device_bytes: stats.host_to_device_bytes,
-            passes_executed: stats.passes_executed,
-            command_buffers: stats.command_buffers,
-            vector_batches: stats.vector_batches,
-            procedural_stroke_batches: stats.hairline_batches,
-            render_bundle_runs: stats.render_bundle_runs,
-            culled_operations: stats.culled_operations,
-            culled_bundle_operations: stats.culled_bundle_operations,
-            retained_stroke_candidate_references: stats.retained_stroke_candidate_references,
-            retained_stroke_cull_dispatches: stats.retained_stroke_cull_dispatches,
-            retained_stroke_indirect_draws: stats.retained_stroke_indirect_draws,
-            retained_stroke_indirect_runs: stats.retained_stroke_indirect_runs,
-            retained_stroke_global_replay: stats.retained_stroke_global_replay,
-            motion_stroke_sample_mask: stats.motion_stroke_sample_mask,
-            reprojected_frame: stats.reprojected_frame,
-            gradient_draws: stats.gradient_draws,
-            image_draws: stats.image_draws,
-            patch_lod_required_scale: format!("{:.3}", stats.patch_lod_required_scale),
-            patch_lod_available_scale: format!("{:.3}", stats.patch_lod_available_scale),
-            patch_lod_deferred: stats.patch_lod_deferred,
-            vector_lod_requested_scale: format!("{:.3}", stats.vector_lod_requested_scale),
-            vector_lod_available_scale: format!("{:.3}", stats.vector_lod_available_scale),
-            vector_lod_deferred: stats.vector_lod_deferred,
-            reused_tiles: stats.reused_tiles,
-            rendered_tiles: stats.rendered_tiles,
-            dirty_tiles: stats.dirty_tiles,
-            refinement_pending: stats.refinement_pending,
-            presentation_quality: format!("{:?}", stats.presentation_quality),
-            scheduled_refinement_work: stats.scheduled_refinement_work,
-            refinement_work_budget: stats.refinement_work_budget,
-            selected_vector_lod: stats.selected_vector_lod,
-            frame_pool_reused: stats.frame_pool_reused,
-            frame_pool_grew: stats.frame_pool_grew,
-            frame_pool_capacity_bytes: stats.frame_pool_capacity_bytes,
-            clip_state_changes: stats.clip_state_changes,
-            stencil_draws: stats.stencil_draws,
-            compute_dispatches: stats.compute_dispatches,
-            offscreen_passes: stats.offscreen_passes,
-            mask_passes: stats.mask_passes,
-            composite_passes: stats.composite_passes,
-            backdrop_copies: stats.backdrop_copies,
-            transient_peak_bytes: stats.transient_peak_bytes,
-            transient_resident_bytes: stats.transient_resident_bytes,
-            transient_pool_reuses: stats.transient_pool_reuses,
-            generation: stats.generation,
-            coverage_strategy: format!("{:?}", stats.coverage_strategy),
-            retained_stroke_strategy: format!("{:?}", stats.retained_stroke_strategy),
-            motion_render_mode: format!("{:?}", stats.motion_render_mode),
-        });
-        let patch_lod_preparation = self
-            .native_gpu_patch_lod_preparation_stats(page_idx)
-            .unwrap_or_default();
-        let preparation_timings = self
-            .native_gpu_preparation_timings(page_idx)
-            .unwrap_or_default();
-        let gpu_preparation = self.native_gpu_preparation_stats(page_idx).map(|stats| {
-            GpuPagePreparationDebugSnapshot {
-                frontend_preflight: preparation_timings.frontend_preflight,
-                compile: preparation_timings.compile,
-                link_conversion: preparation_timings.link_conversion,
-                gpu_prepare: preparation_timings.gpu_prepare,
-                total: preparation_timings.total,
-                compiled_cache_hit: preparation_timings.compiled_cache_hit,
-                elapsed: stats.elapsed,
-                host_to_device_bytes: stats.host_to_device_bytes,
-                resident_bytes: stats.resident_bytes,
-                image_textures: stats.image_textures,
-                alpha_textures: stats.alpha_textures,
-                image_mip_levels: stats.image_mip_levels,
-                alpha_mip_levels: stats.alpha_mip_levels,
-                image_texture_bytes: stats.image_texture_bytes,
-                mip_texture_bytes: stats.mip_texture_bytes,
-                gradient_tables: stats.gradient_tables,
-                patch_shading_lod_levels: stats.patch_shading_lod_levels,
-                patch_shading_deferred_lod_levels: stats.patch_shading_deferred_lod_levels,
-                patch_shading_mesh_bytes: stats.mesh_shading_bytes,
-                deferred_patch_lod_elapsed: patch_lod_preparation.elapsed,
-                deferred_patch_lod_levels: patch_lod_preparation.prepared_lod_levels,
-                deferred_patch_lod_bytes: patch_lod_preparation.mesh_bytes,
-                vector_batches: stats.vector_batches,
-                vector_lod_levels: stats.vector_lod_levels,
-                vector_lod_compacted: stats.vector_lod_compacted,
-                vector_vertices: stats.vector_vertices,
-                vector_triangle_references: stats.vector_triangle_references,
-                vector_reference_bytes: stats.vector_reference_bytes,
-                vector_compact_reference_lods: stats.vector_compact_reference_lods,
-                vector_indexed_reference_lods: stats.vector_indexed_reference_lods,
-                vector_canonical_indices: stats.vector_canonical_indices,
-                vector_reference_segments: stats.vector_reference_segments,
-                vector_instances: stats.vector_instances,
-                vector_bytes: stats.vector_bytes,
-                procedural_stroke_batches: stats.hairline_batches,
-                hairline_lod_levels: stats.hairline_lod_levels,
-                hairline_geometry_records: stats.hairline_geometry_records,
-                stroke_state_records: stats.stroke_state_records,
-                hairline_primitives: stats.hairline_primitives,
-                hairline_draws: stats.hairline_draws,
-                hairline_bytes: stats.hairline_bytes,
-                hairline_chunks: stats.hairline_chunks,
-                procedural_stroke_lod_levels: stats.procedural_stroke_lod_levels,
-                procedural_stroke_primitives: stats.procedural_stroke_primitives,
-                procedural_stroke_draws: stats.procedural_stroke_draws,
-                procedural_stroke_bytes: stats.procedural_stroke_bytes,
-                motion_stroke_lod_levels: stats.motion_stroke_lod_levels,
-                motion_stroke_coarsest_segments: stats.motion_stroke_coarsest_segments,
-                motion_stroke_lod_segments: stats.motion_stroke_lod_segments,
-                motion_stroke_source_segments: stats.motion_stroke_source_segments,
-                motion_stroke_quadratic_segments: stats.motion_stroke_quadratic_segments,
-                exact_stroke_segments: stats.exact_stroke_segments,
-                render_bundle_runs: stats.render_bundle_runs,
-                render_bundle_operations: stats.render_bundle_operations,
-                camera_program_partitions: stats.camera_program_partitions,
-                camera_program_operations: stats.camera_program_operations,
-                retained_operations: stats.retained_operations,
-                flattened_opaque_knockout_groups: stats.flattened_opaque_knockout_groups,
-                retained_form_resources: stats.retained_form_resources,
-                retained_form_instances: stats.retained_form_instances,
-                retained_type3_glyph_resources: stats.retained_type3_glyph_resources,
-                retained_type3_glyph_instances: stats.retained_type3_glyph_instances,
-                retained_tiling_pattern_resources: stats.retained_tiling_pattern_resources,
-                retained_tiling_pattern_instances: stats.retained_tiling_pattern_instances,
-                expanded_tiling_pattern_cells: stats.expanded_tiling_pattern_cells,
-                retained_transparency_groups: stats.retained_transparency_groups,
-                retained_soft_mask_resources: stats.retained_soft_mask_resources,
-                retained_soft_mask_instances: stats.retained_soft_mask_instances,
-                retained_subscene_nodes: stats.retained_subscene_nodes,
-                expanded_scene_nodes: stats.expanded_scene_nodes,
-                unique_clip_paths: stats.unique_clip_paths,
-                analytic_paths: stats.analytic_paths,
-                analytic_segments: stats.analytic_segments,
-                analytic_draws: stats.analytic_draws,
-                analytic_groups: stats.analytic_groups,
-                analytic_bvh_nodes: stats.analytic_bvh_nodes,
-                analytic_bytes: stats.analytic_bytes,
-                analytic_fallback: stats.analytic_fallback.map(str::to_owned),
-            }
-        });
-        let gpu_fallbacks = self
-            .native_gpu_fallback_diagnostics(page_idx)
-            .unwrap_or_default()
-            .iter()
-            .map(gpu_fallback_debug_snapshot)
-            .collect::<Vec<_>>();
-        let gpu_warnings = self
-            .native_gpu_warning_diagnostics(page_idx)
-            .unwrap_or_default()
-            .iter()
-            .map(gpu_warning_debug_snapshot)
-            .collect::<Vec<_>>();
-        let gpu_failure = self.native_gpu_failure(page_idx).map(str::to_owned);
-        let gpu_refinement_failure = self
-            .native_gpu_vector_lod_failure(page_idx)
-            .map(str::to_owned);
-        let backend = if gpu.is_some() || direct_submitted {
-            PageRenderBackendDebug::GlyphstGpu
-        } else if strict_native && (!gpu_fallbacks.is_empty() || gpu_failure.is_some()) {
-            PageRenderBackendDebug::GlyphstFailed
-        } else if strict_native && native_gpu_requested {
-            PageRenderBackendDebug::GlyphstPending
-        } else if strict_native {
-            PageRenderBackendDebug::GlyphstFailed
-        } else if !gpu_fallbacks.is_empty() || gpu_failure.is_some() {
-            PageRenderBackendDebug::MuPdfFallback
-        } else if native_gpu_requested && mupdf_displayed.is_some() {
-            PageRenderBackendDebug::MuPdfWhileGpuPending
-        } else if native_gpu_requested {
-            PageRenderBackendDebug::GlyphstPending
-        } else {
-            PageRenderBackendDebug::MuPdf
-        };
+        let status =
+            page_render_debug_status(requested, displayed, exact_pending, requested_failed);
 
         let source_revision = self
             .page_render_sources
@@ -454,17 +141,8 @@ impl DocumentView {
         let page = &self.pages[page_idx];
 
         PageRenderDebugSnapshot {
-            direct_render,
             page_number: page_idx + 1,
             status,
-            backend,
-            gpu,
-            gpu_preparation,
-            gpu_fallbacks,
-            gpu_warnings,
-            gpu_failure,
-            gpu_refinement_failure,
-            gpu_presentation,
             requested_raster: requested.map(|key| self.raster_debug_snapshot(key)),
             displayed_raster: displayed.map(|key| self.raster_debug_snapshot(key)),
             cached_raster_bytes,
@@ -524,23 +202,17 @@ mod tests {
     }
 
     #[test]
-    fn retained_native_density_is_not_reported_as_a_raster_fallback() {
+    fn mismatched_raster_is_reported_as_a_fallback() {
         let requested = render_key(1_100);
-        let retained = render_key(1_000);
+        let displayed = render_key(1_000);
         assert_eq!(
-            page_render_debug_status(Some(requested), Some(retained), true, true, false,),
-            PageRenderDebugStatus::RetainedGpu {
-                exact_pending: true
-            }
-        );
-        assert_eq!(
-            page_render_debug_status(Some(requested), Some(retained), false, true, false,),
+            page_render_debug_status(Some(requested), Some(displayed), true, false),
             PageRenderDebugStatus::Fallback {
                 exact_pending: true
             }
         );
         assert_eq!(
-            page_render_debug_status(Some(requested), Some(requested), true, false, false,),
+            page_render_debug_status(Some(requested), Some(requested), false, false),
             PageRenderDebugStatus::Exact
         );
     }

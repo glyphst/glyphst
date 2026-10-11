@@ -169,7 +169,6 @@ impl DocumentView {
             epub_style_panel_position: None,
             document_snapshot,
             render_session,
-            gpu_pdf: gpu_render::GpuPdfState::default(),
             page_render_sources: HashMap::new(),
             pages,
             page_count,
@@ -210,8 +209,6 @@ impl DocumentView {
             target_zoom: behavior.default_zoom,
             zoom_anchor: None,
             last_animation_frame: None,
-            render_debug_fixed_frame_driver: false,
-            render_debug_fixed_frame_armed: false,
             zoom_popup_visible: false,
             zoom_popup_hovered: false,
             zoom_popup_generation: 0,
@@ -613,8 +610,6 @@ impl DocumentView {
 
         self.evict_previous_document(cx);
         self.text_indexing_task = None;
-        self.restore_all_native_reader_links();
-        self.gpu_pdf.reset();
         self.pending_renders.clear();
         self.viewport_render_debug.clear();
         self.page_render_debug.clear();
@@ -650,7 +645,6 @@ impl DocumentView {
         self.page_block_ranges = vec![0..0; self.pages.len()];
         self.replace_translation_document();
         self.links.clear();
-        self.gpu_pdf.invalidate_link_mappings();
         self.search.invalidate_search_text();
         self.search.clear_results(self.pages.len());
         self.selection = None;

@@ -16,17 +16,12 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 
 - `reader` and `files` are entry points; shared UI, service, and domain owners
   are described in [ARCHITECTURE.md](ARCHITECTURE.md).
-- `../glyphst-pdf` owns the standalone PDF engine. Keep GPUI integration in
-  `crates/pdf-gpu` and MuPDF in `crates/pdf`. Unsupported native semantics
-  require whole-page fallback.
-- Preserve task ownership, cancellation generations, paint order, resource
-  limits, and performance/quality gates when changing GPU work.
+- MuPDF renders every document page; keep its integration in `crates/pdf`.
+- Preserve task ownership, cancellation, paint order, and render-cache limits
+  when changing page rendering.
 - The library's production current-format opener also serves tests through
   `LibraryStore::open_for_test`. Cleanup must not change on-disk formats or
   restore obsolete migrators.
-- Compiled-page caches have count and estimated-byte limits. The engine's
-  `COMPILED_PAGE_CACHE_VERSION` controls their namespace; encrypted documents
-  must never use the compiled-page disk cache.
 - Normal builds use published Git pins. Preserve the GPUI Kit Rust aliases and
   aligned GPUI revisions; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
   when working on maintained forks. `references/` contains read-only reference
@@ -36,9 +31,9 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 
 ## Verification and documentation
 
-Workspace-wide rules (single active session, check tiers, evidence, disk) are in
+Workspace-wide rules (single active session, check tiers, disk) are in
 `../AGENTS.md`. Run `script/check.sh quick` for code changes and
-`script/check.sh gate` before a PR or engine pin bump; add `--local` to build
+`script/check.sh gate` before a PR or GPUI pin bump; add `--local` to build
 against sibling checkouts. Documentation-only edits need link/content checks.
 
 Keep docs about current contracts and next actions; put run summaries in the

@@ -2,8 +2,7 @@ use super::super::SettingsWindow;
 use glyphst_core::EpubTheme;
 use glyphst_settings::{
     AppLanguage, CopyFormat, DocumentProgressDisplay, KeymapPreset, PathChooserBackend,
-    PdfRenderEngine, RestoreOnStartup, Settings, SettingsStore, TabBarVisibility,
-    WindowBackgroundMode,
+    RestoreOnStartup, Settings, SettingsStore, TabBarVisibility, WindowBackgroundMode,
 };
 use gpui::{App, Context, InteractiveElement as _, SharedString};
 use gpui_component::{
@@ -381,56 +380,6 @@ impl SettingsWindow {
         )
         .description(crate::fl!("settings-document-progress-display-description"));
 
-        let pdf_render_engine = SettingItem::new(
-            crate::fl!("settings-pdf-render-engine"),
-            SettingField::dropdown(
-                [
-                    Self::setting_option(
-                        PdfRenderEngine::MuPdf.as_str(),
-                        crate::fl!("settings-pdf-render-engine-mupdf"),
-                    ),
-                    Self::setting_option(
-                        PdfRenderEngine::Glyphst.as_str(),
-                        crate::fl!("settings-pdf-render-engine-glyphst"),
-                    ),
-                    Self::setting_option(
-                        PdfRenderEngine::GlyphstFirst.as_str(),
-                        crate::fl!("settings-pdf-render-engine-glyphst-first"),
-                    ),
-                ]
-                .into(),
-                |cx: &App| {
-                    cx.global::<SettingsStore>()
-                        .settings
-                        .document_view
-                        .pdf_render_engine
-                        .as_str()
-                        .into()
-                },
-                {
-                    let view = view.clone();
-                    move |value: SharedString, cx: &mut App| {
-                        let engine = match value.as_ref() {
-                            "glyphst" => PdfRenderEngine::Glyphst,
-                            "glyphst-first" => PdfRenderEngine::GlyphstFirst,
-                            _ => PdfRenderEngine::MuPdf,
-                        };
-                        Self::update_settings(&view, cx, move |settings| {
-                            settings.document_view.pdf_render_engine = engine;
-                        });
-                    }
-                },
-            )
-            .default_value(
-                defaults
-                    .document_view
-                    .pdf_render_engine
-                    .as_str()
-                    .to_string(),
-            ),
-        )
-        .description(crate::fl!("settings-pdf-render-engine-description"));
-
         let reading_font_size = SettingItem::new(
             crate::fl!("settings-reading-font-size"),
             SettingField::number_input(
@@ -687,7 +636,7 @@ impl SettingsWindow {
                     .items([copy_format, semantic_copy]),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-document-view"))
-                    .items([progress_display, pdf_render_engine]),
+                    .items([progress_display]),
                 SettingGroup::new()
                     .title(crate::fl!("settings-section-reading"))
                     .items([

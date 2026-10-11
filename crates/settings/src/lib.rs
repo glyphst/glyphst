@@ -13,7 +13,7 @@ pub use settings::{
     DocumentTranslationMode, DocumentViewSettings, FontSettings, KeyBindingOverride, KeymapPreset,
     ModelRef, NewTabSettings, NewTabViewMode, OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings,
     PageImageQuality, PageTextFormat, PathChooserBackend, PdfContentReviewMode,
-    PdfContentReviewSettings, PdfRenderEngine, PinnedTranslationSettings, ProviderSecretId,
+    PdfContentReviewSettings, PinnedTranslationSettings, ProviderSecretId,
     ProviderSecretPersistence, ProviderSecretStatus, QuickAskPosition, QuickAskSettings,
     ResolvedAiConfig, RestoreOnStartup, Settings, SettingsStore, TabBarVisibility,
     TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, TranslationSettings,

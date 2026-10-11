@@ -161,54 +161,17 @@ document_view {
 }
 
 #[test]
-fn pdf_render_engine_is_experimental_and_opt_in() {
-    assert_eq!(
-        Settings::default().document_view.pdf_render_engine,
-        PdfRenderEngine::MuPdf
-    );
-
-    for (value, expected) in [
-        ("mupdf", PdfRenderEngine::MuPdf),
-        ("glyphst", PdfRenderEngine::Glyphst),
-        ("glyphst-first", PdfRenderEngine::GlyphstFirst),
-    ] {
+fn retired_pdf_render_engine_setting_is_ignored_and_dropped() {
+    for value in ["mupdf", "glyphst", "glyphst-first", "glyphst-gpu", "auto"] {
         let settings = parse_settings(&format!(
-            "document_view {{\n    pdf_render_engine \"{value}\"\n}}\n"
+            "document_view {{\n    progress_display \"percentage\"\n    pdf_render_engine \"{value}\"\n}}\n"
         ))
         .unwrap();
-        assert_eq!(settings.document_view.pdf_render_engine, expected);
         assert_eq!(
-            parse_settings(&settings.to_kdl_string())
-                .unwrap()
-                .document_view
-                .pdf_render_engine,
-            expected
+            settings.document_view.progress_display,
+            DocumentProgressDisplay::Percentage
         );
-    }
-
-    let invalid = parse_settings(
-        r#"
-document_view {
-    pdf_render_engine "unknown"
-}
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        invalid.document_view.pdf_render_engine,
-        PdfRenderEngine::MuPdf
-    );
-
-    for (legacy, expected) in [
-        ("glyphst-gpu", PdfRenderEngine::GlyphstFirst),
-        ("auto", PdfRenderEngine::GlyphstFirst),
-    ] {
-        let settings = parse_settings(&format!(
-            "document_view {{\n    pdf_render_engine \"{legacy}\"\n}}\n"
-        ))
-        .unwrap();
-        assert_eq!(settings.document_view.pdf_render_engine, expected);
-        assert!(settings.to_kdl_string().contains(expected.as_str()));
+        assert!(!settings.to_kdl_string().contains("pdf_render_engine"));
     }
 }
 

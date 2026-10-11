@@ -12,25 +12,12 @@
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai`, `ai-ui` | AI services and chat presentation |
 | Translation crates | Translation domain, PDF production, service orchestration, UI |
-| `pdf`, `pdf-gpu` | MuPDF integration and the standalone engine's GPUI adapter |
+| `pdf` | MuPDF integration: document opening, render sessions, display lists |
 
 Private modules split implementation without introducing additional state
-owners. New-tab and workspace entities own their task handles; document GPU
-state owns device invalidation, cancellation, preparation, and cache lifetimes.
-See [workspace](crates/workspace/src) and
-[document GPU coordination](crates/document-ui/src/document_view/gpu_render).
-
-The separate `glyphst-pdf` repository owns a runtime-neutral engine: core types,
-a validated semantic scene, a private Hayro frontend, and CPU/WGPU renderers.
-The [GPUI adapter](crates/pdf-gpu/src/lib.rs) shares the host device and queue,
-uses its external-texture API, and keeps GPUI types outside the engine.
-Frontend preflight, compilation, and renderer preflight must succeed before a
-native page replaces MuPDF. A page never mixes engines or fallback raster islands.
-
-Native page bounds, links and destinations use cropped/rotated physical points
-(1/72 inch), matching MuPDF's reader geometry. The engine applies leaf-page
-UserUnit before supplying those coordinates; the host must not scale them again.
-Unsupported unit geometry follows the same whole-page fallback contract.
+owners. New-tab and workspace entities own their task handles; document views
+own their render requests, text indexing, and cancellation. See
+[workspace](crates/workspace/src) and [document views](crates/document-ui/src/document_view).
 
 MuPDF context clones share stylesheet settings across threads.
 [Document opening](crates/pdf/src/document.rs) serializes configuration. PDF
@@ -41,31 +28,14 @@ documents cannot rely on independent EPUB style policies.
 
 ## Presentation and task lifetime
 
-Native preparation and rendering carry cancellation and device generations.
-A replacement device invalidates retained device resources. Superseded work
-cannot publish over a newer request; the last coherent surface remains visible
-until a valid replacement is ready. Incomplete refinement stays private, and
-publication swaps a completed surface atomically.
-
-Surface slots protect displayed and in-flight textures from overwrite. Visible
-pages take priority over speculative preparation, within the existing worker,
-cache, and surface budgets. Scale-changing frames render retained geometry at
-the current camera; fixed-scale pan caches retain their exact device density.
-Camera identity includes the page, serial, transform, clipped region, and target
-geometry. Interaction diagnostics must describe actual execution for every
-visible page, including neighbors entering the viewport.
-
-When visible demand exceeds the prepared vector scale, refinement keeps the
-required camera scale separate from preferred zoom headroom. Settled pages
-reserve the same bounded headroom as increasing cameras. A headroom preparation
-that exceeds a resource limit may retry once at the required scale; cancellation
-and semantic failures do not retry. Worker reuse compares its target against
-actual camera demand, and generation checks still govern page replacement.
-
-The engine performs an explicit final-color conversion. The adapter preserves
-sRGB versus ordinary UNORM texture-view encoding when GPUI samples cached
-surfaces. Native interactive presentation does not read page pixels back to the
-CPU or upload them through `RenderImage`.
+PDF and EPUB pages are rasterized by MuPDF off the UI thread and presented as
+`RenderImage`s. Render keys identify the document, page, source revision,
+rotation, color transform, and physical size. The process-wide render cache
+bounds raster bytes and display lists; keys for the current viewport are
+protected from eviction while they are displayed or pending. Visible pages are
+requested first and adjacent pages are prefetched within a pixel limit. Until
+the exact raster is ready, the closest cached raster for the page remains
+visible.
 
 ## Library persistence
 
@@ -76,36 +46,10 @@ schema metadata is rejected without modification. Table names, serialization
 keys, schema metadata, managed-library layout, and current-format decode
 fallbacks are compatibility contracts.
 
-## Native compiled-page cache
-
-Each native document retains at most eight compiled pages and the engine's
-`max_cpu_cache_bytes` budget, 512 MiB by default. Admission evicts LRU entries
-until both limits hold. An oversized page bypasses caching without evicting
-useful entries. Concurrent insertion of the same page reuses the cached entry.
-
-The engine computes retained-size estimates off the UI path before the cache
-lock is taken. Estimates include owned capacities, nested scenes/resources,
-reader metadata, and conservative B-tree overhead. HUD snapshots read cached
-counters. These estimates bound cache ownership, not process RSS or pages held
-by active callers. Prepared resources and presentation surfaces have separate
-limits.
-
-`COMPILED_PAGE_CACHE_VERSION` in the engine is the semantic version authority.
-The host derives `compiled-v{version}` from it. Old versions are not read into a
-new namespace; old directories are left untouched. Records bind source, options,
-and page identity, validate checksums, and revalidate decoded scene structure.
-Checksums detect corruption, not malicious local writers. Encrypted documents
-never read or write compiled pages on disk. The disk writer is bounded, idle,
-and best effort.
-
-Layer visibility is compiled into the cache identity. Layer-hidden links retain
-annotation bounds for MuPDF geometry mapping but have empty hit regions and
-inert actions. Appearance-only layers do not disable a visible annotation's link.
-
 ## Dependency maintenance
 
-[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) identify published Zed,
-GPUI Kit, and PDF revisions. Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml).
+[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) identify published Zed
+and GPUI Kit revisions. Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml).
 Sibling checkouts are optional; local overrides are described in
 [README](README.md#working-on-maintained-dependencies).
 
@@ -116,7 +60,7 @@ Change Kit when private internals or its event/render lifecycle require it.
 Preserve `gpui_component`, `gpui_component_assets`, and `gpui_fps` aliases;
 `gpui_component_assets` resolves to `gpui-kit-assets`.
 
-Keep GPUI revisions aligned across consumers. Publish Zed first, then Kit/PDF,
+Keep GPUI revisions aligned across consumers. Publish Zed first, then Kit,
 then update Glyphst's pins. Exact renderer/compiler/math pins and major library
 upgrades require compatibility work. Do not commit override-generated lockfile
 changes.

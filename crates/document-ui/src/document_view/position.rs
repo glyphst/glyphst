@@ -43,7 +43,6 @@ impl DocumentView {
             self.pending_semantic_position = None;
             return;
         }
-        let previous_camera = (self.zoom, self.scroll_x_doc, self.scroll_y_doc);
         self.zoom = position.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.target_zoom = self.zoom;
         self.zoom_anchor = None;
@@ -53,9 +52,6 @@ impl DocumentView {
         self.target_scroll_x_doc = f64::from(position.scroll_x_doc);
         self.target_scroll_y_doc = f64::from(position.scroll_y_doc);
         self.clamp_scroll();
-        if previous_camera != (self.zoom, self.scroll_x_doc, self.scroll_y_doc) {
-            self.record_native_gpu_camera_step(previous_camera.0 != self.zoom);
-        }
     }
 
     pub fn current_document_position(&self) -> DocumentPosition {

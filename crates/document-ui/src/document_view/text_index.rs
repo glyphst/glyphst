@@ -2,8 +2,7 @@ use super::*;
 
 impl DocumentView {
     pub(super) fn start_text_indexing(&mut self, cx: &mut Context<Self>) {
-        if self.strict_native_pdf(cx)
-            || self.text_indexing_task.is_some()
+        if self.text_indexing_task.is_some()
             || self.pages.is_empty()
             || !self.text_index_state.begin()
         {
@@ -256,7 +255,6 @@ impl DocumentView {
         self.page_block_ranges = loaded.page_block_ranges;
         self.invalidate_translation_document();
         self.links = loaded.links;
-        self.gpu_pdf.invalidate_link_mappings();
         self.text_index_state.settle(true);
         self.hovered_link = None;
         self.pending_link = None;

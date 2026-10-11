@@ -8,7 +8,6 @@ members = [
     "crates/library",
     "crates/mermaid-render",
     "crates/pdf",
-    "crates/pdf-gpu",
     "crates/pdf-translation",
     "crates/pdf-translation-service",
     "crates/document-ui",
@@ -49,11 +48,7 @@ gpui_platform = { git = "https://github.com/glyphst/zed", rev = "04a79b674e6c244
     "wayland",
     "x11",
 ] }
-gpui_wgpu = { git = "https://github.com/glyphst/zed", rev = "04a79b674e6c244b1bbf4aa57e7ab2ae28345be0", package = "gpui_wgpu" }
 glyphst-mermaid-render = { path = "crates/mermaid-render" }
-glyphst-pdf-engine = { git = "https://github.com/glyphst/glyphst-pdf", rev = "1c03b4d78abbc7be2b56aaf23bb1f075eae24dc7", package = "glyphst-pdf-engine" }
-glyphst-pdf-render-cpu = { git = "https://github.com/glyphst/glyphst-pdf", rev = "1c03b4d78abbc7be2b56aaf23bb1f075eae24dc7", package = "glyphst-pdf-render-cpu" }
-glyphst-pdf-render-wgpu = { git = "https://github.com/glyphst/glyphst-pdf", rev = "1c03b4d78abbc7be2b56aaf23bb1f075eae24dc7", package = "glyphst-pdf-render-wgpu" }
 httpdate = "1"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }

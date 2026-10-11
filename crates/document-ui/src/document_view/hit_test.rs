@@ -4,10 +4,6 @@ fn should_hit_test_document_content(dragging: bool, panning: bool) -> bool {
     !dragging && !panning
 }
 
-fn native_link_contains_point(interaction: &GpuLinkInteraction, x: f64, y: f64) -> bool {
-    !interaction.action.is_inert() && interaction.contains_point(x, y)
-}
-
 impl DocumentView {
     pub(super) fn collect_images(display_list: &DisplayList) -> Result<Vec<CollectedImage>> {
         let collector = Rc::new(RefCell::new(ImageCollector::default()));
@@ -25,9 +21,6 @@ impl DocumentView {
         point: GpuiPoint<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<(usize, usize)> {
-        if self.strict_native_pdf(cx) {
-            return None;
-        }
         let page_idx = self.page_at_screen(point)?;
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
         let display_list = match self.get_or_create_display_list(page_idx, cx) {
@@ -54,53 +47,16 @@ impl DocumentView {
             })
     }
 
-    pub(super) fn link_at_screen(&self, point: GpuiPoint<Pixels>, cx: &gpui::App) -> Option<usize> {
+    pub(super) fn link_at_screen(&self, point: GpuiPoint<Pixels>) -> Option<usize> {
         let page_idx = self.page_at_screen(point)?;
-        if self.strict_native_pdf(cx)
-            && !u32::try_from(page_idx)
-                .is_ok_and(|page| self.gpu_pdf.reader_link_replacements.contains_key(&page))
-        {
-            return None;
-        }
         let pdf_point = self.screen_to_pdf(page_idx, point)?;
-        let native_interactions = self.native_gpu_link_interactions(page_idx);
-        let native_mapping = self
-            .cached_native_gpu_link_mapping(page_idx)
-            .map(Cow::Borrowed)
-            .or_else(|| {
-                native_interactions.and_then(|interactions| {
-                    Self::native_link_mapping(page_idx, &self.links, interactions).map(Cow::Owned)
-                })
-            });
-
         self.links.iter().enumerate().find_map(|(link_ix, link)| {
-            if link.page_idx != page_idx {
-                return None;
-            }
-            let native_hit = native_mapping.as_ref().and_then(|mapping| {
-                let interaction_ix =
-                    mapping
-                        .iter()
-                        .find_map(|(candidate_link_ix, interaction_ix)| {
-                            (*candidate_link_ix == link_ix).then_some(*interaction_ix)
-                        })?;
-                native_interactions
-                    .and_then(|interactions| interactions.get(interaction_ix))
-                    .map(|interaction| {
-                        native_link_contains_point(
-                            interaction,
-                            f64::from(pdf_point.x),
-                            f64::from(pdf_point.y),
-                        )
-                    })
-            });
-            native_hit
-                .unwrap_or_else(|| {
-                    link.rects
-                        .iter()
-                        .any(|rect| rect.contains(pdf_point.x, pdf_point.y))
-                })
-                .then_some(link_ix)
+            (link.page_idx == page_idx
+                && link
+                    .rects
+                    .iter()
+                    .any(|rect| rect.contains(pdf_point.x, pdf_point.y)))
+            .then_some(link_ix)
         })
     }
 
@@ -173,7 +129,7 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) {
         let link_ix = if should_hit_test_document_content(self.dragging, self.panning.is_some()) {
-            self.link_at_screen(position, cx)
+            self.link_at_screen(position)
         } else {
             None
         };
@@ -217,21 +173,5 @@ mod tests {
         assert!(should_hit_test_document_content(false, false));
         assert!(!should_hit_test_document_content(true, false));
         assert!(!should_hit_test_document_content(false, true));
-    }
-
-    #[test]
-    fn inert_native_links_keep_geometry_but_are_not_hittable() {
-        let interaction = GpuLinkInteraction {
-            annotation_bounds: [10.0, 20.0, 30.0, 40.0],
-            regions: Arc::from([[10.0, 20.0, 30.0, 20.0, 30.0, 40.0, 10.0, 40.0]]),
-            highlight_mode: GpuLinkHighlightMode::None,
-            action: GpuLinkAction::NoOp {
-                code: Arc::from("invalid-link-destination-noop"),
-                message: Arc::from("no destination"),
-            },
-        };
-
-        assert!(interaction.contains_point(20.0, 30.0));
-        assert!(!native_link_contains_point(&interaction, 20.0, 30.0));
     }
 }

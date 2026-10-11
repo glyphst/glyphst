@@ -127,21 +127,13 @@ impl Settings {
             settings.restore_on_startup = value;
         }
 
-        if let Some(document_view) = document.get("document_view").and_then(KdlNode::children) {
-            if let Some(value) = document_view
+        if let Some(document_view) = document.get("document_view").and_then(KdlNode::children)
+            && let Some(value) = document_view
                 .get_arg("progress_display")
                 .and_then(KdlValue::as_string)
                 .and_then(DocumentProgressDisplay::from_str)
-            {
-                settings.document_view.progress_display = value;
-            }
-            if let Some(value) = document_view
-                .get_arg("pdf_render_engine")
-                .and_then(KdlValue::as_string)
-                .and_then(PdfRenderEngine::from_str)
-            {
-                settings.document_view.pdf_render_engine = value;
-            }
+        {
+            settings.document_view.progress_display = value;
         }
 
         if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
@@ -588,11 +580,6 @@ impl Settings {
             document_view_children,
             "progress_display",
             self.document_view.progress_display.as_str(),
-        );
-        push_value_node(
-            document_view_children,
-            "pdf_render_engine",
-            self.document_view.pdf_render_engine.as_str(),
         );
         document.nodes_mut().push(document_view);
 

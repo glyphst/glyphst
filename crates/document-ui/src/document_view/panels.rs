@@ -151,10 +151,7 @@ impl DocumentView {
     }
 
     pub(super) fn toggle_grid_overview(&mut self, cx: &mut Context<Self>) {
-        // The current overview surface is backed by MuPDF RenderImage
-        // thumbnails. Keep strict mode honest until native retained
-        // thumbnails are connected to this surface.
-        if !self.capabilities.page_overview || self.strict_native_pdf(cx) {
+        if !self.capabilities.page_overview {
             return;
         }
         self.set_grid_overview_open(!self.grid_overview_open, cx);

@@ -44,10 +44,8 @@
     fontDirectories = [ ];
     includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
   };
-  # crane vendors every Cargo.lock source in its own directory, so the crates.io
-  # hayro/moxcms crates (Typst, image) and the engine's same-version forks coexist.
-  # Git dependencies use builtins.fetchGit with the evaluating user's credentials,
-  # which the private engine repository requires.
+  # crane vendors every Cargo.lock source in its own directory and fetches Git
+  # dependencies (the Zed and GPUI Kit forks) with builtins.fetchGit.
   commonArgs = {
     pname = "glyphst-reader";
     version = workspaceCargo.workspace.package.version;

@@ -18,7 +18,6 @@ glyphst-core = { path = "../core" }
 glyphst-files = { path = "../files" }
 glyphst-library = { path = "../library" }
 glyphst-pdf = { path = "../pdf" }
-glyphst-pdf-gpu = { path = "../pdf-gpu" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }

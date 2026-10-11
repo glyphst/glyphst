@@ -61,16 +61,10 @@ impl DocumentView {
         }
         let anchor =
             self.zoom_anchor_at_viewport([self.viewport_width / 2.0, self.viewport_height / 2.0]);
-        // Immediate zoom sources cannot be paused by the animation driver.
-        // Enter camera motion and reserve opportunistically before changing
-        // the root transform so the next paint can still use the shared
-        // camera-target contract.
-        self.mark_native_gpu_zoom_motion(cx);
         self.apply_zoom_anchor(zoom, anchor);
         self.target_zoom = zoom;
         self.zoom_anchor = None;
         self.last_animation_frame = None;
-        self.record_native_gpu_camera_step(true);
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);
@@ -94,7 +88,6 @@ impl DocumentView {
         self.target_zoom = zoom;
         self.zoom_anchor = Some(self.zoom_anchor_at_viewport(viewport_anchor));
         self.last_animation_frame = None;
-        self.mark_native_gpu_zoom_motion(cx);
         self.hovered_link = None;
         self.pending_link = None;
         self.schedule_position_save(cx);

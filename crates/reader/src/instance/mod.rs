@@ -23,34 +23,9 @@ pub(crate) struct OpenRequest {
     pub(crate) path: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RenderTraceKind {
-    Scroll,
-    Zoom,
-    ZoomScroll,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RenderTraceEngine {
-    MuPdf,
-    Glyphst,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RenderTraceRequest {
-    pub(crate) kind: RenderTraceKind,
-    pub(crate) engine: RenderTraceEngine,
-    pub(crate) page: usize,
-    pub(crate) initial_zoom: f32,
-    pub(crate) output: PathBuf,
-    pub(crate) window_width: f32,
-    pub(crate) window_height: f32,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StartupRequest {
     pub(crate) open: OpenRequest,
-    pub(crate) trace: Option<RenderTraceRequest>,
 }
 
 pub(crate) fn parse_args() -> Result<StartupRequest> {
@@ -60,79 +35,11 @@ pub(crate) fn parse_args() -> Result<StartupRequest> {
 fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRequest> {
     let mut new = false;
     let mut path = None;
-    let mut trace_kind = None;
-    let mut trace_engine = None;
-    let mut trace_page = 1_usize;
-    let mut trace_zoom = 1.0_f32;
-    let mut trace_output = None;
-    let mut window_width = 1440.0_f32;
-    let mut window_height = 900.0_f32;
-    let mut trace_option_seen = false;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
         if arg.as_os_str() == OsStr::new("--new") {
             new = true;
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--render-trace") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--render-trace")?;
-            trace_kind = Some(match value.to_str() {
-                Some("scroll") => RenderTraceKind::Scroll,
-                Some("zoom") => RenderTraceKind::Zoom,
-                Some("zoom-scroll") => RenderTraceKind::ZoomScroll,
-                _ => bail!("--render-trace must be 'scroll', 'zoom', or 'zoom-scroll'"),
-            });
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--render-engine") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--render-engine")?;
-            trace_engine = Some(match value.to_str() {
-                Some("mupdf") => RenderTraceEngine::MuPdf,
-                Some("glyphst") => RenderTraceEngine::Glyphst,
-                _ => bail!("--render-engine must be 'mupdf' or 'glyphst'"),
-            });
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--render-page") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--render-page")?;
-            trace_page = parse_positive_usize(&value, "--render-page")?;
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--render-zoom") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--render-zoom")?;
-            trace_zoom = parse_render_zoom(&value)?;
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--render-output") {
-            trace_option_seen = true;
-            trace_output = Some(PathBuf::from(required_option_value(
-                &mut args,
-                "--render-output",
-            )?));
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--window-width") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--window-width")?;
-            window_width = parse_window_extent(&value, "--window-width", 900.0)?;
-            continue;
-        }
-
-        if arg.as_os_str() == OsStr::new("--window-height") {
-            trace_option_seen = true;
-            let value = required_option_value(&mut args, "--window-height")?;
-            window_height = parse_window_extent(&value, "--window-height", 600.0)?;
             continue;
         }
 
@@ -153,83 +60,9 @@ fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupRe
         }
     }
 
-    let trace = if trace_option_seen {
-        if new {
-            bail!("--new cannot be combined with an automated render trace");
-        }
-        let path = path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("an automated render trace requires a PDF path"))?;
-        if path.extension().and_then(OsStr::to_str) != Some("pdf") {
-            bail!("an automated render trace requires a .pdf document");
-        }
-        Some(RenderTraceRequest {
-            kind: trace_kind
-                .ok_or_else(|| anyhow::anyhow!("missing required --render-trace option"))?,
-            engine: trace_engine
-                .ok_or_else(|| anyhow::anyhow!("missing required --render-engine option"))?,
-            page: trace_page,
-            initial_zoom: trace_zoom,
-            output: trace_output
-                .ok_or_else(|| anyhow::anyhow!("missing required --render-output option"))?,
-            window_width,
-            window_height,
-        })
-    } else {
-        None
-    };
-
     Ok(StartupRequest {
         open: OpenRequest { new, path },
-        trace,
     })
-}
-
-fn required_option_value(
-    args: &mut impl Iterator<Item = OsString>,
-    option: &str,
-) -> Result<OsString> {
-    args.next()
-        .ok_or_else(|| anyhow::anyhow!("missing value for {option}"))
-}
-
-fn parse_positive_usize(value: &OsStr, option: &str) -> Result<usize> {
-    let value = value
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("{option} is not valid UTF-8"))?;
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| anyhow::anyhow!("{option} must be a positive integer"))?;
-    if parsed == 0 {
-        bail!("{option} must be a positive integer");
-    }
-    Ok(parsed)
-}
-
-fn parse_window_extent(value: &OsStr, option: &str, minimum: f32) -> Result<f32> {
-    let value = value
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("{option} is not valid UTF-8"))?;
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| anyhow::anyhow!("{option} must be a finite number"))?;
-    if !parsed.is_finite() || parsed < minimum {
-        bail!("{option} must be a finite number at least {minimum}");
-    }
-    Ok(parsed)
-}
-
-fn parse_render_zoom(value: &OsStr) -> Result<f32> {
-    let value = value
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("--render-zoom is not valid UTF-8"))?;
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| anyhow::anyhow!("--render-zoom must be a finite number"))?;
-    if !parsed.is_finite() || !(0.25..=8_192.0).contains(&parsed) {
-        bail!("--render-zoom must be a finite number from 0.25 through 8192");
-    }
-    Ok(parsed)
 }
 
 pub(crate) fn try_forward(request: &OpenRequest) -> Result<bool> {
@@ -275,126 +108,11 @@ mod tests {
                 path: Some(PathBuf::from("/tmp/a book.pdf")),
             }
         );
-        assert!(request.trace.is_none());
     }
 
     #[test]
-    fn parses_complete_automated_trace() {
-        let request = parse(&[
-            "/tmp/book.pdf",
-            "--render-trace",
-            "zoom",
-            "--render-engine",
-            "glyphst",
-            "--render-page",
-            "29",
-            "--render-zoom",
-            "4",
-            "--render-output",
-            "/tmp/trace.json",
-            "--window-width",
-            "1536",
-            "--window-height",
-            "960",
-        ])
-        .unwrap();
-        assert_eq!(
-            request.trace,
-            Some(RenderTraceRequest {
-                kind: RenderTraceKind::Zoom,
-                engine: RenderTraceEngine::Glyphst,
-                page: 29,
-                initial_zoom: 4.0,
-                output: PathBuf::from("/tmp/trace.json"),
-                window_width: 1536.0,
-                window_height: 960.0,
-            })
-        );
-    }
-
-    #[test]
-    fn parses_zoom_scroll_trace() {
-        let request = parse(&[
-            "/tmp/book.pdf",
-            "--render-trace",
-            "zoom-scroll",
-            "--render-engine",
-            "glyphst",
-            "--render-output",
-            "/tmp/trace.json",
-        ])
-        .unwrap();
-        assert_eq!(request.trace.unwrap().kind, RenderTraceKind::ZoomScroll);
-    }
-
-    #[test]
-    fn trace_requires_every_identity_option() {
-        let error = parse(&[
-            "/tmp/book.pdf",
-            "--render-trace",
-            "scroll",
-            "--render-output",
-            "/tmp/trace.json",
-        ])
-        .unwrap_err();
-        assert!(error.to_string().contains("--render-engine"));
-    }
-
-    #[test]
-    fn trace_rejects_zero_page_and_small_window() {
-        let zero_page = parse(&[
-            "/tmp/book.pdf",
-            "--render-trace",
-            "zoom",
-            "--render-page",
-            "0",
-        ])
-        .unwrap_err();
-        assert!(zero_page.to_string().contains("positive integer"));
-
-        let small_window = parse(&[
-            "/tmp/book.pdf",
-            "--window-width",
-            "899",
-            "--render-trace",
-            "zoom",
-        ])
-        .unwrap_err();
-        assert!(small_window.to_string().contains("at least 900"));
-
-        let invalid_zoom = parse(&[
-            "/tmp/book.pdf",
-            "--render-zoom",
-            "0.1",
-            "--render-trace",
-            "zoom",
-        ])
-        .unwrap_err();
-        assert!(invalid_zoom.to_string().contains("0.25 through 8192"));
-    }
-
-    #[test]
-    fn trace_rejects_compatibility_backend_and_non_pdf_input() {
-        let compatibility = parse(&[
-            "/tmp/book.pdf",
-            "--render-trace",
-            "zoom",
-            "--render-engine",
-            "glyphst-first",
-        ])
-        .unwrap_err();
-        assert!(compatibility.to_string().contains("mupdf' or 'glyphst"));
-
-        let non_pdf = parse(&[
-            "/tmp/book.epub",
-            "--render-trace",
-            "zoom",
-            "--render-engine",
-            "glyphst",
-            "--render-output",
-            "/tmp/trace.json",
-        ])
-        .unwrap_err();
-        assert!(non_pdf.to_string().contains(".pdf"));
+    fn rejects_a_second_startup_path() {
+        let error = parse(&["/tmp/a.pdf", "/tmp/b.pdf"]).unwrap_err();
+        assert!(error.to_string().contains("only one document path"));
     }
 }

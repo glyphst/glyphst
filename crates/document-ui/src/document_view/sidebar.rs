@@ -145,13 +145,6 @@ impl DocumentView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match sidebar {
-            DocumentSidebar::Thumbnails if self.strict_native_pdf(cx) => div()
-                .size_full()
-                .p_4()
-                .text_color(theme.muted_foreground)
-                .whitespace_normal()
-                .child(crate::fl!("pdf-native-thumbnails-unavailable"))
-                .into_any_element(),
             DocumentSidebar::Thumbnails => self
                 .render_thumbnail_sidebar(theme, window, cx)
                 .into_any_element(),
@@ -974,8 +967,6 @@ mod tests {
             target_top: Some(destination_y),
             target_left: None,
             navigable: true,
-            native_action: None,
-            initially_open: true,
             color: None,
             italic: false,
             bold: false,

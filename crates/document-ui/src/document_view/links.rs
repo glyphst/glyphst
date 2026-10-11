@@ -1,106 +1,6 @@
 use super::*;
 
-fn initially_collapsed_toc_entries(toc: &[TocEntry]) -> HashSet<usize> {
-    toc.iter()
-        .enumerate()
-        .filter_map(|(entry_ix, entry)| {
-            (entry.has_children && !entry.initially_open).then_some(entry_ix)
-        })
-        .collect()
-}
-
 impl DocumentView {
-    pub(super) fn install_native_reader_links(
-        &mut self,
-        page_idx: usize,
-        interactions: &[GpuLinkInteraction],
-    ) -> Option<Vec<(usize, usize)>> {
-        let page = u32::try_from(page_idx).ok()?;
-        if self.gpu_pdf.reader_link_replacements.contains_key(&page) {
-            return Some(
-                self.links
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(link_ix, link)| {
-                        (link.page_idx == page_idx)
-                            .then_some(link.native_interaction_ix.map(|ix| (link_ix, ix)))?
-                    })
-                    .collect(),
-            );
-        }
-
-        let native_links = interactions
-            .iter()
-            .enumerate()
-            .map(|(interaction_ix, interaction)| {
-                let [x0, y0, x1, y1] = interaction.annotation_bounds;
-                let finite = [x0, y0, x1, y1]
-                    .into_iter()
-                    .all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX));
-                if !finite {
-                    return None;
-                }
-                let rect =
-                    Self::normalized_rect(Rect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32))?;
-                Some(DocumentLink {
-                    page_idx,
-                    rects: vec![rect],
-                    // Activation always executes the corresponding owned
-                    // native action. This inert same-page destination is only
-                    // a fail-closed placeholder if that interaction vanishes
-                    // during device recovery.
-                    target: LinkTarget::Internal {
-                        page_idx,
-                        target_top: None,
-                        target_left: None,
-                    },
-                    pdf_annotation: true,
-                    native_interaction_ix: Some(interaction_ix),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        self.gpu_pdf
-            .reader_original_links
-            .get_or_insert_with(|| self.links.clone());
-        let mut retained = Vec::with_capacity(self.links.len());
-        let mut replaced = Vec::new();
-        for (index, link) in std::mem::take(&mut self.links).into_iter().enumerate() {
-            if link.page_idx == page_idx {
-                replaced.push((index, link));
-            } else {
-                retained.push(link);
-            }
-        }
-        self.links = retained;
-        let first_native = self.links.len();
-        self.links.extend(native_links);
-        self.gpu_pdf.reader_link_replacements.insert(page, replaced);
-        // Link IDs are vector positions. Replacing one page can shift every
-        // later page, so rebuild cached mappings and pointer state.
-        self.gpu_pdf.invalidate_link_mappings();
-        self.pending_link = None;
-        self.hovered_link = None;
-        Some(
-            interactions
-                .iter()
-                .enumerate()
-                .map(|(interaction_ix, _)| (first_native + interaction_ix, interaction_ix))
-                .collect(),
-        )
-    }
-
-    pub(super) fn restore_all_native_reader_links(&mut self) {
-        let Some(original_links) = self.gpu_pdf.reader_original_links.take() else {
-            return;
-        };
-        self.links = original_links;
-        self.gpu_pdf.reader_link_replacements.clear();
-        self.gpu_pdf.invalidate_link_mappings();
-        self.pending_link = None;
-        self.hovered_link = None;
-    }
-
     pub(super) fn flatten_toc(outlines: Vec<mupdf::Outline>, page_count: usize) -> Vec<TocEntry> {
         let mut entries = Vec::new();
         for outline in outlines {
@@ -141,8 +41,6 @@ impl DocumentView {
             target_top,
             target_left,
             navigable,
-            native_action: None,
-            initially_open: true,
             color: None,
             italic: false,
             bold: false,
@@ -151,105 +49,6 @@ impl DocumentView {
         for child in down {
             Self::push_toc_outline(child, depth + 1, Some(entry_ix), page_count, entries);
         }
-    }
-
-    pub(super) fn flatten_gpu_outline(
-        outline: &[GpuOutlineItem],
-        page_count: usize,
-    ) -> Vec<TocEntry> {
-        let mut entries = Vec::new();
-        for item in outline {
-            Self::push_gpu_outline(item, 0, None, page_count, &mut entries);
-        }
-        entries
-    }
-
-    fn push_gpu_outline(
-        item: &GpuOutlineItem,
-        depth: usize,
-        parent_ix: Option<usize>,
-        page_count: usize,
-        entries: &mut Vec<TocEntry>,
-    ) {
-        let has_children = !item.children.is_empty();
-        let destination = item
-            .action
-            .as_ref()
-            .and_then(|action| Self::gpu_outline_destination(action, page_count));
-        let (page_idx, target_top, target_left) = destination
-            .map(|(page_idx, top, left)| (Some(page_idx), top, left))
-            .unwrap_or((None, None, None));
-        let entry_ix = entries.len();
-        entries.push(TocEntry {
-            title: item.title.to_string().into(),
-            depth,
-            parent_ix,
-            has_children,
-            page_idx,
-            target_top,
-            target_left,
-            navigable: item.action.is_some(),
-            native_action: item.action.clone(),
-            initially_open: item.initially_open,
-            color: item.color,
-            italic: item.italic,
-            bold: item.bold,
-        });
-
-        for child in item.children.iter() {
-            Self::push_gpu_outline(child, depth + 1, Some(entry_ix), page_count, entries);
-        }
-    }
-
-    fn gpu_outline_destination(
-        action: &GpuLinkAction,
-        page_count: usize,
-    ) -> Option<(usize, Option<f32>, Option<f32>)> {
-        let GpuLinkAction::GoTo { page, view } = action else {
-            return None;
-        };
-        let page_idx = usize::try_from(*page).ok()?;
-        if page_idx >= page_count {
-            return None;
-        }
-        let (target_top, target_left) = match view {
-            GpuDestinationView::Xyz { x, y, .. } => {
-                (y.map(|value| value as f32), x.map(|value| value as f32))
-            }
-            GpuDestinationView::FitWidth { top } => (top.map(|value| value as f32), None),
-            GpuDestinationView::FitHeight { left } => (None, left.map(|value| value as f32)),
-            GpuDestinationView::FitPage => (None, None),
-            GpuDestinationView::FitBoundingBox { .. } => (None, None),
-            GpuDestinationView::FitBoundingBoxWidth { top, .. } => {
-                (top.map(|value| value as f32), None)
-            }
-            GpuDestinationView::FitBoundingBoxHeight { left, .. } => {
-                (None, left.map(|value| value as f32))
-            }
-            GpuDestinationView::FitRectangle(rect) => (Some(rect[1] as f32), Some(rect[0] as f32)),
-        };
-        Some((page_idx, target_top, target_left))
-    }
-
-    pub(super) fn install_native_gpu_outline(
-        &mut self,
-        outline: &[GpuOutlineItem],
-        cx: &mut Context<Self>,
-    ) {
-        self.toc = Self::flatten_gpu_outline(outline, self.page_count);
-        self.toc_collapsed = initially_collapsed_toc_entries(&self.toc);
-        self.toc_sidebar_selected = None;
-        self.toc_sidebar_follow_current = true;
-        self.toc_sidebar_manual_scroll.set(false);
-        self.toc_sidebar_visible_entry_ixs.clear();
-        self.toc_sidebar_entries_dirty = true;
-        if let Some(palette) = self.toc_palette.clone() {
-            let entries = self.toc_palette_entries();
-            palette.update(cx, |picker, cx| {
-                picker.update_delegate(move |delegate| delegate.replace_entries(entries), cx);
-            });
-        }
-        cx.notify();
     }
 
     fn destination_coordinates(kind: DestinationKind) -> (Option<f32>, Option<f32>) {
@@ -300,8 +99,6 @@ impl DocumentView {
                 page_idx,
                 rects: vec![bounds],
                 target,
-                pdf_annotation: true,
-                native_interaction_ix: None,
             });
         }
 
@@ -364,8 +161,6 @@ impl DocumentView {
                     page_idx,
                     rects,
                     target: LinkTarget::External(url),
-                    pdf_annotation: false,
-                    native_interaction_ix: None,
                 });
             }
 
@@ -527,87 +322,6 @@ impl DocumentView {
             })
     }
 
-    pub(super) fn native_link_mapping(
-        page_idx: usize,
-        links: &[DocumentLink],
-        interactions: &[GpuLinkInteraction],
-    ) -> Option<Vec<(usize, usize)>> {
-        let explicit_links = links
-            .iter()
-            .enumerate()
-            .filter(|(_, link)| link.page_idx == page_idx && link.pdf_annotation)
-            .collect::<Vec<_>>();
-        if explicit_links.len() != interactions.len() {
-            return None;
-        }
-
-        let mut claimed = vec![false; explicit_links.len()];
-        let mut mapping = Vec::with_capacity(interactions.len());
-        for (interaction_ix, interaction) in interactions.iter().enumerate() {
-            let explicit_ix =
-                explicit_links
-                    .iter()
-                    .enumerate()
-                    .find_map(|(explicit_ix, (_, link))| {
-                        (!claimed[explicit_ix]
-                            && Self::native_link_annotation_matches_reader(
-                                interaction.annotation_bounds,
-                                &link.rects,
-                            ))
-                        .then_some(explicit_ix)
-                    })?;
-            claimed[explicit_ix] = true;
-            mapping.push((explicit_links[explicit_ix].0, interaction_ix));
-        }
-        Some(mapping)
-    }
-
-    fn native_link_annotation_matches_reader(annotation_bounds: [f64; 4], rects: &[Rect]) -> bool {
-        let [rect] = rects else {
-            return false;
-        };
-        Self::native_link_region_matches_rect(annotation_bounds, *rect)
-    }
-
-    fn native_link_region_matches_rect(region: [f64; 4], rect: Rect) -> bool {
-        const EPSILON: f64 = 0.01;
-        let expected = [
-            f64::from(rect.x0),
-            f64::from(rect.y0),
-            f64::from(rect.x1),
-            f64::from(rect.y1),
-        ];
-        region
-            .into_iter()
-            .zip(expected)
-            .all(|(actual, expected)| actual.is_finite() && (actual - expected).abs() <= EPSILON)
-    }
-
-    pub(super) fn native_link_interaction_for_link(
-        &self,
-        link_ix: usize,
-    ) -> Option<&GpuLinkInteraction> {
-        let link = self.links.get(link_ix)?;
-        if !link.pdf_annotation {
-            return None;
-        }
-        let interactions = self.native_gpu_link_interactions(link.page_idx)?;
-        if let Some(interaction_ix) = link.native_interaction_ix {
-            return interactions.get(interaction_ix);
-        }
-        let interaction_ix = self
-            .cached_native_gpu_link_mapping(link.page_idx)
-            .map(Cow::Borrowed)
-            .or_else(|| {
-                Self::native_link_mapping(link.page_idx, &self.links, interactions).map(Cow::Owned)
-            })?
-            .iter()
-            .find_map(|(candidate_link_ix, interaction_ix)| {
-                (*candidate_link_ix == link_ix).then_some(*interaction_ix)
-            })?;
-        interactions.get(interaction_ix)
-    }
-
     #[ztracing::instrument(skip_all, fields(page_idx))]
     pub(super) fn extract_glyphs(
         display_list: &DisplayList,
@@ -674,37 +388,6 @@ impl DocumentView {
 mod tests {
     use super::*;
 
-    fn document_link(page_idx: usize, rects: Vec<Rect>, pdf_annotation: bool) -> DocumentLink {
-        DocumentLink {
-            page_idx,
-            rects,
-            target: LinkTarget::External("https://example.com".into()),
-            pdf_annotation,
-            native_interaction_ix: None,
-        }
-    }
-
-    fn interaction(annotation_bounds: [f64; 4]) -> GpuLinkInteraction {
-        let [x0, y0, x1, y1] = annotation_bounds;
-        GpuLinkInteraction {
-            annotation_bounds,
-            regions: Arc::from([[x0, y0, x1, y0, x1, y1, x0, y1]]),
-            highlight_mode: GpuLinkHighlightMode::Invert,
-            action: GpuLinkAction::Uri(Arc::from("https://example.com")),
-        }
-    }
-
-    fn link_pdf() -> Vec<u8> {
-        b"%PDF-1.4\n\
-1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
-2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
-3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Annots[5 0 R]>> endobj\n\
-4 0 obj <</Length 0>> stream\nendstream endobj\n\
-5 0 obj <</Type/Annot/Subtype/Link/Rect[10 10 50 30]/Border[0 0 0]/A<</S/URI/URI(https://example.com)>>>> endobj\n\
-trailer <</Root 1 0 R>>\n%%EOF"
-            .to_vec()
-    }
-
     fn outline(title: &str, down: Vec<mupdf::Outline>) -> mupdf::Outline {
         mupdf::Outline {
             title: title.to_string(),
@@ -735,151 +418,5 @@ trailer <</Root 1 0 R>>\n%%EOF"
         assert!(toc[0].has_children);
         assert!(toc[1].has_children);
         assert!(!toc[2].has_children);
-    }
-
-    #[test]
-    fn flatten_gpu_outline_retains_actions_style_and_initial_open_state() {
-        let outline = [GpuOutlineItem {
-            title: Arc::from("Native root"),
-            action: Some(GpuLinkAction::GoTo {
-                page: 1,
-                view: GpuDestinationView::Xyz {
-                    x: Some(12.0),
-                    y: Some(34.0),
-                    zoom: Some(2.0),
-                },
-            }),
-            children: Arc::from([GpuOutlineItem {
-                title: Arc::from("External child"),
-                action: Some(GpuLinkAction::Uri(Arc::from("https://example.com"))),
-                children: Arc::from([]),
-                initially_open: false,
-                color: None,
-                italic: false,
-                bold: false,
-            }]),
-            initially_open: false,
-            color: Some([0.1, 0.2, 0.3]),
-            italic: true,
-            bold: true,
-        }];
-
-        let toc = DocumentView::flatten_gpu_outline(&outline, 2);
-        assert_eq!(toc.len(), 2);
-        assert_eq!(toc[0].page_idx, Some(1));
-        assert_eq!(toc[0].target_top, Some(34.0));
-        assert_eq!(toc[0].target_left, Some(12.0));
-        assert_eq!(toc[0].color, Some([0.1, 0.2, 0.3]));
-        assert!(toc[0].italic);
-        assert!(toc[0].bold);
-        assert_eq!(toc[1].parent_ix, Some(0));
-        assert!(toc[1].navigable);
-        assert_eq!(toc[1].page_idx, None);
-        assert_eq!(initially_collapsed_toc_entries(&toc), HashSet::from([0]));
-    }
-
-    #[test]
-    fn native_link_mapping_ignores_detected_urls() {
-        let links = vec![
-            document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
-            document_link(0, vec![Rect::new(50.0, 60.0, 70.0, 80.0)], false),
-        ];
-        let interactions = [interaction([10.0, 20.0, 30.0, 40.0])];
-
-        assert_eq!(
-            DocumentView::native_link_mapping(0, &links, &interactions),
-            Some(vec![(0, 0)])
-        );
-    }
-
-    #[test]
-    fn native_link_mapping_matches_mupdf_and_engine_canonical_coordinates() {
-        let document = mupdf::Document::from_bytes(&link_pdf(), "application/pdf").unwrap();
-        let page = document.load_page(0).unwrap();
-        let links = DocumentView::extract_explicit_links(&page, 0, 1).unwrap();
-        let interactions = [interaction([10.0, 70.0, 50.0, 90.0])];
-
-        assert_eq!(links[0].rects, vec![Rect::new(10.0, 70.0, 50.0, 90.0)]);
-        assert_eq!(
-            DocumentView::native_link_mapping(0, &links, &interactions),
-            Some(vec![(0, 0)])
-        );
-    }
-
-    #[test]
-    fn native_link_mapping_reconciles_annotation_rect_not_quad_count() {
-        let links = [document_link(
-            0,
-            vec![Rect::new(10.0, 20.0, 90.0, 80.0)],
-            true,
-        )];
-        let interactions = [GpuLinkInteraction {
-            annotation_bounds: [10.0, 20.0, 90.0, 80.0],
-            regions: Arc::from([
-                [12.0, 22.0, 42.0, 22.0, 40.0, 35.0, 14.0, 35.0],
-                [50.0, 55.0, 88.0, 55.0, 86.0, 76.0, 52.0, 76.0],
-            ]),
-            highlight_mode: GpuLinkHighlightMode::Invert,
-            action: GpuLinkAction::Uri(Arc::from("https://example.com")),
-        }];
-
-        assert_eq!(
-            DocumentView::native_link_mapping(0, &links, &interactions),
-            Some(vec![(0, 0)])
-        );
-    }
-
-    #[test]
-    fn native_link_mapping_requires_a_geometry_bijection() {
-        let links = vec![
-            document_link(0, vec![Rect::new(50.0, 60.0, 70.0, 80.0)], true),
-            document_link(0, vec![Rect::new(10.0, 20.0, 30.0, 40.0)], true),
-        ];
-        let interactions = [
-            interaction([10.0, 20.0, 30.0, 40.0]),
-            interaction([50.0, 60.0, 70.0, 80.0]),
-        ];
-
-        assert_eq!(
-            DocumentView::native_link_mapping(0, &links, &interactions),
-            Some(vec![(1, 0), (0, 1)])
-        );
-        assert!(
-            DocumentView::native_link_mapping(0, &links, &[interaction([10.0, 20.0, 31.0, 40.0])])
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn native_link_mapping_keeps_layer_hidden_placeholders() {
-        let links = [document_link(
-            0,
-            vec![Rect::new(10.0, 20.0, 30.0, 40.0)],
-            true,
-        )];
-        let hidden = GpuLinkInteraction {
-            annotation_bounds: [10.0, 20.0, 30.0, 40.0],
-            regions: Arc::from([]),
-            highlight_mode: GpuLinkHighlightMode::None,
-            action: GpuLinkAction::NoOp {
-                code: Arc::from("annotation-layer-hidden"),
-                message: Arc::from("hidden"),
-            },
-        };
-        assert_eq!(
-            DocumentView::native_link_mapping(0, &links, &[hidden]),
-            Some(vec![(0, 0)])
-        );
-    }
-
-    #[test]
-    fn native_link_mapping_requires_all_explicit_annotations() {
-        let links = [document_link(
-            0,
-            vec![Rect::new(10.0, 20.0, 30.0, 40.0)],
-            true,
-        )];
-
-        assert!(DocumentView::native_link_mapping(0, &links, &[]).is_none());
     }
 }

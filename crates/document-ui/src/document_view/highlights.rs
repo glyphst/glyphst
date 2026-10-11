@@ -62,11 +62,6 @@ impl DocumentView {
         let Some(link_ix) = self.hovered_link else {
             return Vec::new();
         };
-        if self.pending_link == Some(link_ix)
-            && self.native_link_interaction_for_link(link_ix).is_some()
-        {
-            return Vec::new();
-        }
         let Some(link) = self.links.get(link_ix) else {
             return Vec::new();
         };
@@ -77,99 +72,6 @@ impl DocumentView {
         }
 
         highlights
-    }
-
-    pub(super) fn link_invert_overlays(&self, pages: &[PaintPage]) -> Vec<LinkInvertOverlay> {
-        let Some(link_ix) = self.pending_link else {
-            return Vec::new();
-        };
-        if self.hovered_link != Some(link_ix) {
-            return Vec::new();
-        }
-        let Some(link) = self.links.get(link_ix) else {
-            return Vec::new();
-        };
-        let Some(interaction) = self.native_link_interaction_for_link(link_ix) else {
-            return Vec::new();
-        };
-        if interaction.highlight_mode != GpuLinkHighlightMode::Invert {
-            return Vec::new();
-        }
-        let Some(page) = pages.iter().find(|page| page.page_idx == link.page_idx) else {
-            return Vec::new();
-        };
-        let Some(texture) = page.gpu.as_ref().and_then(|gpu| gpu.texture.as_ref()) else {
-            return Vec::new();
-        };
-
-        Self::native_link_region_rect(interaction.annotation_bounds)
-            .into_iter()
-            .map(|rect| self.pdf_rect_to_screen(link.page_idx, rect, page.bounds))
-            .filter_map(|bounds| Self::external_texture_subrect(texture.bounds, bounds))
-            .map(|(bounds, relative)| {
-                let base = texture.source_bounds;
-                let source_bounds = Bounds::new(
-                    point(
-                        base.origin.x + relative.origin.x * base.size.width,
-                        base.origin.y + relative.origin.y * base.size.height,
-                    ),
-                    size(
-                        relative.size.width * base.size.width,
-                        relative.size.height * base.size.height,
-                    ),
-                );
-                LinkInvertOverlay {
-                    bounds,
-                    source_bounds,
-                    texture: texture.texture.handle().clone(),
-                    color_space: texture.texture.color_space(),
-                }
-            })
-            .collect()
-    }
-
-    fn native_link_region_rect(region: [f64; 4]) -> Option<Rect> {
-        let mut values = [0.0_f32; 4];
-        for (destination, source) in values.iter_mut().zip(region) {
-            if !source.is_finite() || source.abs() > f64::from(f32::MAX) {
-                return None;
-            }
-            *destination = source as f32;
-        }
-        Self::normalized_rect(Rect::new(values[0], values[1], values[2], values[3]))
-    }
-
-    fn external_texture_subrect(
-        texture_bounds: Bounds<Pixels>,
-        requested_bounds: Bounds<Pixels>,
-    ) -> Option<(Bounds<Pixels>, Bounds<f32>)> {
-        let texture_width = texture_bounds.size.width.as_f32();
-        let texture_height = texture_bounds.size.height.as_f32();
-        if texture_width <= 0.0 || texture_height <= 0.0 {
-            return None;
-        }
-        let bounds = texture_bounds.intersect(&requested_bounds);
-        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
-            return None;
-        }
-
-        let source_x0 =
-            ((bounds.origin.x - texture_bounds.origin.x).as_f32() / texture_width).clamp(0.0, 1.0);
-        let source_y0 =
-            ((bounds.origin.y - texture_bounds.origin.y).as_f32() / texture_height).clamp(0.0, 1.0);
-        let source_x1 =
-            ((bounds.right() - texture_bounds.origin.x).as_f32() / texture_width).clamp(0.0, 1.0);
-        let source_y1 =
-            ((bounds.bottom() - texture_bounds.origin.y).as_f32() / texture_height).clamp(0.0, 1.0);
-        (source_x1 > source_x0 && source_y1 > source_y0).then(|| {
-            (
-                bounds,
-                Bounds::new(
-                    point(source_x0, source_y0),
-                    size(source_x1 - source_x0, source_y1 - source_y0),
-                ),
-            )
-        })
     }
 
     pub(super) fn search_highlights(&self) -> (Vec<Bounds<Pixels>>, Vec<Bounds<Pixels>>) {
@@ -480,33 +382,5 @@ impl DocumentView {
 
     pub(super) fn with_alpha(rgb: u32, alpha: u8) -> u32 {
         ((rgb & 0x00ff_ffff) << 8) | alpha as u32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn external_texture_subrect_maps_a_clipped_destination_to_normalized_source() {
-        let texture = Bounds::new(point(px(100.0), px(200.0)), size(px(400.0), px(200.0)));
-        let requested = Bounds::new(point(px(300.0), px(150.0)), size(px(300.0), px(150.0)));
-
-        let (bounds, source) = DocumentView::external_texture_subrect(texture, requested).unwrap();
-        assert_eq!(
-            bounds,
-            Bounds::new(point(px(300.0), px(200.0)), size(px(200.0), px(100.0)))
-        );
-        assert_eq!(source, Bounds::new(point(0.5, 0.0), size(0.5, 0.5)));
-    }
-
-    #[test]
-    fn external_texture_subrect_rejects_disjoint_or_empty_bounds() {
-        let texture = Bounds::new(point(px(100.0), px(200.0)), size(px(400.0), px(200.0)));
-        let disjoint = Bounds::new(point(px(0.0), px(0.0)), size(px(10.0), px(10.0)));
-        let empty = Bounds::new(point(px(100.0), px(200.0)), size(px(0.0), px(200.0)));
-
-        assert!(DocumentView::external_texture_subrect(texture, disjoint).is_none());
-        assert!(DocumentView::external_texture_subrect(empty, texture).is_none());
     }
 }
