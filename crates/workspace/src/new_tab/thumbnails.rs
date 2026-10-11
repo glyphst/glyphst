@@ -263,9 +263,10 @@ pub(super) fn render_cover_thumbnail(
     let physical_width = logical_width.ceil().max(1.0) as i32;
     let physical_height = logical_height.ceil().max(1.0) as i32;
 
-    let display_list = DisplayList::new(page_bounds)?;
-    let device = Device::from_display_list(&display_list)?;
+    let mut display_list = DisplayList::new(page_bounds)?;
+    let device = Device::from_display_list(&mut display_list)?;
     page.run(&device, &Matrix::IDENTITY)?;
+    drop(device);
 
     let mut pixmap = Pixmap::new_with_w_h(
         &Colorspace::device_rgb(),

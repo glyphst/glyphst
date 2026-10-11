@@ -492,7 +492,7 @@ mod tests {
             .with_password(DocumentPassword::new("123456"));
 
         assert_eq!(snapshot.open().unwrap().inner().page_count().unwrap(), 1);
-        assert_eq!(context.user_css(), Some(css));
+        assert_eq!(context.user_css().as_deref(), Some(css));
         assert!(context.use_document_css());
 
         std::thread::scope(|scope| {
@@ -506,7 +506,7 @@ mod tests {
                 });
             }
         });
-        assert_eq!(context.user_css(), Some(css));
+        assert_eq!(context.user_css().as_deref(), Some(css));
         assert!(context.use_document_css());
     }
 
@@ -533,9 +533,10 @@ mod tests {
         assert!(narrow_pages > 0);
         let page = narrow.inner().load_page(0).unwrap();
         let bounds = page.bounds().unwrap();
-        let display_list = mupdf::DisplayList::new(bounds).unwrap();
-        let list_device = mupdf::Device::from_display_list(&display_list).unwrap();
+        let mut display_list = mupdf::DisplayList::new(bounds).unwrap();
+        let list_device = mupdf::Device::from_display_list(&mut display_list).unwrap();
         page.run(&list_device, &mupdf::Matrix::IDENTITY).unwrap();
+        drop(list_device);
         let mut pixmap = mupdf::Pixmap::new_with_w_h(
             &mupdf::Colorspace::device_rgb(),
             bounds.width().ceil() as i32,

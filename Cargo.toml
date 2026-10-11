@@ -57,7 +57,7 @@ i18n-embed-fl = "0.10"
 kdl = "6"
 lsp-types = { version = "0.97", features = ["proposed"] }
 markdown = "1.0"
-mupdf = "0.7"
+mupdf = "0.8"
 redb = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }
 rand = "0.10"

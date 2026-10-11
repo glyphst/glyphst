@@ -60,9 +60,10 @@ impl DocumentView {
         for page_idx in start_page_idx..end_page_idx {
             let page = document.load_page(page_idx as i32)?;
             let page_bounds = page_bounds[page_idx - start_page_idx];
-            let display_list = DisplayList::new(page_bounds)?;
-            let device = Device::from_display_list(&display_list)?;
+            let mut display_list = DisplayList::new(page_bounds)?;
+            let device = Device::from_display_list(&mut display_list)?;
             page.run(&device, &Matrix::IDENTITY)?;
+            drop(device);
 
             let explicit_links_start = links.len();
             match Self::extract_explicit_links(&page, page_idx, page_count) {

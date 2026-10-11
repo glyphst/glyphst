@@ -124,14 +124,15 @@ impl DocumentRenderSession {
                             .inner()
                             .load_page(page_idx as i32)
                             .with_context(|| format!("failed to load PDF page {}", page_idx + 1))?;
-                        let display_list = DisplayList::new(page_bounds).with_context(|| {
-                            format!(
-                                "failed to create display list for PDF page {}",
-                                page_idx + 1
-                            )
-                        })?;
+                        let mut display_list =
+                            DisplayList::new(page_bounds).with_context(|| {
+                                format!(
+                                    "failed to create display list for PDF page {}",
+                                    page_idx + 1
+                                )
+                            })?;
                         let device =
-                            Device::from_display_list(&display_list).with_context(|| {
+                            Device::from_display_list(&mut display_list).with_context(|| {
                                 format!(
                                     "failed to create display-list device for PDF page {}",
                                     page_idx + 1
@@ -140,6 +141,7 @@ impl DocumentRenderSession {
                         page.run(&device, &Matrix::IDENTITY).with_context(|| {
                             format!("failed to record PDF page {}", page_idx + 1)
                         })?;
+                        drop(device);
                         Ok(display_list)
                     })();
                     let _ = reply.send(result);

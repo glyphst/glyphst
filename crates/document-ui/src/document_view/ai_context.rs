@@ -125,14 +125,15 @@ impl DocumentView {
                 .with_context(|| format!("failed to read bounds for PDF page {page_number}"))?;
             let page_width = page_bounds.x1 - page_bounds.x0;
             let page_height = page_bounds.y1 - page_bounds.y0;
-            let display_list = DisplayList::new(page_bounds).with_context(|| {
+            let mut display_list = DisplayList::new(page_bounds).with_context(|| {
                 format!("failed to create display list for PDF page {page_number}")
             })?;
-            let device = Device::from_display_list(&display_list).with_context(|| {
+            let device = Device::from_display_list(&mut display_list).with_context(|| {
                 format!("failed to create display-list device for PDF page {page_number}")
             })?;
             page.run(&device, &Matrix::IDENTITY)
                 .with_context(|| format!("failed to record PDF page {page_number}"))?;
+            drop(device);
 
             let markdown = page_references
                 .iter()
@@ -271,20 +272,22 @@ impl DocumentView {
                     let page_bounds = page.bounds().with_context(|| {
                         format!("failed to read bounds for PDF page {}", page_idx + 1)
                     })?;
-                    let display_list = DisplayList::new(page_bounds).with_context(|| {
+                    let mut display_list = DisplayList::new(page_bounds).with_context(|| {
                         format!(
                             "failed to create display list for PDF page {}",
                             page_idx + 1
                         )
                     })?;
-                    let device = Device::from_display_list(&display_list).with_context(|| {
-                        format!(
-                            "failed to create display-list device for PDF page {}",
-                            page_idx + 1
-                        )
-                    })?;
+                    let device =
+                        Device::from_display_list(&mut display_list).with_context(|| {
+                            format!(
+                                "failed to create display-list device for PDF page {}",
+                                page_idx + 1
+                            )
+                        })?;
                     page.run(&device, &Matrix::IDENTITY)
                         .with_context(|| format!("failed to record PDF page {}", page_idx + 1))?;
+                    drop(device);
                     let display_list = Arc::new(display_list);
                     page_bounds_by_index.insert(page_idx, page_bounds);
                     display_lists.insert(page_idx, display_list.clone());
