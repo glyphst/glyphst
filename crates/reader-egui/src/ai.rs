@@ -426,12 +426,20 @@ impl Assistant {
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
         ui.horizontal(|ui| {
-            ui.strong("Assistant");
+            ui.add(crate::icons::image("sparkles", 16.0, tokens.accent));
+            ui.label(egui::RichText::new("Assistant").font(crate::theme::semibold(15.0)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("New").on_hover_text("New chat").clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if crate::icons::button(ui, "message-square-plus", 28.0, false, "New chat")
+                    .clicked()
+                {
                     action = Some(PanelAction::NewSession);
                 }
-                ui.toggle_value(&mut self.show_sessions, "Chats");
+                if crate::icons::button(ui, "clock", 28.0, self.show_sessions, "Saved chats")
+                    .clicked()
+                {
+                    self.show_sessions = !self.show_sessions;
+                }
             });
         });
         if !models.is_empty() {
@@ -447,8 +455,9 @@ impl Assistant {
                 action = Some(PanelAction::SetModel(chosen));
             }
         }
-        ui.separator();
+        ui.add_space(4.0);
         if self.show_sessions {
+            crate::widgets::section_title(ui, "Saved chats");
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
@@ -457,7 +466,20 @@ impl Assistant {
                     }
                     for session in &self.sessions {
                         let selected = session.id == self.session_id;
-                        if ui.selectable_label(selected, &session.title).clicked() {
+                        let (rect, response) = crate::widgets::list_row(ui, 30.0, selected);
+                        crate::widgets::row_text(
+                            ui,
+                            rect.left_center() + egui::vec2(8.0, 0.0),
+                            session.title.as_str(),
+                            crate::theme::regular(13.0),
+                            if selected {
+                                tokens.accent_text
+                            } else {
+                                tokens.text
+                            },
+                            rect.width() - 16.0,
+                        );
+                        if response.clicked() {
                             action = Some(PanelAction::LoadSession(session.id));
                         }
                     }
@@ -465,7 +487,7 @@ impl Assistant {
             return action;
         }
 
-        let composer_height = 120.0;
+        let composer_height = 150.0;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .stick_to_bottom(true)
@@ -482,27 +504,44 @@ impl Assistant {
                 for (index, message) in self.messages.iter().enumerate() {
                     match message.role {
                         Role::User => {
-                            egui::Frame::new()
-                                .fill(tokens.selected)
-                                .corner_radius(8)
-                                .inner_margin(8)
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.label(message.display_text());
-                                });
+                            let width = ui.available_width();
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                egui::Frame::new()
+                                    .fill(tokens.accent_soft)
+                                    .corner_radius(egui::CornerRadius {
+                                        nw: 12,
+                                        ne: 12,
+                                        sw: 12,
+                                        se: 4,
+                                    })
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(width * 0.85);
+                                        ui.add(egui::Label::new(message.display_text()).wrap());
+                                    });
+                            });
                         }
                         Role::Assistant => {
                             for row in self.tools.get(index).into_iter().flatten() {
-                                let mark = match row.state {
-                                    ToolState::Running => "…",
-                                    ToolState::Done => "✔",
-                                    ToolState::Failed => "✖",
-                                };
-                                ui.label(
-                                    egui::RichText::new(format!("{mark} {}", row.label()))
-                                        .small()
-                                        .color(tokens.text_muted),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    match row.state {
+                                        ToolState::Running => {
+                                            ui.add(egui::Spinner::new().size(12.0));
+                                        }
+                                        ToolState::Done => {
+                                            ui.add(crate::icons::image("check", 13.0, tokens.text_faint));
+                                        }
+                                        ToolState::Failed => {
+                                            ui.add(crate::icons::image("x", 13.0, tokens.danger));
+                                        }
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(row.label())
+                                            .small()
+                                            .color(tokens.text_faint),
+                                    );
+                                });
                             }
                             let text = message.display_text();
                             if text.is_empty() && self.run.as_ref().is_some_and(|run| run.answer == index) {
@@ -522,38 +561,54 @@ impl Assistant {
                     ui.add_space(8.0);
                 }
                 if let Some(error) = &self.error {
-                    ui.label(egui::RichText::new(error).color(egui::Color32::from_rgb(200, 60, 60)));
+                    ui.label(egui::RichText::new(error).color(tokens.danger));
                 }
             });
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(has_page, |ui| {
-                ui.checkbox(&mut self.include_page, "This page")
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .fill(tokens.field)
+            .stroke(egui::Stroke::new(1.0, tokens.border))
+            .corner_radius(12)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                let input = ui.add(
+                    egui::TextEdit::multiline(&mut self.composer)
+                        .id(egui::Id::new("assistant-input"))
+                        .hint_text("Ask about this document")
+                        .frame(egui::Frame::NONE)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                let enter = input.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(has_page, |ui| {
+                        ui.checkbox(&mut self.include_page, "This page")
+                    });
+                    ui.add_enabled_ui(has_selection, |ui| {
+                        ui.checkbox(&mut self.include_selection, "Selection")
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.run.is_some() {
+                            if crate::icons::button(ui, "x", 28.0, true, "Stop").clicked() {
+                                self.stop();
+                            }
+                        } else {
+                            let empty = self.composer.trim().is_empty();
+                            let send = ui
+                                .add_enabled_ui(!empty, |ui| {
+                                    crate::icons::button(ui, "send", 28.0, !empty, "Send (Enter)")
+                                })
+                                .inner;
+                            if (send.clicked() || enter) && !empty {
+                                // Enter inserted a newline into the text before it was seen.
+                                let text = std::mem::take(&mut self.composer);
+                                action = Some(PanelAction::Send(text.trim_end().to_string()));
+                            }
+                        }
+                    });
+                });
             });
-            ui.add_enabled_ui(has_selection, |ui| {
-                ui.checkbox(&mut self.include_selection, "Selection")
-            });
-        });
-        let input = ui.add(
-            egui::TextEdit::multiline(&mut self.composer)
-                .id(egui::Id::new("assistant-input"))
-                .hint_text("Ask about this document")
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
-        );
-        let enter = input.has_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-        ui.horizontal(|ui| {
-            if self.run.is_some() {
-                if ui.button("Stop").clicked() {
-                    self.stop();
-                }
-            } else if (ui.button("Send").clicked() || enter) && !self.composer.trim().is_empty() {
-                // Enter inserted a newline into the text before it was seen.
-                let text = std::mem::take(&mut self.composer);
-                action = Some(PanelAction::Send(text.trim_end().to_string()));
-            }
-        });
         action
     }
 }

@@ -2484,6 +2484,7 @@ dependencies = [
  "itertools 0.15.0",
  "log",
  "profiling",
+ "resvg 0.45.1",
 ]
 
 [[package]]
@@ -3929,6 +3930,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_commonmark",
+ "egui_extras",
  "gilrs",
  "glyphst-ai",
  "glyphst-core",

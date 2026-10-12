@@ -91,6 +91,13 @@ storage under the config directory; scripted runs (`--bench`,
 `--screenshot…`) save nothing and leave the library unwritten. User effects
 are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
 
+Its components take pdfcraft's style: the design tokens (`theme.rs`, light
+and dark, white pages in both), Inter and JetBrains Mono embedded ahead of
+egui's faces and a system CJK fallback, Lucide SVG icons through craft-ui's
+icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
+pills, search box, section titles, segmented choices, cards, toasts). The
+fonts and icons ship in `crates/reader-egui/assets` with their licences.
+
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette
 (Ctrl+K), menus and buttons all run commands through one dispatcher. The

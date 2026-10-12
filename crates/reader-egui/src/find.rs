@@ -10,7 +10,7 @@ use std::{
 
 use glyphst_pdf::text::PageText;
 
-use crate::{doc_text::DocText, theme::Tokens};
+use crate::{doc_text::DocText, icons, theme::Tokens, widgets};
 
 /// A query is searched once typing pauses this long.
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -299,20 +299,13 @@ pub fn find_bar(
         .pivot(egui::Align2::RIGHT_TOP)
         .fixed_pos(area.right_top() + egui::vec2(-18.0, 12.0))
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(tokens.card)
-                .stroke(egui::Stroke::new(1.0, tokens.border))
-                .corner_radius(10)
-                .shadow(egui::Shadow {
-                    offset: [0, 4],
-                    blur: 16,
-                    spread: 0,
-                    color: egui::Color32::from_black_alpha(40),
-                })
+            widgets::card_frame(ctx)
+                .shadow(tokens.popup_shadow())
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🔍").color(tokens.text_muted));
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.add(icons::image("search", 16.0, tokens.text_muted));
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut find.query)
                                 .id(egui::Id::new("find-input"))
@@ -339,19 +332,22 @@ pub fn find_bar(
                                 .size(12.0)
                                 .color(tokens.text_muted),
                         );
-                        if ui
-                            .button("⏶")
-                            .on_hover_text("Previous (Shift+Enter)")
+                        if icons::button(ui, "chevron-up", 26.0, false, "Previous (Shift+Enter)")
                             .clicked()
                         {
                             action = Some(FindBarAction::Step(false));
                         }
-                        if ui.button("⏷").on_hover_text("Next (Enter)").clicked() {
+                        if icons::button(ui, "chevron-down", 26.0, false, "Next (Enter)").clicked()
+                        {
                             action = Some(FindBarAction::Step(true));
                         }
-                        let options = ui
-                            .selectable_label(find.case_sensitive || find.whole_words, "Aa")
-                            .on_hover_text("Find options");
+                        let options = icons::button(
+                            ui,
+                            "sliders-horizontal",
+                            26.0,
+                            find.case_sensitive || find.whole_words,
+                            "Find options",
+                        );
                         egui::Popup::menu(&options).show(|ui| {
                             let words = ui.checkbox(&mut find.whole_words, "Whole words only");
                             let case = ui.checkbox(&mut find.case_sensitive, "Case-sensitive");
@@ -359,7 +355,7 @@ pub fn find_bar(
                                 find.edited(now);
                             }
                         });
-                        if ui.button("×").on_hover_text("Close (Esc)").clicked() {
+                        if icons::button(ui, "x", 26.0, false, "Close (Esc)").clicked() {
                             action = Some(FindBarAction::Close);
                         }
                     });
@@ -406,7 +402,7 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
                 let selected = find.current == Some(index);
                 if selected || response.hovered() {
                     let fill = if selected {
-                        tokens.selected
+                        tokens.accent_soft
                     } else {
                         tokens.hover
                     };

@@ -17,6 +17,7 @@ use glyphst_settings::{
 };
 
 use crate::{
+    icons,
     theme::Tokens,
     user_settings::{SecretStatus, UserSettings},
 };
@@ -270,7 +271,13 @@ impl ProviderPages {
                             if model.name != model.id {
                                 ui.label(RichText::new(&model.id).small().color(tokens.text_muted));
                             }
-                            if ui.small_button("×").on_hover_text("Remove").clicked() {
+                            if ui
+                                .push_id(&model.id, |ui| {
+                                    icons::button(ui, "x", 22.0, false, "Remove")
+                                })
+                                .inner
+                                .clicked()
+                            {
                                 drop = Some(model.id.clone());
                             }
                         });
@@ -403,17 +410,24 @@ impl ProviderPages {
                     .hint_text("not set")
                     .desired_width(260.0),
             );
+            let (icon, tip) = if shown {
+                ("eye-off", "Hide")
+            } else {
+                ("eye", "Show")
+            };
             if ui
-                .selectable_label(shown, "👁")
-                .on_hover_text(if shown { "Hide" } else { "Show" })
+                .push_id(("reveal", label), |ui| {
+                    icons::button(ui, icon, 24.0, false, tip)
+                })
+                .inner
                 .clicked()
                 && !self.revealed.remove(&id)
             {
                 self.revealed.insert(id);
             }
             let color = match status {
-                SecretStatus::NotSaved(_) => egui::Color32::from_rgb(0xD0, 0x40, 0x40),
-                _ => tokens.text_muted,
+                SecretStatus::NotSaved(_) => tokens.danger,
+                _ => tokens.text_faint,
             };
             ui.label(RichText::new(status.label()).small().color(color));
         });

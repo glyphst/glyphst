@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     annotations::{self, AnnotationId},
     document_tab::{DocumentTab, ViewAction},
-    find,
-    theme::Tokens,
+    find, icons,
+    theme::{self, Tokens},
     translation::{Export, SessionStatus},
+    widgets,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,17 @@ impl SidebarTab {
             Self::Notes => "Notes",
             Self::Search => "Search",
             Self::Translation => "Translation",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Outline => "list",
+            Self::Pages => "layout-grid",
+            Self::Bookmarks => "bookmark",
+            Self::Notes => "sticky-note",
+            Self::Search => "search",
+            Self::Translation => "languages",
         }
     }
 
@@ -98,12 +110,23 @@ pub fn show(
     translation: &TranslationInfo<'_>,
     now: Instant,
 ) -> Vec<SidebarAction> {
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         for candidate in SidebarTab::ALL {
-            ui.selectable_value(which, candidate, candidate.label());
+            if icons::button(
+                ui,
+                candidate.icon(),
+                30.0,
+                *which == candidate,
+                candidate.label(),
+            )
+            .clicked()
+            {
+                *which = candidate;
+            }
         }
     });
-    ui.separator();
+    widgets::section_title(ui, which.label());
     let mut actions = Vec::new();
     match which {
         SidebarTab::Outline => outline(ui, tab, &mut actions),
@@ -177,32 +200,28 @@ fn translation_panel(
                     &format!("{} pages could not be translated", session.failures.len()),
                 );
             }
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(!session.show_translated, "Original")
-                    .clicked()
-                {
-                    actions.push(SidebarAction::ShowTranslated(false));
-                }
-                if ui
-                    .selectable_label(session.show_translated, "Translated")
-                    .clicked()
-                {
-                    actions.push(SidebarAction::ShowTranslated(true));
-                }
-            });
-            ui.horizontal(|ui| {
+            let mut shown = session.show_translated;
+            if widgets::segmented(ui, &mut shown, &[(false, "Original"), (true, "Translated")]) {
+                actions.push(SidebarAction::ShowTranslated(shown));
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
                 if session.is_running() {
-                    if ui.button("Cancel").clicked() {
+                    if widgets::pill_button(ui, Some("x"), "Cancel", false).clicked() {
                         actions.push(SidebarAction::CancelTranslation);
                     }
-                } else if ui.button("Translate again").clicked() {
+                } else if widgets::pill_button(ui, Some("refresh-cw"), "Translate again", false)
+                    .clicked()
+                {
                     actions.push(SidebarAction::StartTranslation);
                 }
                 let can_export = session.status == SessionStatus::Finished
                     && !matches!(session.export, Some(Export::Running(_)));
                 if ui
-                    .add_enabled(can_export, egui::Button::new("Export PDF…"))
+                    .add_enabled_ui(can_export, |ui| {
+                        widgets::pill_button(ui, Some("file-down"), "Export PDF…", false)
+                    })
+                    .inner
                     .clicked()
                 {
                     actions.push(SidebarAction::ExportTranslation);
@@ -219,8 +238,7 @@ fn translation_panel(
     for warning in info.warnings {
         muted(ui, warning);
     }
-    ui.separator();
-    ui.strong("Pinned");
+    widgets::section_title(ui, "Pinned");
     if info.pinned.is_empty() {
         muted(
             ui,
@@ -235,9 +253,9 @@ fn translation_panel(
             for (index, (source, translated)) in info.pinned.iter().enumerate() {
                 egui::Frame::new()
                     .fill(tokens.card)
-                    .stroke(egui::Stroke::new(1.0, tokens.border))
-                    .corner_radius(6)
-                    .inner_margin(8)
+                    .stroke(egui::Stroke::new(1.0, tokens.divider))
+                    .corner_radius(8)
+                    .inner_margin(10)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let quote: String = source.chars().take(QUOTE_CHARS).collect();
@@ -248,12 +266,15 @@ fn translation_panel(
                         );
                         ui.label(translated);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Remove").clicked() {
-                                actions.push(SidebarAction::Unpin(index));
-                            }
-                            if ui.small_button("Copy").clicked() {
-                                ui.ctx().copy_text(translated.clone());
-                            }
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.push_id(index, |ui| {
+                                if icons::button(ui, "trash-2", 24.0, false, "Remove").clicked() {
+                                    actions.push(SidebarAction::Unpin(index));
+                                }
+                                if icons::button(ui, "copy", 24.0, false, "Copy").clicked() {
+                                    ui.ctx().copy_text(translated.clone());
+                                }
+                            });
                         });
                     });
                 ui.add_space(6.0);
@@ -274,6 +295,54 @@ fn muted(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).color(tokens.text_muted));
 }
 
+/// A list row with `title` indented by `depth` and an optional detail
+/// (a page number) at the right.
+fn list_entry(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: Option<String>,
+    depth: usize,
+    selected: bool,
+    enabled: bool,
+) -> egui::Response {
+    let tokens = Tokens::get(ui.ctx());
+    let (rect, response) = widgets::list_row(ui, 28.0, selected);
+    let mut right = rect.right() - 8.0;
+    if let Some(detail) = detail {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(detail, theme::regular(11.5), tokens.text_faint);
+        right -= galley.size().x;
+        ui.painter().galley(
+            egui::pos2(right, rect.center().y - galley.size().y / 2.0),
+            galley,
+            tokens.text_faint,
+        );
+    }
+    let left = rect.left() + 8.0 + depth as f32 * 14.0;
+    let color = if !enabled {
+        tokens.text_faint
+    } else if selected {
+        tokens.accent_text
+    } else {
+        tokens.text
+    };
+    let font = if depth == 0 {
+        theme::medium(13.0)
+    } else {
+        theme::regular(13.0)
+    };
+    widgets::row_text(
+        ui,
+        egui::pos2(left, rect.center().y),
+        title,
+        font,
+        color,
+        right - left - 8.0,
+    );
+    response.on_hover_text(title)
+}
+
 fn outline(ui: &mut egui::Ui, tab: &DocumentTab, actions: &mut Vec<SidebarAction>) {
     if tab.outline.is_empty() {
         muted(ui, "This document has no outline.");
@@ -288,20 +357,21 @@ fn outline(ui: &mut egui::Ui, tab: &DocumentTab, actions: &mut Vec<SidebarAction
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for (index, entry) in tab.outline.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add_space(entry.depth as f32 * 12.0);
-                    let response = ui.add_enabled(
-                        entry.page.is_some(),
-                        egui::Button::selectable(reading == Some(index), entry.title.as_str())
-                            .frame(false),
-                    );
-                    if response.clicked()
-                        && let Some(page) = entry.page
-                    {
-                        actions.push(SidebarAction::View(ViewAction::GoToPage(page)));
-                    }
-                });
+                let response = list_entry(
+                    ui,
+                    &entry.title,
+                    entry.page.map(|page| (page + 1).to_string()),
+                    entry.depth,
+                    reading == Some(index),
+                    entry.page.is_some(),
+                );
+                if response.clicked()
+                    && let Some(page) = entry.page
+                {
+                    actions.push(SidebarAction::View(ViewAction::GoToPage(page)));
+                }
             }
         });
 }
@@ -414,10 +484,10 @@ fn bookmarks(
                         actions.push(SidebarAction::GoToBookmark(bookmark.id));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Delete").clicked() {
+                        if icons::button(ui, "trash-2", 24.0, false, "Delete").clicked() {
                             actions.push(SidebarAction::RemoveBookmark(bookmark.id));
                         }
-                        if ui.small_button("✎").on_hover_text("Rename").clicked() {
+                        if icons::button(ui, "pen-line", 24.0, false, "Rename").clicked() {
                             state.bookmark = Some((bookmark.id, title.clone()));
                         }
                         muted(ui, &page.to_string());

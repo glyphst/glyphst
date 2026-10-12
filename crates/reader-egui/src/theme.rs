@@ -1,9 +1,9 @@
-//! Design tokens and egui style, following pdfcraft's `theme.rs`: a
-//! System/Light/Dark preference, one accent, white pages in both modes.
-//! Widgets get their state colours through craft-ui's `WidgetPalette`.
+//! Design tokens and egui style, taken from pdfcraft's `theme.rs`: neutral
+//! chrome, one blue accent, white pages in both modes, Inter type, soft
+//! shadows. Every custom widget reads [`Tokens::get`].
 
 use craft_ui::theme::WidgetPalette;
-use egui::{Color32, CornerRadius, Stroke, Visuals};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,22 +51,35 @@ impl ThemePreference {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
     pub kind: ThemeKind,
-    /// Tab strip.
+    /// The top bar.
     pub titlebar: Color32,
-    /// Panels and bars.
+    /// Bars and docks.
     pub chrome: Color32,
+    /// Drawers and side panels.
+    pub panel: Color32,
     /// The document area behind pages.
     pub pasteboard: Color32,
     pub page: Color32,
+    /// Popups, cards and dialogs.
     pub card: Color32,
     pub border: Color32,
+    /// Hairlines between groups.
+    pub divider: Color32,
     pub text: Color32,
     pub text_muted: Color32,
+    /// Hints, captions and section titles.
+    pub text_faint: Color32,
+    pub icon: Color32,
     pub hover: Color32,
     pub pressed: Color32,
-    pub selected: Color32,
     pub accent: Color32,
+    /// Accent-coloured text and links.
+    pub accent_text: Color32,
+    /// Selected rows and toggled buttons.
+    pub accent_soft: Color32,
     pub field: Color32,
+    pub danger: Color32,
+    pub page_shadow: Color32,
     pub radius: u8,
 }
 
@@ -77,34 +90,48 @@ impl Tokens {
                 kind,
                 titlebar: Color32::from_rgb(0xE9, 0xE9, 0xEB),
                 chrome: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-                pasteboard: Color32::from_rgb(0xE4, 0xE4, 0xE8),
+                panel: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                pasteboard: Color32::from_rgb(0xF1, 0xF1, 0xF3),
                 page: Color32::WHITE,
-                card: Color32::from_rgb(0xF6, 0xF6, 0xF8),
+                card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
                 border: Color32::from_rgb(0xDA, 0xDA, 0xDE),
+                divider: Color32::from_rgb(0xE8, 0xE8, 0xEB),
                 text: Color32::from_rgb(0x22, 0x22, 0x26),
                 text_muted: Color32::from_rgb(0x5E, 0x5E, 0x66),
+                text_faint: Color32::from_rgb(0x66, 0x66, 0x6E),
+                icon: Color32::from_rgb(0x44, 0x44, 0x4B),
                 hover: Color32::from_rgb(0xF0, 0xF0, 0xF3),
                 pressed: Color32::from_rgb(0xE4, 0xE4, 0xE9),
-                selected: Color32::from_rgb(0xE6, 0xEE, 0xFD),
                 accent: Color32::from_rgb(0x1B, 0x63, 0xE0),
-                field: Color32::WHITE,
+                accent_text: Color32::from_rgb(0x17, 0x55, 0xC4),
+                accent_soft: Color32::from_rgb(0xE3, 0xEC, 0xFD),
+                field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                danger: Color32::from_rgb(0xC4, 0x2B, 0x1C),
+                page_shadow: Color32::from_black_alpha(34),
                 radius: 6,
             },
             ThemeKind::Dark => Self {
                 kind,
                 titlebar: Color32::from_rgb(0x1B, 0x1B, 0x1E),
                 chrome: Color32::from_rgb(0x26, 0x26, 0x2A),
+                panel: Color32::from_rgb(0x26, 0x26, 0x2A),
                 pasteboard: Color32::from_rgb(0x19, 0x19, 0x1C),
                 page: Color32::WHITE,
                 card: Color32::from_rgb(0x2E, 0x2E, 0x33),
                 border: Color32::from_rgb(0x3C, 0x3C, 0x43),
+                divider: Color32::from_rgb(0x33, 0x33, 0x39),
                 text: Color32::from_rgb(0xEC, 0xEC, 0xEF),
                 text_muted: Color32::from_rgb(0xAE, 0xAE, 0xB6),
+                text_faint: Color32::from_rgb(0xA0, 0xA0, 0xA7),
+                icon: Color32::from_rgb(0xD4, 0xD4, 0xDA),
                 hover: Color32::from_rgb(0x34, 0x34, 0x3A),
                 pressed: Color32::from_rgb(0x3E, 0x3E, 0x45),
-                selected: Color32::from_rgb(0x23, 0x3A, 0x63),
                 accent: Color32::from_rgb(0x4B, 0x8B, 0xF5),
+                accent_text: Color32::from_rgb(0x8C, 0xB6, 0xFA),
+                accent_soft: Color32::from_rgb(0x24, 0x36, 0x57),
                 field: Color32::from_rgb(0x1E, 0x1E, 0x22),
+                danger: Color32::from_rgb(0xF2, 0x8B, 0x82),
+                page_shadow: Color32::from_black_alpha(120),
                 radius: 6,
             },
         }
@@ -115,45 +142,134 @@ impl Tokens {
             .unwrap_or_else(|| Self::for_kind(ThemeKind::Light))
     }
 
+    pub fn dark(&self) -> bool {
+        self.kind == ThemeKind::Dark
+    }
+
     /// RGB of the pasteboard in 0..=1, for the solid background effect.
     pub fn pasteboard_rgb(&self) -> [f32; 3] {
         let [r, g, b, _] = self.pasteboard.to_array();
         [r, g, b].map(|channel| f32::from(channel) / 255.0)
     }
+
+    /// The inverted card of toasts: (fill, text).
+    pub fn toast(&self) -> (Color32, Color32) {
+        if self.dark() {
+            (
+                Color32::from_rgb(0xEC, 0xEC, 0xEF),
+                Color32::from_rgb(0x22, 0x22, 0x26),
+            )
+        } else {
+            (Color32::from_rgb(0x2A, 0x2A, 0x2F), Color32::WHITE)
+        }
+    }
+
+    /// The shadow under cards, drawers and dialogs.
+    pub fn card_shadow(&self) -> Shadow {
+        Shadow {
+            offset: [0, 8],
+            blur: 28,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark() { 110 } else { 38 }),
+        }
+    }
+
+    /// The shadow under popups and menus.
+    pub fn popup_shadow(&self) -> Shadow {
+        Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark() { 90 } else { 30 }),
+        }
+    }
 }
 
 const TOKENS_ID: &str = "glyphst-reader-theme";
 
-/// Applies the theme's tokens to egui's style.
+pub fn regular(size: f32) -> FontId {
+    FontId::proportional(size)
+}
+
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::MEDIUM.into()))
+}
+
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(crate::fonts::SEMIBOLD.into()))
+}
+
+pub fn mono(size: f32) -> FontId {
+    FontId::monospace(size)
+}
+
+/// Applies the theme's tokens to egui's style, after pdfcraft's `apply`.
 pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
-    let tokens = Tokens::for_kind(kind);
-    let mut visuals = match kind {
-        ThemeKind::Light => Visuals::light(),
-        ThemeKind::Dark => Visuals::dark(),
+    // Popups and menus take their style from egui's theme, so it must
+    // match the colours drawn.
+    ctx.set_theme(match kind {
+        ThemeKind::Light => egui::Theme::Light,
+        ThemeKind::Dark => egui::Theme::Dark,
+    });
+    let t = Tokens::for_kind(kind);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(TOKENS_ID), t));
+    let mut v = if t.dark() {
+        Visuals::dark()
+    } else {
+        Visuals::light()
     };
-    visuals.panel_fill = tokens.chrome;
-    visuals.window_fill = tokens.chrome;
-    visuals.extreme_bg_color = tokens.field;
-    visuals.faint_bg_color = tokens.card;
-    visuals.override_text_color = Some(tokens.text);
-    visuals.hyperlink_color = tokens.accent;
-    visuals.selection.bg_fill = tokens.selected;
-    visuals.selection.stroke = Stroke::new(1.0, tokens.accent);
-    visuals.window_stroke = Stroke::new(1.0, tokens.border);
-    let radius = CornerRadius::same(tokens.radius);
-    visuals.window_corner_radius = radius;
-    visuals.menu_corner_radius = radius;
+    v.panel_fill = t.panel;
+    v.window_fill = t.card;
+    v.window_stroke = Stroke::new(1.0, t.border);
+    v.extreme_bg_color = t.field;
+    v.faint_bg_color = t.hover;
+    v.code_bg_color = t.hover;
+    v.selection.bg_fill = t.accent_soft;
+    v.selection.stroke = Stroke::new(1.0, t.accent);
+    v.hyperlink_color = t.accent_text;
+    v.override_text_color = Some(t.text);
+    v.error_fg_color = t.danger;
+    v.window_corner_radius = CornerRadius::same(10);
+    v.menu_corner_radius = CornerRadius::same(8);
+    v.window_shadow = t.card_shadow();
+    v.popup_shadow = t.popup_shadow();
+    let radius = CornerRadius::same(t.radius);
     WidgetPalette {
-        noninteractive: tokens.chrome,
-        inactive: tokens.card,
-        hovered: tokens.hover,
-        active: tokens.pressed,
-        open: tokens.pressed,
+        noninteractive: t.chrome,
+        inactive: t.field,
+        hovered: t.hover,
+        active: t.pressed,
+        open: t.hover,
     }
-    .apply_to(&mut visuals.widgets, radius, Stroke::new(1.0, tokens.text));
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, tokens.border);
-    ctx.set_visuals(visuals);
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new(TOKENS_ID), tokens));
+    .apply_to(&mut v.widgets, radius, Stroke::new(1.0, t.text));
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.divider);
+    // Buttons are flat until hovered; fields and checkboxes keep a fill.
+    v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.widgets.hovered.bg_stroke = Stroke::NONE;
+    v.widgets.active.bg_stroke = Stroke::NONE;
+    v.widgets.open.bg_stroke = Stroke::NONE;
+    // Crisper text: glyphs on whole pixels, and in the light theme a mild
+    // gamma that darkens the antialiased edges of dark text (pdfcraft #76).
+    v.text_options.subpixel_binning = false;
+    if !t.dark() {
+        v.text_options.color_transfer_function =
+            egui::epaint::FontColorTransferFunction::Gamma(0.75);
+    }
+    ctx.set_visuals(v);
+    ctx.all_styles_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 5.0);
+        style.spacing.menu_margin = egui::Margin::same(6);
+        style.spacing.scroll.bar_width = 8.0;
+        style.spacing.scroll.floating = true;
+        style.text_styles.insert(TextStyle::Body, regular(13.0));
+        style.text_styles.insert(TextStyle::Button, regular(13.0));
+        style.text_styles.insert(TextStyle::Small, regular(11.0));
+        style.text_styles.insert(TextStyle::Heading, semibold(17.0));
+        style.text_styles.insert(TextStyle::Monospace, mono(12.0));
+        style.interaction.tooltip_delay = 0.35;
+    });
 }
 
 #[cfg(test)]
@@ -172,6 +288,53 @@ mod tests {
             ThemePreference::Light.resolve(Some(egui::Theme::Dark), ThemeKind::Dark),
             ThemeKind::Light
         );
+    }
+
+    /// WCAG 2 contrast ratio between two opaque colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let luminance = |c: Color32| {
+            let linear = |v: u8| {
+                let s = f32::from(v) / 255.0;
+                if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+        };
+        let (x, y) = (luminance(a) + 0.05, luminance(b) + 0.05);
+        x.max(y) / x.min(y)
+    }
+
+    #[test]
+    fn text_is_readable_on_every_surface() {
+        for kind in [ThemeKind::Light, ThemeKind::Dark] {
+            let t = Tokens::for_kind(kind);
+            for (name, fg) in [
+                ("text", t.text),
+                ("text_muted", t.text_muted),
+                ("text_faint", t.text_faint),
+            ] {
+                for bg in [
+                    t.titlebar,
+                    t.chrome,
+                    t.panel,
+                    t.card,
+                    t.pasteboard,
+                    t.hover,
+                    t.accent_soft,
+                ] {
+                    let ratio = contrast(fg, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{kind:?} {name} on {bg:?}: {ratio:.2}:1, WCAG AA needs 4.5:1"
+                    );
+                }
+            }
+            let (fill, text) = t.toast();
+            assert!(contrast(text, fill) >= 4.5);
+        }
     }
 
     #[test]

@@ -215,6 +215,41 @@ impl Command {
         }
     }
 
+    /// Its Lucide icon, shown in the palette, menus and the dock.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Open => "folder-open",
+            Self::CloseTab => "x",
+            Self::NextTab => "chevron-right",
+            Self::PreviousTab => "chevron-left",
+            Self::Palette => "command",
+            Self::Settings => "settings",
+            Self::ToggleSidebar => "panel-left",
+            Self::ToggleStats => "gauge",
+            Self::ThemeSystem => "monitor",
+            Self::ThemeLight => "sun",
+            Self::ThemeDark => "moon",
+            Self::NextPage => "chevron-down",
+            Self::PreviousPage => "chevron-up",
+            Self::FirstPage => "chevron-up",
+            Self::LastPage => "chevron-down",
+            Self::Back => "arrow-left",
+            Self::Forward => "arrow-right",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
+            Self::FitWidth => "scan",
+            Self::Present => "presentation",
+            Self::LargerText => "a-arrow-up",
+            Self::SmallerText => "a-arrow-down",
+            Self::Find | Self::FindNext | Self::FindPrevious => "search",
+            Self::SelectPage => "type",
+            Self::Bookmark => "bookmark-plus",
+            Self::TranslateSelection | Self::TranslateDocument => "languages",
+            Self::ShowTranslated => "globe",
+            Self::Assistant => "sparkles",
+        }
+    }
+
     pub fn category(self) -> Category {
         match self {
             Self::Open

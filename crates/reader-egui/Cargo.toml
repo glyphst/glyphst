@@ -20,6 +20,7 @@ eframe = { workspace = true, features = [
 ] }
 egui.workspace = true
 egui_commonmark.workspace = true
+egui_extras.workspace = true
 gilrs.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }

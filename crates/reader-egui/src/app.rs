@@ -26,6 +26,7 @@ use crate::{
     },
     harness::Harness,
     home::{Home, HomeAction},
+    icons,
     keys::Keymap,
     palette::{self, Item, Palette},
     pickers::{Pickers, is_document},
@@ -37,6 +38,7 @@ use crate::{
     transition::ViewTransition,
     translation::{CardState, Translator},
     user_settings::UserSettings,
+    widgets,
 };
 
 /// Positions are written to the library at most this often while reading.
@@ -44,6 +46,8 @@ const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const TAB_MIN_WIDTH: f32 = 90.0;
 const TAB_MAX_LABEL: usize = 32;
 const TAB_OVERFLOW_WIDTH: f32 = 28.0;
+/// Room a tab needs besides its title: icon, padding and close button.
+const TAB_CHROME: f32 = 62.0;
 /// Margin on each side of a reflowed column, in points.
 const REFLOW_MARGIN: f32 = 24.0;
 /// Height of a reflowed page, in points (as the GPUI Reader lays out).
@@ -64,6 +68,7 @@ pub struct Launch {
     pub harness: Option<Harness>,
     pub background: Option<String>,
     pub transition: Option<String>,
+    pub theme: Option<ThemePreference>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
     /// Scripted runs: search for this text, select this page's text (from
@@ -123,7 +128,7 @@ pub struct ReaderApp {
     continuous: bool,
     pub(crate) repaints: u64,
     last_update: Instant,
-    notices: Vec<String>,
+    notices: crate::widgets::Toasts,
     show_stats: bool,
     sidebar_state: SidebarState,
     drag: Option<Drag>,
@@ -163,10 +168,14 @@ impl ReaderApp {
         let user_effects = dirs::config_dir().map(|dir| dir.join("glyphst").join("effects"));
         ReaderGpu::install(&render_state, user_effects.as_deref());
         crate::fonts::install(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let persist = launch.harness.is_none();
         let mut prefs = Prefs::load(cc.storage);
         if let Some(background) = launch.background {
             prefs.background = background;
+        }
+        if let Some(theme) = launch.theme {
+            prefs.theme = theme;
         }
         if let Some(transition) = launch.transition {
             prefs.transition = (transition != "none").then_some(transition);
@@ -209,7 +218,7 @@ impl ReaderApp {
             continuous: false,
             repaints: 0,
             last_update: Instant::now(),
-            notices: Vec::new(),
+            notices: Default::default(),
             show_stats: launch.harness.is_some(),
             sidebar_state: SidebarState::default(),
             drag: None,
@@ -462,7 +471,7 @@ impl ReaderApp {
                 .map(|(start, end)| SemanticTextRange { start, end });
             if range.is_none() {
                 self.notices
-                    .push("The book's text is still being read; try again in a moment.".into());
+                    .push("The book's text is still being read; try again in a moment.");
                 return;
             }
             range
@@ -695,51 +704,48 @@ impl ReaderApp {
             .order(egui::Order::Foreground)
             .fixed_pos(card.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(egui::Stroke::new(1.0, tokens.border))
-                    .corner_radius(8)
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_max_width(360.0);
-                        let source: String = card.source.chars().take(160).collect();
-                        ui.label(
-                            egui::RichText::new(source)
-                                .italics()
-                                .color(tokens.text_muted),
-                        );
-                        ui.separator();
-                        match &card.state {
-                            CardState::Loading => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label("Translating…");
-                                });
-                            }
-                            CardState::Done(text) => {
-                                egui::ScrollArea::vertical()
-                                    .max_height(320.0)
-                                    .show(ui, |ui| ui.label(text));
-                                ui.horizontal(|ui| {
-                                    if ui.button("Copy").clicked() {
-                                        ui.ctx().copy_text(text.clone());
-                                    }
-                                    pin = ui
-                                        .button("Pin")
-                                        .on_hover_text("Keep in the Translation panel")
-                                        .clicked();
-                                    close = ui.button("Close").clicked();
-                                });
-                            }
-                            CardState::Failed(error) => {
-                                ui.label(
-                                    egui::RichText::new(error)
-                                        .color(egui::Color32::from_rgb(200, 60, 60)),
-                                );
-                                close = ui.button("Close").clicked();
-                            }
-                        }
+                widgets::card_frame(ctx).show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.horizontal(|ui| {
+                        ui.add(icons::image("languages", 15.0, tokens.accent));
+                        ui.label(egui::RichText::new("Translation").font(theme::semibold(13.0)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close |= icons::button(ui, "x", 24.0, false, "Close").clicked();
+                        });
                     });
+                    let source: String = card.source.chars().take(160).collect();
+                    ui.label(
+                        egui::RichText::new(source)
+                            .italics()
+                            .color(tokens.text_muted),
+                    );
+                    ui.add_space(4.0);
+                    match &card.state {
+                        CardState::Loading => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Translating…");
+                            });
+                        }
+                        CardState::Done(text) => {
+                            egui::ScrollArea::vertical()
+                                .max_height(320.0)
+                                .show(ui, |ui| ui.label(text));
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if widgets::pill_button(ui, Some("copy"), "Copy", false).clicked() {
+                                    ui.ctx().copy_text(text.clone());
+                                }
+                                pin = widgets::pill_button(ui, Some("pin"), "Pin", false)
+                                    .on_hover_text("Keep in the Translation panel")
+                                    .clicked();
+                            });
+                        }
+                        CardState::Failed(error) => {
+                            ui.label(egui::RichText::new(error).color(tokens.danger));
+                        }
+                    }
+                });
             });
         if pin {
             self.translator.pin_card();
@@ -1129,12 +1135,14 @@ impl ReaderApp {
         }
     }
 
-    /// A menu item's text with the command's key: "Translate  Ctrl+T".
-    fn menu_label(&self, text: &str, command: Command) -> String {
-        match self.keymap.label(command) {
-            Some(key) => format!("{text}  {key}"),
-            None => text.to_string(),
-        }
+    /// A menu entry for `command`: its icon, `text` and its keys.
+    fn menu_button(&self, ui: &egui::Ui, text: &str, command: Command) -> egui::Button<'static> {
+        menu_entry(
+            ui,
+            command.icon(),
+            text,
+            &self.keymap.label(command).unwrap_or_default(),
+        )
     }
 
     /// The palette and the settings window, drawn over everything.
@@ -1197,130 +1205,194 @@ impl ReaderApp {
             .collect()
     }
 
+    /// The top bar, after pdfcraft's tab strip: Home, the document tabs,
+    /// Open, then the palette's search box, theme, settings and the menu.
     fn tab_strip(&mut self, ui: &mut egui::Ui) {
         let tokens = Tokens::get(ui.ctx());
-        let labels: Vec<String> = std::iter::once("Home".to_string())
-            .chain(
-                self.tabs
-                    .iter()
-                    .map(|tab| truncate(&tab.title, TAB_MAX_LABEL)),
-            )
+        let ctx = ui.ctx().clone();
+        let font = theme::regular(13.0);
+        let labels: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|tab| truncate(&tab.title, TAB_MAX_LABEL))
             .collect();
-        let font = egui::TextStyle::Button.resolve(ui.style());
         let natural: Vec<f32> = labels
             .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                let text = ui
-                    .painter()
+            .map(|label| {
+                ui.painter()
                     .layout_no_wrap(label.clone(), font.clone(), tokens.text)
                     .size()
-                    .x;
-                text + if index == 0 { 24.0 } else { 44.0 }
+                    .x
+                    + TAB_CHROME
             })
             .collect();
-        let selected = self.active.map_or(0, |active| active + 1);
         let strip = ui.available_rect_before_wrap();
-        let menu_width = 36.0;
+        let search_width = if strip.width() > 900.0 { 280.0 } else { 0.0 };
+        // Home and Open on the left; search, theme, settings and the menu
+        // on the right.
+        let controls = 2.0 * 32.0 + search_width + 4.0 * 32.0 + 16.0;
         let fit = craft_ui::tabs::fit(
             &natural,
-            selected,
-            strip.width() - menu_width,
+            self.active.unwrap_or(0),
+            (strip.width() - controls).max(0.0),
             TAB_MIN_WIDTH,
             TAB_OVERFLOW_WIDTH,
         );
-        let mut x = strip.min.x;
         let mut select = None;
         let mut close = None;
-        for &(index, width) in &fit.shown {
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(x, strip.min.y),
-                egui::vec2(width, strip.height()),
-            );
-            x += width;
-            let id = ui.id().with(("tab", index));
-            let is_selected = index == selected;
-            let label = labels[index].clone();
-            let response = craft_ui::tabs::Tab::new(id, &label, is_selected)
-                .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
-                .show_at(ui, rect, |ui, response| {
-                    let fill = if is_selected {
-                        tokens.chrome
-                    } else if response.hovered() {
-                        tokens.hover
-                    } else {
-                        tokens.titlebar
-                    };
-                    ui.painter()
-                        .rect_filled(rect.shrink2(egui::vec2(1.0, 0.0)), 4.0, fill);
-                    let text_rect = rect.shrink2(egui::vec2(10.0, 0.0));
-                    ui.painter().with_clip_rect(text_rect).text(
-                        text_rect.left_center(),
-                        egui::Align2::LEFT_CENTER,
-                        &label,
-                        font.clone(),
-                        if is_selected {
-                            tokens.text
-                        } else {
-                            tokens.text_muted
-                        },
-                    );
-                });
-            if response.clicked() {
-                select = Some(index);
+        let mut run = None;
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if icons::button(ui, "house", 28.0, self.active.is_none(), "Home").clicked() {
+                select = Some(None);
             }
-            if index > 0 {
+            for &(index, width) in &fit.shown {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
+                let id = ui.id().with(("tab", self.tabs[index].id));
+                let is_selected = self.active == Some(index);
+                let label = &labels[index];
+                let icon = if self.tabs[index].is_reflowed() {
+                    "book-open"
+                } else {
+                    "file-text"
+                };
+                let response = craft_ui::tabs::Tab::new(id, label, is_selected)
+                    .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
+                    .show_at(ui, rect, |ui, response| {
+                        if is_selected {
+                            ui.painter().rect(
+                                rect,
+                                8.0,
+                                tokens.chrome,
+                                egui::Stroke::new(1.0, tokens.border),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(rect, 8.0, tokens.hover);
+                        }
+                        icons::paint(
+                            ui,
+                            egui::Rect::from_center_size(
+                                egui::pos2(rect.left() + 16.0, rect.center().y),
+                                egui::vec2(16.0, 16.0),
+                            ),
+                            icon,
+                            15.0,
+                            if is_selected {
+                                tokens.accent
+                            } else {
+                                tokens.text_muted
+                            },
+                        );
+                        widgets::row_text(
+                            ui,
+                            egui::pos2(rect.left() + 30.0, rect.center().y),
+                            label.as_str(),
+                            font.clone(),
+                            if is_selected {
+                                tokens.text
+                            } else {
+                                tokens.text_muted
+                            },
+                            rect.width() - TAB_CHROME,
+                        );
+                    })
+                    .on_hover_text(&self.tabs[index].title);
+                if response.clicked() {
+                    select = Some(Some(index));
+                }
                 if response.middle_clicked() {
-                    close = Some(index - 1);
+                    close = Some(index);
                 }
                 let close_rect = egui::Rect::from_center_size(
-                    egui::pos2(rect.right() - 16.0, rect.center().y),
-                    egui::vec2(18.0, 18.0),
+                    egui::pos2(rect.right() - 15.0, rect.center().y),
+                    egui::vec2(20.0, 20.0),
                 );
                 let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
                 if close_button.hovered() {
                     ui.painter().rect_filled(close_rect, 4.0, tokens.pressed);
                 }
-                ui.painter().text(
-                    close_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "×",
-                    font.clone(),
-                    tokens.text_muted,
-                );
-                if close_button.clicked() {
-                    close = Some(index - 1);
+                if is_selected || response.hovered() || close_button.hovered() {
+                    icons::paint(ui, close_rect, "x", 13.0, tokens.text_muted);
+                }
+                if close_button.on_hover_text("Close").clicked() {
+                    close = Some(index);
                 }
             }
-        }
-        if !fit.overflow.is_empty() {
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(x, strip.min.y),
-                egui::vec2(fit.overflow_width, strip.height()),
-            );
-            ui.put(rect, |ui: &mut egui::Ui| {
-                ui.menu_button("»", |ui| {
+            if !fit.overflow.is_empty() {
+                let response =
+                    icons::button(ui, "chevron-down", TAB_OVERFLOW_WIDTH, false, "More tabs");
+                egui::Popup::menu(&response).show(|ui| {
                     for &index in &fit.overflow {
                         if ui.button(&labels[index]).clicked() {
-                            select = Some(index);
-                            ui.close();
+                            select = Some(Some(index));
                         }
                     }
+                });
+            }
+            let tip = self.keymap.tip("Open documents", Command::Open);
+            if ui
+                .add_enabled_ui(!self.pickers.is_showing(), |ui| {
+                    icons::button(ui, "plus", 28.0, false, &tip)
                 })
-                .response
+                .inner
+                .clicked()
+            {
+                run = Some(Command::Open);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let response = icons::button(ui, "ellipsis", 28.0, false, "Menu");
+                egui::Popup::menu(&response).show(|ui| self.menu(ui));
+                let tip = self.keymap.tip("Settings", Command::Settings);
+                if icons::button(ui, "settings", 28.0, self.settings_window.open, &tip).clicked() {
+                    run = Some(Command::Settings);
+                }
+                let (icon, label) = match self.prefs.theme {
+                    ThemePreference::System => ("monitor", "System"),
+                    ThemePreference::Light => ("sun", "Light"),
+                    ThemePreference::Dark => ("moon", "Dark"),
+                };
+                let response = icons::button(ui, icon, 28.0, false, &format!("Theme: {label}"));
+                egui::Popup::menu(&response).show(|ui| {
+                    for (command, preference) in [
+                        (Command::ThemeSystem, ThemePreference::System),
+                        (Command::ThemeLight, ThemePreference::Light),
+                        (Command::ThemeDark, ThemePreference::Dark),
+                    ] {
+                        if ui
+                            .add(egui::Button::selectable(
+                                self.prefs.theme == preference,
+                                preference.label(),
+                            ))
+                            .clicked()
+                        {
+                            run = Some(command);
+                        }
+                    }
+                });
+                let key = self.keymap.label(Command::Palette).unwrap_or_default();
+                if search_width > 0.0 {
+                    if widgets::search_box(ui, "Search commands, pages, books…", &key, search_width)
+                        .clicked()
+                    {
+                        run = Some(Command::Palette);
+                    }
+                } else {
+                    let tip = self.keymap.tip("Command palette", Command::Palette);
+                    if icons::button(ui, "search", 28.0, self.palette.open, &tip).clicked() {
+                        run = Some(Command::Palette);
+                    }
+                }
             });
-        }
-        let menu_rect = egui::Rect::from_min_max(
-            egui::pos2(strip.right() - menu_width, strip.min.y),
-            strip.max,
-        );
-        ui.put(menu_rect, |ui: &mut egui::Ui| {
-            ui.menu_button("☰", |ui| self.menu(ui)).response
         });
+        if let Some(command) = run {
+            self.run_or_notify(command, &ctx);
+        }
         if let Some(index) = close {
             self.close(index);
         } else if let Some(index) = select {
-            self.activate(index.checked_sub(1));
+            self.activate(index);
         }
     }
 
@@ -1330,11 +1402,7 @@ impl ReaderApp {
         for command in [Command::Open, Command::Palette, Command::Settings] {
             let enabled = command != Command::Open || !self.pickers.is_showing();
             if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::new(command.label())
-                        .shortcut_text(self.keymap.label(command).unwrap_or_default()),
-                )
+                .add_enabled(enabled, self.menu_button(ui, command.label(), command))
                 .clicked()
             {
                 run = Some(command);
@@ -1389,24 +1457,34 @@ impl ReaderApp {
         let mut translation_shown = None;
         let mut assistant = false;
         ui.horizontal(|ui| {
-            ui.toggle_value(&mut self.prefs.show_sidebar, "☰")
-                .on_hover_text(self.keymap.tip("Sidebar", Command::ToggleSidebar));
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let tip = self.keymap.tip("Sidebar", Command::ToggleSidebar);
+            if icons::button(ui, "panel-left", 28.0, self.prefs.show_sidebar, &tip).clicked() {
+                self.prefs.show_sidebar = !self.prefs.show_sidebar;
+            }
+            let tip = self.keymap.tip("Back", Command::Back);
             if ui
-                .add_enabled(tab.can_go_back(), egui::Button::new("⏴"))
-                .on_hover_text(self.keymap.tip("Back", Command::Back))
+                .add_enabled_ui(tab.can_go_back(), |ui| {
+                    icons::button(ui, "arrow-left", 28.0, false, &tip)
+                })
+                .inner
                 .clicked()
             {
                 actions.push(ViewAction::Back);
             }
+            let tip = self.keymap.tip("Forward", Command::Forward);
             if ui
-                .add_enabled(tab.can_go_forward(), egui::Button::new("⏵"))
-                .on_hover_text(self.keymap.tip("Forward", Command::Forward))
+                .add_enabled_ui(tab.can_go_forward(), |ui| {
+                    icons::button(ui, "arrow-right", 28.0, false, &tip)
+                })
+                .inner
                 .clicked()
             {
                 actions.push(ViewAction::Forward);
             }
             ui.separator();
-            if ui.button("◀").clicked() {
+            let tip = self.keymap.tip("Previous page", Command::PreviousPage);
+            if icons::button(ui, "chevron-left", 28.0, false, &tip).clicked() {
                 actions.push(ViewAction::PreviousPage);
             }
             let current = tab.current_page() + 1;
@@ -1421,38 +1499,43 @@ impl ReaderApp {
                 }
                 self.page_input.clear();
             }
-            ui.label(format!("/ {pages}"));
-            if ui.button("▶").clicked() {
+            ui.label(
+                egui::RichText::new(format!("/ {pages}")).color(Tokens::get(ui.ctx()).text_muted),
+            );
+            let tip = self.keymap.tip("Next page", Command::NextPage);
+            if icons::button(ui, "chevron-right", 28.0, false, &tip).clicked() {
                 actions.push(ViewAction::NextPage);
             }
             ui.separator();
-            if ui.button("−").clicked() {
+            let tip = self.keymap.tip("Zoom out", Command::ZoomOut);
+            if icons::button(ui, "zoom-out", 28.0, false, &tip).clicked() {
                 actions.push(ViewAction::ZoomOut);
             }
             ui.label(format!("{:.0}%", tab.view.scale / tab.fit_scale() * 100.0));
-            if ui.button("+").clicked() {
+            let tip = self.keymap.tip("Zoom in", Command::ZoomIn);
+            if icons::button(ui, "zoom-in", 28.0, false, &tip).clicked() {
                 actions.push(ViewAction::ZoomIn);
             }
-            if ui.button("Fit width").clicked() {
+            let tip = self.keymap.tip("Fit width", Command::FitWidth);
+            if icons::button(ui, "scan", 28.0, false, &tip).clicked() {
                 actions.push(ViewAction::FitWidth);
             }
             if let DocumentLayout::Reflow(layout) = tab.document_layout {
                 ui.separator();
-                if ui.button("A−").on_hover_text("Smaller text").clicked() {
+                let tip = self.keymap.tip("Smaller text", Command::SmallerText);
+                if icons::button(ui, "a-arrow-down", 28.0, false, &tip).clicked() {
                     font_step = -1.0;
                 }
                 ui.label(format!("{:.0} pt", layout.font_size));
-                if ui.button("A+").on_hover_text("Larger text").clicked() {
+                let tip = self.keymap.tip("Larger text", Command::LargerText);
+                if icons::button(ui, "a-arrow-up", 28.0, false, &tip).clicked() {
                     font_step = 1.0;
                 }
             }
             ui.separator();
             let presenting = tab.present.is_some();
-            if ui
-                .selectable_label(presenting, "Present")
-                .on_hover_text(self.keymap.tip("Present", Command::Present))
-                .clicked()
-            {
+            let tip = self.keymap.tip("Present", Command::Present);
+            if icons::button(ui, "presentation", 28.0, presenting, &tip).clicked() {
                 actions.push(ViewAction::TogglePresent);
             }
             ui.separator();
@@ -1465,7 +1548,7 @@ impl ReaderApp {
                 .unwrap_or("Language")
                 .to_string();
             egui::ComboBox::from_id_salt("target-language")
-                .selected_text(format!("🌐 {label}"))
+                .selected_text(label)
                 .height(400.0)
                 .show_ui(ui, |ui| {
                     for language in glyphst_translation::TARGET_LANGUAGES {
@@ -1497,21 +1580,14 @@ impl ReaderApp {
                 }
             }
             ui.separator();
-            if ui
-                .selectable_label(self.assistant.open, "✦ Assistant")
-                .on_hover_text(
-                    self.keymap
-                        .tip("Ask about this document", Command::Assistant),
-                )
-                .clicked()
-            {
+            let tip = self
+                .keymap
+                .tip("Ask about this document", Command::Assistant);
+            if icons::button(ui, "sparkles", 28.0, self.assistant.open, &tip).clicked() {
                 assistant = true;
             }
-            if ui
-                .selectable_label(tab.find.open, "🔍 Find")
-                .on_hover_text(self.keymap.tip("Find", Command::Find))
-                .clicked()
-            {
+            let tip = self.keymap.tip("Find", Command::Find);
+            if icons::button(ui, "search", 28.0, tab.find.open, &tip).clicked() {
                 find = true;
             }
         });
@@ -1927,12 +2003,12 @@ impl ReaderApp {
             .as_ref()
             .is_some_and(|selection| self.tabs[active].shows_translation(selection.page));
         if let Some(text) = &selected {
-            if ui.button("Copy  Ctrl+C").clicked() {
+            if ui.add(menu_entry(ui, "copy", "Copy", "Ctrl+C")).clicked() {
                 ctx.copy_text(text.clone());
                 ui.close();
             }
             if ui
-                .button(self.menu_label("Translate", Command::TranslateSelection))
+                .add(self.menu_button(ui, "Translate", Command::TranslateSelection))
                 .clicked()
             {
                 self.translate_selection(at, ctx);
@@ -1941,7 +2017,7 @@ impl ReaderApp {
         }
         if let Some(text) = selected.as_ref().filter(|_| !translated) {
             ui.separator();
-            ui.label("Highlight");
+            ui.label(egui::RichText::new("Highlight").color(Tokens::get(ctx).text_faint));
             ui.horizontal(|ui| {
                 for color in HighlightColor::ALL {
                     let (rect, response) =
@@ -1957,11 +2033,18 @@ impl ReaderApp {
                     }
                 }
             });
-            if ui.button("Add note…").clicked() {
+            if ui
+                .add(menu_entry(ui, "sticky-note", "Add note…", ""))
+                .clicked()
+            {
                 self.annotate_selection(HighlightColor::Yellow, true, at);
                 ui.close();
             }
-            if text.chars().count() <= 64 && ui.button("Find in document").clicked() {
+            if text.chars().count() <= 64
+                && ui
+                    .add(menu_entry(ui, "search", "Find in document", ""))
+                    .clicked()
+            {
                 let tab = &mut self.tabs[active];
                 let page = tab.current_page();
                 tab.find.show(page);
@@ -1972,35 +2055,29 @@ impl ReaderApp {
         }
         if let Some(page) = self.context_page
             && ui
-                .button(self.menu_label("Select all on page", Command::SelectPage))
+                .add(self.menu_button(ui, "Select all on page", Command::SelectPage))
                 .clicked()
         {
             self.tabs[active].select_page(page);
             ui.close();
         }
         if ui
-            .button(self.menu_label("Add bookmark", Command::Bookmark))
+            .add(self.menu_button(ui, "Add bookmark", Command::Bookmark))
             .clicked()
         {
             self.add_bookmark();
             ui.close();
         }
         let (back, forward) = (
-            self.menu_label("Back", Command::Back),
-            self.menu_label("Forward", Command::Forward),
+            self.menu_button(ui, "Back", Command::Back),
+            self.menu_button(ui, "Forward", Command::Forward),
         );
         let tab = &self.tabs[active];
-        if ui
-            .add_enabled(tab.can_go_back(), egui::Button::new(back))
-            .clicked()
-        {
+        if ui.add_enabled(tab.can_go_back(), back).clicked() {
             actions.push(ViewAction::Back);
             ui.close();
         }
-        if ui
-            .add_enabled(tab.can_go_forward(), egui::Button::new(forward))
-            .clicked()
-        {
+        if ui.add_enabled(tab.can_go_forward(), forward).clicked() {
             actions.push(ViewAction::Forward);
             ui.close();
         }
@@ -2080,47 +2157,54 @@ impl ReaderApp {
             .order(egui::Order::Foreground)
             .fixed_pos(editor.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(egui::Stroke::new(1.0, tokens.border))
-                    .corner_radius(8)
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_max_width(280.0);
-                        ui.horizontal(|ui| {
-                            for candidate in HighlightColor::ALL {
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(20.0, 20.0),
-                                    egui::Sense::click(),
-                                );
-                                let radius = if candidate == editor.color { 9.0 } else { 6.5 };
-                                ui.painter().circle_filled(
+                widgets::card_frame(ctx).show(ui, |ui| {
+                    ui.set_max_width(280.0);
+                    ui.horizontal(|ui| {
+                        for candidate in HighlightColor::ALL {
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                            let chosen = candidate == editor.color;
+                            if chosen {
+                                ui.painter().circle_stroke(
                                     rect.center(),
-                                    radius,
-                                    annotations::color(candidate),
+                                    10.0,
+                                    egui::Stroke::new(2.0, tokens.accent),
                                 );
-                                if response.clicked() {
-                                    color = Some(candidate);
-                                }
                             }
-                        });
-                        if is_note {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut editor.body)
-                                    .hint_text("Note")
-                                    .desired_rows(3)
-                                    .desired_width(260.0),
+                            ui.painter().circle_filled(
+                                rect.center(),
+                                if chosen || response.hovered() {
+                                    7.5
+                                } else {
+                                    7.0
+                                },
+                                annotations::color(candidate),
                             );
+                            if response.clicked() {
+                                color = Some(candidate);
+                            }
                         }
-                        ui.horizontal(|ui| {
-                            if is_note && ui.button("Save").clicked() {
-                                save = true;
-                            }
-                            if ui.button("Delete").clicked() {
-                                delete = true;
-                            }
-                        });
                     });
+                    if is_note {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut editor.body)
+                                .hint_text("Note")
+                                .desired_rows(3)
+                                .desired_width(260.0),
+                        );
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if is_note
+                            && widgets::pill_button(ui, Some("check"), "Save", true).clicked()
+                        {
+                            save = true;
+                        }
+                        if widgets::pill_button(ui, Some("trash-2"), "Delete", false).clicked() {
+                            delete = true;
+                        }
+                    });
+                });
             });
         let outside = area.response.clicked_elsewhere() && !editor.fresh;
         editor.fresh = false;
@@ -2174,13 +2258,13 @@ impl ReaderApp {
             stats.gpu_bytes as f64 / 1048576.0,
             self.repaints,
         );
-        let font = egui::FontId::monospace(11.0);
+        let font = theme::mono(11.0);
         let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
-        let at = rect.right_bottom() - galley.size() - egui::vec2(12.0, 12.0);
+        let at = rect.right_bottom() - galley.size() - egui::vec2(20.0, 20.0);
         painter.rect_filled(
-            egui::Rect::from_min_size(at, galley.size()).expand(6.0),
-            6.0,
-            egui::Color32::from_black_alpha(170),
+            egui::Rect::from_min_size(at, galley.size()).expand(10.0),
+            10.0,
+            egui::Color32::from_black_alpha(180),
         );
         painter.galley(at, galley, egui::Color32::WHITE);
     }
@@ -2254,11 +2338,11 @@ impl eframe::App for ReaderApp {
 
         let tokens = Tokens::get(&ctx);
         egui::Panel::top("tabs")
-            .exact_size(34.0)
+            .exact_size(40.0)
             .frame(
                 egui::Frame::new()
                     .fill(tokens.titlebar)
-                    .inner_margin(egui::Margin::symmetric(6, 3)),
+                    .inner_margin(egui::Margin::symmetric(8, 0)),
             )
             .show(ui, |ui| self.tab_strip(ui));
         if self.active.is_some() {
@@ -2342,19 +2426,6 @@ impl eframe::App for ReaderApp {
                 }
             }
         }
-        if !self.notices.is_empty() {
-            egui::Panel::bottom("notices").show(ui, |ui| {
-                let mut dismiss = false;
-                ui.horizontal(|ui| {
-                    ui.label(self.notices.last().cloned().unwrap_or_default());
-                    dismiss = ui.button("Dismiss").clicked();
-                });
-                if dismiss {
-                    self.notices.clear();
-                }
-            });
-        }
-
         let mut animating = false;
         let mut pages_drawn = true;
         egui::CentralPanel::no_frame()
@@ -2373,6 +2444,7 @@ impl eframe::App for ReaderApp {
             });
 
         self.overlays(&ctx);
+        self.notices.show(&ctx, 28.0);
         self.run_harness(&ctx, pages_drawn, now);
         if self
             .transition
@@ -2430,6 +2502,13 @@ impl ReaderApp {
         self.with_gpu(|gpu| gpu.effects().find(&id).is_some_and(|def| def.animated))
             .unwrap_or(false)
     }
+}
+
+/// A menu entry with an icon, a label and a key at the right.
+fn menu_entry(ui: &egui::Ui, icon: &str, text: &str, key: &str) -> egui::Button<'static> {
+    let tokens = Tokens::get(ui.ctx());
+    egui::Button::image_and_text(icons::image(icon, 15.0, tokens.icon), text.to_string())
+        .shortcut_text(egui::RichText::new(key.to_string()).color(tokens.text_faint))
 }
 
 fn truncate(text: &str, limit: usize) -> String {

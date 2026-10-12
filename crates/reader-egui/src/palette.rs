@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use egui::{Align2, CornerRadius, Key, Rect, Sense, vec2};
 
-use crate::{commands::Command, settings_window::Section, theme::Tokens};
+use crate::{commands::Command, icons, settings_window::Section, theme::Tokens, widgets};
 
 /// Results shown at most.
 const MAX_HITS: usize = 12;
@@ -27,6 +27,8 @@ pub enum Item {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
     pub item: Item,
+    /// Its Lucide icon.
+    pub icon: &'static str,
     pub label: String,
     /// The key, or what kind of item it is.
     pub detail: String,
@@ -76,6 +78,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
             0,
             Hit {
                 item: Item::GoToPage(page - 1),
+                icon: "file-text",
                 label: format!("Go to page {page}"),
                 detail: format!("of {pages}"),
                 blocked: None,
@@ -97,6 +100,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
             1 + recency,
             Hit {
                 item: Item::Command(*command),
+                icon: command.icon(),
                 label: command.label().to_string(),
                 detail: key.clone().unwrap_or_default(),
                 blocked: *blocked,
@@ -110,6 +114,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
                 MAX_USED + 2,
                 Hit {
                     item: Item::Tab(index),
+                    icon: "book-open",
                     label: format!("Switch to {title}"),
                     detail: "Tab".into(),
                     blocked: None,
@@ -125,6 +130,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
                 MAX_USED + 3,
                 Hit {
                     item: Item::Settings(section),
+                    icon: section.icon(),
                     label,
                     detail: "Settings".into(),
                     blocked: None,
@@ -143,6 +149,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
                 MAX_USED + 4,
                 Hit {
                     item: Item::Open(path.clone()),
+                    icon: "clock",
                     label: format!("Open {name}"),
                     detail: "Recent".into(),
                     blocked: None,
@@ -224,15 +231,24 @@ impl Palette {
             .fixed_pos(egui::pos2(screen.center().x, screen.top() + 72.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
-                    .corner_radius(CornerRadius::same(10))
+                    .fill(tokens.card)
+                    .corner_radius(CornerRadius::same(12))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.set_width((screen.width() - 32.0).clamp(240.0, 560.0));
-                        let field = ui.add(
-                            egui::TextEdit::singleline(&mut self.query)
-                                .hint_text("Type a command, a page number or a document…")
-                                .desired_width(f32::INFINITY),
-                        );
+                        ui.set_width((screen.width() - 32.0).clamp(240.0, 600.0));
+                        let field_row = ui.horizontal(|ui| {
+                            ui.add_space(6.0);
+                            ui.add(icons::image("search", 16.0, tokens.text_muted));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.query)
+                                    .hint_text("Type a command, a page number or a document…")
+                                    .font(crate::theme::regular(15.0))
+                                    .frame(egui::Frame::NONE)
+                                    .margin(egui::Margin::symmetric(4, 8))
+                                    .desired_width(f32::INFINITY),
+                            )
+                        });
+                        let field = field_row.inner;
                         if (field.has_focus() || field.lost_focus())
                             && ui.input(|i| i.key_pressed(Key::Enter))
                             && let Some(hit) = hits.get(self.highlight)
@@ -240,49 +256,108 @@ impl Palette {
                             chosen = Some(hit.item.clone());
                         }
                         field.request_focus();
-                        ui.separator();
+                        let line = ui.available_rect_before_wrap();
+                        ui.painter().hline(
+                            line.x_range(),
+                            line.top(),
+                            egui::Stroke::new(1.0, tokens.divider),
+                        );
+                        ui.add_space(6.0);
                         for (index, hit) in hits.iter().enumerate() {
                             let (rect, row) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 30.0),
+                                vec2(ui.available_width(), 34.0),
                                 Sense::click(),
                             );
                             if row.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
                             {
                                 self.highlight = index;
                             }
-                            if index == self.highlight {
-                                ui.painter()
-                                    .rect_filled(rect, CornerRadius::same(6), tokens.hover);
+                            let highlighted = index == self.highlight;
+                            if highlighted {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(8),
+                                    tokens.accent_soft,
+                                );
                             }
-                            let color = if hit.blocked.is_some() {
-                                tokens.text_muted
+                            let blocked = hit.blocked.is_some();
+                            let (color, icon_color) = if blocked {
+                                (tokens.text_faint, tokens.text_faint)
+                            } else if highlighted {
+                                (tokens.text, tokens.accent_text)
                             } else {
-                                tokens.text
+                                (tokens.text, tokens.icon)
                             };
-                            let font = egui::TextStyle::Body.resolve(ui.style());
-                            ui.painter().text(
-                                rect.left_center() + vec2(8.0, 0.0),
-                                Align2::LEFT_CENTER,
-                                &hit.label,
-                                font.clone(),
-                                color,
+                            icons::paint(
+                                ui,
+                                egui::Rect::from_center_size(
+                                    rect.left_center() + vec2(18.0, 0.0),
+                                    vec2(16.0, 16.0),
+                                ),
+                                hit.icon,
+                                16.0,
+                                icon_color,
                             );
-                            let detail = hit.blocked.unwrap_or(&hit.detail);
-                            ui.painter().text(
-                                rect.right_center() - vec2(8.0, 0.0),
-                                Align2::RIGHT_CENTER,
-                                detail,
-                                egui::FontId::proportional(font.size * 0.9),
-                                tokens.text_muted,
+                            // The key chip or the reason at the right.
+                            let mut right = rect.right() - 8.0;
+                            if let Some(reason) = hit.blocked {
+                                let galley = ui.painter().layout_no_wrap(
+                                    reason.to_string(),
+                                    crate::theme::regular(12.0),
+                                    tokens.text_faint,
+                                );
+                                right -= galley.size().x;
+                                ui.painter().galley(
+                                    egui::pos2(right, rect.center().y - galley.size().y / 2.0),
+                                    galley,
+                                    tokens.text_faint,
+                                );
+                            } else if !hit.detail.is_empty() {
+                                let is_key = matches!(hit.item, Item::Command(_));
+                                if is_key {
+                                    let size = widgets::kbd_size(ui, &hit.detail);
+                                    right -= size.x;
+                                    widgets::paint_kbd(
+                                        ui,
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(right, rect.center().y - size.y / 2.0),
+                                            size,
+                                        ),
+                                        &hit.detail,
+                                    );
+                                } else {
+                                    let galley = ui.painter().layout_no_wrap(
+                                        hit.detail.clone(),
+                                        crate::theme::regular(12.0),
+                                        tokens.text_faint,
+                                    );
+                                    right -= galley.size().x;
+                                    ui.painter().galley(
+                                        egui::pos2(right, rect.center().y - galley.size().y / 2.0),
+                                        galley,
+                                        tokens.text_faint,
+                                    );
+                                }
+                            }
+                            let left = rect.left() + 36.0;
+                            widgets::row_text(
+                                ui,
+                                egui::pos2(left, rect.center().y),
+                                hit.label.as_str(),
+                                crate::theme::regular(13.5),
+                                color,
+                                right - left - 12.0,
                             );
                             if row.clicked() {
                                 chosen = Some(hit.item.clone());
                             }
                         }
                         if hits.is_empty() {
+                            ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new("Nothing matches").color(tokens.text_muted),
                             );
+                            ui.add_space(4.0);
                         }
                     });
             });

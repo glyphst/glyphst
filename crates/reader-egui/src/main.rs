@@ -31,6 +31,8 @@ mod gamepad;
 mod gpu;
 mod harness;
 mod home;
+mod icon_data;
+mod icons;
 mod keys;
 mod palette;
 mod pickers;
@@ -43,6 +45,7 @@ mod theme;
 mod transition;
 mod translation;
 mod user_settings;
+mod widgets;
 
 use std::path::PathBuf;
 
@@ -50,7 +53,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
+const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -62,6 +65,7 @@ fn parse_args() -> Result<Launch> {
         harness: None,
         background: None,
         transition: None,
+        theme: None,
         zoom: None,
         find: None,
         page: None,
@@ -94,6 +98,17 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--background" => launch.background = Some(value()?),
+            "--theme" => {
+                let name = value()?;
+                launch.theme = Some(
+                    theme::ThemePreference::ALL
+                        .into_iter()
+                        .find(|theme| theme.label().eq_ignore_ascii_case(&name))
+                        .with_context(|| {
+                            format!("--theme takes system, light or dark, not {name}")
+                        })?,
+                );
+            }
             "--transition" => launch.transition = Some(value()?),
             "--zoom" => launch.zoom = Some(value()?.parse().context("--zoom takes a number")?),
             "--find" => launch.find = Some(value()?),
