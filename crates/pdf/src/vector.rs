@@ -10,7 +10,7 @@
 //! ranges through MuPDF's own rasterizer, so paint order is preserved and no
 //! page falls back as a whole.
 
-use std::{cell::RefCell, num::NonZero, ops::Range, rc::Rc};
+use std::{cell::RefCell, num::NonZero, ops::Range, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use mupdf::{
@@ -75,6 +75,17 @@ pub enum VectorItem {
         ops: Range<u32>,
         bounds: PageRect,
     },
+    /// An image at its own resolution. `transform` maps the unit square
+    /// (`u`, `v` in 0..=1, pixel row 0 at `v` = 0) to page space:
+    /// `x = a·u + c·v + e`, `y = b·u + d·v + f`.
+    Image {
+        rgba: ImagePixels,
+        size: [u32; 2],
+        transform: [f32; 6],
+        /// Whether the PDF asks for smooth scaling when the image is
+        /// enlarged; otherwise pixels stay square, as MuPDF draws them.
+        interpolate: bool,
+    },
     /// Restricts following items to `path` until the matching [`ClipPop`].
     ///
     /// [`ClipPop`]: VectorItem::ClipPop
@@ -83,6 +94,88 @@ pub enum VectorItem {
         even_odd: bool,
     },
     ClipPop,
+}
+
+/// Largest image side kept as a texture; larger images are rasterized.
+pub const MAX_IMAGE_DIMENSION: u32 = 8192;
+
+/// Premultiplied RGBA8 rows of an image, shared rather than copied.
+#[derive(Clone, PartialEq)]
+pub struct ImagePixels(pub Arc<[u8]>);
+
+impl std::fmt::Debug for ImagePixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ImagePixels({} bytes)", self.0.len())
+    }
+}
+
+/// Converts an image to premultiplied RGBA with `alpha` applied, when that
+/// is exact: device RGB or gray without a soft mask. Other images are left
+/// to MuPDF's rasterizer.
+fn image_rgba(image: &Image, alpha: f32) -> Option<(ImagePixels, [u32; 2])> {
+    if image.mask().is_some() {
+        return None;
+    }
+    let pixmap = image.to_pixmap().ok()?;
+    let (width, height) = (pixmap.width(), pixmap.height());
+    if width == 0 || height == 0 || width.max(height) > MAX_IMAGE_DIMENSION {
+        return None;
+    }
+    let colorspace = pixmap.color_space()?;
+    let has_alpha = pixmap.alpha();
+    let n = usize::from(pixmap.n());
+    let colors = n - usize::from(has_alpha);
+    let gray = colorspace.is_gray() && colors == 1;
+    let rgb = colorspace.is_rgb() && colors == 3;
+    if !(gray || rgb) {
+        return None;
+    }
+    let stride = usize::try_from(pixmap.stride()).ok()?;
+    let samples = pixmap.samples();
+    let scale = (alpha.clamp(0.0, 1.0) * 255.0).round() as u16;
+    let mul = |value: u8| ((u16::from(value) * scale + 127) / 255) as u8;
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in samples.chunks(stride).take(height as usize) {
+        for pixel in row[..width as usize * n].chunks_exact(n) {
+            // Pixmap samples with alpha are already premultiplied.
+            let a = if has_alpha { pixel[n - 1] } else { 255 };
+            let (r, g, b) = if gray {
+                (pixel[0], pixel[0], pixel[0])
+            } else {
+                (pixel[0], pixel[1], pixel[2])
+            };
+            rgba.extend_from_slice(&[mul(r), mul(g), mul(b), mul(a)]);
+        }
+    }
+    Some((ImagePixels(rgba.into()), [width, height]))
+}
+
+/// An image mask painted in `color` (straight RGBA8): the mask's coverage
+/// becomes alpha, premultiplied into the colour.
+fn mask_rgba(image: &Image, color: [u8; 4]) -> Option<(ImagePixels, [u32; 2])> {
+    let pixmap = image.to_pixmap().ok()?;
+    let (width, height) = (pixmap.width(), pixmap.height());
+    if width == 0 || height == 0 || width.max(height) > MAX_IMAGE_DIMENSION || pixmap.n() != 1 {
+        return None;
+    }
+    let stride = usize::try_from(pixmap.stride()).ok()?;
+    let premultiplied = |coverage: u8| {
+        let alpha = u16::from(coverage) * u16::from(color[3]) / 255;
+        let channel = |value: u8| ((u16::from(value) * alpha + 127) / 255) as u8;
+        [
+            channel(color[0]),
+            channel(color[1]),
+            channel(color[2]),
+            alpha as u8,
+        ]
+    };
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in pixmap.samples().chunks(stride).take(height as usize) {
+        for &coverage in &row[..width as usize] {
+            rgba.extend_from_slice(&premultiplied(coverage));
+        }
+    }
+    Some((ImagePixels(rgba.into()), [width, height]))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +207,7 @@ pub struct CaptureStats {
     pub fills: usize,
     pub strokes: usize,
     pub glyphs: usize,
+    pub images: usize,
     pub path_points: usize,
     pub raster_layers: usize,
     /// Paint operations routed to raster layers, by reason.
@@ -557,24 +651,57 @@ impl NativeDevice for CaptureDevice {
         capture.raster(op, RasterReason::Shading, None);
     }
 
-    fn fill_image(&mut self, _: &Image, ctm: Matrix, _: f32, _: ColorParams) {
+    fn fill_image(&mut self, image: &Image, ctm: Matrix, alpha: f32, _: ColorParams) {
         let mut capture = self.0.borrow_mut();
         let op = capture.take_op();
-        capture.raster(op, RasterReason::Image, Some(unit_square(&ctm)));
+        let converted = capture
+            .forced()
+            .is_none()
+            .then(|| image_rgba(image, alpha))
+            .flatten();
+        match converted {
+            Some((rgba, size)) => {
+                capture.stats.images += 1;
+                capture.push_vector(VectorItem::Image {
+                    rgba,
+                    size,
+                    transform: [ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f],
+                    interpolate: image.interpolate(),
+                });
+            }
+            None => capture.raster(op, RasterReason::Image, Some(unit_square(&ctm))),
+        }
     }
 
     fn fill_image_mask(
         &mut self,
-        _: &Image,
+        image: &Image,
         ctm: Matrix,
-        _: &Colorspace,
-        _: &[f32],
-        _: f32,
-        _: ColorParams,
+        color_space: &Colorspace,
+        color: &[f32],
+        alpha: f32,
+        cp: ColorParams,
     ) {
         let mut capture = self.0.borrow_mut();
         let op = capture.take_op();
-        capture.raster(op, RasterReason::ImageMask, Some(unit_square(&ctm)));
+        let color = capture.color(color_space, color, alpha, cp);
+        let converted = capture
+            .forced()
+            .is_none()
+            .then(|| mask_rgba(image, color))
+            .flatten();
+        match converted {
+            Some((rgba, size)) => {
+                capture.stats.images += 1;
+                capture.push_vector(VectorItem::Image {
+                    rgba,
+                    size,
+                    transform: [ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f],
+                    interpolate: image.interpolate(),
+                });
+            }
+            None => capture.raster(op, RasterReason::ImageMask, Some(unit_square(&ctm))),
+        }
     }
 
     fn clip_image_mask(&mut self, _: &Image, _: Matrix, scissor: Rect) {
@@ -1057,6 +1184,7 @@ mod tests {
                 VectorItem::Fill { .. } => "fill",
                 VectorItem::Stroke { .. } => "stroke",
                 VectorItem::Raster { .. } => "raster",
+                VectorItem::Image { .. } => "image",
                 VectorItem::ClipPush { .. } => "clip",
                 VectorItem::ClipPop => "unclip",
             })
@@ -1155,5 +1283,80 @@ mod tests {
             255,
             "shading missing"
         );
+    }
+
+    /// A 2×1 inline image (red, blue) stretched over the page's left half.
+    const IMAGE: &str =
+        "q 100 0 0 100 0 0 cm BI /W 2 /H 1 /CS /RGB /BPC 8 /F /AHx ID ff00000000ff> EI Q";
+
+    #[test]
+    fn images_keep_their_pixels_and_land_where_mupdf_draws_them() {
+        let (page, list) = capture(IMAGE, "<< >>");
+        assert_eq!(kinds(&page), ["image"]);
+        let VectorItem::Image {
+            rgba,
+            size,
+            transform,
+            ..
+        } = &page.draws[0].item
+        else {
+            unreachable!()
+        };
+        assert_eq!(size, &[2, 1]);
+        assert_eq!(&rgba.0[..], &[255, 0, 0, 255, 0, 0, 255, 255]);
+        // The centre of pixel (0, 0) through the transform…
+        let [a, b, c, d, e, f] = *transform;
+        let (u, v) = (0.25, 0.5);
+        let (x, y) = (a * u + c * v + e, b * u + d * v + f);
+        // …is red in MuPDF's own raster of the page.
+        let mut pixmap = Pixmap::new_with_w_h(&Colorspace::device_rgb(), 200, 100, false).unwrap();
+        pixmap.clear_with(255).unwrap();
+        let device = Device::from_pixmap(&pixmap).unwrap();
+        list.run(&device, &Matrix::IDENTITY, Rect::INF).unwrap();
+        drop(device);
+        let offset = (y as usize * 200 + x as usize) * 3;
+        assert_eq!(&pixmap.samples()[offset..offset + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn images_in_blend_groups_are_rasterized() {
+        let content = format!("/G gs {IMAGE}");
+        let (page, _) = capture(&content, "<< /ExtGState << /G << /BM /Multiply >> >> >>");
+        assert_eq!(page.stats.images, 0);
+        assert!(
+            page.draws
+                .iter()
+                .all(|draw| !matches!(draw.item, VectorItem::Image { .. }))
+        );
+    }
+
+    #[test]
+    fn image_masks_paint_their_colour_where_mupdf_does() {
+        // A 2×1 stencil (first pixel painted under the default decode) in red.
+        let (page, list) = capture(
+            "1 0 0 rg q 100 0 0 100 0 0 cm BI /W 2 /H 1 /IM true /BPC 1 /F /AHx ID 40> EI Q",
+            "<< >>",
+        );
+        let VectorItem::Image {
+            rgba, transform, ..
+        } = &page.draws[0].item
+        else {
+            panic!("expected an image, got {:?}", kinds(&page));
+        };
+        let [a, b, c, d, e, f] = *transform;
+        let mut pixmap = Pixmap::new_with_w_h(&Colorspace::device_rgb(), 200, 100, false).unwrap();
+        pixmap.clear_with(255).unwrap();
+        let device = Device::from_pixmap(&pixmap).unwrap();
+        list.run(&device, &Matrix::IDENTITY, Rect::INF).unwrap();
+        drop(device);
+        for (pixel, u) in [(0usize, 0.25f32), (1, 0.75)] {
+            let (x, y) = (a * u + c * 0.5 + e, b * u + d * 0.5 + f);
+            let offset = (y as usize * 200 + x as usize) * 3;
+            let painted = pixmap.samples()[offset + 1] < 128;
+            assert_eq!(rgba.0[pixel * 4 + 3] > 128, painted, "pixel {pixel}");
+            if painted {
+                assert_eq!(&rgba.0[pixel * 4..pixel * 4 + 4], &[255, 0, 0, 255]);
+            }
+        }
     }
 }

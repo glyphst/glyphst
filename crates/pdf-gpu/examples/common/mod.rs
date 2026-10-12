@@ -93,7 +93,7 @@ pub fn upload(
             .map_err(|error| anyhow::anyhow!("GPU wait failed: {error}"))
     };
     let started = Instant::now();
-    let mut page = renderer.upload(device, &loaded.prepared);
+    let mut page = renderer.upload(device, queue, &loaded.prepared);
     wait()?;
     let upload = started.elapsed();
 

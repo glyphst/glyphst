@@ -31,6 +31,7 @@ development shell provides the required libraries and tools.
 ```sh
 nix develop
 cargo run -p glyphst-reader --release -- /path/to/document.pdf
+cargo run -p glyphst-reader-egui --release -- /path/to/document.pdf   # the egui Reader (in progress)
 cargo run -p glyphst-files -- /path/to/start
 ```
 
@@ -101,6 +102,13 @@ fails only on crashes or timeouts after parsing. For zoom timing on one page:
 cargo run --release -p glyphst-pdf-gpu --example zoom_bench -- page.pdf --out target/check-reports/zoom-bench
 cargo run --release -p glyphst-pdf-gpu --example zoom_view -- page.pdf   # interactive
 ```
+
+The egui Reader runs the same checks unattended in its own window, saving
+nothing: `--bench` prints zoom and scroll frame times as JSON, and
+`--screenshot PATH`, `--screenshot-turn PATH` and `--screenshot-switch PATH`
+(two documents) capture the window, the latter two halfway through a
+transition. `--zoom Z`, `--background ID` and `--transition ID|none` set up
+the run.
 
 Report baseline failures separately. The rendering debug panel's frame capture
 measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)

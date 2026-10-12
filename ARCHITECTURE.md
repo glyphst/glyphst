@@ -13,8 +13,9 @@
 | `ai`, `ai-ui` | AI services and chat presentation |
 | Translation crates | Translation domain, PDF production, service orchestration, UI |
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
-| `pdf-gpu` | GPU vector page rendering from captured pages (wgpu; not yet used by the Reader) |
-| `egui-spike` | Decision spike: the GPU renderer, IME/CJK input, a page transition and gamepad input in eframe |
+| `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
+| `effects` | Shader effects (transitions, backgrounds, overlays) defined as data; wgpu only |
+| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view |
 
 Private modules split implementation without introducing additional state
 owners. New-tab and workspace entities own their task handles; document views
@@ -50,11 +51,33 @@ ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
 tessellates each page once per level of detail and draws it with a camera
 uniform; dense pages also get a mipmapped overview rendered from their own
 vectors and drawn while it is at least as sharp as the screen. The Reader
-does not use it yet: GPUI 0.3.8 cannot composite a wgpu texture on Linux (see
-[next work](ROADMAP.md)). `pdf-gpu` uses wgpu 30, egui's version; GPUI keeps
-its own wgpu 29. The [egui spike](crates/egui-spike) draws pages from an
-`egui_wgpu` paint callback: `prepare` renders into a multisampled
-`OffscreenTarget`, `paint` composites it into egui's pass.
+does not use it; GPUI 0.3.8 cannot composite a wgpu texture on Linux. The
+[egui Reader](crates/reader-egui) does (see [next work](ROADMAP.md)).
+`pdf-gpu` uses wgpu 30, egui's version; GPUI keeps its own wgpu 29.
+
+Images and image masks become textures at their own resolution. In the egui
+Reader, an `egui_wgpu` paint callback draws a view in three steps (following
+photocraft's `gpu_canvas`): `prepare` renders paper and resident pages into a
+multisampled `OffscreenTarget`; a background effect fills the view; a
+content effect composites the pages, or a transition from a snapshot of the
+previous view (another tab, the page before a turn). Raster layers are
+re-rasterized for the view once it is still. Pages load on a worker thread
+per document and stay within a GPU byte budget; overviews are built one tile
+per frame.
+
+## egui Reader boundaries
+
+The egui Reader follows the patterns of artcraft's egui apps (pdfcraft's
+home, pickers, last session and theme; craft-ui tabs; filmcraft's
+data-defined effects) rather than reproducing the GPUI Reader. It reuses
+`pdf`, `pdf-gpu`, `effects` and `library`; `library` builds without GPUI
+(its `gpui` feature adds the app global for the GPUI crates). Both readers
+share the redb library, which one process holds at a time: while the GPUI
+Reader runs, the egui Reader opens documents without history. Its own
+preferences (theme, transition, background, last session) live in eframe
+storage under the config directory; scripted runs (`--bench`,
+`--screenshot…`) save nothing and leave the library unwritten. User effects
+are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
 
 ## Library persistence
 

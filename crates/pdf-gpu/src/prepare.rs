@@ -67,6 +67,8 @@ pub enum BatchKind {
     Strokes(Range<u32>),
     /// Index into [`PreparedPage::raster_layers`].
     Raster(usize),
+    /// Index into [`PreparedPage::images`].
+    Image(usize),
     /// Fill indices of a clip path that raises the stencil depth to the
     /// batch's depth inside the path, and the index of the matching pop.
     ClipPush(Range<u32>, usize),
@@ -108,6 +110,27 @@ pub struct PreparedPage {
     /// Coarse to exact; see [`PreparedPage::level_for_scale`].
     pub levels: Vec<PreparedLevel>,
     pub raster_layers: Vec<RasterLayerSource>,
+    /// Images at their own resolution, shared by every level.
+    pub images: Vec<PreparedImage>,
+}
+
+/// An image to draw as a textured quad; see [`VectorItem::Image`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedImage {
+    pub rgba: glyphst_pdf::vector::ImagePixels,
+    pub size: [u32; 2],
+    pub transform: [f32; 6],
+    pub interpolate: bool,
+}
+
+impl PreparedImage {
+    /// Page-space corners: top-left, top-right, bottom-left, bottom-right
+    /// of the image's pixel grid.
+    pub fn corners(&self) -> [[f32; 2]; 4] {
+        let [a, b, c, d, e, f] = self.transform;
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .map(|(u, v)| [a * u + c * v + e, b * u + d * v + f])
+    }
 }
 
 /// Page geometry at one level of detail.
@@ -127,6 +150,24 @@ pub struct PreparedLevel {
 
 impl PreparedPage {
     pub fn new(page: &VectorPage) -> Self {
+        let images = page
+            .draws
+            .iter()
+            .filter_map(|draw| match &draw.item {
+                VectorItem::Image {
+                    rgba,
+                    size,
+                    transform,
+                    interpolate,
+                } => Some(PreparedImage {
+                    rgba: rgba.clone(),
+                    size: *size,
+                    transform: *transform,
+                    interpolate: *interpolate,
+                }),
+                _ => None,
+            })
+            .collect();
         let raster_layers = page
             .draws
             .iter()
@@ -172,6 +213,7 @@ impl PreparedPage {
             bounds: page.bounds,
             levels,
             raster_layers,
+            images,
         }
     }
 
@@ -201,6 +243,7 @@ impl PreparedLevel {
         let mut tessellator = FillTessellator::new();
         let mut polylines = Vec::new();
         let mut raster_layer = 0;
+        let mut image = 0;
         // Index ranges and push batches of the clips on the stencil stack.
         let mut clips: Vec<(Range<u32>, usize)> = Vec::new();
         for draw in &page.draws {
@@ -241,6 +284,15 @@ impl PreparedLevel {
                         chunks: Vec::new(),
                     });
                     raster_layer += 1;
+                }
+                VectorItem::Image { .. } => {
+                    level.batches.push(Batch {
+                        kind: BatchKind::Image(image),
+                        clip: draw.clip,
+                        depth: level.depth,
+                        chunks: Vec::new(),
+                    });
+                    image += 1;
                 }
                 VectorItem::ClipPush { path, even_odd } => {
                     let start = level.fill_indices.len() as u32;
@@ -388,7 +440,7 @@ impl PreparedLevel {
                     bounds,
                 });
             }
-            BatchKind::Raster(_) => {}
+            BatchKind::Raster(_) | BatchKind::Image(_) => {}
         }
         chunks
     }
@@ -398,7 +450,10 @@ impl PreparedLevel {
     fn push_batch(&mut self, kind: BatchKind, clip: Option<PageRect>) {
         let empty = match &kind {
             BatchKind::Fills(range) | BatchKind::Strokes(range) => range.is_empty(),
-            BatchKind::Raster(_) | BatchKind::ClipPush(..) | BatchKind::ClipPop(_) => false,
+            BatchKind::Raster(_)
+            | BatchKind::Image(_)
+            | BatchKind::ClipPush(..)
+            | BatchKind::ClipPop(_) => false,
         };
         if empty {
             return;

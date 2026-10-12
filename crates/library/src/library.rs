@@ -16,7 +16,6 @@ pub use glyphst_core::{
     DocumentFormat, DocumentId, DocumentPageLayout, DocumentRotation, EpubReaderPreferences,
     HighlightColor, RegionImageReference, SemanticTextAnchor,
 };
-use gpui::Global;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -1897,7 +1896,9 @@ pub struct HistoryEntryPersistenceSnapshot {
     revision: u64,
 }
 
-impl Global for LibraryStore {}
+/// The GPUI Reader keeps the store as an app global.
+#[cfg(feature = "gpui")]
+impl gpui::Global for LibraryStore {}
 
 #[derive(Clone, Debug, PartialEq)]
 enum DocumentEdit {

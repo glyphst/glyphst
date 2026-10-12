@@ -10,46 +10,47 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. GPU vector page rendering: GPUI or egui
+## 1. egui Reader: M2 working with text
 
-**Owner:** `pdf-gpu`, `egui-spike`, `document-ui`.
+**Owner:** `reader-egui`, `library`.
 
-**Current evidence:** Captured MuPDF pages render on the GPU with every frame
-drawn from vectors or from an overview rendered from them. On this machine's
-Intel Arc iGPU, `zoom_bench` zooms Murietta_Level1, Level 1, Lower Level and
-War and Peace page 1 from 0.25x to 64x with p95 frame times of 0.6-3.1 ms
-(MuPDF needs 0.5-2.6 s per fit-size view of the drawings). Fewer than 1.5% of
-pixels differ from MuPDF at fit and under 0.07% at 8x and 64x. The pdf.js
-corpus tier renders 97 of 100 files (2 unreadable, 1 parser timeout); 2 differ
-by more than 1%.
+**Current evidence:** egui hosts the GPU vector renderer (GPUI 0.3.8 cannot
+composite a wgpu texture on Linux); the user confirmed smooth zoom and fcitx5
+input in the spike. M1 of the [egui Reader](crates/reader-egui) is in place:
+a library home (history and library items, an async open dialog, dropped
+files), [craft-ui](https://github.com/storytold/craft-libs) tabs, the GPU
+document view with outline, page and zoom controls, presentation mode,
+positions in the shared library, a System/Light/Dark theme after pdfcraft,
+and [effects](crates/effects) for view transitions (tab switches, page turns)
+and backgrounds. The app is not a 1:1 port of the GPUI Reader: artcraft's
+egui apps are the reference, and old crates are reused only where cheap.
 
-GPUI 0.3.8 cannot composite a wgpu texture on Linux (`PaintSurface` is a
-no-op). The [egui spike](crates/egui-spike) (eframe 0.36, wgpu 30, the
-photocraft paint-callback pattern) hosts the renderer unchanged. On a 120 Hz
-display its `--bench` mode zooms Murietta 1x-64x-1x with no frame over 25 ms
-(p95 8.6 ms intervals) and scrolls 600 frames through War and Peace (1,259
-pages, pages loaded on demand within a 1 GiB budget, 126 MiB used) with p95
-9.0 ms and 2 frames over 25 ms, from page uploads. The first page is drawn
-about 250 ms after start. Idle, it uses 0.1% CPU (the GPUI Reader 0.6%) and
-196 MB RSS; its stripped binary is 31 MB (the Reader's, with far more
-features, 125 MB). CJK labels and text fields render with the system Noto
-Sans CJK through fontconfig, and a custom-shader slide-over page transition
-runs inside egui's pass (`--screenshot-transition`).
+Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
+Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
+8.6-8.7 ms) and scrolls War and Peace (1,259 pages) with p95 9.0 ms and at
+most one frame just over 25 ms. First pages appear after 0.15 s (War and
+Peace), 1.3 s (Murietta) and 9.4 s (Lower Level); idle CPU is 0.0% with the
+solid background and 6% with the animated aurora at its 30 fps cap. Images
+and image masks are textures at their own resolution; the remaining raster
+layers (blend groups, soft masks, shadings, patterns) are re-rasterized for
+the view once it has been still for 150 ms. The pdf.js corpus tier renders 97
+of 100 files (2 unreadable, 1 parser timeout); 20 pages still use raster
+layers and 1 differs from MuPDF by more than 1%.
 
-Known renderer gaps: raster layers are rasterized once (blurry when zoomed
-deep; images and image masks should become native-resolution textures), 4x
-MSAA gives small text coarser edges than MuPDF, zooming into Lower Level's
-dense hatching reaches 27 ms frames, a dense page's first upload can take a
-frame of 30-180 ms, and GPU memory reaches 580 MiB for the largest drawing.
+Known gaps: Lower Level (7.6M strokes) costs one 250 ms frame to upload its
+level buffers (uploading levels across frames needs level fallback); 4x MSAA gives small text coarser edges
+than MuPDF; only fixed-layout pages are shown (EPUB reflow is M2).
 
-**Next step:** The user tries `cargo run --release -p glyphst-egui-spike --
-<pdf>`: typing Chinese and Japanese with fcitx5 in both text fields, the
-presentation-mode transition (P, then Page Down), a gamepad if available, and
-zooming Murietta_Level1 against HEPR's demo. With those results, choose the
-host: port the Reader to egui, or patch GPUI with a wgpu `PaintSurface`.
+**Next step (M2):** text selection and copy, search, internal and external
+links, bookmarks/highlights/notes from the library, a thumbnail sidebar and
+EPUB reflow, taking pdfcraft's search and side panels as the reference.
+Later milestones: M3 translation and AI panels, M4 settings, keys and command
+palette, M5 split panes (craft-ui docking), the `files` app and removing the
+GPUI crates, M6 an effects manager (user effect directory, hot reload,
+previews, per-book choices).
 
-**Done when:** The Reader zooms Murietta_Level1 without a raster swap,
-`script/check.sh corpus` passes, and multi-page memory is bounded.
+**Done when:** M2's features work in the egui Reader with tests, `check.sh
+quick` and `corpus` pass, and the bench shows no frames over 25 ms.
 
 ## 2. Workspace layout smoke test
 

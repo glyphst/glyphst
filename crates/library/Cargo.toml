@@ -7,12 +7,14 @@ edition.workspace = true
 workspace = true
 
 [features]
+# The GPUI Reader keeps the store as an app global.
+gpui = ["dep:gpui"]
 test-support = []
 
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
-gpui.workspace = true
+gpui = { workspace = true, optional = true }
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true

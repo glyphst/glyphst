@@ -10,6 +10,7 @@ mod target;
 
 pub use prepare::PreparedPage;
 pub use renderer::{
-    Camera, DrawStats, GpuPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT, stencil_attachment,
+    Camera, DrawStats, GpuPage, OverviewJob, Renderer, SAMPLE_COUNT, STENCIL_FORMAT,
+    stencil_attachment,
 };
 pub use target::OffscreenTarget;

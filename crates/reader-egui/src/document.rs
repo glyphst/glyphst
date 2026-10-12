@@ -1,7 +1,7 @@
 //! Continuous page layout, the view camera, and background page loading.
 
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
     sync::{
@@ -18,12 +18,13 @@ use glyphst_pdf::{
     vector::{LayerImage, PageRect, capture_display_list, rasterize_layer},
 };
 use glyphst_pdf_gpu::{Camera, PreparedPage};
-use mupdf::{Colorspace, Matrix};
+use mupdf::{Colorspace, DisplayList, Matrix};
 
 /// Gap between pages, in page points.
 pub const PAGE_GAP: f64 = 12.0;
 /// Device pixels per point of the loading thumbnails.
 const THUMBNAIL_SCALE: f32 = 0.35;
+const THUMBNAIL_MAX_POINTS: usize = 200_000;
 /// Device pixels per point at which raster layers are rasterized.
 const LAYER_SCALE: f32 = 4.0;
 const MAX_LAYER_DIMENSION: u32 = 4096;
@@ -200,12 +201,33 @@ pub enum Loaded {
         page: usize,
         error: String,
     },
+    /// A raster layer re-rasterized for the current view.
+    Layer {
+        page: usize,
+        layer: usize,
+        image: LayerImage,
+    },
 }
+
+/// Work for the loader thread.
+enum Request {
+    Page(usize),
+    Layer {
+        page: usize,
+        layer: usize,
+        ops: Range<u32>,
+        rect: PageRect,
+        scale: f32,
+    },
+}
+
+/// Display lists the loader keeps for re-rasterizing layers.
+const CACHED_LISTS: usize = 8;
 
 /// Captures and prepares pages on a worker thread with its own document.
 /// Requests for pages no longer wanted are skipped.
 pub struct Loader {
-    requests: Sender<usize>,
+    requests: Sender<Request>,
     results: Receiver<Loaded>,
     wanted: Arc<Mutex<HashSet<usize>>>,
     requested: HashSet<usize>,
@@ -213,12 +235,12 @@ pub struct Loader {
 
 impl Loader {
     pub fn new(path: PathBuf, ctx: egui::Context) -> Self {
-        let (requests, request_rx) = mpsc::channel::<usize>();
+        let (requests, request_rx) = mpsc::channel::<Request>();
         let (result_tx, results) = mpsc::channel();
         let wanted = Arc::new(Mutex::new(HashSet::new()));
         let worker_wanted = wanted.clone();
         thread::Builder::new()
-            .name("egui-spike-loader".into())
+            .name("page-loader".into())
             .spawn(move || {
                 let document = match GlyphstDocument::open(&path) {
                     Ok(document) => document,
@@ -230,18 +252,50 @@ impl Loader {
                         return;
                     }
                 };
-                while let Ok(page) = request_rx.recv() {
-                    if !worker_wanted
-                        .lock()
-                        .is_ok_and(|wanted| wanted.contains(&page))
-                    {
-                        continue;
-                    }
-                    for loaded in load_page(document.inner(), page) {
-                        if result_tx.send(loaded).is_err() {
-                            return;
+                let mut lists: VecDeque<(usize, DisplayList)> = VecDeque::new();
+                let mut send = |loaded| {
+                    let sent = result_tx.send(loaded).is_ok();
+                    ctx.request_repaint();
+                    sent
+                };
+                while let Ok(request) = request_rx.recv() {
+                    match request {
+                        Request::Page(page) => {
+                            if !worker_wanted
+                                .lock()
+                                .is_ok_and(|wanted| wanted.contains(&page))
+                            {
+                                continue;
+                            }
+                            if let Some(list) = load_page(document.inner(), page, &mut send) {
+                                lists.retain(|(cached, _)| *cached != page);
+                                lists.push_back((page, list));
+                                if lists.len() > CACHED_LISTS {
+                                    lists.pop_front();
+                                }
+                            }
                         }
-                        ctx.request_repaint();
+                        Request::Layer {
+                            page,
+                            layer,
+                            ops,
+                            rect,
+                            scale,
+                        } => {
+                            let image = rasterize_cached(
+                                document.inner(),
+                                &mut lists,
+                                page,
+                                ops,
+                                rect,
+                                scale,
+                            );
+                            if let Some(image) = image
+                                && !send(Loaded::Layer { page, layer, image })
+                            {
+                                return;
+                            }
+                        }
                     }
                 }
             })
@@ -264,9 +318,28 @@ impl Loader {
         self.requested.retain(|page| pages.contains(page));
         for &page in pages {
             if !loaded(page) && self.requested.insert(page) {
-                let _ = self.requests.send(page);
+                let _ = self.requests.send(Request::Page(page));
             }
         }
+    }
+
+    /// Re-rasterizes raster layer `layer` of `page` (its display-list `ops`)
+    /// over page area `rect` at `scale` device pixels per point.
+    pub fn rasterize_layer(
+        &self,
+        page: usize,
+        layer: usize,
+        ops: Range<u32>,
+        rect: PageRect,
+        scale: f32,
+    ) {
+        let _ = self.requests.send(Request::Layer {
+            page,
+            layer,
+            ops,
+            rect,
+            scale,
+        });
     }
 
     /// Marks `page` as no longer loaded, so it can be requested again.
@@ -279,22 +352,35 @@ impl Loader {
     }
 }
 
-fn load_page(document: &mupdf::Document, page: usize) -> Vec<Loaded> {
+/// Loads one page, sending a thumbnail as soon as it is drawn and the
+/// prepared vectors after. MuPDF interprets the page once, into a display
+/// list both are made from. Pages with more path points than
+/// [`THUMBNAIL_MAX_POINTS`] get no thumbnail: rasterizing them takes
+/// seconds, about as long as preparing their vectors.
+fn load_page(
+    document: &mupdf::Document,
+    page: usize,
+    send: &mut dyn FnMut(Loaded) -> bool,
+) -> Option<DisplayList> {
     let started = Instant::now();
-    let result = (|| -> Result<Vec<Loaded>> {
-        let mupdf_page = document
+    let result = (|| -> Result<Option<(Loaded, DisplayList)>> {
+        let list = document
             .load_page(i32::try_from(page)?)
-            .with_context(|| format!("failed to load page {}", page + 1))?;
-        let thumbnail = mupdf_page.to_pixmap(
-            &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
-            &Colorspace::device_rgb(),
-            false,
-            true,
-        )?;
-        let size = [thumbnail.width() as usize, thumbnail.height() as usize];
-        let image = egui::ColorImage::from_rgb(size, thumbnail.samples());
-        let list = mupdf_page.to_display_list(true)?;
+            .with_context(|| format!("failed to load page {}", page + 1))?
+            .to_display_list(true)?;
         let vector = capture_display_list(&list)?;
+        if vector.stats.path_points <= THUMBNAIL_MAX_POINTS {
+            let thumbnail = list.to_pixmap(
+                &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
+                &Colorspace::device_rgb(),
+                false,
+            )?;
+            let size = [thumbnail.width() as usize, thumbnail.height() as usize];
+            let image = egui::ColorImage::from_rgb(size, thumbnail.samples());
+            if !send(Loaded::Thumbnail { page, image }) {
+                return Ok(None);
+            }
+        }
         let prepared = PreparedPage::new(&vector);
         let mut layers = Vec::new();
         for (index, layer) in prepared.raster_layers.iter().enumerate() {
@@ -308,34 +394,110 @@ fn load_page(document: &mupdf::Document, page: usize) -> Vec<Loaded> {
                 layers.push((index, image));
             }
         }
-        Ok(vec![
-            Loaded::Thumbnail { page, image },
-            Loaded::Prepared {
-                page,
-                prepared: Box::new(prepared),
-                layers,
-                seconds: started.elapsed().as_secs_f64(),
-            },
-        ])
-    })();
-    result.unwrap_or_else(|error| {
-        vec![Loaded::Failed {
+        let loaded = Loaded::Prepared {
             page,
-            error: format!("{error:#}"),
-        }]
-    })
+            prepared: Box::new(prepared),
+            layers,
+            seconds: started.elapsed().as_secs_f64(),
+        };
+        Ok(Some((loaded, list)))
+    })();
+    match result {
+        Ok(Some((loaded, list))) => send(loaded).then_some(list),
+        Ok(None) => None,
+        Err(error) => {
+            send(Loaded::Failed {
+                page,
+                error: format!("{error:#}"),
+            });
+            None
+        }
+    }
 }
 
-/// Page bounds of every page, read on the calling thread.
-pub fn page_bounds(path: &std::path::Path) -> Result<Vec<PageRect>> {
-    let document = GlyphstDocument::open(path)?;
-    let count = document.inner().page_count()?;
-    (0..count)
-        .map(|index| {
-            let b = document.inner().load_page(index)?.bounds()?;
-            Ok([b.x0, b.y0, b.x1, b.y1])
+/// Rasterizes layer operations from a cached display list, loading the
+/// page's list again when it was dropped.
+fn rasterize_cached(
+    document: &mupdf::Document,
+    lists: &mut VecDeque<(usize, DisplayList)>,
+    page: usize,
+    ops: Range<u32>,
+    rect: PageRect,
+    scale: f32,
+) -> Option<LayerImage> {
+    if !lists.iter().any(|(cached, _)| *cached == page) {
+        let list = document
+            .load_page(i32::try_from(page).ok()?)
+            .ok()?
+            .to_display_list(true)
+            .ok()?;
+        lists.push_back((page, list));
+        if lists.len() > CACHED_LISTS {
+            lists.pop_front();
+        }
+    }
+    let (_, list) = lists.iter().find(|(cached, _)| *cached == page)?;
+    rasterize_layer(list, ops, rect, scale, MAX_LAYER_DIMENSION)
+        .ok()
+        .flatten()
+}
+
+/// One entry of a document's outline, flattened in reading order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlineEntry {
+    pub title: String,
+    pub page: Option<usize>,
+    pub depth: usize,
+}
+
+/// What a tab needs before its first frame, read on the calling thread.
+pub struct DocumentInfo {
+    pub bounds: Vec<PageRect>,
+    pub outline: Vec<OutlineEntry>,
+    pub title: Option<String>,
+}
+
+impl DocumentInfo {
+    pub fn read(path: &std::path::Path) -> Result<Self> {
+        let document = GlyphstDocument::open(path)?;
+        let document = document.inner();
+        let count = document.page_count()?;
+        let bounds = (0..count)
+            .map(|index| {
+                let b = document.load_page(index)?.bounds()?;
+                Ok([b.x0, b.y0, b.x1, b.y1])
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut outline = Vec::new();
+        // A broken outline should not stop the document from opening.
+        if let Ok(entries) = document.outlines() {
+            flatten_outline(&entries, 0, &mut outline);
+        }
+        let title = document
+            .metadata(mupdf::MetadataName::Title)
+            .ok()
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty());
+        Ok(Self {
+            bounds,
+            outline,
+            title,
         })
-        .collect()
+    }
+}
+
+fn flatten_outline(entries: &[mupdf::Outline], depth: usize, out: &mut Vec<OutlineEntry>) {
+    for entry in entries {
+        out.push(OutlineEntry {
+            title: entry.title.trim().to_string(),
+            page: entry
+                .dest
+                .as_ref()
+                .map(|dest| dest.loc.page_number as usize),
+            depth,
+        });
+        flatten_outline(&entry.down, depth + 1, out);
+    }
 }
 
 /// Rolling frame intervals for the HUD and the benchmark.

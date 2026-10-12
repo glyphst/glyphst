@@ -5,24 +5,14 @@
 
 use gilrs::{Axis, Button, EventType, Gilrs};
 
+use crate::document_tab::ViewAction;
+
 /// Stick positions below this magnitude are ignored.
 const DEADZONE: f32 = 0.15;
 /// View pixels per second at full stick deflection.
 pub const MAX_SCROLL_SPEED: f32 = 2400.0;
 /// Natural-log zoom change per second at a fully pressed trigger.
 pub const MAX_ZOOM_RATE: f32 = 2.5;
-/// View pixels per D-pad press.
-pub const DPAD_STEP: f32 = 120.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    PreviousPage,
-    NextPage,
-    FitWidth,
-    TogglePresent,
-    /// D-pad scroll by whole steps; positive scrolls down.
-    Step(i32),
-}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GamepadInput {
@@ -30,7 +20,7 @@ pub struct GamepadInput {
     pub scroll: [f32; 2],
     /// Zoom rate in natural-log units per second; positive zooms in.
     pub zoom: f32,
-    pub actions: Vec<Action>,
+    pub actions: Vec<ViewAction>,
 }
 
 impl GamepadInput {
@@ -50,14 +40,14 @@ pub fn axis_speed(value: f32) -> f32 {
     scaled * scaled * value.signum()
 }
 
-pub fn action_for(button: Button) -> Option<Action> {
+pub fn action_for(button: Button) -> Option<ViewAction> {
     Some(match button {
-        Button::LeftTrigger => Action::PreviousPage,
-        Button::RightTrigger => Action::NextPage,
-        Button::South => Action::FitWidth,
-        Button::Start => Action::TogglePresent,
-        Button::DPadUp => Action::Step(-1),
-        Button::DPadDown => Action::Step(1),
+        Button::LeftTrigger => ViewAction::PreviousPage,
+        Button::RightTrigger => ViewAction::NextPage,
+        Button::South => ViewAction::FitWidth,
+        Button::Start => ViewAction::TogglePresent,
+        Button::DPadUp => ViewAction::Step(-1),
+        Button::DPadDown => ViewAction::Step(1),
         _ => return None,
     })
 }
@@ -125,8 +115,8 @@ mod tests {
 
     #[test]
     fn buttons_map_to_reader_actions() {
-        assert_eq!(action_for(Button::RightTrigger), Some(Action::NextPage));
-        assert_eq!(action_for(Button::DPadUp), Some(Action::Step(-1)));
+        assert_eq!(action_for(Button::RightTrigger), Some(ViewAction::NextPage));
+        assert_eq!(action_for(Button::DPadUp), Some(ViewAction::Step(-1)));
         assert_eq!(action_for(Button::North), None);
         assert!(!GamepadInput::default().is_active());
     }

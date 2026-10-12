@@ -15,8 +15,20 @@ pub const SAMPLE_COUNT: u32 = 4;
 /// [`SAMPLE_COUNT`] samples, cleared to zero; non-rectangular clips use it.
 pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 
-/// Tile size used when rendering the overview texture.
-const OVERVIEW_TILE: u32 = 2048;
+/// Tile size used when rendering the overview texture; one tile is the unit
+/// of work an interactive host does per frame.
+const OVERVIEW_TILE: u32 = 1024;
+
+/// An overview being built tile by tile (see [`Renderer::begin_overview`]).
+pub struct OverviewJob {
+    texture: wgpu::Texture,
+    tile: OffscreenTarget,
+    scale: f32,
+    size: [u32; 2],
+    mip_level_count: u32,
+    /// The next tile: mip level and its top-left pixel.
+    next: (u32, u32, u32),
+}
 
 /// Pages with at least this many stroke segments are expensive to draw
 /// zoomed out, where every segment covers at least a pixel and they pile up;
@@ -106,6 +118,9 @@ pub struct Renderer {
     layer_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     mip_sampler: wgpu::Sampler,
+    /// Images without /Interpolate: square pixels when enlarged, mipmaps
+    /// when reduced.
+    pixel_sampler: wgpu::Sampler,
     fill: wgpu::RenderPipeline,
     stroke: wgpu::RenderPipeline,
     layer: wgpu::RenderPipeline,
@@ -138,6 +153,8 @@ struct RasterLayer {
     vertices: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     rect: PageRect,
+    /// Texture bytes counted in the page's `gpu_bytes`.
+    bytes: u64,
 }
 
 /// The page rendered from its own vectors into a mipmapped texture, drawn
@@ -164,6 +181,7 @@ pub struct GpuPage {
     levels: Vec<GpuLevel>,
     max_scales: Vec<f32>,
     layers: Vec<Option<RasterLayer>>,
+    images: Vec<Option<RasterLayer>>,
     overview: Option<Overview>,
     /// Exact-level stroke segments and fill triangles.
     segments: usize,
@@ -237,6 +255,13 @@ impl Renderer {
         let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pdf_gpu_overview"),
             mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let pixel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("pdf_gpu_image_pixels"),
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
@@ -370,6 +395,7 @@ impl Renderer {
             layer_layout,
             sampler,
             mip_sampler,
+            pixel_sampler,
             fill,
             stroke,
             layer,
@@ -382,7 +408,29 @@ impl Renderer {
         self.format
     }
 
-    pub fn upload(&self, device: &wgpu::Device, page: &PreparedPage) -> GpuPage {
+    /// Uploads a prepared page: its levels' buffers, and its images as
+    /// mipmapped textures at their own resolution.
+    pub fn upload(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        page: &PreparedPage,
+    ) -> GpuPage {
+        let mut image_bytes = 0;
+        let images = page
+            .images
+            .iter()
+            .map(|image| {
+                let (texture, bytes) = upload_mipmapped(device, queue, &image.rgba.0, image.size);
+                image_bytes += bytes;
+                let sampler = if image.interpolate {
+                    &self.mip_sampler
+                } else {
+                    &self.pixel_sampler
+                };
+                Some(self.textured_quad(device, &texture, sampler, image.corners()))
+            })
+            .collect();
         let levels: Vec<GpuLevel> = page
             .levels
             .iter()
@@ -407,7 +455,8 @@ impl Renderer {
             .flat_map(|level| [&level.fill_vertices, &level.fill_indices, &level.segments])
             .flatten()
             .map(wgpu::Buffer::size)
-            .sum();
+            .sum::<u64>()
+            + image_bytes;
         GpuPage {
             bounds: page.bounds,
             camera,
@@ -415,6 +464,7 @@ impl Renderer {
             max_scales: levels.iter().map(|level| level.max_scale).collect(),
             levels,
             layers: page.raster_layers.iter().map(|_| None).collect(),
+            images,
             overview: None,
             segments: page.exact().segments.len(),
             triangles: page.exact().fill_indices.len() / 3,
@@ -459,9 +509,13 @@ impl Renderer {
             },
             extent,
         );
-        let layer = self.raster_layer(device, &texture, &self.sampler, rect);
-        page.gpu_bytes += u64::from(size[0]) * u64::from(size[1]) * 4;
-        page.layers[index] = Some(layer);
+        let mut layer = self.raster_layer(device, &texture, &self.sampler, rect);
+        layer.bytes = u64::from(size[0]) * u64::from(size[1]) * 4;
+        page.gpu_bytes += layer.bytes;
+        // Replacing a layer (re-rasterized for a closer view) frees the old.
+        if let Some(old) = page.layers[index].replace(layer) {
+            page.gpu_bytes = page.gpu_bytes.saturating_sub(old.bytes);
+        }
     }
 
     fn raster_layer(
@@ -470,6 +524,24 @@ impl Renderer {
         texture: &wgpu::Texture,
         sampler: &wgpu::Sampler,
         rect: PageRect,
+    ) -> RasterLayer {
+        let [x0, y0, x1, y1] = rect;
+        self.textured_quad(
+            device,
+            texture,
+            sampler,
+            [[x0, y0], [x1, y0], [x0, y1], [x1, y1]],
+        )
+    }
+
+    /// A texture drawn over a page-space quadrilateral whose corners are
+    /// the texture's top-left, top-right, bottom-left and bottom-right.
+    fn textured_quad(
+        &self,
+        device: &wgpu::Device,
+        texture: &wgpu::Texture,
+        sampler: &wgpu::Sampler,
+        corners: [[f32; 2]; 4],
     ) -> RasterLayer {
         let view = texture.create_view(&Default::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -486,25 +558,16 @@ impl Renderer {
                 },
             ],
         });
-        let [x0, y0, x1, y1] = rect;
-        let vertices = [
-            LayerVertex {
-                position: [x0, y0],
-                uv: [0.0, 0.0],
-            },
-            LayerVertex {
-                position: [x1, y0],
-                uv: [1.0, 0.0],
-            },
-            LayerVertex {
-                position: [x0, y1],
-                uv: [0.0, 1.0],
-            },
-            LayerVertex {
-                position: [x1, y1],
-                uv: [1.0, 1.0],
-            },
-        ];
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let vertices: Vec<LayerVertex> = corners
+            .into_iter()
+            .zip(uvs)
+            .map(|(position, uv)| LayerVertex { position, uv })
+            .collect();
+        let rect = corners.iter().fold(
+            [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            |[x0, y0, x1, y1], [x, y]| [x0.min(*x), y0.min(*y), x1.max(*x), y1.max(*y)],
+        );
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("pdf_gpu_raster_layer"),
             contents: bytemuck::cast_slice(&vertices),
@@ -514,12 +577,14 @@ impl Renderer {
             vertices,
             bind_group,
             rect,
+            bytes: 0,
         }
     }
 
     /// Renders the page from its vectors (and raster layers) into a
-    /// mipmapped texture whose longer side is `max_dimension` pixels. Every
-    /// mip level is rendered from the vectors rather than downsampled.
+    /// mipmapped texture whose longer side is `max_dimension` pixels, all at
+    /// once. Every mip level is rendered from the vectors rather than
+    /// downsampled. Interactive hosts use [`Renderer::begin_overview`].
     pub fn build_overview(
         &self,
         device: &wgpu::Device,
@@ -527,10 +592,22 @@ impl Renderer {
         page: &mut GpuPage,
         max_dimension: u32,
     ) {
+        if let Some(mut job) = self.begin_overview(device, page, max_dimension) {
+            while !self.continue_overview(device, queue, page, &mut job, usize::MAX) {}
+        }
+    }
+
+    /// Starts building an overview in steps; `None` for an empty page.
+    pub fn begin_overview(
+        &self,
+        device: &wgpu::Device,
+        page: &GpuPage,
+        max_dimension: u32,
+    ) -> Option<OverviewJob> {
         let [x0, y0, x1, y1] = page.bounds;
         let (width_pt, height_pt) = (x1 - x0, y1 - y0);
         if width_pt <= 0.0 || height_pt <= 0.0 {
-            return;
+            return None;
         }
         let scale = max_dimension as f32 / width_pt.max(height_pt);
         let width = ((width_pt * scale).ceil() as u32).clamp(1, max_dimension);
@@ -556,70 +633,98 @@ impl Renderer {
             [OVERVIEW_TILE, OVERVIEW_TILE],
             wgpu::TextureUsages::COPY_SRC,
         );
+        Some(OverviewJob {
+            texture,
+            tile,
+            scale,
+            size: [width, height],
+            mip_level_count,
+            next: (0, 0, 0),
+        })
+    }
 
-        for mip in 0..mip_level_count {
-            let mip_width = (width >> mip).max(1);
-            let mip_height = (height >> mip).max(1);
-            let mip_scale = scale / (1u32 << mip) as f32;
-            for tile_y in (0..mip_height).step_by(OVERVIEW_TILE as usize) {
-                for tile_x in (0..mip_width).step_by(OVERVIEW_TILE as usize) {
-                    let camera = Camera {
-                        origin: [
-                            x0 + tile_x as f32 / mip_scale,
-                            y0 + tile_y as f32 / mip_scale,
-                        ],
-                        scale: mip_scale,
-                        viewport: [OVERVIEW_TILE, OVERVIEW_TILE],
-                    };
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    {
-                        let mut pass = tile.begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
-                        self.draw_vectors(
-                            queue,
-                            page,
-                            &camera,
-                            &mut pass,
-                            &mut DrawStats::default(),
-                        );
-                    }
-                    encoder.copy_texture_to_texture(
-                        tile.texture().as_image_copy(),
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &texture,
-                            mip_level: mip,
-                            origin: wgpu::Origin3d {
-                                x: tile_x,
-                                y: tile_y,
-                                z: 0,
-                            },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d {
-                            width: OVERVIEW_TILE.min(mip_width - tile_x),
-                            height: OVERVIEW_TILE.min(mip_height - tile_y),
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                    // The camera uniform is rewritten per tile, so each tile
-                    // is submitted before the next write.
-                    queue.submit([encoder.finish()]);
-                }
+    /// Renders up to `tiles` more tiles of `job`. When the last tile is
+    /// done the overview is installed on `page` and `true` is returned.
+    pub fn continue_overview(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        page: &mut GpuPage,
+        job: &mut OverviewJob,
+        tiles: usize,
+    ) -> bool {
+        let [x0, y0, _, _] = page.bounds;
+        for _ in 0..tiles {
+            let (mip, tile_x, tile_y) = job.next;
+            if mip >= job.mip_level_count {
+                break;
             }
+            let mip_width = (job.size[0] >> mip).max(1);
+            let mip_height = (job.size[1] >> mip).max(1);
+            let mip_scale = job.scale / (1u32 << mip) as f32;
+            let camera = Camera {
+                origin: [
+                    x0 + tile_x as f32 / mip_scale,
+                    y0 + tile_y as f32 / mip_scale,
+                ],
+                scale: mip_scale,
+                viewport: [OVERVIEW_TILE, OVERVIEW_TILE],
+            };
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = job.tile.begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
+                self.draw_vectors(queue, page, &camera, &mut pass, &mut DrawStats::default());
+            }
+            encoder.copy_texture_to_texture(
+                job.tile.texture().as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &job.texture,
+                    mip_level: mip,
+                    origin: wgpu::Origin3d {
+                        x: tile_x,
+                        y: tile_y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: OVERVIEW_TILE.min(mip_width - tile_x),
+                    height: OVERVIEW_TILE.min(mip_height - tile_y),
+                    depth_or_array_layers: 1,
+                },
+            );
+            // The camera uniform is rewritten per tile, so each tile is
+            // submitted before the next write.
+            queue.submit([encoder.finish()]);
+            job.next = if tile_x + OVERVIEW_TILE < mip_width {
+                (mip, tile_x + OVERVIEW_TILE, tile_y)
+            } else if tile_y + OVERVIEW_TILE < mip_height {
+                (mip, 0, tile_y + OVERVIEW_TILE)
+            } else {
+                (mip + 1, 0, 0)
+            };
+        }
+        if job.next.0 < job.mip_level_count {
+            return false;
         }
 
+        let [width, height] = job.size;
         let rect = [
             x0,
             y0,
-            x0 + width as f32 / scale,
-            y0 + height as f32 / scale,
+            x0 + width as f32 / job.scale,
+            y0 + height as f32 / job.scale,
         ];
-        let layer = self.raster_layer(device, &texture, &self.mip_sampler, rect);
+        let layer = self.raster_layer(device, &job.texture, &self.mip_sampler, rect);
         page.gpu_bytes += u64::from(width) * u64::from(height) * 4 * 4 / 3;
-        page.overview = Some(Overview { layer, scale });
+        page.overview = Some(Overview {
+            layer,
+            scale: job.scale,
+        });
 
         // Levels serving only scales the overview covers are never drawn.
         for level in &mut page.levels {
-            if level.max_scale <= scale {
+            if level.max_scale <= job.scale {
                 for buffer in [
                     level.fill_vertices.take(),
                     level.fill_indices.take(),
@@ -634,6 +739,7 @@ impl Renderer {
                 level.batches.clear();
             }
         }
+        true
     }
 
     /// Records the page into `pass`, which must target this renderer's format
@@ -723,6 +829,12 @@ impl Renderer {
                         }
                         _ => Vec::new(),
                     },
+                    BatchKind::Image(index) => match page.images.get(*index) {
+                        Some(Some(image)) if intersects(image.rect, visible) => {
+                            std::iter::once(0..1).collect()
+                        }
+                        _ => Vec::new(),
+                    },
                 };
                 (!ranges.is_empty()).then_some((scissor, ranges))
             })
@@ -796,6 +908,13 @@ impl Renderer {
                         pass.set_stencil_reference(batch.depth);
                         stats.draw_calls += 1;
                         self.draw_layer(layer, pass);
+                    }
+                }
+                BatchKind::Image(image) => {
+                    if let Some(Some(image)) = page.images.get(*image) {
+                        pass.set_stencil_reference(batch.depth);
+                        stats.draw_calls += 1;
+                        self.draw_layer(image, pass);
                     }
                 }
             }
@@ -892,5 +1011,101 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
             load: wgpu::LoadOp::Clear(0),
             store: wgpu::StoreOp::Discard,
         }),
+    }
+}
+
+/// Uploads premultiplied RGBA8 pixels as a texture with a full mip chain
+/// (box-filtered on the CPU); returns it and its size in bytes.
+fn upload_mipmapped(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    rgba: &[u8],
+    size: [u32; 2],
+) -> (wgpu::Texture, u64) {
+    let mip_level_count = size[0].max(size[1]).max(1).ilog2() + 1;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pdf_gpu_image"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut level = rgba.to_vec();
+    let [mut width, mut height] = size;
+    let mut bytes = 0;
+    for mip in 0..mip_level_count {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &level,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        bytes += level.len() as u64;
+        if mip + 1 < mip_level_count {
+            (level, width, height) = downsample(&level, width, height);
+        }
+    }
+    (texture, bytes)
+}
+
+/// Halves an RGBA8 image (2x2 box filter; odd edges repeat).
+fn downsample(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let (half_width, half_height) = ((width / 2).max(1), (height / 2).max(1));
+    let mut out = Vec::with_capacity((half_width * half_height * 4) as usize);
+    let pixel = |x: u32, y: u32, channel: usize| {
+        u32::from(rgba[((y.min(height - 1) * width + x.min(width - 1)) * 4) as usize + channel])
+    };
+    for y in 0..half_height {
+        for x in 0..half_width {
+            for channel in 0..4 {
+                let sum = pixel(2 * x, 2 * y, channel)
+                    + pixel(2 * x + 1, 2 * y, channel)
+                    + pixel(2 * x, 2 * y + 1, channel)
+                    + pixel(2 * x + 1, 2 * y + 1, channel);
+                out.push(((sum + 2) / 4) as u8);
+            }
+        }
+    }
+    (out, half_width, half_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downsampling_averages_two_by_two_blocks_and_repeats_odd_edges() {
+        let rgba = [
+            0, 0, 0, 0, 100, 100, 100, 100, 200, 200, 200, 200, //
+            100, 100, 100, 100, 0, 0, 0, 0, 40, 40, 40, 40,
+        ];
+        let (half, width, height) = downsample(&rgba, 3, 2);
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(half, [50, 50, 50, 50]);
+        let (single, width, height) = downsample(&[9, 9, 9, 9], 1, 1);
+        assert_eq!(
+            (single.as_slice(), width, height),
+            (&[9u8, 9, 9, 9][..], 1, 1)
+        );
     }
 }

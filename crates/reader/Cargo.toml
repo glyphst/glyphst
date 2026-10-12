@@ -16,7 +16,7 @@ futures.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
-glyphst-library = { path = "../library" }
+glyphst-library = { path = "../library", features = ["gpui"] }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-document-ui = { path = "../document-ui" }
 glyphst-settings = { path = "../settings" }

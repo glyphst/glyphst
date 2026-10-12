@@ -14,7 +14,7 @@ glyphst-actions = { path = "../actions" }
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-files = { path = "../files" }
-glyphst-library = { path = "../library" }
+glyphst-library = { path = "../library", features = ["gpui"] }
 glyphst-settings = { path = "../settings" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
