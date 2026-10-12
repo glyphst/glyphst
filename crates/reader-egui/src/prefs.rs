@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::theme::ThemePreference;
+use crate::{sidebar::SidebarTab, theme::ThemePreference};
 
 const STORAGE_KEY: &str = "glyphst-reader-egui";
 /// More files than anyone keeps open; storage is untrusted.
@@ -21,6 +21,8 @@ pub struct Prefs {
     pub background: String,
     /// Frames per second an animated background may repaint at.
     pub background_fps: u32,
+    pub show_sidebar: bool,
+    pub sidebar: SidebarTab,
     pub last_session: LastSession,
 }
 
@@ -32,6 +34,8 @@ impl Default for Prefs {
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),
             background_fps: 30,
+            show_sidebar: true,
+            sidebar: SidebarTab::default(),
             last_session: LastSession::default(),
         }
     }
@@ -110,6 +114,8 @@ mod tests {
         let prefs = Prefs {
             theme: ThemePreference::Dark,
             transition: None,
+            show_sidebar: false,
+            sidebar: SidebarTab::Notes,
             last_session: LastSession {
                 files: vec![
                     SessionFile {

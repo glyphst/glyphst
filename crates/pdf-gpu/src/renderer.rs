@@ -756,9 +756,9 @@ impl Renderer {
             Some(overview) if camera.scale <= overview.scale => {
                 self.write_camera(queue, page, camera);
                 stats.used_overview = true;
-                if camera.scissor(page.bounds).is_some() {
+                if let Some([x, y, width, height]) = camera.scissor(page.bounds) {
                     pass.set_bind_group(0, &page.camera_bind_group, &[]);
-                    pass.set_scissor_rect(0, 0, camera.viewport[0], camera.viewport[1]);
+                    pass.set_scissor_rect(x, y, width, height);
                     pass.set_stencil_reference(0);
                     self.draw_layer(&overview.layer, pass);
                     stats.draw_calls += 1;
@@ -799,12 +799,13 @@ impl Renderer {
         stats: &mut DrawStats,
     ) {
         self.write_camera(queue, page, camera);
-        if camera.scissor(page.bounds).is_none() {
+        // Nothing shows outside the page box, as in MuPDF's pixmaps: EPUB
+        // chapter backgrounds, for one, run past the pages they start on.
+        let Some(full) = camera.scissor(page.bounds) else {
             return;
-        }
+        };
         let level = &page.levels[page.level_for_scale(camera.scale)];
         let visible = camera.visible_page_rect(2.0);
-        let full = [0, 0, camera.viewport[0], camera.viewport[1]];
 
         // Visible work per batch, then a running count of batches that draw
         // content, so a clip whose contents are all off screen is skipped.
@@ -813,7 +814,7 @@ impl Renderer {
             .iter()
             .map(|batch| {
                 let scissor = match batch.clip {
-                    Some(clip) => camera.scissor(clip)?,
+                    Some(clip) => camera.scissor(clip_to(clip, page.bounds))?,
                     None => full,
                 };
                 let ranges = match &batch.kind {
@@ -942,6 +943,16 @@ impl Renderer {
 
 /// Scissor rectangle and visible primitive ranges of one batch.
 type BatchWork = ([u32; 4], Vec<Range<u32>>);
+
+/// `rect` limited to `bounds`; empty (and so skipped) when they do not meet.
+fn clip_to(rect: PageRect, bounds: PageRect) -> PageRect {
+    [
+        rect[0].max(bounds[0]),
+        rect[1].max(bounds[1]),
+        rect[2].min(bounds[2]),
+        rect[3].min(bounds[3]),
+    ]
+}
 
 fn intersects(a: PageRect, b: PageRect) -> bool {
     a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
@@ -1092,6 +1103,30 @@ fn downsample(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scissors_keep_drawing_inside_the_page() {
+        // A 100×100 pt page at 2 px/pt, scrolled so its top-left corner is
+        // 10 pt into a 400×400 px view.
+        let camera = Camera {
+            origin: [-10.0, -10.0],
+            scale: 2.0,
+            viewport: [400, 400],
+        };
+        let page = [0.0, 0.0, 100.0, 100.0];
+        assert_eq!(camera.scissor(page), Some([20, 20, 200, 200]));
+        // A clip reaching past the page is cut at its edge, one beside it
+        // draws nothing.
+        let wide_clip = [-50.0, 50.0, 500.0, 60.0];
+        assert_eq!(
+            camera.scissor(clip_to(wide_clip, page)),
+            Some([20, 120, 200, 20])
+        );
+        assert_eq!(
+            camera.scissor(clip_to([120.0, 0.0, 150.0, 10.0], page)),
+            None
+        );
+    }
 
     #[test]
     fn downsampling_averages_two_by_two_blocks_and_repeats_odd_edges() {

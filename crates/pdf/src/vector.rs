@@ -1129,46 +1129,10 @@ mod tests {
     use super::*;
     use crate::{DocumentRenderSession, DocumentSnapshot};
 
-    fn single_page_pdf(content: &str, resources: &str) -> Vec<u8> {
-        let objects = [
-            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
-                 /Resources {resources} /Contents 4 0 R >>"
-            ),
-            format!(
-                "<< /Length {} >>\nstream\n{content}\nendstream",
-                content.len() + 1
-            ),
-        ];
-        let mut pdf = b"%PDF-1.7\n".to_vec();
-        let mut offsets = Vec::new();
-        for (index, body) in objects.iter().enumerate() {
-            offsets.push(pdf.len());
-            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
-        }
-        let xref = pdf.len();
-        pdf.extend_from_slice(
-            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-        );
-        for offset in offsets {
-            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-        }
-        pdf.extend_from_slice(
-            format!(
-                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-                objects.len() + 1
-            )
-            .as_bytes(),
-        );
-        pdf
-    }
-
     fn capture(content: &str, resources: &str) -> (VectorPage, crate::RetainedDisplayList) {
         let snapshot = Arc::new(DocumentSnapshot::from_pdf_bytes(
             "vector.pdf",
-            single_page_pdf(content, resources),
+            crate::test_pdf::single_page_pdf(content, resources, ""),
         ));
         let session = DocumentRenderSession::open(snapshot, DocumentLayout::Fixed).unwrap();
         let list = session

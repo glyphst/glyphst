@@ -3,9 +3,10 @@
 use std::{
     collections::{HashSet, VecDeque},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -13,8 +14,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use glyphst_core::DocumentLayout;
 use glyphst_pdf::{
-    GlyphstDocument,
+    DocumentSnapshot, GlyphstDocument,
+    text::{PageLink, PageText, page_links},
     vector::{LayerImage, PageRect, capture_display_list, rasterize_layer},
 };
 use glyphst_pdf_gpu::{Camera, PreparedPage};
@@ -22,8 +25,11 @@ use mupdf::{Colorspace, DisplayList, Matrix};
 
 /// Gap between pages, in page points.
 pub const PAGE_GAP: f64 = 12.0;
-/// Device pixels per point of the loading thumbnails.
+/// Device pixels per point of the loading and sidebar thumbnails.
 const THUMBNAIL_SCALE: f32 = 0.35;
+/// A sidebar thumbnail slower than this marks the document as too dense
+/// for thumbnails of pages that are not open.
+const HEAVY_THUMBNAIL: Duration = Duration::from_millis(400);
 const THUMBNAIL_MAX_POINTS: usize = 200_000;
 /// Device pixels per point at which raster layers are rasterized.
 const LAYER_SCALE: f32 = 4.0;
@@ -195,7 +201,17 @@ pub enum Loaded {
         page: usize,
         prepared: Box<PreparedPage>,
         layers: Vec<(usize, LayerImage)>,
+        links: Vec<PageLink>,
         seconds: f64,
+    },
+    /// A page's text, read after the page is shown or by the indexer.
+    Text {
+        page: usize,
+        text: Arc<PageText>,
+    },
+    /// The indexer skipped a thumbnail: the document is too dense.
+    ThumbnailSkipped {
+        page: usize,
     },
     Failed {
         page: usize,
@@ -233,8 +249,13 @@ pub struct Loader {
     requested: HashSet<usize>,
 }
 
+/// Opens the document a worker reads, with the tab's layout.
+fn open_document(path: &Path, layout: DocumentLayout) -> Result<GlyphstDocument> {
+    DocumentSnapshot::read(path)?.open_with_layout(layout)
+}
+
 impl Loader {
-    pub fn new(path: PathBuf, ctx: egui::Context) -> Self {
+    pub fn new(path: PathBuf, layout: DocumentLayout, ctx: egui::Context) -> Self {
         let (requests, request_rx) = mpsc::channel::<Request>();
         let (result_tx, results) = mpsc::channel();
         let wanted = Arc::new(Mutex::new(HashSet::new()));
@@ -242,7 +263,7 @@ impl Loader {
         thread::Builder::new()
             .name("page-loader".into())
             .spawn(move || {
-                let document = match GlyphstDocument::open(&path) {
+                let document = match open_document(&path, layout) {
                     Ok(document) => document,
                     Err(error) => {
                         let _ = result_tx.send(Loaded::Failed {
@@ -364,10 +385,11 @@ fn load_page(
 ) -> Option<DisplayList> {
     let started = Instant::now();
     let result = (|| -> Result<Option<(Loaded, DisplayList)>> {
-        let list = document
+        let loaded_page = document
             .load_page(i32::try_from(page)?)
-            .with_context(|| format!("failed to load page {}", page + 1))?
-            .to_display_list(true)?;
+            .with_context(|| format!("failed to load page {}", page + 1))?;
+        let list = loaded_page.to_display_list(true)?;
+        let links = page_links(&loaded_page);
         let vector = capture_display_list(&list)?;
         if vector.stats.path_points <= THUMBNAIL_MAX_POINTS {
             let thumbnail = list.to_pixmap(
@@ -398,12 +420,25 @@ fn load_page(
             page,
             prepared: Box::new(prepared),
             layers,
+            links,
             seconds: started.elapsed().as_secs_f64(),
         };
         Ok(Some((loaded, list)))
     })();
     match result {
-        Ok(Some((loaded, list))) => send(loaded).then_some(list),
+        Ok(Some((loaded, list))) => {
+            if !send(loaded) {
+                return None;
+            }
+            // The text follows the page, so a dense page shows without
+            // waiting for it; a page whose text cannot be read still shows.
+            let text = PageText::from_display_list(&list).unwrap_or_default();
+            send(Loaded::Text {
+                page,
+                text: Arc::new(text),
+            })
+            .then_some(list)
+        }
         Ok(None) => None,
         Err(error) => {
             send(Loaded::Failed {
@@ -442,6 +477,149 @@ fn rasterize_cached(
         .flatten()
 }
 
+/// What the indexer is asked for.
+#[derive(Default)]
+struct IndexWork {
+    /// Sidebar thumbnails, in priority order.
+    thumbnails: Vec<usize>,
+    /// Pages whose text to read, in order.
+    texts: VecDeque<usize>,
+}
+
+/// Page text for search and reflow anchors, and thumbnails for the pages
+/// panel, made on a second worker so they never hold up visible pages.
+/// Thumbnails come first; text is read in the order asked.
+pub struct Indexer {
+    work: Arc<Mutex<IndexWork>>,
+    stop: Arc<AtomicBool>,
+    worker: thread::Thread,
+    results: Receiver<Loaded>,
+}
+
+impl Indexer {
+    pub fn new(path: PathBuf, layout: DocumentLayout, ctx: egui::Context) -> Self {
+        let work = Arc::new(Mutex::new(IndexWork::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result_tx, results) = mpsc::channel();
+        let (worker_work, worker_stop) = (work.clone(), stop.clone());
+        let handle = thread::Builder::new()
+            .name("page-indexer".into())
+            .spawn(move || {
+                let Ok(document) = open_document(&path, layout) else {
+                    return;
+                };
+                let document = document.inner();
+                let mut heavy = false;
+                let send = |loaded| {
+                    let sent = result_tx.send(loaded).is_ok();
+                    ctx.request_repaint();
+                    sent
+                };
+                while !worker_stop.load(Ordering::Relaxed) {
+                    let (thumbnail, text) = {
+                        let Ok(mut work) = worker_work.lock() else {
+                            return;
+                        };
+                        let thumbnail =
+                            (!work.thumbnails.is_empty()).then(|| work.thumbnails.remove(0));
+                        let text = match thumbnail {
+                            None => work.texts.pop_front(),
+                            Some(_) => None,
+                        };
+                        (thumbnail, text)
+                    };
+                    let sent = if let Some(page) = thumbnail {
+                        if heavy {
+                            send(Loaded::ThumbnailSkipped { page })
+                        } else {
+                            let started = Instant::now();
+                            let image = page_thumbnail(document, page);
+                            heavy = started.elapsed() > HEAVY_THUMBNAIL;
+                            match image {
+                                Some(image) => send(Loaded::Thumbnail { page, image }),
+                                None => send(Loaded::ThumbnailSkipped { page }),
+                            }
+                        }
+                    } else if let Some(page) = text {
+                        let text = i32::try_from(page)
+                            .ok()
+                            .and_then(|index| document.load_page(index).ok())
+                            .and_then(|page| PageText::from_page(&page).ok())
+                            .unwrap_or_default();
+                        send(Loaded::Text {
+                            page,
+                            text: Arc::new(text),
+                        })
+                    } else {
+                        thread::park_timeout(Duration::from_millis(500));
+                        true
+                    };
+                    if !sent {
+                        return;
+                    }
+                }
+            })
+            .expect("failed to start the page indexer");
+        Self {
+            work,
+            stop,
+            worker: handle.thread().clone(),
+            results,
+        }
+    }
+
+    /// Replaces the sidebar thumbnails wanted, in priority order.
+    pub fn want_thumbnails(&self, pages: Vec<usize>) {
+        if let Ok(mut work) = self.work.lock()
+            && work.thumbnails != pages
+        {
+            work.thumbnails = pages;
+            self.worker.unpark();
+        }
+    }
+
+    /// Adds pages whose text to read.
+    pub fn request_text(&self, pages: Vec<usize>) {
+        if let Ok(mut work) = self.work.lock() {
+            work.texts.extend(pages);
+            self.worker.unpark();
+        }
+    }
+
+    /// Forgets text not read yet.
+    pub fn cancel_text(&self) {
+        if let Ok(mut work) = self.work.lock() {
+            work.texts.clear();
+        }
+    }
+
+    pub fn try_recv(&self) -> Option<Loaded> {
+        self.results.try_recv().ok()
+    }
+}
+
+impl Drop for Indexer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.worker.unpark();
+    }
+}
+
+fn page_thumbnail(document: &mupdf::Document, page: usize) -> Option<egui::ColorImage> {
+    let pixmap = document
+        .load_page(i32::try_from(page).ok()?)
+        .ok()?
+        .to_pixmap(
+            &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
+            &Colorspace::device_rgb(),
+            false,
+            true,
+        )
+        .ok()?;
+    let size = [pixmap.width() as usize, pixmap.height() as usize];
+    Some(egui::ColorImage::from_rgb(size, pixmap.samples()))
+}
+
 /// One entry of a document's outline, flattened in reading order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutlineEntry {
@@ -455,12 +633,16 @@ pub struct DocumentInfo {
     pub bounds: Vec<PageRect>,
     pub outline: Vec<OutlineEntry>,
     pub title: Option<String>,
+    /// The layout the document opened with: reflowable documents laid
+    /// out as asked, others fixed.
+    pub layout: DocumentLayout,
 }
 
 impl DocumentInfo {
-    pub fn read(path: &std::path::Path) -> Result<Self> {
-        let document = GlyphstDocument::open(path)?;
-        let document = document.inner();
+    pub fn read(path: &Path, layout: DocumentLayout) -> Result<Self> {
+        let opened = open_document(path, layout)?;
+        let layout = opened.layout();
+        let document = opened.inner();
         let count = document.page_count()?;
         let bounds = (0..count)
             .map(|index| {
@@ -482,6 +664,7 @@ impl DocumentInfo {
             bounds,
             outline,
             title,
+            layout,
         })
     }
 }

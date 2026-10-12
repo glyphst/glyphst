@@ -1,5 +1,6 @@
-//! Scripted runs for unattended checks: a zoom-and-scroll benchmark that
-//! prints JSON, and in-app screenshots (egui's own capture of this window).
+//! Scripted runs for unattended checks: a zoom, scroll and find benchmark
+//! that prints JSON, and in-app screenshots (egui's own capture of this
+//! window), optionally with a search, a selection or a sidebar tab shown.
 //! Both exit when done and neither saves preferences or library history.
 
 use std::{
@@ -22,6 +23,10 @@ const BENCH_SCROLL_STEP: f64 = 40.0;
 /// Frames to wait once the pages are drawn, so loading has settled; long
 /// enough for raster layers to be refreshed for the view (150 ms).
 const SETTLE_FRAMES: u32 = 40;
+/// The benchmark searches for this word; it is common in English books.
+const BENCH_QUERY: &str = "the";
+/// The find run gives up after this many frames.
+const BENCH_FIND_FRAMES: usize = 20_000;
 
 pub enum Harness {
     Bench(Bench),
@@ -63,6 +68,7 @@ enum Phase {
     Settle(u32),
     Zoom(usize),
     Scroll(usize),
+    Find(usize),
     Done,
 }
 
@@ -71,6 +77,9 @@ pub struct Bench {
     last_frame: Option<Instant>,
     zoom: Vec<Duration>,
     scroll: Vec<Duration>,
+    find: Vec<Duration>,
+    find_started: Option<Instant>,
+    find_ms: Option<f64>,
     max_encode_ms: f64,
     peak_gpu_bytes: u64,
 }
@@ -82,6 +91,9 @@ impl Default for Bench {
             last_frame: None,
             zoom: Vec::new(),
             scroll: Vec::new(),
+            find: Vec::new(),
+            find_started: None,
+            find_ms: None,
             max_encode_ms: 0.0,
             peak_gpu_bytes: 0,
         }
@@ -89,6 +101,32 @@ impl Default for Bench {
 }
 
 impl ReaderApp {
+    /// Starts the search and selection a screenshot asked for; returns
+    /// whether they are still waiting for text.
+    fn prepare_text_shot(&mut self, now: Instant) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        let tab = &mut self.tabs[active];
+        if let Some(query) = self.launch_find.take() {
+            let page = tab.current_page();
+            tab.find.show(page);
+            tab.find.query = query;
+            tab.find.edited(now - Duration::from_secs(1));
+        }
+        if let Some(page) = self.launch_select {
+            // The documents opened at this page.
+            let page = (page - 1).min(tab.layout.len() - 1);
+            if tab.text.get(page).is_none() {
+                return true;
+            }
+            tab.select_page(page);
+            self.launch_select = None;
+        }
+        // A search shows its final count, with the current match in view.
+        tab.find.is_active() && !tab.find.is_complete()
+    }
+
     pub(crate) fn run_harness(&mut self, ctx: &egui::Context, pages_drawn: bool, now: Instant) {
         let Some(mut harness) = self.harness.take() else {
             return;
@@ -149,9 +187,30 @@ impl ReaderApp {
                 }
                 tab.view.scroll_by_pixels(0.0, BENCH_SCROLL_STEP);
                 if frame + 1 >= BENCH_SCROLL_FRAMES || tab.layout.len() == 1 {
-                    Phase::Done
+                    Phase::Find(0)
                 } else {
                     Phase::Scroll(frame + 1)
+                }
+            }
+            // Searches the whole document while frames keep coming.
+            Phase::Find(frame) => {
+                if frame == 0 {
+                    let page = tab.current_page();
+                    tab.find.show(page);
+                    tab.find.query = BENCH_QUERY.into();
+                    bench.find_started = Some(now);
+                } else {
+                    bench.find.extend(interval);
+                }
+                if tab.find.is_complete() || frame + 1 >= BENCH_FIND_FRAMES {
+                    bench.find_ms = tab
+                        .find
+                        .is_complete()
+                        .then(|| bench.find_started.map(|t| (now - t).as_secs_f64() * 1000.0))
+                        .flatten();
+                    Phase::Done
+                } else {
+                    Phase::Find(frame + 1)
                 }
             }
             Phase::Done => return true,
@@ -180,6 +239,12 @@ impl ReaderApp {
             "first_page_ms": self.first_page_ms,
             "zoom": summarize(&bench.zoom),
             "scroll": summarize(&bench.scroll),
+            "find": {
+                "query": BENCH_QUERY,
+                "complete_ms": bench.find_ms,
+                "matches": tab.find.matches.len(),
+                "frames": summarize(&bench.find),
+            },
             "max_encode_ms": bench.max_encode_ms,
             "peak_gpu_mib": bench.peak_gpu_bytes as f64 / 1048576.0,
             "pages_loaded": tab.load_seconds.len(),
@@ -222,7 +287,8 @@ impl ReaderApp {
         let layers_pending = self
             .active
             .is_some_and(|active| self.tabs[active].layers_pending());
-        if !pages_drawn || layers_pending || shot.requested {
+        let text_pending = self.prepare_text_shot(now);
+        if !pages_drawn || layers_pending || text_pending || shot.requested {
             shot.ready_frames = shot.ready_frames.min(SETTLE_FRAMES / 2);
             return false;
         }

@@ -133,7 +133,11 @@ fn recent(ui: &mut egui::Ui, library: &LibraryStore, tokens: &Tokens) -> Option<
     ui.heading("Recent");
     let mut action = None;
     for entry in entries.into_iter().take(RECENT_LIMIT) {
-        let detail = format!("{} · page {}", folder(&entry.path), entry.position.page + 1);
+        let detail = format!(
+            "{} · page {}",
+            folder(&entry.path),
+            entry.position.page.max(1)
+        );
         if row(
             ui,
             tokens,

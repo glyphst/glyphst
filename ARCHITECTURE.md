@@ -15,7 +15,7 @@
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
 | `effects` | Shader effects (transitions, backgrounds, overlays) defined as data; wgpu only |
-| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view |
+| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view, text selection, find, links, annotations, EPUB reflow |
 
 Private modules split implementation without introducing additional state
 owners. New-tab and workspace entities own their task handles; document views
@@ -61,9 +61,10 @@ photocraft's `gpu_canvas`): `prepare` renders paper and resident pages into a
 multisampled `OffscreenTarget`; a background effect fills the view; a
 content effect composites the pages, or a transition from a snapshot of the
 previous view (another tab, the page before a turn). Raster layers are
-re-rasterized for the view once it is still. Pages load on a worker thread
-per document and stay within a GPU byte budget; overviews are built one tile
-per frame.
+re-rasterized for the view once it is still. Each page is scissored to its
+page box, as MuPDF clips to its pixmap. Pages load on a worker thread per
+document and stay within a GPU byte budget; overviews are built one tile per
+frame.
 
 ## egui Reader boundaries
 
@@ -78,6 +79,17 @@ preferences (theme, transition, background, last session) live in eframe
 storage under the config directory; scripted runs (`--bench`,
 `--screenshot…`) save nothing and leave the library unwritten. User effects
 are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
+
+Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
+with whitespace kept and ligatures expanded, as the GPUI Reader indexes it, so
+glyph offsets in reflowed positions and highlight anchors resolve in both
+readers. Text follows each loaded page; a second worker per document reads
+the remaining pages' text for search and reflowed documents, and sidebar
+thumbnails. Selections, search matches and highlights are egui shapes over
+the GPU view. Positions store pages from 1, as the library does. Fixed-layout
+highlights and notes keep page rectangles; reflowed ones keep a semantic range
+and are found again after a relayout. EPUBs are laid out for the view's width
+(capped by the document's reading preferences) and shown at actual size.
 
 ## Library persistence
 

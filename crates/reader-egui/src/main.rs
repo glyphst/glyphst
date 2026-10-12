@@ -2,16 +2,24 @@
 //! shader effects for transitions and backgrounds.
 //!
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
+//!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
-//! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll.
+//! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
+//! dragging on text selects it (Alt+drag a column), double and triple
+//! clicks select a word and a line, right-click for highlights and notes.
 //! Keys: Ctrl+O open, Ctrl+W close, Ctrl+Tab switch tabs; + / - / 0 zoom
 //! and fit, Page Up / Page Down / Space turn pages, Home / End, P presents,
-//! F9 outline, F12 statistics.
+//! Ctrl+F find (F3 next), Ctrl+C copy, Ctrl+A select the page, Ctrl+D
+//! bookmark, Alt+Left / Alt+Right back and forward, F9 sidebar, F12
+//! statistics.
 
+mod annotations;
 mod app;
+mod doc_text;
 mod document;
 mod document_tab;
+mod find;
 mod fonts;
 mod gamepad;
 mod gpu;
@@ -19,6 +27,8 @@ mod harness;
 mod home;
 mod pickers;
 mod prefs;
+mod sidebar;
+mod text_overlay;
 mod theme;
 mod transition;
 
@@ -29,6 +39,7 @@ use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
+                     [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
 fn parse_args() -> Result<Launch> {
@@ -38,6 +49,11 @@ fn parse_args() -> Result<Launch> {
         background: None,
         transition: None,
         zoom: None,
+        find: None,
+        page: None,
+        select_page: None,
+        sidebar: None,
+        font_size: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -59,6 +75,27 @@ fn parse_args() -> Result<Launch> {
             "--background" => launch.background = Some(value()?),
             "--transition" => launch.transition = Some(value()?),
             "--zoom" => launch.zoom = Some(value()?.parse().context("--zoom takes a number")?),
+            "--find" => launch.find = Some(value()?),
+            "--page" => {
+                let page: usize = value()?.parse().context("--page takes a page number")?;
+                launch.page = Some(page.max(1));
+            }
+            "--select-page" => {
+                let page: usize = value()?
+                    .parse()
+                    .context("--select-page takes a page number")?;
+                launch.select_page = Some(page.max(1));
+            }
+            "--sidebar" => {
+                let name = value()?;
+                launch.sidebar = Some(
+                    sidebar::SidebarTab::parse(&name)
+                        .with_context(|| format!("unknown sidebar tab {name}\n{USAGE}"))?,
+                );
+            }
+            "--font-size" => {
+                launch.font_size = Some(value()?.parse().context("--font-size takes a number")?);
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);

@@ -104,11 +104,13 @@ cargo run --release -p glyphst-pdf-gpu --example zoom_view -- page.pdf   # inter
 ```
 
 The egui Reader runs the same checks unattended in its own window, saving
-nothing: `--bench` prints zoom and scroll frame times as JSON, and
-`--screenshot PATH`, `--screenshot-turn PATH` and `--screenshot-switch PATH`
-(two documents) capture the window, the latter two halfway through a
-transition. `--zoom Z`, `--background ID` and `--transition ID|none` set up
-the run.
+nothing: `--bench` prints zoom, scroll and whole-document search frame
+times as JSON, and `--screenshot PATH`, `--screenshot-turn PATH` and
+`--screenshot-switch PATH` (two documents) capture the window, the latter two
+halfway through a transition. `--zoom Z`, `--page N`, `--background ID` and
+`--transition ID|none` set up the run; `--find TEXT`, `--select-page N`,
+`--sidebar TAB` and `--font-size PT` (EPUB) show a search, a selection, a
+sidebar tab or a reflowed size in the screenshot.
 
 Report baseline failures separately. The rendering debug panel's frame capture
 measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)

@@ -1,22 +1,31 @@
 //! One open document: continuous layout, camera, page loading, outline,
-//! presentation mode and the reading position.
+//! presentation mode, the reading position, and its text: selection,
+//! links, find, highlights and the reflowed layout of EPUBs.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
+use glyphst_core::{DocumentLayout, SemanticTextAnchor};
 use glyphst_library::DocumentPosition;
-use glyphst_pdf::vector::{LayerImage, PageRect};
+use glyphst_pdf::{
+    text::{LinkTarget, PageLink},
+    vector::{LayerImage, PageRect},
+};
 use glyphst_pdf_gpu::PreparedPage;
 
 use crate::{
-    document::{DocumentInfo, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP, View},
+    annotations::Annotations,
+    doc_text::DocText,
+    document::{DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP, View},
+    find::Find,
     gamepad::GamepadInput,
     gpu::PageDraw,
+    text_overlay::Selection,
 };
 
 /// Zoom limits relative to the fit-width scale.
@@ -36,8 +45,15 @@ const MAX_LAYER_PIXELS: f64 = 4096.0;
 /// Extra area rasterized around the visible part of a layer, as a share of
 /// its size, so small pans stay sharp.
 const LAYER_MARGIN: f32 = 0.15;
+/// Back and forward history kept per tab, as pdfcraft keeps.
+const MAX_HISTORY: usize = 200;
+/// View pixels kept above a link or bookmark target.
+const TARGET_MARGIN: f64 = 24.0;
+/// Sidebar thumbnails kept as textures; the farthest from the current page
+/// go first.
+const MAX_THUMBNAILS: usize = 400;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewAction {
     PreviousPage,
     NextPage,
@@ -48,6 +64,19 @@ pub enum ViewAction {
     /// Scrolls by whole steps; positive scrolls down.
     Step(i32),
     GoToPage(usize),
+    /// Goes to a page point (a link or a bookmark), remembering where the
+    /// view was.
+    GoTo {
+        page: usize,
+        y: Option<f32>,
+    },
+    Back,
+    Forward,
+    /// Scrolls a page rectangle into view if it is not (a search match).
+    Reveal {
+        page: usize,
+        rect: PageRect,
+    },
 }
 
 /// Input gathered for one frame of the view.
@@ -96,18 +125,32 @@ pub struct TabFrame {
     pub turn: Option<f32>,
 }
 
+/// Where the view was, for Back and Forward.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    origin: [f64; 2],
+    present: Option<usize>,
+}
+
 pub struct DocumentTab {
     pub id: u64,
     pub path: PathBuf,
     pub title: String,
+    /// Fixed, or the reflowed layout of an EPUB.
+    pub document_layout: DocumentLayout,
     pub layout: Layout,
     pub view: View,
     /// View size in device pixels from the last frame.
     pub viewport: [f64; 2],
+    /// Device pixels per egui point, set by the app each frame.
+    pub pixels_per_point: f64,
     fitted: bool,
     restore: Option<DocumentPosition>,
     loader: Loader,
+    indexer: Indexer,
     thumbnails: HashMap<usize, egui::TextureHandle>,
+    /// Pages the indexer will not make sidebar thumbnails for.
+    pub dense_pages: HashSet<usize>,
     pub failed: HashMap<usize, String>,
     pub ready: VecDeque<ReadyPage>,
     /// Re-rasterized layers waiting for the GPU: page, layer, image.
@@ -118,16 +161,32 @@ pub struct DocumentTab {
     pub outline: Vec<OutlineEntry>,
     pub present: Option<usize>,
     pub load_seconds: Vec<f64>,
+    pub text: DocText,
+    /// Pages whose text the indexer was asked for.
+    text_requested: Vec<bool>,
+    links: HashMap<usize, Vec<PageLink>>,
+    pub selection: Option<Selection>,
+    pub find: Find,
+    pub annotations: Annotations,
+    back: Vec<Place>,
+    forward: Vec<Place>,
+    /// A reflowed position waiting for the text it points into, and the
+    /// view origin when it was set: moving the view cancels it.
+    pending_anchor: Option<(SemanticTextAnchor, f32, [f64; 2])>,
+    /// When the view width last stopped matching the reflowed layout.
+    pub reflow_mismatch: Option<Instant>,
 }
 
 impl DocumentTab {
+    /// Opens `path` with `layout` (used by reflowable documents only).
     pub fn open(
         id: u64,
         path: &Path,
         ctx: &egui::Context,
         restore: Option<DocumentPosition>,
+        layout: DocumentLayout,
     ) -> Result<Self> {
-        let info = DocumentInfo::read(path)?;
+        let info = DocumentInfo::read(path, layout)?;
         if info.bounds.is_empty() {
             anyhow::bail!("{} has no pages", path.display());
         }
@@ -135,17 +194,22 @@ impl DocumentTab {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        let pages = info.bounds.len();
         Ok(Self {
             id,
             path: path.to_path_buf(),
             title: info.title.unwrap_or(file_name),
+            document_layout: info.layout,
             layout: Layout::new(info.bounds),
             view: View::new(1.0),
             viewport: [1.0, 1.0],
+            pixels_per_point: 1.0,
             fitted: false,
             restore,
-            loader: Loader::new(path.to_path_buf(), ctx.clone()),
+            loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
+            indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
             thumbnails: HashMap::new(),
+            dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
             ready_layers: VecDeque::new(),
@@ -154,13 +218,64 @@ impl DocumentTab {
             outline: info.outline,
             present: None,
             load_seconds: Vec::new(),
+            text: DocText::new(pages),
+            text_requested: vec![false; pages],
+            links: HashMap::new(),
+            selection: None,
+            find: Find::default(),
+            annotations: Annotations::default(),
+            back: Vec::new(),
+            forward: Vec::new(),
+            pending_anchor: None,
+            reflow_mismatch: None,
         })
+    }
+
+    /// Whether the document is laid out by the reader (an EPUB).
+    pub fn is_reflowed(&self) -> bool {
+        matches!(self.document_layout, DocumentLayout::Reflow(_))
+    }
+
+    /// Lays a reflowed document out again, keeping the reading position:
+    /// everything made for the old layout is dropped, so the caller drops
+    /// the tab's GPU pages too.
+    pub fn relayout(&mut self, layout: DocumentLayout, ctx: &egui::Context) -> Result<()> {
+        let position = self.position();
+        let info = DocumentInfo::read(&self.path, layout)?;
+        if info.bounds.is_empty() {
+            anyhow::bail!("{} has no pages", self.path.display());
+        }
+        let pages = info.bounds.len();
+        self.document_layout = info.layout;
+        self.layout = Layout::new(info.bounds);
+        self.outline = info.outline;
+        self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
+        self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
+        self.thumbnails.clear();
+        self.dense_pages.clear();
+        self.failed.clear();
+        self.ready.clear();
+        self.ready_layers.clear();
+        self.layers.clear();
+        self.text = DocText::new(pages);
+        self.text_requested = vec![false; pages];
+        self.links.clear();
+        self.selection = None;
+        self.find.restart();
+        self.annotations.clear_resolved();
+        self.back.clear();
+        self.forward.clear();
+        self.pending_anchor = None;
+        self.reflow_mismatch = None;
+        self.restore = Some(position);
+        self.fitted = false;
+        Ok(())
     }
 
     /// Takes the loader's results: thumbnails become textures, prepared
     /// pages wait in `ready` for the GPU.
     pub fn receive(&mut self, ctx: &egui::Context) {
-        while let Some(loaded) = self.loader.try_recv() {
+        while let Some(loaded) = self.loader.try_recv().or_else(|| self.indexer.try_recv()) {
             match loaded {
                 Loaded::Thumbnail { page, image } => {
                     let texture = ctx.load_texture(
@@ -174,9 +289,11 @@ impl DocumentTab {
                     page,
                     prepared,
                     layers,
+                    links,
                     seconds,
                 } => {
                     self.load_seconds.push(seconds);
+                    self.links.insert(page, links);
                     let states = prepared
                         .raster_layers
                         .iter()
@@ -208,6 +325,12 @@ impl DocumentTab {
                 }
                 Loaded::Failed { page, error } => {
                     self.failed.insert(page, error);
+                }
+                Loaded::Text { page, text } => {
+                    self.text.insert(page, text);
+                }
+                Loaded::ThumbnailSkipped { page } => {
+                    self.dense_pages.insert(page);
                 }
                 Loaded::Layer { page, layer, image } => {
                     if let Some(state) = self
@@ -253,6 +376,213 @@ impl DocumentTab {
     pub fn forget(&mut self, page: usize) {
         self.loader.forget(page);
         self.layers.remove(&page);
+        self.links.remove(&page);
+        // Text goes with the page unless a search, the reflowed layout or
+        // the selection needs it.
+        let selected = self.selection.as_ref().map(|selection| selection.page);
+        if !self.find.is_active() && !self.is_reflowed() && selected != Some(page) {
+            self.text.remove(page);
+        }
+    }
+
+    /// Keeps the text the tab needs: every page while searching and for
+    /// reflowed documents (their positions and highlights are found by
+    /// text), otherwise only pages near the view and the selection's.
+    /// Runs the search over text as it arrives.
+    pub fn update_text(&mut self, now: Instant) {
+        let current = self.current_page();
+        let searching = self.find.refresh(&self.text, now, current);
+        let everything = searching || self.find.is_active() || self.is_reflowed();
+        if everything {
+            let missing: Vec<usize> = (0..self.layout.len())
+                .filter(|&page| self.text.get(page).is_none() && !self.text_requested[page])
+                .collect();
+            if !missing.is_empty() {
+                for &page in &missing {
+                    self.text_requested[page] = true;
+                }
+                self.indexer.request_text(missing);
+            }
+        } else if self.text_requested.iter().any(|requested| *requested) {
+            self.indexer.cancel_text();
+            self.text_requested.fill(false);
+            let near = |page: usize| page.abs_diff(current) <= 8;
+            let selected = self.selection.as_ref().map(|selection| selection.page);
+            self.text.retain(|page| {
+                near(page) || Some(page) == selected || self.links.contains_key(&page)
+            });
+        }
+        if self.is_reflowed() {
+            self.annotations.resolve(&self.text);
+            self.resolve_pending_anchor();
+        }
+    }
+
+    /// Asks for sidebar thumbnails of `pages` (the rows shown), dropping
+    /// textures far from them when there are many.
+    pub fn want_thumbnails(&mut self, pages: Range<usize>) {
+        let missing: Vec<usize> = pages
+            .clone()
+            .filter(|page| !self.thumbnails.contains_key(page) && !self.dense_pages.contains(page))
+            .collect();
+        self.indexer.want_thumbnails(missing);
+        if self.thumbnails.len() > MAX_THUMBNAILS {
+            let center = (pages.start + pages.end) / 2;
+            let mut far: Vec<usize> = self
+                .thumbnails
+                .keys()
+                .copied()
+                .filter(|page| !pages.contains(page))
+                .collect();
+            far.sort_by_key(|page| std::cmp::Reverse(page.abs_diff(center)));
+            for page in far.into_iter().take(self.thumbnails.len() - MAX_THUMBNAILS) {
+                self.thumbnails.remove(&page);
+            }
+        }
+    }
+
+    pub fn thumbnail(&self, page: usize) -> Option<&egui::TextureHandle> {
+        self.thumbnails.get(&page)
+    }
+
+    /// The link under a page point.
+    pub fn link_at(&self, page: usize, point: [f32; 2]) -> Option<&LinkTarget> {
+        self.links.get(&page)?.iter().rev().find_map(|link| {
+            let r = link.rect;
+            (point[0] >= r[0] && point[0] <= r[2] && point[1] >= r[1] && point[1] <= r[3])
+                .then_some(&link.target)
+        })
+    }
+
+    /// The text of the selection.
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection.as_ref()?;
+        let text = selection.text(self.text.get(selection.page)?);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Selects all text of the page at the view's center.
+    pub fn select_page(&mut self, page: usize) {
+        if let Some(text) = self.text.get(page)
+            && !text.is_empty()
+        {
+            self.selection = Some(Selection::run(page, 0..text.len()));
+        }
+    }
+
+    fn place(&self) -> Place {
+        Place {
+            origin: self.view.origin,
+            present: self.present,
+        }
+    }
+
+    fn go_to_place(&mut self, place: Place) {
+        self.view.origin = place.origin;
+        if self.present.is_some() {
+            self.present = place.present.or(self.present);
+        }
+    }
+
+    /// Remembers the view before a jump.
+    fn remember(&mut self) {
+        let place = self.place();
+        if self.back.last() != Some(&place) {
+            self.back.push(place);
+            if self.back.len() > MAX_HISTORY {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
+    /// Document y of a page point.
+    fn document_y(&self, page: usize, y: f32) -> f64 {
+        self.layout.offsets[page][1] + f64::from(y - self.layout.bounds[page][1])
+    }
+
+    /// Shows page point `y` of `page` near the top of the view.
+    fn go_to_point(&mut self, page: usize, y: Option<f32>) {
+        let page = page.min(self.layout.len() - 1);
+        self.go_to_page(page);
+        if let Some(y) = y
+            && self.present.is_none()
+        {
+            let y = self.document_y(
+                page,
+                y.clamp(self.layout.bounds[page][1], self.layout.bounds[page][3]),
+            );
+            self.view.origin[1] = y - TARGET_MARGIN / self.view.scale;
+        }
+    }
+
+    /// Goes to a saved position (a bookmark) without changing the zoom.
+    pub fn go_to_position(&mut self, position: &DocumentPosition) {
+        self.remember();
+        let page = position.page.saturating_sub(1).min(self.layout.len() - 1);
+        let into = f64::from(position.scroll_y_doc) - self.layout.offsets[page][1];
+        let y = (0.0..self.layout.page_size(page)[1])
+            .contains(&into)
+            .then(|| self.layout.bounds[page][1] + into as f32);
+        self.go_to_point(page, y.filter(|_| position.semantic.is_none()));
+        if self.is_reflowed()
+            && let Some(semantic) = &position.semantic
+        {
+            self.view.clamp(&self.layout, self.viewport);
+            self.pending_anchor = Some((semantic.anchor.clone(), 0.0, self.view.origin));
+            self.resolve_pending_anchor();
+        }
+    }
+
+    /// The first words at the top of the view, to name a bookmark.
+    pub fn words_at_top(&self, count: usize) -> Option<String> {
+        let page = self.position().page.saturating_sub(1);
+        let text = self.text.get(page)?;
+        let top = (self.view.origin[1] - self.layout.offsets[page][1]) as f32
+            + self.layout.bounds[page][1];
+        let first = text.glyphs.iter().position(|glyph| glyph.rect[3] >= top)?;
+        let words: Vec<String> = text
+            .text_of(first..(first + 200).min(text.len()))
+            .split_whitespace()
+            .take(count)
+            .map(str::to_string)
+            .collect();
+        (!words.is_empty()).then(|| words.join(" "))
+    }
+
+    /// Scrolls so a page rectangle is in view, centring it when it is not.
+    fn reveal(&mut self, page: usize, rect: PageRect) {
+        let page = page.min(self.layout.len() - 1);
+        if self.present.is_some() {
+            self.present = Some(page);
+            return;
+        }
+        let offset = self.layout.offsets[page];
+        let b = self.layout.bounds[page];
+        let x0 = offset[0] + f64::from(rect[0] - b[0]);
+        let x1 = offset[0] + f64::from(rect[2] - b[0]);
+        let y0 = self.document_y(page, rect[1]);
+        let y1 = self.document_y(page, rect[3]);
+        let [width, height] = [
+            self.viewport[0] / self.view.scale,
+            self.viewport[1] / self.view.scale,
+        ];
+        let margin = TARGET_MARGIN / self.view.scale;
+        let origin = self.view.origin;
+        if y0 < origin[1] + margin || y1 > origin[1] + height - margin {
+            self.view.origin[1] = (y0 + y1) / 2.0 - height / 2.0;
+        }
+        if x0 < origin[0] || x1 > origin[0] + width {
+            self.view.origin[0] = (x0 + x1) / 2.0 - width / 2.0;
+        }
     }
 
     /// Once the view has been still for [`LAYER_SETTLE`], asks for sharper
@@ -317,8 +647,15 @@ impl DocumentTab {
     }
 
     /// Device pixels per point that fit the widest page across the view.
+    /// A reflowed column is laid out for the view, so it shows at its
+    /// actual size (one page point per egui point) when it fits.
     pub fn fit_scale(&self) -> f64 {
-        self.viewport[0] / (self.layout.width + 2.0 * PAGE_GAP)
+        let fit = self.viewport[0] / (self.layout.width + 2.0 * PAGE_GAP);
+        if self.is_reflowed() {
+            fit.min(self.pixels_per_point)
+        } else {
+            fit
+        }
     }
 
     fn fit_width(&mut self) {
@@ -348,24 +685,73 @@ impl DocumentTab {
         self.view.origin[1] = self.layout.offsets[page][1] - PAGE_GAP;
     }
 
-    /// The reading position: the page at the top of the view, the offset
-    /// into it, and the zoom relative to fit width.
+    /// The reading position: the page at the top of the view (numbered
+    /// from 1, as the library stores it), the offset into it, and the zoom
+    /// relative to fit width. Reflowed documents also record the text at
+    /// the top of the view, which outlives a change of layout.
     pub fn position(&self) -> DocumentPosition {
         let top = self
             .layout
             .offsets
             .partition_point(|offset| offset[1] <= self.view.origin[1] + PAGE_GAP)
             .saturating_sub(1);
+        let page = self.present.unwrap_or(top);
+        let zoom = (self.view.scale / self.fit_scale()) as f32;
+        if self.is_reflowed()
+            && let Some((anchor, fraction)) = self.anchor_at_top(page)
+        {
+            let progress = (self.view.origin[1] / self.layout.height.max(1.0)).clamp(0.0, 1.0);
+            return DocumentPosition::reflow(anchor, fraction, progress as f32, zoom, page + 1);
+        }
         DocumentPosition::fixed(
             self.view.origin[0] as f32,
             self.view.origin[1] as f32,
-            (self.view.scale / self.fit_scale()) as f32,
-            self.present.unwrap_or(top),
+            zoom,
+            page + 1,
         )
     }
 
+    /// The anchor of the first glyph at or below the top of the view on
+    /// `page`, and where it is in the view (0 at the top, 1 at the bottom).
+    fn anchor_at_top(&self, page: usize) -> Option<(SemanticTextAnchor, f32)> {
+        let text = self.text.get(page)?;
+        let top = (self.view.origin[1] - self.layout.offsets[page][1]) as f32
+            + self.layout.bounds[page][1];
+        let glyph = text
+            .glyphs
+            .iter()
+            .position(|glyph| glyph.rect[3] >= top && !glyph.ch.is_whitespace())?;
+        let anchor = self.text.anchor(page, glyph)?;
+        let y = self.document_y(page, text.glyphs[glyph].rect[1]);
+        let height = self.viewport[1] / self.view.scale;
+        let fraction = ((y - self.view.origin[1]) / height).clamp(0.0, 1.0) as f32;
+        Some((anchor, fraction))
+    }
+
+    /// Moves to a reflowed position once its text is known, unless the view
+    /// moved meanwhile.
+    fn resolve_pending_anchor(&mut self) {
+        let Some((anchor, fraction, origin)) = &self.pending_anchor else {
+            return;
+        };
+        if *origin != self.view.origin {
+            self.pending_anchor = None;
+            return;
+        }
+        let Some((page, glyph)) = self.text.resolve(anchor) else {
+            return;
+        };
+        let fraction = f64::from(*fraction);
+        if let Some(rect) = self.text.get(page).map(|text| text.glyphs[glyph].rect) {
+            let height = self.viewport[1] / self.view.scale;
+            self.view.origin[1] = self.document_y(page, rect[1]) - fraction * height;
+            self.view.clamp(&self.layout, self.viewport);
+        }
+        self.pending_anchor = None;
+    }
+
     fn apply_restore(&mut self, position: &DocumentPosition) {
-        let page = position.page.min(self.layout.len() - 1);
+        let page = position.page.saturating_sub(1).min(self.layout.len() - 1);
         let zoom = f64::from(position.zoom);
         if zoom.is_finite() && zoom > 0.0 {
             self.view = View::new(self.fit_scale() * zoom.clamp(MIN_ZOOM, MAX_ZOOM));
@@ -374,8 +760,19 @@ impl DocumentTab {
         // The saved offset into the page, when it is one (positions written
         // by other layouts only place the page).
         let into_page = f64::from(position.scroll_y_doc) - self.layout.offsets[page][1];
-        if (0.0..self.layout.page_size(page)[1]).contains(&into_page) {
+        if position.semantic.is_none() && (0.0..self.layout.page_size(page)[1]).contains(&into_page)
+        {
             self.view.origin[1] = self.layout.offsets[page][1] + into_page;
+        }
+        if self.is_reflowed()
+            && let Some(semantic) = &position.semantic
+        {
+            self.view.clamp(&self.layout, self.viewport);
+            self.pending_anchor = Some((
+                semantic.anchor.clone(),
+                semantic.viewport_fraction,
+                self.view.origin,
+            ));
         }
     }
 
@@ -425,7 +822,27 @@ impl DocumentTab {
             ViewAction::Step(steps) => self
                 .view
                 .scroll_by_pixels(0.0, f64::from(steps) * STEP_PIXELS),
-            ViewAction::GoToPage(page) => self.go_to_page(page),
+            ViewAction::GoToPage(page) => {
+                self.remember();
+                self.go_to_page(page);
+            }
+            ViewAction::GoTo { page, y } => {
+                self.remember();
+                self.go_to_point(page, y);
+            }
+            ViewAction::Back => {
+                if let Some(place) = self.back.pop() {
+                    self.forward.push(self.place());
+                    self.go_to_place(place);
+                }
+            }
+            ViewAction::Forward => {
+                if let Some(place) = self.forward.pop() {
+                    self.back.push(self.place());
+                    self.go_to_place(place);
+                }
+            }
+            ViewAction::Reveal { page, rect } => self.reveal(page, rect),
         }
         None
     }
@@ -470,7 +887,23 @@ impl DocumentTab {
         let animating = self.view.animate(input.seconds);
         self.view.clamp(&self.layout, self.viewport);
 
-        let (draws, wanted) = match self.present {
+        let (draws, wanted) = self.draws_and_wanted(viewport);
+        if let Some(now) = input.now {
+            self.refresh_layers(&draws, now);
+        }
+        TabFrame {
+            draws,
+            placeholders: Vec::new(),
+            wanted,
+            animating,
+            turn,
+        }
+    }
+
+    /// The pages the view shows, and the pages to keep loaded in priority
+    /// order.
+    fn draws_and_wanted(&self, viewport: [u32; 2]) -> (Vec<PageDraw>, Vec<usize>) {
+        match self.present {
             Some(page) => {
                 let last = self.layout.len() - 1;
                 let draw = self.presented(page, viewport);
@@ -494,17 +927,16 @@ impl DocumentTab {
                 wanted.retain(|&page| page < self.layout.len());
                 (draws, wanted)
             }
-        };
-        if let Some(now) = input.now {
-            self.refresh_layers(&draws, now);
         }
-        TabFrame {
-            draws,
-            placeholders: Vec::new(),
-            wanted,
-            animating,
-            turn,
+    }
+
+    /// The pages the view showed last frame, for hit-testing this frame's
+    /// pointer before the view moves.
+    pub fn visible_draws(&self, viewport: [u32; 2]) -> Vec<PageDraw> {
+        if !self.fitted {
+            return Vec::new();
         }
+        self.draws_and_wanted(viewport).0
     }
 
     /// Placeholders for the pages of `frame` that `resident` says are not
@@ -571,17 +1003,22 @@ mod tests {
     /// A tab without a document behind it: layout and view logic only.
     fn tab(pages: usize) -> DocumentTab {
         let ctx = egui::Context::default();
+        let path = PathBuf::from("/nonexistent.pdf");
         DocumentTab {
             id: 1,
-            path: PathBuf::from("/nonexistent.pdf"),
+            path: path.clone(),
             title: "t".into(),
+            document_layout: DocumentLayout::Fixed,
             layout: Layout::new(vec![[0.0, 0.0, 600.0, 800.0]; pages]),
             view: View::new(1.0),
             viewport: [1.0, 1.0],
+            pixels_per_point: 1.0,
             fitted: false,
             restore: None,
-            loader: Loader::new(PathBuf::from("/nonexistent.pdf"), ctx),
+            loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
+            indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
             thumbnails: HashMap::new(),
+            dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
             ready_layers: VecDeque::new(),
@@ -590,6 +1027,16 @@ mod tests {
             outline: Vec::new(),
             present: None,
             load_seconds: Vec::new(),
+            text: DocText::new(pages),
+            text_requested: vec![false; pages],
+            links: HashMap::new(),
+            selection: None,
+            find: Find::default(),
+            annotations: Annotations::default(),
+            back: Vec::new(),
+            forward: Vec::new(),
+            pending_anchor: None,
+            reflow_mismatch: None,
         }
     }
 
@@ -626,12 +1073,12 @@ mod tests {
         first.view.set_scale(first.fit_scale() * 2.0);
         first.view.target_scale = first.view.scale;
         let position = first.position();
-        assert_eq!(position.page, 7);
+        assert_eq!(position.page, 8, "the library numbers pages from 1");
 
         let mut second = tab(20);
         second.restore = Some(position.clone());
         settle(&mut second);
-        assert_eq!(second.position().page, 7);
+        assert_eq!(second.position().page, 8);
         assert!((second.view.origin[1] - first.view.origin[1]).abs() < 1e-3);
         assert!((second.view.scale / second.fit_scale() - 2.0).abs() < 1e-6);
     }
@@ -727,5 +1174,64 @@ mod tests {
         state.scale = scale;
         frame(&mut tab, start + Duration::from_millis(400));
         assert!(!tab.layers[&0][0].pending);
+    }
+
+    #[test]
+    fn links_jump_to_their_point_and_back_and_forward_return() {
+        let mut tab = tab(20);
+        settle(&mut tab);
+        tab.apply(ViewAction::GoToPage(3), false);
+        let start = tab.view.origin;
+        // A link to page 9, 200 pt down the page.
+        tab.apply(
+            ViewAction::GoTo {
+                page: 9,
+                y: Some(200.0),
+            },
+            false,
+        );
+        let shown = tab.view.origin[1] + TARGET_MARGIN / tab.view.scale;
+        assert!((shown - (tab.layout.offsets[9][1] + 200.0)).abs() < 1e-6);
+        assert!(tab.can_go_back() && !tab.can_go_forward());
+        tab.apply(ViewAction::Back, false);
+        assert_eq!(tab.view.origin, start);
+        tab.apply(ViewAction::Back, false);
+        assert_eq!(tab.current_page(), 0, "back to before the first jump");
+        assert!(!tab.can_go_back());
+        tab.apply(ViewAction::Forward, false);
+        tab.apply(ViewAction::Forward, false);
+        assert_eq!(tab.position().page, 10);
+        // A new jump forgets the forward history.
+        tab.apply(ViewAction::Back, false);
+        tab.apply(ViewAction::GoToPage(1), false);
+        assert!(!tab.can_go_forward());
+    }
+
+    #[test]
+    fn revealing_a_match_scrolls_only_when_it_is_out_of_view() {
+        let mut tab = tab(20);
+        settle(&mut tab);
+        let origin = tab.view.origin;
+        tab.apply(
+            ViewAction::Reveal {
+                page: 0,
+                rect: [100.0, 100.0, 140.0, 112.0],
+            },
+            false,
+        );
+        assert_eq!(tab.view.origin, origin, "already visible");
+        tab.apply(
+            ViewAction::Reveal {
+                page: 12,
+                rect: [100.0, 400.0, 140.0, 412.0],
+            },
+            false,
+        );
+        let center = tab.view.origin[1] + tab.viewport[1] / tab.view.scale / 2.0;
+        assert!((center - (tab.layout.offsets[12][1] + 406.0)).abs() < 1e-6);
+        assert!(
+            !tab.can_go_back(),
+            "stepping through matches keeps no history"
+        );
     }
 }

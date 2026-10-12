@@ -10,46 +10,47 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. egui Reader: M2 working with text
+## 1. egui Reader: M3 translation and AI panels
 
-**Owner:** `reader-egui`, `library`.
+**Owner:** `reader-egui`, with the `pdf-translation` and `translation` domain crates.
 
 **Current evidence:** egui hosts the GPU vector renderer (GPUI 0.3.8 cannot
 composite a wgpu texture on Linux); the user confirmed smooth zoom and fcitx5
-input in the spike. M1 of the [egui Reader](crates/reader-egui) is in place:
-a library home (history and library items, an async open dialog, dropped
-files), [craft-ui](https://github.com/storytold/craft-libs) tabs, the GPU
-document view with outline, page and zoom controls, presentation mode,
-positions in the shared library, a System/Light/Dark theme after pdfcraft,
-and [effects](crates/effects) for view transitions (tab switches, page turns)
-and backgrounds. The app is not a 1:1 port of the GPUI Reader: artcraft's
-egui apps are the reference, and old crates are reused only where cheap.
+input in the spike. The [egui Reader](crates/reader-egui) has M1 (a library
+home, [craft-ui](https://github.com/storytold/craft-libs) tabs, the GPU
+document view, presentation mode, positions in the shared library, a theme
+after pdfcraft, [effects](crates/effects) for transitions and backgrounds)
+and M2: text selection (runs, Alt+drag columns, word and line clicks) and
+copy, a find bar and search panel after pdfcraft, internal links with back
+and forward history and external links, bookmarks, highlights and notes
+shared with the GPUI Reader through the library, a sidebar (outline, page
+thumbnails, bookmarks, notes, search) and EPUB reflow with a text size
+control. The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps
+are the reference, and old crates are reused only where cheap.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
-8.6-8.7 ms) and scrolls War and Peace (1,259 pages) with p95 9.0 ms and at
-most one frame just over 25 ms. First pages appear after 0.15 s (War and
-Peace), 1.3 s (Murietta) and 9.4 s (Lower Level); idle CPU is 0.0% with the
-solid background and 6% with the animated aurora at its 30 fps cap. Images
-and image masks are textures at their own resolution; the remaining raster
-layers (blend groups, soft masks, shadings, patterns) are re-rasterized for
-the view once it has been still for 150 ms. The pdf.js corpus tier renders 97
-of 100 files (2 unreadable, 1 parser timeout); 20 pages still use raster
-layers and 1 differs from MuPDF by more than 1%.
+8.7-8.9 ms); scrolling War and Peace (1,259 pages) has p95 8.8 ms and one
+upload frame over 25 ms; searching all of it for "the" finds 48,603 matches
+in 0.8-1.4 s with no frame over 25 ms. First pages appear after 0.07 s (War
+and Peace), 1.4 s (Murietta) and 10.6 s (Lower Level, measured with another
+process holding a core; 9.4 s at M1). The pdf.js corpus tier is unchanged:
+97 of 100 files render (2 unreadable, 1 parser timeout), 1 differs from
+MuPDF by more than 1%.
 
 Known gaps: Lower Level (7.6M strokes) costs one 250 ms frame to upload its
-level buffers (uploading levels across frames needs level fallback); 4x MSAA gives small text coarser edges
-than MuPDF; only fixed-layout pages are shown (EPUB reflow is M2).
+level buffers (uploading levels across frames needs level fallback); 4x MSAA
+gives small text coarser edges than MuPDF; a relayout of a large EPUB blocks
+the window while MuPDF lays it out; selections stay within one page.
 
-**Next step (M2):** text selection and copy, search, internal and external
-links, bookmarks/highlights/notes from the library, a thumbnail sidebar and
-EPUB reflow, taking pdfcraft's search and side panels as the reference.
-Later milestones: M3 translation and AI panels, M4 settings, keys and command
+**Next step (M3):** the translation view (pdf-translation's page jobs shown
+over or beside the GPU page) and the AI panel, reusing the domain crates and
+following artcraft's panels. Later milestones: M4 settings, keys and command
 palette, M5 split panes (craft-ui docking), the `files` app and removing the
 GPUI crates, M6 an effects manager (user effect directory, hot reload,
 previews, per-book choices).
 
-**Done when:** M2's features work in the egui Reader with tests, `check.sh
+**Done when:** M3's features work in the egui Reader with tests, `check.sh
 quick` and `corpus` pass, and the bench shows no frames over 25 ms.
 
 ## 2. Workspace layout smoke test
