@@ -128,7 +128,7 @@ fn render_and_compare(loaded: &LoadedPage, size: [u32; 2]) -> Result<Value> {
         gpu.render(&renderer, &uploaded.page, &camera);
         gpu.wait()?;
         let frame = started.elapsed();
-        let vector = gpu.read_target(size)?;
+        let vector = gpu.read_target()?;
         let reference = mupdf_view(&loaded.list, &camera)?;
         let result = diff(&vector, &reference, size);
         views.push(json!({

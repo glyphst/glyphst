@@ -14,6 +14,7 @@
 | Translation crates | Translation domain, PDF production, service orchestration, UI |
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu; not yet used by the Reader) |
+| `egui-spike` | Decision spike: the GPU renderer, IME/CJK input, a page transition and gamepad input in eframe |
 
 Private modules split implementation without introducing additional state
 owners. New-tab and workspace entities own their task handles; document views
@@ -50,7 +51,10 @@ tessellates each page once per level of detail and draws it with a camera
 uniform; dense pages also get a mipmapped overview rendered from their own
 vectors and drawn while it is at least as sharp as the screen. The Reader
 does not use it yet: GPUI 0.3.8 cannot composite a wgpu texture on Linux (see
-[next work](ROADMAP.md)).
+[next work](ROADMAP.md)). `pdf-gpu` uses wgpu 30, egui's version; GPUI keeps
+its own wgpu 29. The [egui spike](crates/egui-spike) draws pages from an
+`egui_wgpu` paint callback: `prepare` renders into a multisampled
+`OffscreenTarget`, `paint` composites it into egui's pass.
 
 ## Library persistence
 

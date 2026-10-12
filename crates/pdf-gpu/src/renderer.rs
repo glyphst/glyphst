@@ -4,7 +4,10 @@ use bytemuck::{Pod, Zeroable};
 use glyphst_pdf::vector::PageRect;
 use wgpu::util::DeviceExt as _;
 
-use crate::prepare::{Batch, BatchKind, FillVertex, PreparedLevel, PreparedPage, StrokeSegment};
+use crate::{
+    OffscreenTarget,
+    prepare::{Batch, BatchKind, FillVertex, PreparedLevel, PreparedPage, StrokeSegment},
+};
 
 pub const SAMPLE_COUNT: u32 = 4;
 
@@ -15,9 +18,13 @@ pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 /// Tile size used when rendering the overview texture.
 const OVERVIEW_TILE: u32 = 2048;
 
-/// Pages with more triangles plus segments than this are expensive to draw
-/// zoomed out, where all of them land in few pixels; they get an overview.
-const OVERVIEW_MIN_PRIMITIVES: usize = 100_000;
+/// Pages with at least this many stroke segments are expensive to draw
+/// zoomed out, where every segment covers at least a pixel and they pile up;
+/// they get an overview. Fill triangles cost far less (a dense text page
+/// has a few hundred thousand and draws in well under a millisecond), so
+/// only a much larger count of them asks for one.
+const OVERVIEW_MIN_SEGMENTS: usize = 100_000;
+const OVERVIEW_MIN_TRIANGLES: usize = 2_000_000;
 
 /// Maps page space to device pixels: `pixel = (page - origin) * scale`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,7 +165,9 @@ pub struct GpuPage {
     max_scales: Vec<f32>,
     layers: Vec<Option<RasterLayer>>,
     overview: Option<Overview>,
-    primitives: usize,
+    /// Exact-level stroke segments and fill triangles.
+    segments: usize,
+    triangles: usize,
     pub gpu_bytes: u64,
 }
 
@@ -171,7 +180,7 @@ impl GpuPage {
     /// Whether zoomed-out views of this page are dense enough to need an
     /// overview texture.
     pub fn wants_overview(&self) -> bool {
-        self.primitives >= OVERVIEW_MIN_PRIMITIVES
+        self.segments >= OVERVIEW_MIN_SEGMENTS || self.triangles >= OVERVIEW_MIN_TRIANGLES
     }
 
     /// Index of the level drawn at `scale` device pixels per page point.
@@ -237,7 +246,7 @@ impl Renderer {
                         vs: &str,
                         fs: &str,
                         layouts: &[Option<&wgpu::BindGroupLayout>],
-                        buffers: &[wgpu::VertexBufferLayout],
+                        buffers: &[Option<wgpu::VertexBufferLayout>],
                         topology: wgpu::PrimitiveTopology,
                         stencil: wgpu::DepthStencilState,
                         write_mask: wgpu::ColorWrites| {
@@ -285,11 +294,11 @@ impl Renderer {
             "vs_fill",
             "fs_fill",
             &[Some(&camera_layout)],
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<FillVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4],
-            }],
+            })],
             wgpu::PrimitiveTopology::TriangleList,
             stencil_state(wgpu::StencilOperation::Keep, 0),
             wgpu::ColorWrites::ALL,
@@ -299,7 +308,7 @@ impl Renderer {
             "vs_stroke",
             "fs_stroke",
             &[Some(&camera_layout)],
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<StrokeSegment>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &wgpu::vertex_attr_array![
@@ -309,7 +318,7 @@ impl Renderer {
                     3 => Unorm8x4,
                     4 => Uint32,
                 ],
-            }],
+            })],
             wgpu::PrimitiveTopology::TriangleStrip,
             stencil_state(wgpu::StencilOperation::Keep, 0),
             wgpu::ColorWrites::ALL,
@@ -319,21 +328,21 @@ impl Renderer {
             "vs_layer",
             "fs_layer",
             &[Some(&camera_layout), Some(&layer_layout)],
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<LayerVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
-            }],
+            })],
             wgpu::PrimitiveTopology::TriangleStrip,
             stencil_state(wgpu::StencilOperation::Keep, 0),
             wgpu::ColorWrites::ALL,
         );
 
-        let fill_layout = [wgpu::VertexBufferLayout {
+        let fill_layout = [Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<FillVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4],
-        }];
+        })];
         let clip_push = pipeline(
             "pdf_gpu_clip_push",
             "vs_fill",
@@ -407,7 +416,8 @@ impl Renderer {
             levels,
             layers: page.raster_layers.iter().map(|_| None).collect(),
             overview: None,
-            primitives: page.exact().fill_indices.len() / 3 + page.exact().segments.len(),
+            segments: page.exact().segments.len(),
+            triangles: page.exact().fill_indices.len() / 3,
             gpu_bytes,
         }
     }
@@ -540,45 +550,12 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let tile_texture = |samples, usage| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("pdf_gpu_overview_tile"),
-                size: wgpu::Extent3d {
-                    width: OVERVIEW_TILE,
-                    height: OVERVIEW_TILE,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: samples,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let msaa = tile_texture(SAMPLE_COUNT, wgpu::TextureUsages::RENDER_ATTACHMENT)
-            .create_view(&Default::default());
-        let resolve = tile_texture(
-            1,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        let tile = OffscreenTarget::new(
+            device,
+            self.format,
+            [OVERVIEW_TILE, OVERVIEW_TILE],
+            wgpu::TextureUsages::COPY_SRC,
         );
-        let resolve_view = resolve.create_view(&Default::default());
-        let stencil = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("pdf_gpu_overview_stencil"),
-                size: wgpu::Extent3d {
-                    width: OVERVIEW_TILE,
-                    height: OVERVIEW_TILE,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: SAMPLE_COUNT,
-                dimension: wgpu::TextureDimension::D2,
-                format: STENCIL_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&Default::default());
 
         for mip in 0..mip_level_count {
             let mip_width = (width >> mip).max(1);
@@ -596,22 +573,7 @@ impl Renderer {
                     };
                     let mut encoder = device.create_command_encoder(&Default::default());
                     {
-                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("pdf_gpu_overview"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &msaa,
-                                resolve_target: Some(&resolve_view),
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                    store: wgpu::StoreOp::Discard,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: Some(stencil_attachment(&stencil)),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        });
+                        let mut pass = tile.begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
                         self.draw_vectors(
                             queue,
                             page,
@@ -621,7 +583,7 @@ impl Renderer {
                         );
                     }
                     encoder.copy_texture_to_texture(
-                        resolve.as_image_copy(),
+                        tile.texture().as_image_copy(),
                         wgpu::TexelCopyTextureInfo {
                             texture: &texture,
                             mip_level: mip,

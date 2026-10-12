@@ -187,6 +187,50 @@ pub fn rasterize_ops(
     Ok(pixmap)
 }
 
+/// A raster layer rasterized over its page bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerImage {
+    /// Page area the image covers; slightly larger than the requested
+    /// bounds because the pixel size is rounded up.
+    pub rect: PageRect,
+    pub size: [u32; 2],
+    /// Premultiplied RGBA8 rows.
+    pub rgba: Vec<u8>,
+}
+
+/// Rasterizes the operations `ops`, which paint within `bounds`, at `scale`
+/// device pixels per page point, keeping both sides within `max_dimension`
+/// pixels. Returns `None` for empty bounds.
+pub fn rasterize_layer(
+    display_list: &DisplayList,
+    ops: Range<u32>,
+    bounds: PageRect,
+    scale: f32,
+    max_dimension: u32,
+) -> Result<Option<LayerImage>> {
+    let [x0, y0, x1, y1] = bounds;
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(None);
+    }
+    let scale = scale
+        .min(max_dimension as f32 / (x1 - x0))
+        .min(max_dimension as f32 / (y1 - y0));
+    let width = ((x1 - x0) * scale).ceil().max(1.0) as u32;
+    let height = ((y1 - y0) * scale).ceil().max(1.0) as u32;
+    let ctm = Matrix::new(scale, 0.0, 0.0, scale, -x0 * scale, -y0 * scale);
+    let pixmap = rasterize_ops(display_list, ops, &ctm, width, height)?;
+    Ok(Some(LayerImage {
+        rect: [
+            x0,
+            y0,
+            x0 + width as f32 / scale,
+            y0 + height as f32 / scale,
+        ],
+        size: [width, height],
+        rgba: pixmap.samples().to_vec(),
+    }))
+}
+
 #[derive(Clone, Copy)]
 struct ClipEntry {
     /// Exact rectangle for vector scissoring; `None` when not rectangular.

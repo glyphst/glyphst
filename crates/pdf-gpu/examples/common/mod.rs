@@ -8,17 +8,15 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use glyphst_pdf::vector::{VectorPage, capture_display_list, rasterize_ops};
-use glyphst_pdf_gpu::{
-    Camera, GpuPage, PreparedPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT, stencil_attachment,
-};
+use glyphst_pdf::vector::{VectorPage, capture_display_list, rasterize_layer};
+use glyphst_pdf_gpu::{Camera, DrawStats, GpuPage, OffscreenTarget, PreparedPage, Renderer};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
 
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// A pixel differs when no pixel within one pixel in the other image is
 /// within this channel distance, which tolerates antialiasing phase.
 pub const DIFF_THRESHOLD: u8 = 64;
-const MAX_LAYER_DIMENSION: f32 = 4096.0;
+const MAX_LAYER_DIMENSION: u32 = 4096;
 
 pub fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
@@ -103,32 +101,26 @@ pub fn upload(
     let started = Instant::now();
     let mut layer_pixels = 0u64;
     for (index, layer) in loaded.prepared.raster_layers.iter().enumerate() {
-        let [x0, y0, x1, y1] = layer.bounds;
-        if x1 <= x0 || y1 <= y0 {
+        let Some(image) = rasterize_layer(
+            &loaded.list,
+            layer.ops.clone(),
+            layer.bounds,
+            layer_scale,
+            MAX_LAYER_DIMENSION,
+        )?
+        else {
             continue;
-        }
-        let scale = layer_scale
-            .min(MAX_LAYER_DIMENSION / (x1 - x0))
-            .min(MAX_LAYER_DIMENSION / (y1 - y0));
-        let width = ((x1 - x0) * scale).ceil().max(1.0) as u32;
-        let height = ((y1 - y0) * scale).ceil().max(1.0) as u32;
-        let ctm = Matrix::new(scale, 0.0, 0.0, scale, -x0 * scale, -y0 * scale);
-        let pixmap = rasterize_ops(&loaded.list, layer.ops.clone(), &ctm, width, height)?;
-        let rect = [
-            x0,
-            y0,
-            x0 + width as f32 / scale,
-            y0 + height as f32 / scale,
-        ];
+        };
         renderer.set_raster_layer(
             device,
             queue,
             &mut page,
             index,
-            rect,
-            pixmap.samples(),
-            [width, height],
+            image.rect,
+            &image.rgba,
+            image.size,
         );
+        let [width, height] = image.size;
         layer_pixels += u64::from(width) * u64::from(height);
     }
     wait()?;
@@ -154,10 +146,7 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter: String,
-    msaa: wgpu::TextureView,
-    stencil: wgpu::TextureView,
-    target: wgpu::Texture,
-    target_view: wgpu::TextureView,
+    pub target: OffscreenTarget,
 }
 
 impl Gpu {
@@ -165,8 +154,7 @@ impl Gpu {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
+            ..Default::default()
         }))
         .context("no GPU adapter")?;
         let info = adapter.get_info();
@@ -176,45 +164,12 @@ impl Gpu {
                 required_limits: adapter.limits(),
                 ..Default::default()
             }))?;
-        let extent = wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        };
-        let texture = |samples, format, usage| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: extent,
-                mip_level_count: 1,
-                sample_count: samples,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let msaa = texture(SAMPLE_COUNT, FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
-            .create_view(&Default::default());
-        let stencil = texture(
-            SAMPLE_COUNT,
-            STENCIL_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
-        )
-        .create_view(&Default::default());
-        let target = texture(
-            1,
-            FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        );
-        let target_view = target.create_view(&Default::default());
+        let target = OffscreenTarget::new(&device, FORMAT, size, wgpu::TextureUsages::COPY_SRC);
         Ok(Self {
             device,
             queue,
             adapter: format!("{} ({:?})", info.name, info.backend),
-            msaa,
-            stencil,
             target,
-            target_view,
         })
     }
 
@@ -225,59 +180,40 @@ impl Gpu {
             .map_err(|error| anyhow::anyhow!("GPU wait failed: {error}"))
     }
 
-    pub fn render(
-        &self,
-        renderer: &Renderer,
-        page: &glyphst_pdf_gpu::GpuPage,
-        camera: &Camera,
-    ) -> glyphst_pdf_gpu::DrawStats {
+    pub fn render(&self, renderer: &Renderer, page: &GpuPage, camera: &Camera) -> DrawStats {
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pdf_gpu_example"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.msaa,
-                    resolve_target: Some(&self.target_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(stencil_attachment(&self.stencil)),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let stats = renderer.draw(&self.queue, page, camera, &mut pass);
-            drop(pass);
-            self.queue.submit([encoder.finish()]);
-            stats
-        }
+        let stats = {
+            let mut pass = self.target.begin_pass(&mut encoder, wgpu::Color::WHITE);
+            renderer.draw(&self.queue, page, camera, &mut pass)
+        };
+        self.queue.submit([encoder.finish()]);
+        stats
     }
 
-    pub fn read_target(&self, size: [u32; 2]) -> Result<Vec<u8>> {
-        let padded = (size[0] * 4).div_ceil(256) * 256;
+    /// The target's pixels as RGB8 rows.
+    pub fn read_target(&self) -> Result<Vec<u8>> {
+        let [width, height] = self.target.size();
+        let padded = (width * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: u64::from(padded) * u64::from(size[1]),
+            size: u64::from(padded) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            self.target.as_image_copy(),
+            self.target.texture().as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
-                    rows_per_image: Some(size[1]),
+                    rows_per_image: Some(height),
                 },
             },
             wgpu::Extent3d {
-                width: size[0],
-                height: size[1],
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
@@ -288,10 +224,10 @@ impl Gpu {
         });
         self.wait()?;
         receiver.recv()??;
-        let mapped = buffer.get_mapped_range(..);
-        let mut rgb = Vec::with_capacity((size[0] * size[1] * 3) as usize);
+        let mapped = buffer.get_mapped_range(..)?;
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
         for row in mapped.chunks_exact(padded as usize) {
-            for pixel in row[..(size[0] * 4) as usize].chunks_exact(4) {
+            for pixel in row[..(width * 4) as usize].chunks_exact(4) {
                 rgb.extend_from_slice(&pixel[..3]);
             }
         }

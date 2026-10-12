@@ -66,6 +66,8 @@
             freetype
             libxcb
             libxkbcommon
+            # gilrs (egui-spike's gamepad input) links libudev.
+            udev
           ];
           runtimeLibraries = with pkgs; [
             libglvnd

@@ -10,28 +10,43 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. GPU vector page rendering: host decision
+## 1. GPU vector page rendering: GPUI or egui
 
-**Owner:** `pdf-gpu`, `document-ui`.
+**Owner:** `pdf-gpu`, `egui-spike`, `document-ui`.
 
 **Current evidence:** Captured MuPDF pages render on the GPU with every frame
 drawn from vectors or from an overview rendered from them. On this machine's
 Intel Arc iGPU, `zoom_bench` zooms Murietta_Level1, Level 1, Lower Level and
-War and Peace page 1 from 0.25x to 64x with p95 frame times of 0.7-2.1 ms
+War and Peace page 1 from 0.25x to 64x with p95 frame times of 0.6-3.1 ms
 (MuPDF needs 0.5-2.6 s per fit-size view of the drawings). Fewer than 1.5% of
 pixels differ from MuPDF at fit and under 0.07% at 8x and 64x. The pdf.js
-corpus tier renders 97 of 100 files (2 unreadable, 1 parser timeout); 6 differ
-by more than 1%. Known gaps: raster layers are rasterized once (blurry when
-zoomed deep; images and image masks should become native-resolution
-textures), 4x MSAA gives small text coarser edges than MuPDF, zooming into
-Lower Level's dense hatching reaches 27 ms frames, GPU memory reaches 580 MiB
-for the largest drawing, and only single pages are prepared.
+corpus tier renders 97 of 100 files (2 unreadable, 1 parser timeout); 2 differ
+by more than 1%.
 
-**Next step:** The user chooses the host: a small GPUI patch compositing a
-wgpu texture (`PaintSurface` is a no-op on Linux in `gpui-pre` 0.3.8), or the
-pending egui spike (`egui_wgpu` paint callbacks). Then integrate per-page
-rendering into the document view, keeping MuPDF rasters for loading and
-errors and the MuPDF text path for selection, search and links.
+GPUI 0.3.8 cannot composite a wgpu texture on Linux (`PaintSurface` is a
+no-op). The [egui spike](crates/egui-spike) (eframe 0.36, wgpu 30, the
+photocraft paint-callback pattern) hosts the renderer unchanged. On a 120 Hz
+display its `--bench` mode zooms Murietta 1x-64x-1x with no frame over 25 ms
+(p95 8.6 ms intervals) and scrolls 600 frames through War and Peace (1,259
+pages, pages loaded on demand within a 1 GiB budget, 126 MiB used) with p95
+9.0 ms and 2 frames over 25 ms, from page uploads. The first page is drawn
+about 250 ms after start. Idle, it uses 0.1% CPU (the GPUI Reader 0.6%) and
+196 MB RSS; its stripped binary is 31 MB (the Reader's, with far more
+features, 125 MB). CJK labels and text fields render with the system Noto
+Sans CJK through fontconfig, and a custom-shader slide-over page transition
+runs inside egui's pass (`--screenshot-transition`).
+
+Known renderer gaps: raster layers are rasterized once (blurry when zoomed
+deep; images and image masks should become native-resolution textures), 4x
+MSAA gives small text coarser edges than MuPDF, zooming into Lower Level's
+dense hatching reaches 27 ms frames, a dense page's first upload can take a
+frame of 30-180 ms, and GPU memory reaches 580 MiB for the largest drawing.
+
+**Next step:** The user tries `cargo run --release -p glyphst-egui-spike --
+<pdf>`: typing Chinese and Japanese with fcitx5 in both text fields, the
+presentation-mode transition (P, then Page Down), a gamepad if available, and
+zooming Murietta_Level1 against HEPR's demo. With those results, choose the
+host: port the Reader to egui, or patch GPUI with a wgpu `PaintSurface`.
 
 **Done when:** The Reader zooms Murietta_Level1 without a raster swap,
 `script/check.sh corpus` passes, and multi-page memory is bounded.

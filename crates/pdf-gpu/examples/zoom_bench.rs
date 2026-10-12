@@ -174,7 +174,7 @@ fn main() -> Result<()> {
     for zoom in CHECKPOINTS.into_iter().chain(options.zoom) {
         let camera = camera(zoom);
         gpu.render(&renderer, gpu_page, &camera);
-        let vector = gpu.read_target(size)?;
+        let vector = gpu.read_target()?;
         let started = Instant::now();
         let reference = mupdf_view(list, &camera)?;
         let mupdf_ms = ms(started.elapsed());

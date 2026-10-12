@@ -12,6 +12,7 @@ members = [
     "crates/pdf-translation",
     "crates/pdf-translation-service",
     "crates/document-ui",
+    "crates/egui-spike",
     "crates/files",
     "crates/reader",
     "crates/settings",
@@ -37,7 +38,10 @@ base64 = "0.23"
 bytemuck = { version = "1", features = ["derive"] }
 chrono = "0.4"
 dirs = "7"
+eframe = { version = "0.36", default-features = false }
+egui = "0.36"
 futures = "0.3"
+gilrs = "0.11"
 gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = [
     "wayland",
     "x11",
@@ -89,7 +93,7 @@ typst-layout = "=0.15.1"
 typst-pdf = "=0.15.1"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 url = "2"
-wgpu = "29.0.4"
+wgpu = "30"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 zstd = "0.14"

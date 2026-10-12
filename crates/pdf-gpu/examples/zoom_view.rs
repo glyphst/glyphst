@@ -11,9 +11,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context as _, Result, bail};
 use common::LoadedPage;
-use glyphst_pdf_gpu::{
-    Camera, GpuPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT, stencil_attachment,
-};
+use glyphst_pdf_gpu::{Camera, GpuPage, OffscreenTarget, Renderer};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -38,8 +36,8 @@ struct View {
     renderer: Renderer,
     page: GpuPage,
     page_bounds: [f32; 4],
-    msaa: wgpu::TextureView,
-    stencil: wgpu::TextureView,
+    /// Multisampled attachments; pages resolve straight into the surface.
+    attachments: OffscreenTarget,
     origin: [f32; 2],
     scale: f32,
     target_scale: f32,
@@ -61,8 +59,8 @@ impl View {
         let surface = instance.create_surface(window.clone())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
             compatible_surface: Some(&surface),
+            ..Default::default()
         }))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -82,7 +80,7 @@ impl View {
         let renderer = Renderer::new(&device, config.format);
         let fit = loaded.fit_scale([config.width, config.height]);
         let uploaded = common::upload(&device, &queue, &renderer, loaded, fit * 4.0)?;
-        let [msaa, stencil] = attachments(&device, &config);
+        let attachments = surface_attachments(&device, &config);
         let bounds = loaded.prepared.bounds;
         let mut view = Self {
             window,
@@ -93,8 +91,7 @@ impl View {
             renderer,
             page: uploaded.page,
             page_bounds: bounds,
-            msaa,
-            stencil,
+            attachments,
             origin: [0.0; 2],
             scale: fit,
             target_scale: fit,
@@ -124,7 +121,7 @@ impl View {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        [self.msaa, self.stencil] = attachments(&self.device, &self.config);
+        self.attachments = surface_attachments(&self.device, &self.config);
     }
 
     /// Moves the zoom toward its target, keeping `anchor` fixed on screen.
@@ -174,34 +171,22 @@ impl View {
         let started = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let stats = {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("zoom_view"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.msaa,
-                    resolve_target: Some(&target),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.35,
-                            g: 0.35,
-                            b: 0.37,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(stencil_attachment(&self.stencil)),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let background = wgpu::Color {
+                r: 0.35,
+                g: 0.35,
+                b: 0.37,
+                a: 1.0,
+            };
+            let mut pass = self
+                .attachments
+                .begin_pass_into(&mut encoder, &target, background);
             self.renderer
                 .draw(&self.queue, &self.page, &camera, &mut pass)
         };
         self.queue.submit([encoder.finish()]);
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         let elapsed = started.elapsed();
-        frame.present();
+        self.queue.present(frame);
 
         let source = if stats.used_overview {
             "overview".to_string()
@@ -220,28 +205,16 @@ impl View {
     }
 }
 
-fn attachments(
+fn surface_attachments(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
-) -> [wgpu::TextureView; 2] {
-    [config.format, STENCIL_FORMAT].map(|format| {
-        device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("zoom_view_attachment"),
-                size: wgpu::Extent3d {
-                    width: config.width,
-                    height: config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: SAMPLE_COUNT,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&Default::default())
-    })
+) -> OffscreenTarget {
+    OffscreenTarget::new(
+        device,
+        config.format,
+        [config.width, config.height],
+        wgpu::TextureUsages::empty(),
+    )
 }
 
 struct App {
