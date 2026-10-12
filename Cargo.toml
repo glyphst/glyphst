@@ -8,6 +8,7 @@ members = [
     "crates/library",
     "crates/mermaid-render",
     "crates/pdf",
+    "crates/pdf-gpu",
     "crates/pdf-translation",
     "crates/pdf-translation-service",
     "crates/document-ui",
@@ -33,6 +34,7 @@ unsafe_code = "deny"
 anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.23"
+bytemuck = { version = "1", features = ["derive"] }
 chrono = "0.4"
 dirs = "7"
 futures = "0.3"
@@ -55,11 +57,13 @@ image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"
 kdl = "6"
+lyon_tessellation = "1"
 lsp-types = { version = "0.97", features = ["proposed"] }
 markdown = "1.0"
 mupdf = "0.8"
 redb = "4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }
+pollster = "0.4"
 rand = "0.10"
 ratex-layout = "=0.1.14"
 ratex-parser = "=0.1.14"
@@ -85,6 +89,7 @@ typst-layout = "=0.15.1"
 typst-pdf = "=0.15.1"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 url = "2"
+wgpu = "29.0.4"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 zstd = "0.14"

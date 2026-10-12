@@ -1,0 +1,21 @@
+[package]
+name = "glyphst-pdf-gpu"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+glyphst-pdf = { path = "../pdf" }
+lyon_tessellation.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+mupdf.workspace = true
+pollster.workspace = true
+serde_json.workspace = true
+winit = "0.30"

@@ -90,6 +90,16 @@ logs and timings under `target/check-reports/`:
 script/check.sh quick          # fmt, clippy, tests
 script/check.sh gate           # + doctests, cargo audit, release Reader build
 script/check.sh gate --local   # same, against sibling checkouts (.cargo/config.local.toml)
+script/check.sh corpus         # GPU page rendering against MuPDF on sample PDFs
+```
+
+The `corpus` tier renders page 1 of up to `GLYPHST_PDF_CORPUS_LIMIT` (100) PDFs
+from `GLYPHST_PDF_CORPUS` (default: the pdf.js test corpus under `../bak`) and
+fails only on crashes or timeouts after parsing. For zoom timing on one page:
+
+```sh
+cargo run --release -p glyphst-pdf-gpu --example zoom_bench -- page.pdf --out target/check-reports/zoom-bench
+cargo run --release -p glyphst-pdf-gpu --example zoom_view -- page.pdf   # interactive
 ```
 
 Report baseline failures separately. The rendering debug panel's frame capture

@@ -69,6 +69,8 @@
           ];
           runtimeLibraries = with pkgs; [
             libglvnd
+            # winit (pdf-gpu's zoom_view example) loads it at run time.
+            libxkbcommon
             vulkan-loader
             wayland
           ];

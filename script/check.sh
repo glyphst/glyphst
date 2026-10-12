@@ -4,6 +4,9 @@
 #   script/check.sh quick   every edit loop: fmt, clippy, tests
 #   script/check.sh gate    before a PR or pin bump: quick + doctests, audit,
 #                           and a release Reader build
+#   script/check.sh corpus  GPU page rendering against MuPDF on sample PDFs
+#                           (GLYPHST_PDF_CORPUS, default: ../bak pdf.js corpus;
+#                           GLYPHST_PDF_CORPUS_LIMIT files, default 100)
 #
 # Options:
 #   --local       build against sibling checkouts via .cargo/config.local.toml
@@ -36,8 +39,8 @@ for argument in "$@"; do
     esac
 done
 case ${tier} in
-    quick | gate) ;;
-    *) sed -n '2,11p' "$0" >&2; exit 2 ;;
+    quick | gate | corpus) ;;
+    *) sed -n '2,14p' "$0" >&2; exit 2 ;;
 esac
 
 cd "${repo}"
@@ -99,6 +102,15 @@ step() {
 
 printf 'check %s at %s%s\n' "${tier}" "$(git rev-parse --short HEAD)" \
     "$( ((${#cargo_config[@]})) && echo ' (local sibling dependencies)')"
+if [[ ${tier} == corpus ]]; then
+    corpus=${GLYPHST_PDF_CORPUS:-${repo}/../bak/glyphst-pdf/references/pdfjs/test/pdfs}
+    # Release build: rendering and MuPDF rasterization are too slow unoptimized.
+    step corpus-build cargo build "${cargo_config[@]}" --release "${locked[@]}" \
+        -p glyphst-pdf-gpu --example corpus
+    step corpus "${repo}/target/release/examples/corpus" "${corpus}" \
+        --limit "${GLYPHST_PDF_CORPUS_LIMIT:-100}" --out "${run_dir}/corpus"
+    finish
+fi
 step fmt cargo fmt --all -- --check
 # External Cargo commands only receive configuration placed after the subcommand.
 step clippy cargo clippy "${cargo_config[@]}" --workspace --all-targets --all-features \

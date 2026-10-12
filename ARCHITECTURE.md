@@ -12,7 +12,8 @@
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai`, `ai-ui` | AI services and chat presentation |
 | Translation crates | Translation domain, PDF production, service orchestration, UI |
-| `pdf` | MuPDF integration: document opening, render sessions, display lists |
+| `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
+| `pdf-gpu` | GPU vector page rendering from captured pages (wgpu; not yet used by the Reader) |
 
 Private modules split implementation without introducing additional state
 owners. New-tab and workspace entities own their task handles; document views
@@ -36,6 +37,20 @@ protected from eviction while they are displayed or pending. Visible pages are
 requested first and adjacent pages are prefetched within a pixel limit. Until
 the exact raster is ready, the closest cached raster for the page remains
 visible.
+
+## GPU vector rendering
+
+[Vector capture](crates/pdf/src/vector.rs) replays a MuPDF display list
+through a native device and records fills, strokes and glyph outlines in page
+space. Rectangular clips become scissors and other path clips stencil clips.
+Shadings, images, soft masks, non-normal blend groups, patterns and text or
+stroke clips stay ranges of display-list operations that MuPDF rasterizes as
+ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
+tessellates each page once per level of detail and draws it with a camera
+uniform; dense pages also get a mipmapped overview rendered from their own
+vectors and drawn while it is at least as sharp as the screen. The Reader
+does not use it yet: GPUI 0.3.8 cannot composite a wgpu texture on Linux (see
+[next work](ROADMAP.md)).
 
 ## Library persistence
 

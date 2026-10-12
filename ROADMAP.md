@@ -4,12 +4,39 @@ A short ordered shortlist for tasks without a more specific user direction.
 Select one bounded step, verify its current premise, and finish its acceptance
 checks. Update affected entries when evidence changes; remove completed work
 rather than appending a progress history. Evidence below was reviewed on
-2026-10-11; each entry identifies its relevant checkpoint or evidence.
+2026-10-11 (entry 1 on 2026-10-12); each entry identifies its relevant
+checkpoint or evidence.
 
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. Workspace layout smoke test
+## 1. GPU vector page rendering: host decision
+
+**Owner:** `pdf-gpu`, `document-ui`.
+
+**Current evidence:** Captured MuPDF pages render on the GPU with every frame
+drawn from vectors or from an overview rendered from them. On this machine's
+Intel Arc iGPU, `zoom_bench` zooms Murietta_Level1, Level 1, Lower Level and
+War and Peace page 1 from 0.25x to 64x with p95 frame times of 0.7-2.1 ms
+(MuPDF needs 0.5-2.6 s per fit-size view of the drawings). Fewer than 1.5% of
+pixels differ from MuPDF at fit and under 0.07% at 8x and 64x. The pdf.js
+corpus tier renders 97 of 100 files (2 unreadable, 1 parser timeout); 6 differ
+by more than 1%. Known gaps: raster layers are rasterized once (blurry when
+zoomed deep; images and image masks should become native-resolution
+textures), 4x MSAA gives small text coarser edges than MuPDF, zooming into
+Lower Level's dense hatching reaches 27 ms frames, GPU memory reaches 580 MiB
+for the largest drawing, and only single pages are prepared.
+
+**Next step:** The user chooses the host: a small GPUI patch compositing a
+wgpu texture (`PaintSurface` is a no-op on Linux in `gpui-pre` 0.3.8), or the
+pending egui spike (`egui_wgpu` paint callbacks). Then integrate per-page
+rendering into the document view, keeping MuPDF rasters for loading and
+errors and the MuPDF text path for selection, search and links.
+
+**Done when:** The Reader zooms Murietta_Level1 without a raster swap,
+`script/check.sh corpus` passes, and multi-page memory is bounded.
+
+## 2. Workspace layout smoke test
 
 **Owner:** `workspace`.
 
@@ -31,7 +58,7 @@ after quitting.
 
 **Done when:** that smoke test passes, or its findings are fixed with tests.
 
-## 2. Long-document coordinate precision
+## 3. Long-document coordinate precision
 
 **Owner:** `document-ui` layout and viewport geometry.
 
@@ -48,7 +75,7 @@ conversion. Preserve rotation, fractional device origin, and camera identity.
 zoom, with round-trip scroll/zoom restoration passing. Do not infer correctness
 solely from ordinary first-page rendering.
 
-## 3. Dependency audit follow-up
+## 4. Dependency audit follow-up
 
 **Owner:** Workspace dependency maintenance.
 
