@@ -71,14 +71,28 @@ frame.
 The egui Reader follows the patterns of artcraft's egui apps (pdfcraft's
 home, pickers, last session and theme; craft-ui tabs; filmcraft's
 data-defined effects) rather than reproducing the GPUI Reader. It reuses
-`pdf`, `pdf-gpu`, `effects` and `library`; `library` builds without GPUI
-(its `gpui` feature adds the app global for the GPUI crates). Both readers
+`pdf`, `pdf-gpu`, `effects`, `library` and the translation domain crates;
+`library`, `settings` and `ai` build without GPUI, and their `gpui` features
+add what the GPUI crates need (the app globals, the settings store with its
+credential worker, gpui-component themes, ChatGPT Subscription sign-in).
+The egui Reader reads the GPUI Reader's settings file and, with the
+`settings` crate's `keychain` feature, the provider keys it keeps in the
+system credential store; it does not edit either. Both readers
 share the redb library, which one process holds at a time: while the GPUI
 Reader runs, the egui Reader opens documents without history. Its own
 preferences (theme, transition, background, last session) live in eframe
 storage under the config directory; scripted runs (`--bench`,
 `--screenshot…`) save nothing and leave the library unwritten. User effects
 are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
+
+Translation runs the domain services on worker threads: a selection becomes a
+card, and a PDF becomes a translation session whose pages (one-page PDFs
+typeset by Typst, in a worker process of the reader's executable) are drawn
+in place of the originals as they arrive. Each page has a source version
+(original, or a preview revision); the loader and indexer load and read the
+version shown, and a page's GPU drawing is replaced only when the new version
+is ready, so the original stays visible meanwhile. Selection, copy and search
+use the translated text; hovering a translated block shows the original.
 
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, as the GPUI Reader indexes it, so

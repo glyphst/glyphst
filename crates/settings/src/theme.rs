@@ -1,13 +1,13 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::path::PathBuf;
+#[cfg(feature = "gpui")]
+use std::{collections::HashSet, fs, path::Path, rc::Rc};
 
+#[cfg(feature = "gpui")]
 use anyhow::{Context as _, Result};
 use glyphst_core::{DocumentColors, HighlightColor};
+#[cfg(feature = "gpui")]
 use gpui::{App, Hsla, rgb, rgba};
+#[cfg(feature = "gpui")]
 use gpui_component::{
     Colorize as _, Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig,
     ThemeMode as ComponentThemeMode, ThemeRegistry as ComponentThemeRegistry,
@@ -20,14 +20,19 @@ pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 pub const SYNCHRONIZED_GROUP_COLOR_COUNT: usize = 8;
 
+#[cfg(feature = "gpui")]
 const DEFAULT_COMPONENT_RADIUS: usize = 6;
+#[cfg(feature = "gpui")]
 const DEFAULT_COMPONENT_RADIUS_LG: usize = 12;
+#[cfg(feature = "gpui")]
 const DEFAULT_COMPONENT_SHADOW: bool = true;
+#[cfg(feature = "gpui")]
 const DEFAULT_INACTIVE_TAB_OPACITY: f32 = 0.45;
 
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
 
+#[cfg(feature = "gpui")]
 const BUNDLED_THEME_SOURCES: [&str; 23] = [
     include_str!("../themes/gpui-component/default-theme.json"),
     include_str!("../themes/gpui-component/adventure.json"),
@@ -68,6 +73,7 @@ impl ThemeAppearance {
         }
     }
 
+    #[cfg(feature = "gpui")]
     fn from_component(mode: ComponentThemeMode) -> Self {
         if mode.is_dark() {
             Self::Dark
@@ -249,6 +255,7 @@ pub struct Theme {
 }
 
 impl Theme {
+    #[cfg(feature = "gpui")]
     /// Resolve Glyphst's document/workspace semantics from the component
     /// theme. This is the only color translation layer retained by Glyphst.
     pub fn from_component(theme: &ComponentTheme) -> Self {
@@ -371,6 +378,7 @@ impl Theme {
     }
 }
 
+#[cfg(feature = "gpui")]
 impl Default for Theme {
     fn default() -> Self {
         let set = serde_json::from_str::<ComponentThemeSet>(BUNDLED_THEME_SOURCES[0])
@@ -634,17 +642,20 @@ pub struct ThemeMetadata {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "gpui")]
 pub struct ThemeCatalog {
     themes: Vec<ThemeEntry>,
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "gpui")]
 struct ThemeEntry {
     id: String,
     config: Rc<ComponentThemeConfig>,
     origin: ThemeOrigin,
 }
 
+#[cfg(feature = "gpui")]
 impl ThemeCatalog {
     pub fn load(user_themes_dir: &Path) -> Self {
         let mut catalog = Self::bundled();
@@ -798,6 +809,7 @@ impl ThemeCatalog {
     }
 }
 
+#[cfg(feature = "gpui")]
 fn appearance_sort_key(appearance: ThemeAppearance) -> u8 {
     match appearance {
         ThemeAppearance::Light => 0,
@@ -805,6 +817,7 @@ fn appearance_sort_key(appearance: ThemeAppearance) -> u8 {
     }
 }
 
+#[cfg(feature = "gpui")]
 /// Apply the subset of Glyphst's domain overrides that has a component-theme
 /// equivalent. Document-only colors are applied later by [`Theme::apply`].
 pub fn apply_component_overrides(theme: &mut ComponentTheme, overrides: PartialTheme) {
@@ -900,10 +913,12 @@ pub fn push_value_node(document: &mut KdlDocument, name: &str, value: impl Into<
     document.nodes_mut().push(node);
 }
 
+#[cfg(feature = "gpui")]
 fn hsla_to_rgb(color: Hsla) -> u32 {
     hsla_to_rgba(color) >> 8
 }
 
+#[cfg(feature = "gpui")]
 fn hsla_to_rgba(color: Hsla) -> u32 {
     let rgb = color.to_rgb();
     (channel_to_u8(rgb.r) << 24)
@@ -912,10 +927,12 @@ fn hsla_to_rgba(color: Hsla) -> u32 {
         | channel_to_u8(color.a)
 }
 
+#[cfg(feature = "gpui")]
 fn hsla_to_rgba_with_alpha(color: Hsla, alpha: u32) -> u32 {
     (hsla_to_rgb(color) << 8) | (alpha & 0xff)
 }
 
+#[cfg(feature = "gpui")]
 fn channel_to_u8(channel: f32) -> u32 {
     (channel.clamp(0.0, 1.0) * 255.0).round() as u32
 }
@@ -938,7 +955,7 @@ fn mask_rgba_option(value: &mut Option<u32>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests {
     use super::*;
 

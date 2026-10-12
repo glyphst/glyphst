@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "gpui")]
 pub fn ui_rems(px: f32) -> gpui::Rems {
     gpui::rems(px / DEFAULT_UI_FONT_SIZE)
 }
@@ -226,6 +227,7 @@ impl FontSettings {
         };
     }
 
+    #[cfg(feature = "gpui")]
     pub fn ui_font(&self) -> Font {
         Font {
             family: self.ui_font_family.clone().into(),
@@ -263,6 +265,7 @@ impl WindowBackgroundMode {
         }
     }
 
+    #[cfg(feature = "gpui")]
     fn into_gpui(self) -> WindowBackgroundAppearance {
         match self {
             Self::Opaque => WindowBackgroundAppearance::Opaque,
@@ -304,6 +307,7 @@ impl WindowSettings {
         }
     }
 
+    #[cfg(feature = "gpui")]
     pub fn background_appearance(self, enabled: bool) -> WindowBackgroundAppearance {
         if enabled && self.transparency_enabled_by_default() {
             self.background.into_gpui()

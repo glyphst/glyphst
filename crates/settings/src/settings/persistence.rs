@@ -1,7 +1,9 @@
+#[cfg(feature = "gpui")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 
+#[cfg(feature = "gpui")]
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn parse_settings(text: &str) -> Result<Settings> {
@@ -29,6 +31,7 @@ pub(super) fn load_settings(path: &Path) -> Result<Settings> {
         .and_then(|text| parse_settings(&text))
 }
 
+#[cfg(feature = "gpui")]
 pub(super) fn write_kdl(path: &Path, contents: String) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -39,6 +42,7 @@ pub(super) fn write_kdl(path: &Path, contents: String) -> Result<()> {
     atomic_write_private(path, contents.as_bytes())
 }
 
+#[cfg(feature = "gpui")]
 fn create_private_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -64,6 +68,7 @@ fn create_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "gpui")]
 fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path

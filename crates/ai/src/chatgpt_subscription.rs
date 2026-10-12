@@ -1,3 +1,8 @@
+// Without GPUI nothing signs in or loads saved credentials, so the sign-in
+// and persistence machinery is unused and requests report the subscription as
+// not initialized.
+#![cfg_attr(not(feature = "gpui"), allow(dead_code, unused_imports))]
+
 use std::{
     str::FromStr as _,
     sync::{Arc, Condvar, LazyLock, Mutex, RwLock, Weak},
@@ -13,6 +18,7 @@ use futures::{
     StreamExt as _,
     channel::{mpsc, oneshot},
 };
+#[cfg(feature = "gpui")]
 use gpui::{App, AppContext as _, Global};
 use rand::Rng as _;
 use reqwest::StatusCode;
@@ -21,6 +27,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use url::{Url, form_urlencoded};
 
+#[cfg(feature = "gpui")]
 use crate::settings::{AiProvider, SettingsStore};
 
 pub const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -104,9 +111,11 @@ pub struct ChatGptSubscription {
     inner: Arc<AuthInner>,
 }
 
+#[cfg(feature = "gpui")]
 impl Global for ChatGptSubscription {}
 
 impl ChatGptSubscription {
+    #[cfg(feature = "gpui")]
     pub fn global(cx: &App) -> Option<Self> {
         cx.try_global::<Self>().cloned()
     }
@@ -130,6 +139,7 @@ impl ChatGptSubscription {
         self.inner.lock_state().credentials.is_some()
     }
 
+    #[cfg(feature = "gpui")]
     pub fn sign_in(&self, cx: &mut App) {
         let generation = {
             let mut state = self.inner.lock_state();
@@ -220,6 +230,7 @@ impl ChatGptSubscription {
         .detach();
     }
 
+    #[cfg(feature = "gpui")]
     pub fn sign_out(&self, cx: &mut App) {
         {
             let mut state = self.inner.lock_state();
@@ -235,6 +246,7 @@ impl ChatGptSubscription {
     }
 }
 
+#[cfg(feature = "gpui")]
 pub fn init(cx: &mut App) {
     if cx.has_global::<ChatGptSubscription>() {
         return;
@@ -285,6 +297,7 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+#[cfg(feature = "gpui")]
 fn spawn_persistence_worker(
     mut receiver: mpsc::UnboundedReceiver<PersistenceCommand>,
     inner: Arc<AuthInner>,
@@ -330,6 +343,7 @@ fn spawn_persistence_worker(
     .detach();
 }
 
+#[cfg(feature = "gpui")]
 fn notify(cx: &mut App) {
     if cx.has_global::<ChatGptSubscription>() {
         let _ = cx.global_mut::<ChatGptSubscription>();
@@ -337,6 +351,7 @@ fn notify(cx: &mut App) {
     cx.refresh_windows();
 }
 
+#[cfg(feature = "gpui")]
 fn enable_provider(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
         return;

@@ -74,6 +74,25 @@ impl Find {
         self.edited = Some(now);
     }
 
+    /// Forgets a page's matches, so its new text is searched again.
+    pub fn invalidate_page(&mut self, page: usize) {
+        let Some(searched) = self.searched.get_mut(page) else {
+            return;
+        };
+        *searched = false;
+        let range = self.on_page(page);
+        if range.is_empty() {
+            return;
+        }
+        let removed = range.len();
+        self.current = match self.current {
+            Some(current) if range.contains(&current) => None,
+            Some(current) if current >= range.end => Some(current - removed),
+            other => other,
+        };
+        self.matches.drain(range);
+    }
+
     /// Searches again from scratch, as after a relayout.
     pub fn restart(&mut self) {
         self.reset(None);
@@ -523,5 +542,34 @@ mod tests {
         find.close();
         assert!(!find.is_active());
         assert!(find.matches.is_empty());
+    }
+
+    #[test]
+    fn pages_whose_text_changed_are_searched_again() {
+        let mut text = DocText::new(2);
+        text.insert(0, page("cat cat"));
+        text.insert(1, page("cat"));
+        let mut find = Find {
+            query: "cat".into(),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        find.refresh(&text, now, 1);
+        assert_eq!(find.matches.len(), 3);
+        assert_eq!(find.current_match().unwrap().page, 1);
+
+        // Page 0 now shows its translation.
+        find.invalidate_page(0);
+        text.remove(0);
+        assert_eq!(find.matches.len(), 1);
+        assert_eq!(
+            find.current_match().unwrap().page,
+            1,
+            "the current match is kept"
+        );
+        text.insert(0, page("chat"));
+        find.refresh(&text, now, 1);
+        assert_eq!(find.matches.len(), 1, "the new text has no match");
+        assert!(find.is_complete());
     }
 }

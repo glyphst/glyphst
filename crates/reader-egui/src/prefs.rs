@@ -23,6 +23,8 @@ pub struct Prefs {
     pub background_fps: u32,
     pub show_sidebar: bool,
     pub sidebar: SidebarTab,
+    /// Language to translate into; `None` follows the translation settings.
+    pub target_language: Option<String>,
     pub last_session: LastSession,
 }
 
@@ -36,6 +38,7 @@ impl Default for Prefs {
             background_fps: 30,
             show_sidebar: true,
             sidebar: SidebarTab::default(),
+            target_language: None,
             last_session: LastSession::default(),
         }
     }
@@ -116,6 +119,7 @@ mod tests {
             transition: None,
             show_sidebar: false,
             sidebar: SidebarTab::Notes,
+            target_language: Some("ja".into()),
             last_session: LastSession {
                 files: vec![
                     SessionFile {

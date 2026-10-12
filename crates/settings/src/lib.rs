@@ -15,8 +15,10 @@ pub use settings::{
     PageImageQuality, PageTextFormat, PathChooserBackend, PdfContentReviewMode,
     PdfContentReviewSettings, PinnedTranslationSettings, ProviderSecretId,
     ProviderSecretPersistence, ProviderSecretStatus, QuickAskPosition, QuickAskSettings,
-    ResolvedAiConfig, RestoreOnStartup, Settings, SettingsStore, TabBarVisibility,
-    TranslationBoxCorner, TranslationProvider, TranslationProviderConfig, TranslationSettings,
-    TranslationTargetLanguage, UnlimitedOcrSettings, WindowBackgroundMode, WindowSettings,
-    parse_settings, setup_ui_font, sync_component_theme, ui_rems, user_themes_dir,
+    ResolvedAiConfig, RestoreOnStartup, Settings, TabBarVisibility, TranslationBoxCorner,
+    TranslationProvider, TranslationProviderConfig, TranslationSettings, TranslationTargetLanguage,
+    UnlimitedOcrSettings, WindowBackgroundMode, WindowSettings, keychain_secret_ids,
+    load_user_settings, parse_settings, read_keychain_secrets, user_themes_dir,
 };
+#[cfg(feature = "gpui")]
+pub use settings::{SettingsStore, setup_ui_font, sync_component_theme, ui_rems};

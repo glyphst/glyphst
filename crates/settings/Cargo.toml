@@ -6,18 +6,30 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The GPUI settings store, credential worker and gpui-component themes,
+# for the GPUI crates. Without it the crate is the settings model, its KDL
+# persistence and a keychain reader for other hosts.
+gpui = ["dep:futures", "dep:gpui", "dep:gpui_component"]
+# Reads provider secrets the GPUI apps keep in the system credential store.
+keychain = ["dep:oo7", "dep:pollster"]
+
 [dependencies]
 anyhow.workspace = true
-futures.workspace = true
+futures = { workspace = true, optional = true }
 glyphst-core = { path = "../core" }
-gpui.workspace = true
-gpui_component.workspace = true
+gpui = { workspace = true, optional = true }
+gpui_component = { workspace = true, optional = true }
 i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 kdl.workspace = true
 rust-embed.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+pollster = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+oo7 = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

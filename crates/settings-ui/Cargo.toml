@@ -9,12 +9,12 @@ workspace = true
 [dependencies]
 dirs.workspace = true
 glyphst-actions = { path = "../actions" }
-glyphst-ai = { path = "../ai" }
+glyphst-ai = { path = "../ai", features = ["gpui"] }
 glyphst-core = { path = "../core" }
 glyphst-files = { path = "../files" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true

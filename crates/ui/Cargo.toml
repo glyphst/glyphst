@@ -11,7 +11,7 @@ anyhow.workspace = true
 glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }
 glyphst-mermaid-render.workspace = true
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 gpui.workspace = true
 gpui_component.workspace = true
 gpui_component_assets.workspace = true

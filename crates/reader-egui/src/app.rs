@@ -26,10 +26,11 @@ use crate::{
     home::{Home, HomeAction},
     pickers::{Pickers, is_document},
     prefs::{LastSession, Prefs, SessionFile},
-    sidebar::{self, SidebarAction, SidebarState, SidebarTab},
+    sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
     text_overlay::{PageMap, Selection, Span, fill_rects, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
     transition::ViewTransition,
+    translation::{CardState, Translator},
 };
 
 /// Positions are written to the library at most this often while reading.
@@ -67,6 +68,11 @@ pub struct Launch {
     pub select_page: Option<usize>,
     pub sidebar: Option<SidebarTab>,
     pub font_size: Option<f32>,
+    /// Translate through a local fake provider instead of the settings'.
+    pub translate_fake: bool,
+    /// Scripted runs: translate the first document, or the selection.
+    pub translate_document: bool,
+    pub translate_selection: bool,
 }
 
 /// What a primary-button drag on the document does.
@@ -113,7 +119,10 @@ pub struct ReaderApp {
     context_page: Option<usize>,
     pub(crate) launch_find: Option<String>,
     pub(crate) launch_select: Option<usize>,
+    pub(crate) launch_translate_document: bool,
+    pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
+    pub(crate) translator: Translator,
     page_input: String,
     saved_positions: HashMap<u64, DocumentPosition>,
     last_position_save: Instant,
@@ -147,6 +156,13 @@ impl ReaderApp {
             prefs.sidebar = tab;
             prefs.show_sidebar = true;
         }
+        let fake_settings = if launch.translate_fake {
+            let port = crate::fake_providers::start_translation_server()?;
+            Some(crate::fake_providers::translation_settings(port))
+        } else {
+            None
+        };
+        let translator = Translator::new(&cc.egui_ctx, fake_settings, persist, false);
         let mut app = Self {
             prefs,
             theme_kind: None,
@@ -172,7 +188,10 @@ impl ReaderApp {
             context_page: None,
             launch_find: launch.find,
             launch_select: launch.select_page,
+            launch_translate_document: launch.translate_document,
+            launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
+            translator,
             page_input: String::new(),
             saved_positions: HashMap::new(),
             last_position_save: Instant::now(),
@@ -498,7 +517,12 @@ impl ReaderApp {
         self.prefs.sidebar = SidebarTab::Bookmarks;
     }
 
-    fn apply_sidebar(&mut self, action: SidebarAction, actions: &mut Vec<ViewAction>) {
+    fn apply_sidebar(
+        &mut self,
+        action: SidebarAction,
+        actions: &mut Vec<ViewAction>,
+        ctx: &egui::Context,
+    ) {
         match action {
             SidebarAction::View(action) => actions.push(action),
             SidebarAction::GoToBookmark(id) => {
@@ -524,6 +548,45 @@ impl ReaderApp {
                 let result = self.library.remove_bookmark(id);
                 self.after_edit(result);
             }
+            SidebarAction::StartTranslation => self.start_document_translation(ctx),
+            SidebarAction::CancelTranslation => {
+                if let Some(session) = self
+                    .active
+                    .and_then(|active| self.tabs[active].translation.as_ref())
+                {
+                    session.cancel();
+                }
+            }
+            SidebarAction::ExportTranslation => {
+                if let Some(active) = self.active {
+                    let tab = &self.tabs[active];
+                    let stem = tab
+                        .path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "document".into());
+                    let target = tab
+                        .translation
+                        .as_ref()
+                        .map(|session| session.target.clone())
+                        .unwrap_or_default();
+                    let name = format!("{stem}.{target}.pdf");
+                    self.pickers.save_pdf(ctx, &name, tab.id);
+                }
+            }
+            SidebarAction::ShowTranslated(shown) => {
+                if let Some(session) = self
+                    .active
+                    .and_then(|active| self.tabs[active].translation.as_mut())
+                {
+                    session.show_translated = shown;
+                }
+            }
+            SidebarAction::Unpin(index) => {
+                if index < self.translator.pinned.len() {
+                    self.translator.pinned.remove(index);
+                }
+            }
             SidebarAction::SetColor(id, color) => self.set_annotation_color(id, color),
             SidebarAction::SetBody(id, body) => self.set_note_body(id, body),
             SidebarAction::Remove(id) => self.remove_annotation(id),
@@ -534,6 +597,112 @@ impl ReaderApp {
     fn find_step(&mut self, forward: bool) {
         if let Some(active) = self.active {
             self.tabs[active].find.step(forward);
+        }
+    }
+
+    /// Translates the selection into a card at `at`.
+    pub(crate) fn translate_selection(&mut self, at: egui::Pos2, ctx: &egui::Context) {
+        let Some(text) = self
+            .active
+            .and_then(|active| self.tabs[active].selected_text())
+        else {
+            return;
+        };
+        let target = self.prefs.target_language.clone();
+        self.translator
+            .translate_selection(text, target.as_deref(), at, ctx);
+    }
+
+    /// Starts translating the active document.
+    pub(crate) fn start_document_translation(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let target = self.prefs.target_language.clone();
+        let started =
+            self.translator
+                .start_session(&self.tabs[active].path, target.as_deref(), ctx);
+        match started {
+            Ok(session) => {
+                self.tabs[active].translation = Some(session);
+                self.prefs.show_sidebar = true;
+                self.prefs.sidebar = SidebarTab::Translation;
+            }
+            Err(error) => self.notices.push(format!("Could not translate: {error}")),
+        }
+    }
+
+    /// The card of a selection translation: the translation, Copy and Pin.
+    fn translation_card(&mut self, ctx: &egui::Context) {
+        let Some(card) = self.translator.card.clone() else {
+            return;
+        };
+        let tokens = Tokens::get(ctx);
+        let (mut close, mut pin) = (false, false);
+        let area = egui::Area::new(egui::Id::new("translation-card"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(card.at + egui::vec2(8.0, 8.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(tokens.card)
+                    .stroke(egui::Stroke::new(1.0, tokens.border))
+                    .corner_radius(8)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        let source: String = card.source.chars().take(160).collect();
+                        ui.label(
+                            egui::RichText::new(source)
+                                .italics()
+                                .color(tokens.text_muted),
+                        );
+                        ui.separator();
+                        match &card.state {
+                            CardState::Loading => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("Translating…");
+                                });
+                            }
+                            CardState::Done(text) => {
+                                egui::ScrollArea::vertical()
+                                    .max_height(320.0)
+                                    .show(ui, |ui| ui.label(text));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Copy").clicked() {
+                                        ui.ctx().copy_text(text.clone());
+                                    }
+                                    pin = ui
+                                        .button("Pin")
+                                        .on_hover_text("Keep in the Translation panel")
+                                        .clicked();
+                                    close = ui.button("Close").clicked();
+                                });
+                            }
+                            CardState::Failed(error) => {
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .color(egui::Color32::from_rgb(200, 60, 60)),
+                                );
+                                close = ui.button("Close").clicked();
+                            }
+                        }
+                    });
+            });
+        if pin {
+            self.translator.pin_card();
+            self.prefs.show_sidebar = true;
+            self.prefs.sidebar = SidebarTab::Translation;
+            close = true;
+        }
+        let fresh = ctx.input(|i| i.pointer.any_pressed())
+            && area.response.rect.contains(card.at + egui::vec2(9.0, 9.0));
+        if close
+            || (area.response.clicked_elsewhere()
+                && !fresh
+                && !matches!(card.state, CardState::Loading))
+        {
+            self.translator.card = None;
         }
     }
 
@@ -683,6 +852,12 @@ impl ReaderApp {
             }
             if ctrl && pressed(egui::Key::D) {
                 self.add_bookmark();
+            }
+            if ctrl && pressed(egui::Key::T) && !typing {
+                let at = ctx
+                    .pointer_latest_pos()
+                    .unwrap_or_else(|| ctx.content_rect().center());
+                self.translate_selection(at, ctx);
             }
             if pressed(egui::Key::F3) {
                 self.find_step(!shift);
@@ -970,6 +1145,8 @@ impl ReaderApp {
         let pages = tab.layout.len();
         let mut find = false;
         let mut font_step = 0.0;
+        let mut translate_document = false;
+        let mut translation_shown = None;
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.prefs.show_sidebar, "☰")
                 .on_hover_text("Sidebar (F9)");
@@ -1034,6 +1211,47 @@ impl ReaderApp {
                 actions.push(ViewAction::TogglePresent);
             }
             ui.separator();
+            let current = self
+                .translator
+                .target_language(self.prefs.target_language.as_deref());
+            let label = current
+                .as_deref()
+                .map(sidebar::language_label)
+                .unwrap_or("Language")
+                .to_string();
+            egui::ComboBox::from_id_salt("target-language")
+                .selected_text(format!("🌐 {label}"))
+                .height(400.0)
+                .show_ui(ui, |ui| {
+                    for language in glyphst_translation::TARGET_LANGUAGES {
+                        let chosen = current.as_deref() == Some(language.code);
+                        if ui.selectable_label(chosen, language.label).clicked() {
+                            self.prefs.target_language = Some(language.code.to_string());
+                        }
+                    }
+                });
+            match &tab.translation {
+                Some(session) => {
+                    let mut shown = session.show_translated;
+                    if ui
+                        .toggle_value(&mut shown, "Translated")
+                        .on_hover_text("Show translated pages")
+                        .changed()
+                    {
+                        translation_shown = Some(shown);
+                    }
+                }
+                None => {
+                    if ui
+                        .button("Translate")
+                        .on_hover_text("Translate this document")
+                        .clicked()
+                    {
+                        translate_document = true;
+                    }
+                }
+            }
+            ui.separator();
             if ui
                 .selectable_label(tab.find.open, "🔍 Find")
                 .on_hover_text("Find (Ctrl+F)")
@@ -1053,6 +1271,15 @@ impl ReaderApp {
         }
         if font_step != 0.0 {
             self.change_font_size(font_step);
+        }
+        if translate_document {
+            let ctx = ui.ctx().clone();
+            self.start_document_translation(&ctx);
+        }
+        if let Some(shown) = translation_shown
+            && let Some(session) = self.tabs[active].translation.as_mut()
+        {
+            session.show_translated = shown;
         }
     }
 
@@ -1241,6 +1468,7 @@ impl ReaderApp {
             }
         }
         self.note_popover(&ctx);
+        self.translation_card(&ctx);
         if self.tabs[active].is_reflowed() {
             self.reflow_to_view(active, rect.width(), now, &ctx);
         }
@@ -1282,6 +1510,36 @@ impl ReaderApp {
             } else if link {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+        }
+
+        // Over a translated block: its outline, and the original text.
+        if self.drag.is_none()
+            && let Some(pos) = response.hover_pos()
+            && let Some((map, point)) = under(pos)
+            && let Some((block, original)) = tab.original_at(map.page, point)
+        {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("translation-hover"),
+                ))
+                .with_clip_rect(rect.intersect(map.paper));
+            let tokens = Tokens::get(ctx);
+            painter.rect_stroke(
+                map.rect_to_screen(block).expand(2.0),
+                3.0,
+                egui::Stroke::new(1.5, tokens.accent),
+                egui::StrokeKind::Outside,
+            );
+            response.clone().on_hover_ui_at_pointer(|ui| {
+                ui.set_max_width(360.0);
+                ui.label(
+                    egui::RichText::new("Original")
+                        .small()
+                        .color(tokens.text_muted),
+                );
+                ui.label(original);
+            });
         }
 
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -1406,11 +1664,21 @@ impl ReaderApp {
         actions: &mut Vec<ViewAction>,
     ) {
         let selected = self.tabs[active].selected_text();
+        let translated = self.tabs[active]
+            .selection
+            .as_ref()
+            .is_some_and(|selection| self.tabs[active].shows_translation(selection.page));
         if let Some(text) = &selected {
             if ui.button("Copy  Ctrl+C").clicked() {
                 ctx.copy_text(text.clone());
                 ui.close();
             }
+            if ui.button("Translate  Ctrl+T").clicked() {
+                self.translate_selection(at, ctx);
+                ui.close();
+            }
+        }
+        if let Some(text) = selected.as_ref().filter(|_| !translated) {
             ui.separator();
             ui.label("Highlight");
             ui.horizontal(|ui| {
@@ -1482,7 +1750,13 @@ impl ReaderApp {
         let tab = &self.tabs[active];
         let reflowed = tab.is_reflowed();
         for map in maps {
-            for (item, rects) in tab.annotations.on_page(map.page, reflowed) {
+            // Highlights belong to the original text.
+            let annotations = if tab.shows_translation(map.page) {
+                Vec::new()
+            } else {
+                tab.annotations.on_page(map.page, reflowed)
+            };
+            for (item, rects) in annotations {
                 fill_rects(
                     painter,
                     map,
@@ -1672,8 +1946,17 @@ impl eframe::App for ReaderApp {
         for path in dropped {
             self.open(&path, &ctx, None);
         }
+        self.translator.poll();
+        if let Some((tab_id, path)) = self.pickers.take_saved()
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+            && let Some(session) = tab.translation.as_mut()
+            && let Err(error) = self.translator.export(session, path, &ctx)
+        {
+            self.notices.push(format!("Could not export: {error}"));
+        }
         for tab in &mut self.tabs {
             tab.receive(&ctx);
+            tab.sync_translation();
             tab.update_text(now);
         }
         self.upload_ready_page();
@@ -1719,6 +2002,14 @@ impl eframe::App for ReaderApp {
                 && let Some(active) = self.active
             {
                 let mut requests = Vec::new();
+                let info = TranslationInfo {
+                    target: self
+                        .translator
+                        .target_language(self.prefs.target_language.as_deref()),
+                    pinned: &self.translator.pinned,
+                    warnings: &self.translator.warnings,
+                    ready: self.translator.settings().is_some(),
+                };
                 egui::Panel::left("sidebar")
                     .default_size(SIDEBAR_WIDTH)
                     .frame(egui::Frame::new().fill(tokens.chrome).inner_margin(8))
@@ -1728,11 +2019,12 @@ impl eframe::App for ReaderApp {
                             &mut self.tabs[active],
                             &mut self.prefs.sidebar,
                             &mut self.sidebar_state,
+                            &info,
                             now,
                         );
                     });
                 for request in requests {
-                    self.apply_sidebar(request, &mut actions);
+                    self.apply_sidebar(request, &mut actions, &ctx);
                 }
             }
         }

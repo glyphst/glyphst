@@ -42,3 +42,20 @@ pub fn pdf_with(content: &str, resources: &str, page_extra: &str, extra: &[&str]
 pub fn single_page_pdf(content: &str, resources: &str, page_extra: &str) -> Vec<u8> {
     pdf_with(content, resources, page_extra, &[])
 }
+
+/// Page resources with Helvetica as `/F1`.
+pub const HELVETICA: &str =
+    "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+
+/// A page with `lines` of 12 pt Helvetica from the top left.
+pub fn text_pdf(lines: &[&str]) -> Vec<u8> {
+    let mut content = String::from("BT /F1 12 Tf 10 80 Td");
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            content.push_str(" 0 -16 Td");
+        }
+        content.push_str(&format!(" ({line}) Tj"));
+    }
+    content.push_str(" ET");
+    single_page_pdf(&content, HELVETICA, "")
+}

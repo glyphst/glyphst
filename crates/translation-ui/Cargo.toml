@@ -10,7 +10,7 @@ workspace = true
 futures.workspace = true
 glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true

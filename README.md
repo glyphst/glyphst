@@ -110,7 +110,10 @@ times as JSON, and `--screenshot PATH`, `--screenshot-turn PATH` and
 halfway through a transition. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run; `--find TEXT`, `--select-page N`,
 `--sidebar TAB` and `--font-size PT` (EPUB) show a search, a selection, a
-sidebar tab or a reflowed size in the screenshot.
+sidebar tab or a reflowed size in the screenshot. `--translate-fake`
+translates through a local fake provider (no keys, no network), and
+`--translate-document` / `--translate-selection` start a translation that a
+screenshot waits for and a bench runs alongside.
 
 Report baseline failures separately. The rendering debug panel's frame capture
 measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)

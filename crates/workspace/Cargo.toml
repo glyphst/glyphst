@@ -11,7 +11,7 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 glyphst-actions = { path = "../actions" }
-glyphst-ai = { path = "../ai" }
+glyphst-ai = { path = "../ai", features = ["gpui"] }
 glyphst-ai-ui = { path = "../ai-ui" }
 glyphst-core = { path = "../core" }
 glyphst-files = { path = "../files" }
@@ -19,7 +19,7 @@ glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library", features = ["gpui"] }
 glyphst-pdf = { path = "../pdf" }
 glyphst-document-ui = { path = "../document-ui" }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-settings-ui = { path = "../settings-ui" }
 glyphst-translation-ui = { path = "../translation-ui" }
 glyphst-ui = { path = "../ui" }

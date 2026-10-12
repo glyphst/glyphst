@@ -1,11 +1,3 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
-use anyhow::Result;
-use gpui::{App, Task};
-
 use super::{AiProvider, Settings, TranslationProvider};
 
 const CREDENTIAL_URL_PREFIX: &str = "https://glyphst.app/credentials/providers/v1";
@@ -98,70 +90,86 @@ impl ProviderSecretStatus {
     }
 }
 
-pub(super) type CredentialReadResult = Result<Option<(String, Vec<u8>)>>;
+/// Credential storage through GPUI's platform API, for the settings store.
+#[cfg(feature = "gpui")]
+mod backend {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
-pub(super) trait ProviderCredentialBackend: Send + Sync {
-    fn read(&self, url: &str, cx: &App) -> Task<CredentialReadResult>;
-    fn write(&self, url: &str, username: &str, secret: &[u8], cx: &App) -> Task<Result<()>>;
-    fn delete(&self, url: &str, cx: &App) -> Task<Result<()>>;
-}
+    use anyhow::Result;
+    use gpui::{App, Task};
 
-pub(super) struct PlatformCredentialBackend;
+    pub(in crate::settings) type CredentialReadResult = Result<Option<(String, Vec<u8>)>>;
 
-impl ProviderCredentialBackend for PlatformCredentialBackend {
-    fn read(&self, url: &str, cx: &App) -> Task<CredentialReadResult> {
-        cx.read_credentials(url)
+    pub(in crate::settings) trait ProviderCredentialBackend:
+        Send + Sync
+    {
+        fn read(&self, url: &str, cx: &App) -> Task<CredentialReadResult>;
+        fn write(&self, url: &str, username: &str, secret: &[u8], cx: &App) -> Task<Result<()>>;
+        fn delete(&self, url: &str, cx: &App) -> Task<Result<()>>;
     }
 
-    fn write(&self, url: &str, username: &str, secret: &[u8], cx: &App) -> Task<Result<()>> {
-        cx.write_credentials(url, username, secret)
+    pub(in crate::settings) struct PlatformCredentialBackend;
+
+    impl ProviderCredentialBackend for PlatformCredentialBackend {
+        fn read(&self, url: &str, cx: &App) -> Task<CredentialReadResult> {
+            cx.read_credentials(url)
+        }
+
+        fn write(&self, url: &str, username: &str, secret: &[u8], cx: &App) -> Task<Result<()>> {
+            cx.write_credentials(url, username, secret)
+        }
+
+        fn delete(&self, url: &str, cx: &App) -> Task<Result<()>> {
+            cx.delete_credentials(url)
+        }
     }
 
-    fn delete(&self, url: &str, cx: &App) -> Task<Result<()>> {
-        cx.delete_credentials(url)
-    }
-}
-
-#[derive(Default)]
-pub(super) struct MemoryCredentialBackend {
-    entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
-}
-
-impl ProviderCredentialBackend for MemoryCredentialBackend {
-    fn read(&self, url: &str, _: &App) -> Task<CredentialReadResult> {
-        let value = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(url)
-            .cloned();
-        Task::ready(Ok(value))
+    #[derive(Default)]
+    pub(in crate::settings) struct MemoryCredentialBackend {
+        entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
     }
 
-    fn write(&self, url: &str, username: &str, secret: &[u8], _: &App) -> Task<Result<()>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(url.to_string(), (username.to_string(), secret.to_vec()));
-        Task::ready(Ok(()))
+    impl ProviderCredentialBackend for MemoryCredentialBackend {
+        fn read(&self, url: &str, _: &App) -> Task<CredentialReadResult> {
+            let value = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(url)
+                .cloned();
+            Task::ready(Ok(value))
+        }
+
+        fn write(&self, url: &str, username: &str, secret: &[u8], _: &App) -> Task<Result<()>> {
+            self.entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(url.to_string(), (username.to_string(), secret.to_vec()));
+            Task::ready(Ok(()))
+        }
+
+        fn delete(&self, url: &str, _: &App) -> Task<Result<()>> {
+            self.entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(url);
+            Task::ready(Ok(()))
+        }
     }
 
-    fn delete(&self, url: &str, _: &App) -> Task<Result<()>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(url);
-        Task::ready(Ok(()))
+    pub(in crate::settings) fn platform_backend() -> Arc<dyn ProviderCredentialBackend> {
+        Arc::new(PlatformCredentialBackend)
+    }
+
+    pub(in crate::settings) fn memory_backend() -> Arc<dyn ProviderCredentialBackend> {
+        Arc::new(MemoryCredentialBackend::default())
     }
 }
-
-pub(super) fn platform_backend() -> Arc<dyn ProviderCredentialBackend> {
-    Arc::new(PlatformCredentialBackend)
-}
-
-pub(super) fn memory_backend() -> Arc<dyn ProviderCredentialBackend> {
-    Arc::new(MemoryCredentialBackend::default())
-}
+#[cfg(feature = "gpui")]
+pub(super) use backend::*;
 
 impl Settings {
     pub fn provider_secret_ids(&self) -> Vec<ProviderSecretId> {
@@ -237,6 +245,7 @@ impl Settings {
         }
     }
 
+    #[cfg(feature = "gpui")]
     pub(super) fn non_empty_provider_secrets(&self) -> Vec<(ProviderSecretId, String)> {
         self.provider_secret_ids()
             .into_iter()
@@ -248,6 +257,7 @@ impl Settings {
             .collect()
     }
 
+    #[cfg(feature = "gpui")]
     pub(super) fn without_provider_secrets(&self) -> Self {
         let mut settings = self.clone();
         for id in settings.provider_secret_ids() {

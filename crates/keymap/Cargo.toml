@@ -9,7 +9,7 @@ workspace = true
 [dependencies]
 glyphst-actions = { path = "../actions" }
 glyphst-core = { path = "../core" }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 gpui_component.workspace = true

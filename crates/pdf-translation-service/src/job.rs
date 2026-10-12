@@ -60,6 +60,8 @@ pub struct PdfTranslationService {
     typst: TypstCompiler,
     composer: PdfComposer,
     artifact_cache_state: Arc<Mutex<ArtifactCacheState>>,
+    /// Where translation jobs and their caches are kept.
+    artifact_root: PathBuf,
 }
 
 #[derive(Default)]
@@ -267,11 +269,19 @@ impl PdfTranslationService {
             typst: TypstCompiler::new(typst_config),
             composer: PdfComposer,
             artifact_cache_state: Arc::new(Mutex::new(ArtifactCacheState::default())),
+            artifact_root: artifact_root(),
         }
     }
 
+    /// Keeps translation artifacts under `root` instead of the state
+    /// directory (tests, scripted runs).
+    pub fn with_artifact_root(mut self, root: PathBuf) -> Self {
+        self.artifact_root = root;
+        self
+    }
+
     pub fn clear_translation_data(&self) -> anyhow::Result<()> {
-        self.clear_translation_data_at(&artifact_root(), true)
+        self.clear_translation_data_at(&self.artifact_root, true)
     }
 
     fn clear_translation_data_at(
@@ -500,7 +510,7 @@ impl PdfTranslationService {
         mut update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
     ) -> Result<Option<PdfTranslationRestoredSession>, PdfTranslationError> {
         let _run_guard = self.begin_run()?;
-        let job_directory = artifact_root().join(key.as_str());
+        let job_directory = self.artifact_root.join(key.as_str());
         let manifest_path = job_directory.join(LIVE_SESSION_MANIFEST_FILE);
         let manifest = match fs::read(&manifest_path)
             .ok()
@@ -773,8 +783,9 @@ impl PdfTranslationService {
                 error,
             )
         })?;
-        let job_directory = create_job_directory(&fingerprint)?;
-        let prepared_directory = create_prepared_directory(&source_fingerprint)?;
+        let job_directory = create_job_directory(&self.artifact_root, &fingerprint)?;
+        let prepared_directory =
+            create_prepared_directory(&self.artifact_root, &source_fingerprint)?;
         let source_path = job_directory.join("source-original.pdf");
         write_private_file(&source_path, &working_source_bytes).map_err(|error| {
             PdfTranslationError::stage(
@@ -1525,7 +1536,7 @@ impl PdfTranslationService {
     ) -> Option<PdfTranslationResult> {
         let _state = self.artifact_cache_state.lock().ok()?;
         let fingerprint = request_fingerprint(settings, request).ok()?;
-        let job_directory = artifact_root().join(&fingerprint);
+        let job_directory = self.artifact_root.join(&fingerprint);
         let manifest_path = job_directory.join("artifact-manifest.json");
         let manifest: PdfTranslationArtifactManifest =
             serde_json::from_slice(&fs::read(&manifest_path).ok()?).ok()?;
@@ -1566,7 +1577,7 @@ impl PdfTranslationService {
         };
         let fingerprint = request_fingerprint(settings, &provisional)?;
         Ok(PdfTranslationRequest {
-            output_path: artifact_root().join(fingerprint).join("translated.pdf"),
+            output_path: self.artifact_root.join(fingerprint).join("translated.pdf"),
             ..provisional
         })
     }
@@ -3780,8 +3791,8 @@ fn translation_checkpoint_changed(
     resolved != last_resolved || failed != last_failed
 }
 
-fn create_job_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
-    let directory = artifact_root().join(fingerprint);
+fn create_job_directory(root: &Path, fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
+    let directory = root.join(fingerprint);
     create_private_directory(&directory).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Preparing,
@@ -3792,8 +3803,11 @@ fn create_job_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationErro
     Ok(directory)
 }
 
-fn create_prepared_directory(fingerprint: &str) -> Result<PathBuf, PdfTranslationError> {
-    let directory = artifact_root().join("prepared").join(fingerprint);
+fn create_prepared_directory(
+    root: &Path,
+    fingerprint: &str,
+) -> Result<PathBuf, PdfTranslationError> {
+    let directory = root.join("prepared").join(fingerprint);
     create_private_directory(&directory).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Preparing,

@@ -221,6 +221,9 @@ impl ReaderGpu {
         layers: &[(usize, LayerImage)],
     ) -> f64 {
         let started = Instant::now();
+        // A page replaced by another drawing (its translation) drops the
+        // overview being built for the old one.
+        self.overviews.remove(&key);
         let mut page = self.renderer.upload(device, queue, prepared);
         for (layer, image) in layers {
             self.renderer.set_raster_layer(

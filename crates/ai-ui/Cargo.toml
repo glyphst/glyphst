@@ -11,11 +11,11 @@ anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
 glyphst-actions = { path = "../actions" }
-glyphst-ai = { path = "../ai" }
+glyphst-ai = { path = "../ai", features = ["gpui"] }
 glyphst-core = { path = "../core" }
 glyphst-files = { path = "../files" }
 glyphst-library = { path = "../library", features = ["gpui"] }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 gpui_component.workspace = true

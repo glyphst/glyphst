@@ -10,7 +10,7 @@ workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-ui = { path = "../ui" }
 gpui.workspace = true
 gpui_component.workspace = true

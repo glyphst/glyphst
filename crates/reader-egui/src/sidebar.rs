@@ -12,6 +12,7 @@ use crate::{
     document_tab::{DocumentTab, ViewAction},
     find,
     theme::Tokens,
+    translation::{Export, SessionStatus},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,15 +23,17 @@ pub enum SidebarTab {
     Bookmarks,
     Notes,
     Search,
+    Translation,
 }
 
 impl SidebarTab {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Outline,
         Self::Pages,
         Self::Bookmarks,
         Self::Notes,
         Self::Search,
+        Self::Translation,
     ];
 
     pub fn label(self) -> &'static str {
@@ -40,6 +43,7 @@ impl SidebarTab {
             Self::Bookmarks => "Bookmarks",
             Self::Notes => "Notes",
             Self::Search => "Search",
+            Self::Translation => "Translation",
         }
     }
 
@@ -61,6 +65,20 @@ pub enum SidebarAction {
     SetColor(AnnotationId, HighlightColor),
     SetBody(AnnotationId, String),
     Remove(AnnotationId),
+    StartTranslation,
+    CancelTranslation,
+    ExportTranslation,
+    ShowTranslated(bool),
+    Unpin(usize),
+}
+
+/// What the Translation panel shows besides the tab's session.
+pub struct TranslationInfo<'a> {
+    pub target: Option<String>,
+    pub pinned: &'a [(String, String)],
+    pub warnings: &'a [String],
+    /// The settings and keys are loaded.
+    pub ready: bool,
 }
 
 /// Edits in progress in the sidebar.
@@ -77,6 +95,7 @@ pub fn show(
     tab: &mut DocumentTab,
     which: &mut SidebarTab,
     state: &mut SidebarState,
+    translation: &TranslationInfo<'_>,
     now: Instant,
 ) -> Vec<SidebarAction> {
     ui.horizontal_wrapped(|ui| {
@@ -95,8 +114,159 @@ pub fn show(
         SidebarTab::Search => {
             find::search_panel(&mut tab.find, ui, now);
         }
+        SidebarTab::Translation => translation_panel(ui, tab, translation, &mut actions),
     }
     actions
+}
+
+fn translation_panel(
+    ui: &mut egui::Ui,
+    tab: &DocumentTab,
+    info: &TranslationInfo<'_>,
+    actions: &mut Vec<SidebarAction>,
+) {
+    let language = info
+        .target
+        .as_deref()
+        .map(language_label)
+        .unwrap_or("the settings' language");
+    let is_pdf = tab
+        .path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+    ui.strong("Document");
+    match &tab.translation {
+        None if !is_pdf => muted(ui, "Only PDFs can be translated as documents."),
+        None => {
+            muted(
+                ui,
+                &format!(
+                    "Translate this PDF into {language}; translated pages replace the originals as they are ready."
+                ),
+            );
+            let start = ui.add_enabled(info.ready, egui::Button::new("Translate document"));
+            if start.clicked() {
+                actions.push(SidebarAction::StartTranslation);
+            }
+            if !info.ready {
+                muted(ui, "Reading the translation settings…");
+            }
+        }
+        Some(session) => {
+            ui.label(session.status_line());
+            if let Some(progress) = &session.progress
+                && let (Some(done), Some(total)) = (progress.completed, progress.total)
+                && total > 0
+                && session.is_running()
+            {
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(6.0));
+            }
+            if session.page_count > 0 {
+                muted(
+                    ui,
+                    &format!(
+                        "{} of {} pages translated",
+                        session.previews.len(),
+                        session.page_count
+                    ),
+                );
+            }
+            if !session.failures.is_empty() {
+                muted(
+                    ui,
+                    &format!("{} pages could not be translated", session.failures.len()),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(!session.show_translated, "Original")
+                    .clicked()
+                {
+                    actions.push(SidebarAction::ShowTranslated(false));
+                }
+                if ui
+                    .selectable_label(session.show_translated, "Translated")
+                    .clicked()
+                {
+                    actions.push(SidebarAction::ShowTranslated(true));
+                }
+            });
+            ui.horizontal(|ui| {
+                if session.is_running() {
+                    if ui.button("Cancel").clicked() {
+                        actions.push(SidebarAction::CancelTranslation);
+                    }
+                } else if ui.button("Translate again").clicked() {
+                    actions.push(SidebarAction::StartTranslation);
+                }
+                let can_export = session.status == SessionStatus::Finished
+                    && !matches!(session.export, Some(Export::Running(_)));
+                if ui
+                    .add_enabled(can_export, egui::Button::new("Export PDF…"))
+                    .clicked()
+                {
+                    actions.push(SidebarAction::ExportTranslation);
+                }
+            });
+            match &session.export {
+                Some(Export::Running(_)) => muted(ui, "Exporting…"),
+                Some(Export::Done(Ok(path))) => muted(ui, &format!("Saved {}", path.display())),
+                Some(Export::Done(Err(error))) => muted(ui, &format!("Export failed: {error}")),
+                None => {}
+            }
+        }
+    }
+    for warning in info.warnings {
+        muted(ui, warning);
+    }
+    ui.separator();
+    ui.strong("Pinned");
+    if info.pinned.is_empty() {
+        muted(
+            ui,
+            "Translate a selection (right-click or Ctrl+T) and pin it to keep it here.",
+        );
+        return;
+    }
+    let tokens = Tokens::get(ui.ctx());
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            for (index, (source, translated)) in info.pinned.iter().enumerate() {
+                egui::Frame::new()
+                    .fill(tokens.card)
+                    .stroke(egui::Stroke::new(1.0, tokens.border))
+                    .corner_radius(6)
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let quote: String = source.chars().take(QUOTE_CHARS).collect();
+                        ui.label(
+                            egui::RichText::new(quote)
+                                .italics()
+                                .color(tokens.text_muted),
+                        );
+                        ui.label(translated);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                actions.push(SidebarAction::Unpin(index));
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(translated.clone());
+                            }
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+        });
+}
+
+/// A language's name from its code, or the code itself.
+pub fn language_label(code: &str) -> &str {
+    glyphst_translation::TARGET_LANGUAGES
+        .iter()
+        .find(|language| language.code.eq_ignore_ascii_case(code))
+        .map_or(code, |language| language.label)
 }
 
 fn muted(ui: &mut egui::Ui, text: &str) {

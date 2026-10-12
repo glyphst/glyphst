@@ -18,6 +18,8 @@ pub const DOCUMENT_EXTENSIONS: [&str; 7] = ["pdf", "epub", "xps", "oxps", "cbz",
 pub struct Pickers {
     showing: Arc<AtomicBool>,
     picked: Arc<Mutex<Vec<PathBuf>>>,
+    /// A save dialog's answer: what it was for and the chosen path.
+    saved: Arc<Mutex<Option<(u64, PathBuf)>>>,
 }
 
 impl Pickers {
@@ -44,6 +46,39 @@ impl Pickers {
         if spawned.is_err() {
             self.showing.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Shows a save dialog for a PDF named `name`; the answer is tagged
+    /// with `purpose` (here, the tab exporting).
+    pub fn save_pdf(&self, ctx: &egui::Context, name: &str, purpose: u64) {
+        if self.showing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Export translated PDF")
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(name)
+            .save_file();
+        let (showing, saved, ctx) = (self.showing.clone(), self.saved.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("save-dialog".into())
+            .spawn(move || {
+                if let Some(file) = pollster::block_on(dialog)
+                    && let Ok(mut saved) = saved.lock()
+                {
+                    *saved = Some((purpose, file.path().to_path_buf()));
+                }
+                showing.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            self.showing.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The path a save dialog chose since the last call, and its purpose.
+    pub fn take_saved(&self) -> Option<(u64, PathBuf)> {
+        self.saved.lock().ok().and_then(|mut saved| saved.take())
     }
 
     pub fn is_showing(&self) -> bool {

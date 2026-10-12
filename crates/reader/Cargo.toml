@@ -13,13 +13,13 @@ tracy = ["ztracing/tracy"]
 anyhow.workspace = true
 dirs.workspace = true
 futures.workspace = true
-glyphst-ai = { path = "../ai" }
+glyphst-ai = { path = "../ai", features = ["gpui"] }
 glyphst-core = { path = "../core" }
 glyphst-keymap = { path = "../keymap" }
 glyphst-library = { path = "../library", features = ["gpui"] }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-document-ui = { path = "../document-ui" }
-glyphst-settings = { path = "../settings" }
+glyphst-settings = { path = "../settings", features = ["gpui"] }
 glyphst-settings-ui = { path = "../settings-ui" }
 glyphst-translation = { path = "../translation" }
 glyphst-translation-ui = { path = "../translation-ui" }

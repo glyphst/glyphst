@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -13,7 +14,7 @@ use anyhow::Result;
 use glyphst_core::{DocumentLayout, SemanticTextAnchor};
 use glyphst_library::DocumentPosition;
 use glyphst_pdf::{
-    text::{LinkTarget, PageLink},
+    text::{LinkTarget, PageLink, PageText},
     vector::{LayerImage, PageRect},
 };
 use glyphst_pdf_gpu::PreparedPage;
@@ -21,11 +22,14 @@ use glyphst_pdf_gpu::PreparedPage;
 use crate::{
     annotations::Annotations,
     doc_text::DocText,
-    document::{DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP, View},
+    document::{
+        DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP, PageSource, View,
+    },
     find::Find,
     gamepad::GamepadInput,
     gpu::PageDraw,
     text_overlay::Selection,
+    translation::DocSession,
 };
 
 /// Zoom limits relative to the fit-width scale.
@@ -175,6 +179,13 @@ pub struct DocumentTab {
     pending_anchor: Option<(SemanticTextAnchor, f32, [f64; 2])>,
     /// When the view width last stopped matching the reflowed layout.
     pub reflow_mismatch: Option<Instant>,
+    /// The document's translation, when one was started.
+    pub translation: Option<DocSession>,
+    /// The source version of each page's loaded drawing and of its text.
+    loaded_version: HashMap<usize, u64>,
+    text_version: Vec<u64>,
+    /// The document's own text of pages shown translated.
+    pub original_text: HashMap<usize, Arc<PageText>>,
 }
 
 impl DocumentTab {
@@ -228,6 +239,10 @@ impl DocumentTab {
             forward: Vec::new(),
             pending_anchor: None,
             reflow_mismatch: None,
+            translation: None,
+            loaded_version: HashMap::new(),
+            text_version: vec![0; pages],
+            original_text: HashMap::new(),
         })
     }
 
@@ -267,6 +282,10 @@ impl DocumentTab {
         self.forward.clear();
         self.pending_anchor = None;
         self.reflow_mismatch = None;
+        self.translation = None;
+        self.loaded_version.clear();
+        self.text_version = vec![0; pages];
+        self.original_text.clear();
         self.restore = Some(position);
         self.fitted = false;
         Ok(())
@@ -287,11 +306,17 @@ impl DocumentTab {
                 }
                 Loaded::Prepared {
                     page,
+                    version,
                     prepared,
                     layers,
                     links,
                     seconds,
                 } => {
+                    // A drawing from a source no longer shown is dropped.
+                    if version != self.source(page).version() {
+                        continue;
+                    }
+                    self.loaded_version.insert(page, version);
                     self.load_seconds.push(seconds);
                     self.links.insert(page, links);
                     let states = prepared
@@ -326,13 +351,35 @@ impl DocumentTab {
                 Loaded::Failed { page, error } => {
                     self.failed.insert(page, error);
                 }
-                Loaded::Text { page, text } => {
-                    self.text.insert(page, text);
+                Loaded::Text {
+                    page,
+                    version,
+                    text,
+                } => {
+                    if version == self.source(page).version() {
+                        if self.text_version[page] != version {
+                            self.text.remove(page);
+                            self.find.invalidate_page(page);
+                            self.text_version[page] = version;
+                        }
+                        self.text.insert(page, text);
+                    }
+                }
+                Loaded::OriginalText { page, text } => {
+                    self.original_text.insert(page, text);
                 }
                 Loaded::ThumbnailSkipped { page } => {
                     self.dense_pages.insert(page);
                 }
-                Loaded::Layer { page, layer, image } => {
+                Loaded::Layer {
+                    page,
+                    version,
+                    layer,
+                    image,
+                } => {
+                    if self.loaded_version.get(&page) != Some(&version) {
+                        continue;
+                    }
                     if let Some(state) = self
                         .layers
                         .get_mut(&page)
@@ -350,10 +397,104 @@ impl DocumentTab {
     }
 
     /// Asks the loader for `wanted` pages that `resident` says are missing.
+    /// A page counts as loaded once its drawing from the source shown is on
+    /// the GPU or waiting for it.
     pub fn want(&mut self, wanted: &[usize], resident: impl Fn(usize) -> bool) {
         let waiting: Vec<usize> = self.ready.iter().map(|ready| ready.page).collect();
-        self.loader
-            .want(wanted, |page| resident(page) || waiting.contains(&page));
+        let current =
+            |page: usize| self.loaded_version.get(&page) == Some(&self.source(page).version());
+        let loaded: HashSet<usize> = wanted
+            .iter()
+            .copied()
+            .filter(|&page| (resident(page) || waiting.contains(&page)) && current(page))
+            .collect();
+        let sources: HashMap<usize, PageSource> = wanted
+            .iter()
+            .map(|&page| (page, self.source(page)))
+            .collect();
+        self.loader.want(
+            wanted,
+            |page| loaded.contains(&page),
+            |page| sources.get(&page).cloned().unwrap_or(PageSource::Original),
+        );
+    }
+
+    /// Where `page` is drawn from: its translation when one is shown,
+    /// otherwise the document.
+    pub fn source(&self, page: usize) -> PageSource {
+        match self
+            .translation
+            .as_ref()
+            .and_then(|session| session.shown_preview(page))
+        {
+            Some(preview) => PageSource::Preview {
+                revision: preview.revision,
+                pdf: preview.pdf.clone(),
+            },
+            None => PageSource::Original,
+        }
+    }
+
+    /// The translated block under a page point, and the original text it
+    /// replaces (read from the document's text in the block's source
+    /// regions).
+    pub fn original_at(&self, page: usize, point: [f32; 2]) -> Option<(PageRect, String)> {
+        let preview = self.translation.as_ref()?.shown_preview(page)?;
+        let inside = |b: &glyphst_pdf_translation_service::BoundingBox| {
+            point[0] >= b.x0 && point[0] <= b.x1 && point[1] >= b.y0 && point[1] <= b.y1
+        };
+        let region = preview
+            .hover
+            .iter()
+            .filter(|region| inside(&region.target_bounds))
+            .min_by(|a, b| {
+                let area = |r: &glyphst_pdf_translation_service::BoundingBox| {
+                    (r.x1 - r.x0) * (r.y1 - r.y0)
+                };
+                area(&a.target_bounds).total_cmp(&area(&b.target_bounds))
+            })?;
+        let original = self.original_text.get(&page)?;
+        let glyphs: Vec<usize> = region
+            .source_regions
+            .iter()
+            .flat_map(|b| original.glyphs_in([b.x0, b.y0, b.x1, b.y1]))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let text = original.text_of_glyphs(&glyphs);
+        let b = &region.target_bounds;
+        (!text.is_empty()).then_some(([b.x0, b.y0, b.x1, b.y1], text))
+    }
+
+    /// Whether `page` shows its translation.
+    pub fn shows_translation(&self, page: usize) -> bool {
+        self.source(page).version() != 0
+    }
+
+    /// Follows the translation: pages whose shown source changed (a new
+    /// translated page, or the view switched between original and
+    /// translation) are drawn and read again.
+    pub fn sync_translation(&mut self) {
+        if let Some(session) = &mut self.translation {
+            session.poll();
+        }
+        for page in 0..self.layout.len() {
+            let version = self.source(page).version();
+            if self.text_version[page] != version {
+                self.text.remove(page);
+                self.find.invalidate_page(page);
+                self.text_version[page] = version;
+                self.text_requested[page] = false;
+                self.thumbnails.remove(&page);
+                if self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.page == page)
+                {
+                    self.selection = None;
+                }
+            }
+        }
     }
 
     /// Opens at `zoom` (relative to fit width) instead of the remembered
@@ -377,6 +518,8 @@ impl DocumentTab {
         self.loader.forget(page);
         self.layers.remove(&page);
         self.links.remove(&page);
+        self.loaded_version.remove(&page);
+        self.original_text.remove(&page);
         // Text goes with the page unless a search, the reflowed layout or
         // the selection needs it.
         let selected = self.selection.as_ref().map(|selection| selection.page);
@@ -401,7 +544,12 @@ impl DocumentTab {
                 for &page in &missing {
                     self.text_requested[page] = true;
                 }
-                self.indexer.request_text(missing);
+                self.indexer.request_text(
+                    missing
+                        .into_iter()
+                        .map(|page| (page, self.source(page)))
+                        .collect(),
+                );
             }
         } else if self.text_requested.iter().any(|requested| *requested) {
             self.indexer.cancel_text();
@@ -640,8 +788,24 @@ impl DocumentTab {
                     continue;
                 }
                 state.pending = true;
-                self.loader
-                    .rasterize_layer(draw.page, index, state.ops.clone(), wanted, needed);
+                let source = match &self.translation {
+                    Some(session) => match session.shown_preview(draw.page) {
+                        Some(preview) => PageSource::Preview {
+                            revision: preview.revision,
+                            pdf: preview.pdf.clone(),
+                        },
+                        None => PageSource::Original,
+                    },
+                    None => PageSource::Original,
+                };
+                self.loader.rasterize_layer(
+                    draw.page,
+                    source,
+                    index,
+                    state.ops.clone(),
+                    wanted,
+                    needed,
+                );
             }
         }
     }
@@ -1037,6 +1201,10 @@ mod tests {
             forward: Vec::new(),
             pending_anchor: None,
             reflow_mismatch: None,
+            translation: None,
+            loaded_version: HashMap::new(),
+            text_version: vec![0; pages],
+            original_text: HashMap::new(),
         }
     }
 

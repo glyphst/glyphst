@@ -1,7 +1,7 @@
 //! Continuous page layout, the view camera, and background page loading.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -191,7 +191,26 @@ impl View {
     }
 }
 
-/// A page result from the loader.
+/// Where a page's drawing and text come from: the document, or a
+/// translated preview of the page (a one-page PDF).
+#[derive(Clone, Debug)]
+pub enum PageSource {
+    Original,
+    Preview { revision: u64, pdf: Arc<[u8]> },
+}
+
+impl PageSource {
+    /// 0 for the original, then one per preview revision.
+    pub fn version(&self) -> u64 {
+        match self {
+            Self::Original => 0,
+            Self::Preview { revision, .. } => revision + 1,
+        }
+    }
+}
+
+/// A page result from the loader. `version` is the [`PageSource`] it was
+/// made from.
 pub enum Loaded {
     Thumbnail {
         page: usize,
@@ -199,6 +218,7 @@ pub enum Loaded {
     },
     Prepared {
         page: usize,
+        version: u64,
         prepared: Box<PreparedPage>,
         layers: Vec<(usize, LayerImage)>,
         links: Vec<PageLink>,
@@ -206,6 +226,13 @@ pub enum Loaded {
     },
     /// A page's text, read after the page is shown or by the indexer.
     Text {
+        page: usize,
+        version: u64,
+        text: Arc<PageText>,
+    },
+    /// The document's own text of a page shown from a preview, for showing
+    /// the original of translated text.
+    OriginalText {
         page: usize,
         text: Arc<PageText>,
     },
@@ -220,6 +247,7 @@ pub enum Loaded {
     /// A raster layer re-rasterized for the current view.
     Layer {
         page: usize,
+        version: u64,
         layer: usize,
         image: LayerImage,
     },
@@ -227,9 +255,13 @@ pub enum Loaded {
 
 /// Work for the loader thread.
 enum Request {
-    Page(usize),
+    Page {
+        page: usize,
+        source: PageSource,
+    },
     Layer {
         page: usize,
+        source: PageSource,
         layer: usize,
         ops: Range<u32>,
         rect: PageRect,
@@ -246,7 +278,8 @@ pub struct Loader {
     requests: Sender<Request>,
     results: Receiver<Loaded>,
     wanted: Arc<Mutex<HashSet<usize>>>,
-    requested: HashSet<usize>,
+    /// Pages asked for and the version of each.
+    requested: HashMap<usize, u64>,
 }
 
 /// Opens the document a worker reads, with the tab's layout.
@@ -273,7 +306,8 @@ impl Loader {
                         return;
                     }
                 };
-                let mut lists: VecDeque<(usize, DisplayList)> = VecDeque::new();
+                // Display lists by page and source version.
+                let mut lists: VecDeque<((usize, u64), DisplayList)> = VecDeque::new();
                 let mut send = |loaded| {
                     let sent = result_tx.send(loaded).is_ok();
                     ctx.request_repaint();
@@ -281,16 +315,19 @@ impl Loader {
                 };
                 while let Ok(request) = request_rx.recv() {
                     match request {
-                        Request::Page(page) => {
+                        Request::Page { page, source } => {
                             if !worker_wanted
                                 .lock()
                                 .is_ok_and(|wanted| wanted.contains(&page))
                             {
                                 continue;
                             }
-                            if let Some(list) = load_page(document.inner(), page, &mut send) {
-                                lists.retain(|(cached, _)| *cached != page);
-                                lists.push_back((page, list));
+                            let key = (page, source.version());
+                            if let Some(list) =
+                                load_page(document.inner(), page, &source, &mut send)
+                            {
+                                lists.retain(|(cached, _)| *cached != key);
+                                lists.push_back((key, list));
                                 if lists.len() > CACHED_LISTS {
                                     lists.pop_front();
                                 }
@@ -298,21 +335,29 @@ impl Loader {
                         }
                         Request::Layer {
                             page,
+                            source,
                             layer,
                             ops,
                             rect,
                             scale,
                         } => {
+                            let version = source.version();
                             let image = rasterize_cached(
                                 document.inner(),
                                 &mut lists,
                                 page,
+                                &source,
                                 ops,
                                 rect,
                                 scale,
                             );
                             if let Some(image) = image
-                                && !send(Loaded::Layer { page, layer, image })
+                                && !send(Loaded::Layer {
+                                    page,
+                                    version,
+                                    layer,
+                                    image,
+                                })
                             {
                                 return;
                             }
@@ -325,21 +370,32 @@ impl Loader {
             requests,
             results,
             wanted,
-            requested: HashSet::new(),
+            requested: HashMap::new(),
         }
     }
 
-    /// Requests `pages` (in priority order) and forgets other pages that
-    /// were requested but not loaded yet.
-    pub fn want(&mut self, pages: &[usize], loaded: impl Fn(usize) -> bool) {
+    /// Requests `pages` (in priority order) from their `source` and
+    /// forgets other pages that were requested but not loaded yet. A page
+    /// asked for from another source is requested again.
+    pub fn want(
+        &mut self,
+        pages: &[usize],
+        loaded: impl Fn(usize) -> bool,
+        source: impl Fn(usize) -> PageSource,
+    ) {
         if let Ok(mut wanted) = self.wanted.lock() {
             wanted.clear();
             wanted.extend(pages.iter().copied().filter(|&page| !loaded(page)));
         }
-        self.requested.retain(|page| pages.contains(page));
+        self.requested.retain(|page, _| pages.contains(page));
         for &page in pages {
-            if !loaded(page) && self.requested.insert(page) {
-                let _ = self.requests.send(Request::Page(page));
+            if loaded(page) {
+                continue;
+            }
+            let source = source(page);
+            if self.requested.get(&page) != Some(&source.version()) {
+                self.requested.insert(page, source.version());
+                let _ = self.requests.send(Request::Page { page, source });
             }
         }
     }
@@ -349,6 +405,7 @@ impl Loader {
     pub fn rasterize_layer(
         &self,
         page: usize,
+        source: PageSource,
         layer: usize,
         ops: Range<u32>,
         rect: PageRect,
@@ -356,6 +413,7 @@ impl Loader {
     ) {
         let _ = self.requests.send(Request::Layer {
             page,
+            source,
             layer,
             ops,
             rect,
@@ -381,13 +439,13 @@ impl Loader {
 fn load_page(
     document: &mupdf::Document,
     page: usize,
+    source: &PageSource,
     send: &mut dyn FnMut(Loaded) -> bool,
 ) -> Option<DisplayList> {
     let started = Instant::now();
+    let version = source.version();
     let result = (|| -> Result<Option<(Loaded, DisplayList)>> {
-        let loaded_page = document
-            .load_page(i32::try_from(page)?)
-            .with_context(|| format!("failed to load page {}", page + 1))?;
+        let loaded_page = source_page(document, page, source)?;
         let list = loaded_page.to_display_list(true)?;
         let links = page_links(&loaded_page);
         let vector = capture_display_list(&list)?;
@@ -418,6 +476,7 @@ fn load_page(
         }
         let loaded = Loaded::Prepared {
             page,
+            version,
             prepared: Box::new(prepared),
             layers,
             links,
@@ -433,11 +492,23 @@ fn load_page(
             // The text follows the page, so a dense page shows without
             // waiting for it; a page whose text cannot be read still shows.
             let text = PageText::from_display_list(&list).unwrap_or_default();
-            send(Loaded::Text {
+            if !send(Loaded::Text {
                 page,
+                version,
                 text: Arc::new(text),
-            })
-            .then_some(list)
+            }) {
+                return None;
+            }
+            if version != 0 {
+                let original = original_text(document, page);
+                if !send(Loaded::OriginalText {
+                    page,
+                    text: Arc::new(original),
+                }) {
+                    return None;
+                }
+            }
+            Some(list)
         }
         Ok(None) => None,
         Err(error) => {
@@ -450,28 +521,55 @@ fn load_page(
     }
 }
 
+/// The MuPDF page a source draws: the document's page, or the first page
+/// of a preview PDF.
+fn source_page(
+    document: &mupdf::Document,
+    page: usize,
+    source: &PageSource,
+) -> Result<mupdf::Page> {
+    match source {
+        PageSource::Original => document
+            .load_page(i32::try_from(page)?)
+            .with_context(|| format!("failed to load page {}", page + 1)),
+        PageSource::Preview { pdf, .. } => mupdf::Document::from_bytes(pdf, "application/pdf")
+            .and_then(|preview| preview.load_page(0))
+            .with_context(|| format!("failed to open the translated page {}", page + 1)),
+    }
+}
+
+/// The document's own text of a page; empty when it cannot be read.
+fn original_text(document: &mupdf::Document, page: usize) -> PageText {
+    i32::try_from(page)
+        .ok()
+        .and_then(|index| document.load_page(index).ok())
+        .and_then(|page| PageText::from_page(&page).ok())
+        .unwrap_or_default()
+}
+
 /// Rasterizes layer operations from a cached display list, loading the
 /// page's list again when it was dropped.
 fn rasterize_cached(
     document: &mupdf::Document,
-    lists: &mut VecDeque<(usize, DisplayList)>,
+    lists: &mut VecDeque<((usize, u64), DisplayList)>,
     page: usize,
+    source: &PageSource,
     ops: Range<u32>,
     rect: PageRect,
     scale: f32,
 ) -> Option<LayerImage> {
-    if !lists.iter().any(|(cached, _)| *cached == page) {
-        let list = document
-            .load_page(i32::try_from(page).ok()?)
+    let key = (page, source.version());
+    if !lists.iter().any(|(cached, _)| *cached == key) {
+        let list = source_page(document, page, source)
             .ok()?
             .to_display_list(true)
             .ok()?;
-        lists.push_back((page, list));
+        lists.push_back((key, list));
         if lists.len() > CACHED_LISTS {
             lists.pop_front();
         }
     }
-    let (_, list) = lists.iter().find(|(cached, _)| *cached == page)?;
+    let (_, list) = lists.iter().find(|(cached, _)| *cached == key)?;
     rasterize_layer(list, ops, rect, scale, MAX_LAYER_DIMENSION)
         .ok()
         .flatten()
@@ -482,8 +580,8 @@ fn rasterize_cached(
 struct IndexWork {
     /// Sidebar thumbnails, in priority order.
     thumbnails: Vec<usize>,
-    /// Pages whose text to read, in order.
-    texts: VecDeque<usize>,
+    /// Pages whose text to read, in order, and where from.
+    texts: VecDeque<(usize, PageSource)>,
 }
 
 /// Page text for search and reflow anchors, and thumbnails for the pages
@@ -540,14 +638,14 @@ impl Indexer {
                                 None => send(Loaded::ThumbnailSkipped { page }),
                             }
                         }
-                    } else if let Some(page) = text {
-                        let text = i32::try_from(page)
+                    } else if let Some((page, source)) = text {
+                        let text = source_page(document, page, &source)
                             .ok()
-                            .and_then(|index| document.load_page(index).ok())
                             .and_then(|page| PageText::from_page(&page).ok())
                             .unwrap_or_default();
                         send(Loaded::Text {
                             page,
+                            version: source.version(),
                             text: Arc::new(text),
                         })
                     } else {
@@ -579,7 +677,7 @@ impl Indexer {
     }
 
     /// Adds pages whose text to read.
-    pub fn request_text(&self, pages: Vec<usize>) {
+    pub fn request_text(&self, pages: Vec<(usize, PageSource)>) {
         if let Ok(mut work) = self.work.lock() {
             work.texts.extend(pages);
             self.worker.unpark();
@@ -803,5 +901,49 @@ mod tests {
         view.origin = [-500.0, 5000.0];
         view.clamp(&layout, [400.0, 400.0]);
         assert_eq!(view.origin, [-PAGE_GAP, 1924.0 + PAGE_GAP - 200.0]);
+    }
+
+    #[test]
+    fn previews_load_in_place_of_the_document_page() {
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-reader-egui-preview-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("source.pdf");
+        std::fs::write(&path, glyphst_pdf::test_pdf::text_pdf(&["Original words"])).unwrap();
+        let preview: Arc<[u8]> = glyphst_pdf::test_pdf::text_pdf(&["Translated words"]).into();
+        let mut loader = Loader::new(path, DocumentLayout::Fixed, egui::Context::default());
+        loader.want(
+            &[0],
+            |_| false,
+            |_| PageSource::Preview {
+                revision: 4,
+                pdf: preview.clone(),
+            },
+        );
+        let (mut prepared, mut text, mut original) = (None, None, None);
+        let started = Instant::now();
+        while original.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(30), "timed out");
+            match loader.try_recv() {
+                Some(Loaded::Prepared { version, .. }) => prepared = Some(version),
+                Some(Loaded::Text {
+                    version, text: t, ..
+                }) => text = Some((version, t)),
+                Some(Loaded::OriginalText { text: t, .. }) => original = Some(t),
+                Some(Loaded::Failed { error, .. }) => panic!("{error}"),
+                Some(_) => {}
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert_eq!(prepared, Some(5), "the preview's version");
+        let (version, text) = text.unwrap();
+        assert_eq!(
+            (version, text.plain_text().as_str()),
+            (5, "Translated words")
+        );
+        assert_eq!(original.unwrap().plain_text(), "Original words");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

@@ -6,6 +6,10 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Small PDFs built in memory, for other crates' tests.
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }

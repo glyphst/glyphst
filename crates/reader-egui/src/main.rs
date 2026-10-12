@@ -3,6 +3,7 @@
 //!
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
+//!     [--translate-fake] [--translate-document] [--translate-selection]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
@@ -19,6 +20,7 @@ mod app;
 mod doc_text;
 mod document;
 mod document_tab;
+mod fake_providers;
 mod find;
 mod fonts;
 mod gamepad;
@@ -31,6 +33,7 @@ mod sidebar;
 mod text_overlay;
 mod theme;
 mod transition;
+mod translation;
 
 use std::path::PathBuf;
 
@@ -39,6 +42,7 @@ use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
+                     [--translate-fake] [--translate-document] [--translate-selection] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -54,6 +58,9 @@ fn parse_args() -> Result<Launch> {
         select_page: None,
         sidebar: None,
         font_size: None,
+        translate_fake: false,
+        translate_document: false,
+        translate_selection: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -76,6 +83,9 @@ fn parse_args() -> Result<Launch> {
             "--transition" => launch.transition = Some(value()?),
             "--zoom" => launch.zoom = Some(value()?.parse().context("--zoom takes a number")?),
             "--find" => launch.find = Some(value()?),
+            "--translate-fake" => launch.translate_fake = true,
+            "--translate-document" => launch.translate_document = true,
+            "--translate-selection" => launch.translate_selection = true,
             "--page" => {
                 let page: usize = value()?.parse().context("--page takes a page number")?;
                 launch.page = Some(page.max(1));
@@ -110,6 +120,11 @@ fn parse_args() -> Result<Launch> {
 }
 
 fn main() -> Result<()> {
+    // Translation typesets pages with Typst in a worker process that runs
+    // this executable.
+    if let Some(exit_code) = glyphst_pdf_translation_service::run_typst_worker_if_requested() {
+        std::process::exit(exit_code);
+    }
     let launch = parse_args()?;
     // Scripted runs keep no preferences, so they cannot change the user's.
     let persistence_path = launch

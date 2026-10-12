@@ -71,6 +71,8 @@ mupdf = "0.8"
 redb = "4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }
 pollster = "0.4"
+# The Secret Service keyring, built as gpui-pre-linux builds it (async-io).
+oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 rand = "0.10"
 ratex-layout = "=0.1.14"
 ratex-parser = "=0.1.14"

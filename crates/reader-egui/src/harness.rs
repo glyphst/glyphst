@@ -103,7 +103,7 @@ impl Default for Bench {
 impl ReaderApp {
     /// Starts the search and selection a screenshot asked for; returns
     /// whether they are still waiting for text.
-    fn prepare_text_shot(&mut self, now: Instant) -> bool {
+    fn prepare_text_shot(&mut self, ctx: &egui::Context, now: Instant) -> bool {
         let Some(active) = self.active else {
             return false;
         };
@@ -124,7 +124,41 @@ impl ReaderApp {
             self.launch_select = None;
         }
         // A search shows its final count, with the current match in view.
-        tab.find.is_active() && !tab.find.is_complete()
+        let searching = tab.find.is_active() && !tab.find.is_complete();
+        searching || self.prepare_translation(ctx)
+    }
+
+    /// Starts the translations a scripted run asked for once the settings
+    /// are read; returns whether one is still running.
+    pub(crate) fn prepare_translation(&mut self, ctx: &egui::Context) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        if self.translator.settings().is_none() {
+            return self.launch_translate_document || self.launch_translate_selection;
+        }
+        if self.launch_translate_document {
+            self.launch_translate_document = false;
+            self.start_document_translation(ctx);
+        }
+        if self.launch_translate_selection && self.launch_select.is_none() {
+            if self.tabs[active].selection.is_none() {
+                return true;
+            }
+            self.launch_translate_selection = false;
+            let at = ctx.content_rect().center() - egui::vec2(180.0, 120.0);
+            self.translate_selection(at, ctx);
+        }
+        let document = self.tabs[active]
+            .translation
+            .as_ref()
+            .is_some_and(|session| session.is_running());
+        let selection = self
+            .translator
+            .card
+            .as_ref()
+            .is_some_and(|card| card.state == crate::translation::CardState::Loading);
+        document || selection || self.launch_translate_selection
     }
 
     pub(crate) fn run_harness(&mut self, ctx: &egui::Context, pages_drawn: bool, now: Instant) {
@@ -132,7 +166,7 @@ impl ReaderApp {
             return;
         };
         let done = match &mut harness {
-            Harness::Bench(bench) => self.bench_step(bench, pages_drawn, now),
+            Harness::Bench(bench) => self.bench_step(ctx, bench, pages_drawn, now),
             Harness::Screenshot(shot) => self.screenshot_step(ctx, shot, pages_drawn, now),
         };
         if done {
@@ -141,7 +175,15 @@ impl ReaderApp {
         self.harness = Some(harness);
     }
 
-    fn bench_step(&mut self, bench: &mut Bench, pages_drawn: bool, now: Instant) -> bool {
+    fn bench_step(
+        &mut self,
+        ctx: &egui::Context,
+        bench: &mut Bench,
+        pages_drawn: bool,
+        now: Instant,
+    ) -> bool {
+        // A translation runs alongside, its pages swapping in as they come.
+        self.prepare_translation(ctx);
         let interval = bench.last_frame.replace(now).map(|last| now - last);
         let stats = self.with_gpu(|gpu| gpu.stats.clone()).unwrap_or_default();
         bench.max_encode_ms = bench.max_encode_ms.max(stats.encode_ms);
@@ -250,6 +292,10 @@ impl ReaderApp {
             "pages_loaded": tab.load_seconds.len(),
             "load_ms_p50": percentile_ms(&load, 0.5),
             "upload_ms_max": self.upload_ms.iter().copied().fold(0.0, f64::max),
+            "translation": tab.translation.as_ref().map(|session| json!({
+                "status": session.status_line(),
+                "pages": session.previews.len(),
+            })),
         });
         println!("{summary}");
         true
@@ -287,7 +333,7 @@ impl ReaderApp {
         let layers_pending = self
             .active
             .is_some_and(|active| self.tabs[active].layers_pending());
-        let text_pending = self.prepare_text_shot(now);
+        let text_pending = self.prepare_text_shot(ctx, now);
         if !pages_drawn || layers_pending || text_pending || shot.requested {
             shot.ready_frames = shot.ready_frames.min(SETTLE_FRAMES / 2);
             return false;

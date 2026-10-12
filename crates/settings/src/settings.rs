@@ -1,19 +1,23 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write as _,
+    fs,
     path::{Path, PathBuf},
 };
+#[cfg(feature = "gpui")]
+use std::{fs::OpenOptions, io::Write as _};
 
 use anyhow::{Context as _, Result};
 use glyphst_core::{EpubReaderPreferences, EpubTheme};
+#[cfg(feature = "gpui")]
 use gpui::{App, Font, FontFallbacks, FontWeight, Global, Window, WindowBackgroundAppearance};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
+#[cfg(feature = "gpui")]
 use crate::theme::{
-    DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, PartialTheme, Theme, ThemeAppearance,
-    ThemeCatalog, ThemeSelection, apply_component_overrides, push_value_node, value_to_f32,
+    DEFAULT_DARK_THEME_ID, DEFAULT_LIGHT_THEME_ID, Theme, ThemeAppearance, ThemeCatalog,
+    apply_component_overrides,
 };
+use crate::theme::{PartialTheme, ThemeSelection, push_value_node, value_to_f32};
 
 pub const DEFAULT_ZOOM: f32 = 1.0;
 pub const DEFAULT_ZOOM_STEP: f32 = 1.1;
@@ -61,30 +65,36 @@ mod model;
 mod ocr;
 mod persistence;
 mod provider_secrets;
+#[cfg(feature = "gpui")]
 mod store;
 mod translation;
+mod user;
 
 pub use ai::{
     AiApiStyle, AiCapabilityOverride, AiCapabilitySupport, AiModel, AiModelCapabilities,
     AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, ModelRef, PageImageQuality,
     PageTextFormat, QuickAskPosition, QuickAskSettings, ResolvedAiConfig,
 };
+#[cfg(feature = "gpui")]
+pub use general::ui_rems;
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, DocumentProgressDisplay, DocumentThemeSettings,
     DocumentViewSettings, FontSettings, KeyBindingOverride, KeymapPreset, NewTabSettings,
     NewTabViewMode, PathChooserBackend, RestoreOnStartup, TabBarVisibility, WindowBackgroundMode,
-    WindowSettings, ui_rems,
+    WindowSettings,
 };
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};
 pub use persistence::{parse_settings, user_themes_dir};
 pub use provider_secrets::{ProviderSecretId, ProviderSecretPersistence, ProviderSecretStatus};
+#[cfg(feature = "gpui")]
 pub use store::{SettingsStore, setup_ui_font, sync_component_theme};
 pub use translation::{
     DocumentTranslationMode, PdfContentReviewMode, PdfContentReviewSettings,
     PinnedTranslationSettings, TranslationBoxCorner, TranslationProvider,
     TranslationProviderConfig, TranslationSettings, TranslationTargetLanguage,
 };
+pub use user::{keychain_secret_ids, load_user_settings, read_keychain_secrets};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests;

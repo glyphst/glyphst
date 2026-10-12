@@ -1,8 +1,8 @@
 mod document;
 mod reload;
 mod render;
-#[cfg(test)]
-mod test_pdf;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_pdf;
 pub mod text;
 pub mod vector;
 
