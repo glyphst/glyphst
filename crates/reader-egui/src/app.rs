@@ -41,6 +41,8 @@ use crate::{
     widgets,
 };
 
+mod chrome;
+
 /// Positions are written to the library at most this often while reading.
 const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const TAB_MIN_WIDTH: f32 = 90.0;
@@ -69,6 +71,9 @@ pub struct Launch {
     pub background: Option<String>,
     pub transition: Option<String>,
     pub theme: Option<ThemePreference>,
+    /// Keeps the dock and the rail shown (`true`) or faded (`false`)
+    /// instead of fading them after a pause.
+    pub controls: Option<bool>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
     /// Scripted runs: search for this text, select this page's text (from
@@ -154,6 +159,11 @@ pub struct ReaderApp {
     pub(crate) upload_ms: Vec<f64>,
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
+    chrome: chrome::StageChrome,
+    /// See [`Launch::controls`].
+    controls: Option<bool>,
+    /// Present mode was on last frame (to say how to leave it).
+    was_presenting: bool,
     pub(crate) keymap: Keymap,
     pub(crate) palette: Palette,
     pub(crate) settings_window: SettingsWindow,
@@ -241,6 +251,10 @@ impl ReaderApp {
             first_page_ms: None,
             upload_ms: Vec::new(),
             pending_actions: Vec::new(),
+            chrome: Default::default(),
+            // Scripted runs show the controls unless told otherwise.
+            was_presenting: false,
+            controls: launch.controls.or((!persist).then_some(true)),
             keymap: Keymap::default(),
             palette: Palette::default(),
             settings_window: SettingsWindow::default(),
@@ -973,6 +987,8 @@ impl ReaderApp {
                     tab.selection = None;
                 } else if tab.find.open {
                     tab.find.close();
+                } else if tab.present.is_some() {
+                    actions.push(ViewAction::TogglePresent);
                 }
             }
         }
@@ -1445,184 +1461,13 @@ impl ReaderApp {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ViewAction>) {
-        let Some(active) = self.active else {
-            return;
-        };
-        let tab = &self.tabs[active];
-        let pages = tab.layout.len();
-        let mut find = false;
-        let mut font_step = 0.0;
-        let mut translate_document = false;
-        let mut translation_shown = None;
-        let mut assistant = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let tip = self.keymap.tip("Sidebar", Command::ToggleSidebar);
-            if icons::button(ui, "panel-left", 28.0, self.prefs.show_sidebar, &tip).clicked() {
-                self.prefs.show_sidebar = !self.prefs.show_sidebar;
-            }
-            let tip = self.keymap.tip("Back", Command::Back);
-            if ui
-                .add_enabled_ui(tab.can_go_back(), |ui| {
-                    icons::button(ui, "arrow-left", 28.0, false, &tip)
-                })
-                .inner
-                .clicked()
-            {
-                actions.push(ViewAction::Back);
-            }
-            let tip = self.keymap.tip("Forward", Command::Forward);
-            if ui
-                .add_enabled_ui(tab.can_go_forward(), |ui| {
-                    icons::button(ui, "arrow-right", 28.0, false, &tip)
-                })
-                .inner
-                .clicked()
-            {
-                actions.push(ViewAction::Forward);
-            }
-            ui.separator();
-            let tip = self.keymap.tip("Previous page", Command::PreviousPage);
-            if icons::button(ui, "chevron-left", 28.0, false, &tip).clicked() {
-                actions.push(ViewAction::PreviousPage);
-            }
-            let current = tab.current_page() + 1;
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.page_input)
-                    .desired_width(48.0)
-                    .hint_text(current.to_string()),
-            );
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Ok(page) = self.page_input.trim().parse::<usize>() {
-                    actions.push(ViewAction::GoToPage(page.saturating_sub(1)));
-                }
-                self.page_input.clear();
-            }
-            ui.label(
-                egui::RichText::new(format!("/ {pages}")).color(Tokens::get(ui.ctx()).text_muted),
-            );
-            let tip = self.keymap.tip("Next page", Command::NextPage);
-            if icons::button(ui, "chevron-right", 28.0, false, &tip).clicked() {
-                actions.push(ViewAction::NextPage);
-            }
-            ui.separator();
-            let tip = self.keymap.tip("Zoom out", Command::ZoomOut);
-            if icons::button(ui, "zoom-out", 28.0, false, &tip).clicked() {
-                actions.push(ViewAction::ZoomOut);
-            }
-            ui.label(format!("{:.0}%", tab.view.scale / tab.fit_scale() * 100.0));
-            let tip = self.keymap.tip("Zoom in", Command::ZoomIn);
-            if icons::button(ui, "zoom-in", 28.0, false, &tip).clicked() {
-                actions.push(ViewAction::ZoomIn);
-            }
-            let tip = self.keymap.tip("Fit width", Command::FitWidth);
-            if icons::button(ui, "scan", 28.0, false, &tip).clicked() {
-                actions.push(ViewAction::FitWidth);
-            }
-            if let DocumentLayout::Reflow(layout) = tab.document_layout {
-                ui.separator();
-                let tip = self.keymap.tip("Smaller text", Command::SmallerText);
-                if icons::button(ui, "a-arrow-down", 28.0, false, &tip).clicked() {
-                    font_step = -1.0;
-                }
-                ui.label(format!("{:.0} pt", layout.font_size));
-                let tip = self.keymap.tip("Larger text", Command::LargerText);
-                if icons::button(ui, "a-arrow-up", 28.0, false, &tip).clicked() {
-                    font_step = 1.0;
-                }
-            }
-            ui.separator();
-            let presenting = tab.present.is_some();
-            let tip = self.keymap.tip("Present", Command::Present);
-            if icons::button(ui, "presentation", 28.0, presenting, &tip).clicked() {
-                actions.push(ViewAction::TogglePresent);
-            }
-            ui.separator();
-            let current = self
-                .translator
-                .target_language(self.prefs.target_language.as_deref());
-            let label = current
-                .as_deref()
-                .map(sidebar::language_label)
-                .unwrap_or("Language")
-                .to_string();
-            egui::ComboBox::from_id_salt("target-language")
-                .selected_text(label)
-                .height(400.0)
-                .show_ui(ui, |ui| {
-                    for language in glyphst_translation::TARGET_LANGUAGES {
-                        let chosen = current.as_deref() == Some(language.code);
-                        if ui.selectable_label(chosen, language.label).clicked() {
-                            self.prefs.target_language = Some(language.code.to_string());
-                        }
-                    }
-                });
-            match &tab.translation {
-                Some(session) => {
-                    let mut shown = session.show_translated;
-                    if ui
-                        .toggle_value(&mut shown, "Translated")
-                        .on_hover_text("Show translated pages")
-                        .changed()
-                    {
-                        translation_shown = Some(shown);
-                    }
-                }
-                None => {
-                    if ui
-                        .button("Translate")
-                        .on_hover_text("Translate this document")
-                        .clicked()
-                    {
-                        translate_document = true;
-                    }
-                }
-            }
-            ui.separator();
-            let tip = self
-                .keymap
-                .tip("Ask about this document", Command::Assistant);
-            if icons::button(ui, "sparkles", 28.0, self.assistant.open, &tip).clicked() {
-                assistant = true;
-            }
-            let tip = self.keymap.tip("Find", Command::Find);
-            if icons::button(ui, "search", 28.0, tab.find.open, &tip).clicked() {
-                find = true;
-            }
-        });
-        if find {
-            let tab = &mut self.tabs[active];
-            if tab.find.open {
-                tab.find.close();
-            } else {
-                let page = tab.current_page();
-                tab.find.show(page);
-            }
-        }
-        if font_step != 0.0 {
-            self.change_font_size(font_step);
-        }
-        if translate_document {
-            let ctx = ui.ctx().clone();
-            self.start_document_translation(&ctx);
-        }
-        if assistant {
-            self.toggle_assistant();
-        }
-        if let Some(shown) = translation_shown
-            && let Some(session) = self.tabs[active].translation.as_mut()
-        {
-            session.show_translated = shown;
-        }
-    }
-
     /// The document view: input, layout, loading, the GPU callback and
     /// loading placeholders. Returns whether it is animating and whether
     /// every visible page is drawn.
     fn document_view(
         &mut self,
         ui: &mut egui::Ui,
+        rect: egui::Rect,
         actions: Vec<ViewAction>,
         pad: &GamepadInput,
         seconds: f64,
@@ -1631,7 +1476,6 @@ impl ReaderApp {
         let Some(active) = self.active else {
             return (false, true);
         };
-        let rect = ui.max_rect();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
@@ -1716,21 +1560,6 @@ impl ReaderApp {
         self.tabs[active].placeholders(&mut frame, |page| resident.contains(&page));
 
         let tokens = Tokens::get(&ctx);
-        let background = {
-            let id = self.prefs.background.clone();
-            let def = self
-                .with_gpu(|gpu| gpu.effects().find(&id).cloned())
-                .flatten();
-            let params = match (&def, id.as_str()) {
-                (_, glyphst_effects::SOLID) => {
-                    let [r, g, b] = tokens.pasteboard_rgb();
-                    [r, g, b, 1.0]
-                }
-                (Some(def), _) => def.default_params(),
-                (None, _) => [0.0; 4],
-            };
-            EffectUse { id, params }
-        };
         let transition = self.transition.as_mut().map(|transition| {
             let params = self
                 .render_state
@@ -1755,6 +1584,25 @@ impl ReaderApp {
             }
         });
         let page_color = tokens.page.to_normalized_gamma_f32();
+        // Shadows under the pages, between the backdrop and the pages; a
+        // transition's outgoing pages sit elsewhere, so none then.
+        if transition.is_none() {
+            let shadow = egui::Shadow {
+                offset: [0, 3],
+                blur: 18,
+                spread: 0,
+                color: tokens.page_shadow,
+            };
+            let painter = ui.painter_at(rect);
+            for draw in &frame.draws {
+                let [x0, y0, x1, y1] = draw.paper;
+                let paper = egui::Rect::from_min_max(
+                    rect.min + egui::vec2(x0, y0) / ppp,
+                    rect.min + egui::vec2(x1, y1) / ppp,
+                );
+                painter.add(shadow.as_shape(paper, 2));
+            }
+        }
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             ViewCallback {
@@ -1762,7 +1610,6 @@ impl ReaderApp {
                 tab: tab_id,
                 draws: frame.draws.clone(),
                 page_color,
-                background,
                 transition,
                 time: self.started.elapsed().as_secs_f32(),
                 pointer: pointer.map(|[x, y]| [x as f32, y as f32]),
@@ -2260,7 +2107,7 @@ impl ReaderApp {
         );
         let font = theme::mono(11.0);
         let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
-        let at = rect.right_bottom() - galley.size() - egui::vec2(20.0, 20.0);
+        let at = rect.right_top() + egui::vec2(-20.0 - galley.size().x, 20.0);
         painter.rect_filled(
             egui::Rect::from_min_size(at, galley.size()).expand(10.0),
             10.0,
@@ -2337,102 +2184,34 @@ impl eframe::App for ReaderApp {
         }
 
         let tokens = Tokens::get(&ctx);
-        egui::Panel::top("tabs")
-            .exact_size(40.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(tokens.titlebar)
-                    .inner_margin(egui::Margin::symmetric(8, 0)),
-            )
-            .show(ui, |ui| self.tab_strip(ui));
-        if self.active.is_some() {
-            egui::Panel::top("toolbar")
+        let presenting = self
+            .active
+            .is_some_and(|active| self.tabs[active].present.is_some());
+        if presenting && !self.was_presenting {
+            let key = self.keymap.label(Command::Present).unwrap_or_default();
+            self.notices
+                .push(format!("Presenting. Press Esc or {key} to leave."));
+        }
+        self.was_presenting = presenting;
+        if !presenting {
+            egui::Panel::top("tabs")
+                .exact_size(40.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(tokens.chrome)
-                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                        .fill(tokens.titlebar)
+                        .stroke(egui::Stroke::new(1.0, tokens.divider))
+                        .inner_margin(egui::Margin::symmetric(8, 0)),
                 )
-                .show(ui, |ui| self.toolbar(ui, &mut actions));
-            if self.prefs.show_sidebar
-                && let Some(active) = self.active
-            {
-                let mut requests = Vec::new();
-                let warnings: Vec<String> = self
-                    .user_settings
-                    .warnings
-                    .iter()
-                    .chain(&self.translator.warnings)
-                    .cloned()
-                    .collect();
-                let info = TranslationInfo {
-                    target: self
-                        .translator
-                        .target_language(self.prefs.target_language.as_deref()),
-                    pinned: &self.translator.pinned,
-                    warnings: &warnings,
-                    ready: self.user_settings.get().is_some(),
-                };
-                egui::Panel::left("sidebar")
-                    .default_size(SIDEBAR_WIDTH)
-                    .frame(egui::Frame::new().fill(tokens.chrome).inner_margin(8))
-                    .show(ui, |ui| {
-                        requests = sidebar::show(
-                            ui,
-                            &mut self.tabs[active],
-                            &mut self.prefs.sidebar,
-                            &mut self.sidebar_state,
-                            &info,
-                            now,
-                        );
-                    });
-                for request in requests {
-                    self.apply_sidebar(request, &mut actions, &ctx);
-                }
-            }
-            if self.assistant.open
-                && let Some(active) = self.active
-            {
-                let tab = &self.tabs[active];
-                let has_page = tab.text.get(tab.current_page()).is_some();
-                let has_selection = tab.selection.is_some();
-                let (models, model) = match self.user_settings.get() {
-                    Some(settings) => {
-                        let main = settings.ai.resolved_main();
-                        (
-                            crate::settings_providers::model_choices(settings),
-                            Some(glyphst_settings::ModelRef::new(main.provider, main.model)),
-                        )
-                    }
-                    None => (Vec::new(), None),
-                };
-                let mut request = None;
-                egui::Panel::right("assistant")
-                    .default_size(380.0)
-                    .frame(egui::Frame::new().fill(tokens.chrome).inner_margin(8))
-                    .show(ui, |ui| {
-                        request =
-                            self.assistant
-                                .ui(ui, has_page, has_selection, &models, model.clone());
-                    });
-                match request {
-                    Some(PanelAction::Send(text)) => self.ask(text, &ctx),
-                    Some(PanelAction::NewSession) => self.assistant.new_session(),
-                    Some(PanelAction::LoadSession(id)) => self.assistant.load_session(id),
-                    Some(PanelAction::SetModel(model)) => {
-                        self.user_settings
-                            .edit(|settings| settings.ai.main_model = Some(model));
-                    }
-                    None => {}
-                }
-            }
+                .show(ui, |ui| self.tab_strip(ui));
         }
+
         let mut animating = false;
         let mut pages_drawn = true;
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::new().fill(tokens.pasteboard))
             .show(ui, |ui| {
                 if self.active.is_some() {
-                    (animating, pages_drawn) = self.document_view(ui, actions, &pad, seconds, now);
+                    (animating, pages_drawn) = self.stage(ui, actions, &pad, seconds, now);
                 } else if let Some(action) =
                     self.home.ui(ui, &self.library, self.pickers.is_showing())
                 {
@@ -2444,7 +2223,13 @@ impl eframe::App for ReaderApp {
             });
 
         self.overlays(&ctx);
-        self.notices.show(&ctx, 28.0);
+        // Above the dock while it shows.
+        let lift = if self.active.is_some() && !presenting {
+            84.0
+        } else {
+            28.0
+        };
+        self.notices.show(&ctx, lift);
         self.run_harness(&ctx, pages_drawn, now);
         if self
             .transition

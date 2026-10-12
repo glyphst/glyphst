@@ -110,23 +110,6 @@ pub fn show(
     translation: &TranslationInfo<'_>,
     now: Instant,
 ) -> Vec<SidebarAction> {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for candidate in SidebarTab::ALL {
-            if icons::button(
-                ui,
-                candidate.icon(),
-                30.0,
-                *which == candidate,
-                candidate.label(),
-            )
-            .clicked()
-            {
-                *which = candidate;
-            }
-        }
-    });
-    widgets::section_title(ui, which.label());
     let mut actions = Vec::new();
     match which {
         SidebarTab::Outline => outline(ui, tab, &mut actions),

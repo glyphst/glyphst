@@ -27,6 +27,11 @@ pub struct Prefs {
     pub background_fps: u32,
     pub show_sidebar: bool,
     pub sidebar: SidebarTab,
+    /// Widths of the left drawer and the assistant, in points.
+    pub drawer_width: f32,
+    pub assistant_width: f32,
+    /// Fade the dock and the rail while reading.
+    pub autohide_controls: bool,
     /// Language to translate into; `None` follows the translation settings.
     pub target_language: Option<String>,
     /// Keyboard shortcuts the user changed: command id to keys.
@@ -44,6 +49,9 @@ impl Default for Prefs {
             background_fps: 30,
             show_sidebar: true,
             sidebar: SidebarTab::default(),
+            drawer_width: 300.0,
+            assistant_width: 380.0,
+            autohide_controls: true,
             target_language: None,
             shortcuts: Overrides::new(),
             last_session: LastSession::default(),
@@ -84,6 +92,17 @@ impl Prefs {
             prefs.last_session.active = None;
         }
         prefs.background_fps = prefs.background_fps.clamp(1, 120);
+        let defaults = Prefs::default();
+        for (width, default) in [
+            (&mut prefs.drawer_width, defaults.drawer_width),
+            (&mut prefs.assistant_width, defaults.assistant_width),
+        ] {
+            *width = if width.is_finite() {
+                width.clamp(crate::stage::DRAWER_MIN, 2000.0)
+            } else {
+                default
+            };
+        }
         prefs.shortcuts = keys::sanitize(&prefs.shortcuts);
         prefs
     }
@@ -127,6 +146,9 @@ mod tests {
             transition: None,
             show_sidebar: false,
             sidebar: SidebarTab::Notes,
+            drawer_width: 340.0,
+            assistant_width: 420.0,
+            autohide_controls: false,
             target_language: Some("ja".into()),
             shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
             last_session: LastSession {
@@ -153,12 +175,13 @@ mod tests {
         let mut storage = MemoryStorage::default();
         storage.set_string(
             STORAGE_KEY,
-            r#"{"theme":"Light","background_fps":0,"shortcuts":{"text.find":["Nope"],"gone":["F2"]},"last_session":{"files":[],"active":3},"unknown":1}"#.into(),
+            r#"{"theme":"Light","background_fps":0,"drawer_width":1e9,"shortcuts":{"text.find":["Nope"],"gone":["F2"]},"last_session":{"files":[],"active":3},"unknown":1}"#.into(),
         );
         let prefs = Prefs::load(Some(&storage));
         assert_eq!(prefs.theme, ThemePreference::Light);
         assert_eq!(prefs.last_session.active, None);
         assert_eq!(prefs.background_fps, 1);
+        assert_eq!(prefs.drawer_width, 2000.0);
         assert!(
             prefs.shortcuts.is_empty(),
             "unknown commands and keys are dropped"

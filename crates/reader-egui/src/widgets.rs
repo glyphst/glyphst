@@ -384,6 +384,7 @@ impl Toasts {
         let screen = ctx.content_rect();
         let area = egui::Area::new(egui::Id::new("toast"))
             .order(egui::Order::Tooltip)
+            .sense(Sense::click())
             .pivot(Align2::CENTER_BOTTOM)
             .fixed_pos(screen.center_bottom() - vec2(0.0, lift))
             .show(ctx, |ui| {
@@ -397,7 +398,7 @@ impl Toasts {
                         ui.add(egui::Label::new(egui::RichText::new(message).color(text)).wrap());
                     });
             });
-        let response = area.response.interact(Sense::click());
+        let response = area.response;
         if response.clicked() {
             self.clear();
             return;

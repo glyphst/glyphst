@@ -4,7 +4,7 @@ A short ordered shortlist for tasks without a more specific user direction.
 Select one bounded step, verify its current premise, and finish its acceptance
 checks. Update affected entries when evidence changes; remove completed work
 rather than appending a progress history. Evidence below was reviewed on
-2026-10-11 (entry 1 on 2026-10-12); each entry identifies its relevant
+2026-10-11 (entry 1 on 2026-10-13); each entry identifies its relevant
 checkpoint or evidence.
 
 Use [architecture](ARCHITECTURE.md) for boundaries and
@@ -34,16 +34,24 @@ input in the spike. The [egui Reader](crates/reader-egui) has:
   translation, OCR, AI providers and models) that saves the provider
   sections and keys where the GPUI Reader keeps them; and a model picker in
   the assistant.
+- **Styling:** pdfcraft's components (tokens, Inter, Lucide icons, pills,
+  cards, toasts) and a reading layout of its own, the stage: the
+  background effect behind the whole window, floating drawers opened from
+  a rail, a dock of reading controls that fades while reading, a progress
+  line with chapter scrubbing, page shadows, and a home page with the
+  book to continue and cover cards.
 
 The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
-8.7-9.1 ms; one Murietta run of four, under load from a corpus run, had one
-42 ms frame); scrolling War and Peace (1,259 pages) has p95 9.0 ms and no
-frame over 25 ms; searching all of it finds 48,603 matches for "the" in
-0.75-1.5 s with no frame over 25 ms. A fake document translation running
+8.7-10 ms); scrolling War and Peace (1,259 pages) has p95 9.2-11.8 ms with
+1-2 frames of 32-34 ms, and searching all of it finds 48,603 matches for
+"the" in 0.75-1.5 s with 0-1 frames over 25 ms. The stage shows more pages
+than the old toolbar layout, so the scroll now reaches page 19, whose level
+buffers (11.6 MiB) take 27 ms to upload; the old layout has the same two
+frames when its scroll starts at page 16. A fake document translation running
 alongside keeps those numbers; on the 15-page image-heavy brochure, 12
 pages swapped in during a run with the same 1 zoom and 5-6 scroll frames
 over 25 ms as without translation (image uploads up to 38 ms). The pdf.js
@@ -51,9 +59,10 @@ corpus tier is unchanged: 97 of 100 files render, 1 differs from MuPDF by
 more than 1%.
 
 Known gaps:
-- Lower Level (7.6M strokes) costs one 250 ms frame to upload its level
-  buffers (uploading levels across frames needs level fallback), and
-  image-heavy pages cost 25-80 ms upload frames.
+- Uploads block a frame: Lower Level (7.6M strokes) costs one 250 ms
+  frame to upload its level buffers, dense text pages (War and Peace page
+  19) 27 ms, and image-heavy pages 25-80 ms. Uploading levels across frames
+  needs level fallback.
 - 4x MSAA gives small text coarser edges than MuPDF.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Selections stay within one page.
@@ -65,7 +74,8 @@ Known gaps:
   GPUI-only. No automated run writes the real keychain: the user's check of
   a key set in the egui Reader showing in the GPUI Reader is pending.
 
-**Next step (M5):** split panes (craft-ui docking), the `files` app on egui,
+**Next step (M5):** spread page uploads across frames (so the bench is back
+to no frames over 25 ms), then split panes (craft-ui docking), the `files` app on egui,
 and removing the GPUI crates (which also moves ChatGPT Subscription sign-in).
 Later: M6 an effects manager (user effect directory, hot reload, previews,
 per-book choices).

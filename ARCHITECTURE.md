@@ -97,6 +97,13 @@ egui's faces and a system CJK fallback, Lucide SVG icons through craft-ui's
 icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
 pills, search box, section titles, segmented choices, cards, toasts). The
 fonts and icons ship in `crates/reader-egui/assets` with their licences.
+The layout is its own: below the top bar (tabs, the palette's search box,
+theme, settings) a document's stage draws in two GPU callbacks, the
+background effect over the whole stage and then the pages over a reading
+rectangle, with egui page shadows between them. The rail, the drawers, the
+dock and the progress line are egui Areas above the stage; `stage.rs` lays
+them out (drawers push the pages aside, or float over them in a narrow
+window) and fades the dock and rail after a pause in pointer movement.
 
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette

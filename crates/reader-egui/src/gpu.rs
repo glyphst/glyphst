@@ -1,16 +1,18 @@
-//! GPU resources and the egui paint callback that draws document views.
+//! GPU resources and the egui paint callbacks that draw the reading stage.
 //!
 //! As in photocraft's `gpu_canvas`, resources live in egui-wgpu's
-//! `callback_resources` and each frame's callback carries only plain view
-//! data. A frame of a document view is three steps:
+//! `callback_resources` and each frame's callbacks carry only plain view
+//! data. A frame of the stage is two callbacks, with egui's own shapes
+//! (page shadows) between them:
 //!
-//! 1. `prepare` draws paper and resident pages with `pdf-gpu` into a
-//!    multisampled [`OffscreenTarget`] (egui's own pass has no MSAA or
-//!    stencil).
-//! 2. A background effect fills the view.
-//! 3. A content effect composites the page image over it: the plain
-//!    "present" effect, or a transition from a snapshot of the previous view
-//!    (another tab, or the page before a turn) to the new image.
+//! 1. [`BackdropCallback`]: a background effect fills the whole stage, the
+//!    window below the top bar, so it runs on behind floating panels.
+//! 2. [`ViewCallback`], over the reading area: `prepare` draws paper and
+//!    resident pages with `pdf-gpu` into a multisampled [`OffscreenTarget`]
+//!    (egui's own pass has no MSAA or stencil), then a content effect
+//!    composites the page image over the backdrop: the plain "present"
+//!    effect, or a transition from a snapshot of the previous view (another
+//!    tab, or the page before a turn) to the new image.
 
 use std::{collections::HashMap, time::Instant};
 
@@ -104,6 +106,10 @@ pub struct ReaderGpu {
     paper_bind_group: wgpu::BindGroup,
     paper_color: wgpu::Buffer,
     prepared: Vec<PreparedEffect>,
+    /// A 1×1 texture for the backdrop's effect inputs; backgrounds don't
+    /// sample them.
+    blank: wgpu::TextureView,
+    backdrop: Option<PreparedEffect>,
     pub stats: FrameStats,
 }
 
@@ -183,6 +189,22 @@ impl ReaderGpu {
         if let Some(dir) = user_effects {
             effects.load_dir(device, dir);
         }
+        let blank = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("backdrop_input"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
         let gpu = Self {
             renderer: Renderer::new(device, format),
             format,
@@ -197,6 +219,8 @@ impl ReaderGpu {
             paper_bind_group,
             paper_color,
             prepared: Vec::new(),
+            blank,
+            backdrop: None,
             stats: FrameStats::default(),
         };
         render_state.renderer.write().callback_resources.insert(gpu);
@@ -401,7 +425,6 @@ pub struct ViewCallback {
     /// Every visible page; pages not resident yet get paper only.
     pub draws: Vec<PageDraw>,
     pub page_color: [f32; 4],
-    pub background: EffectUse,
     pub transition: Option<TransitionUse>,
     /// Seconds for animated effects.
     pub time: f32,
@@ -553,14 +576,6 @@ impl CallbackTrait for ViewCallback {
                 .or_else(|| effects.prepare(device, fallback, &effect_inputs))
         };
         let mut prepared = Vec::new();
-        prepared.extend(prepare(
-            &self.background.id,
-            SOLID,
-            target.view(),
-            self.background.params,
-            0.0,
-            1.0,
-        ));
         let content = match (&self.transition, &gpu.snapshot) {
             (Some(transition), Some(snapshot)) if snapshot.size == size => prepare(
                 &transition.effect.id,
@@ -593,6 +608,60 @@ impl CallbackTrait for ViewCallback {
             for prepared in &gpu.prepared {
                 gpu.effects.draw(prepared, pass);
             }
+        }
+    }
+}
+
+/// The per-frame paint callback of the stage's background.
+pub struct BackdropCallback {
+    pub rect: egui::Rect,
+    pub background: EffectUse,
+    /// Seconds for animated effects.
+    pub time: f32,
+    /// The pointer in stage pixels.
+    pub pointer: Option<[f32; 2]>,
+}
+
+impl CallbackTrait for BackdropCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        screen: &ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Some(gpu) = resources.get_mut::<ReaderGpu>() else {
+            return Vec::new();
+        };
+        let size = pixel_size(self.rect, screen.pixels_per_point);
+        let inputs = EffectInputs {
+            from: &gpu.blank,
+            to: &gpu.blank,
+            resolution: [size[0] as f32, size[1] as f32],
+            pointer: self.pointer,
+            time: self.time,
+            progress: 0.0,
+            direction: 1.0,
+            params: self.background.params,
+        };
+        gpu.backdrop = gpu
+            .effects
+            .prepare(device, &self.background.id, &inputs)
+            .or_else(|| gpu.effects.prepare(device, SOLID, &inputs));
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &CallbackResources,
+    ) {
+        if let Some(gpu) = resources.get::<ReaderGpu>()
+            && let Some(backdrop) = &gpu.backdrop
+        {
+            gpu.effects.draw(backdrop, pass);
         }
     }
 }

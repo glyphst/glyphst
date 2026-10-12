@@ -40,6 +40,7 @@ mod prefs;
 mod settings_providers;
 mod settings_window;
 mod sidebar;
+mod stage;
 mod text_overlay;
 mod theme;
 mod transition;
@@ -53,7 +54,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] \
+const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -66,6 +67,7 @@ fn parse_args() -> Result<Launch> {
         background: None,
         transition: None,
         theme: None,
+        controls: None,
         zoom: None,
         find: None,
         page: None,
@@ -98,6 +100,13 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--background" => launch.background = Some(value()?),
+            "--controls" => {
+                launch.controls = match value()?.as_str() {
+                    "shown" => Some(true),
+                    "hidden" => Some(false),
+                    other => bail!("--controls takes shown or hidden, not {other}"),
+                };
+            }
             "--theme" => {
                 let name = value()?;
                 launch.theme = Some(

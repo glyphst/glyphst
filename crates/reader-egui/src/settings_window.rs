@@ -501,7 +501,12 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
         &mut prefs.reopen_last_session,
         "Reopen the last session's documents",
     );
-    ui.checkbox(&mut prefs.show_sidebar, "Show the sidebar");
+    widgets::section_title(ui, "While reading");
+    ui.checkbox(&mut prefs.show_sidebar, "Show the side drawer");
+    ui.checkbox(
+        &mut prefs.autohide_controls,
+        "Hide the reading controls after a few seconds without moving the pointer",
+    );
 }
 
 #[cfg(test)]
