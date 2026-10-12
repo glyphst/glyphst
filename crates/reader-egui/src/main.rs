@@ -3,7 +3,7 @@
 //!
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
-//!     [--translate-fake] [--translate-document] [--translate-selection]
+//!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
@@ -12,9 +12,11 @@
 //! Keys: Ctrl+O open, Ctrl+W close, Ctrl+Tab switch tabs; + / - / 0 zoom
 //! and fit, Page Up / Page Down / Space turn pages, Home / End, P presents,
 //! Ctrl+F find (F3 next), Ctrl+C copy, Ctrl+A select the page, Ctrl+D
-//! bookmark, Alt+Left / Alt+Right back and forward, F9 sidebar, F12
-//! statistics.
+//! bookmark, Ctrl+T translate the selection, Ctrl+L assistant, Alt+Left /
+//! Alt+Right back and forward, F9 sidebar, F12 statistics.
 
+mod ai;
+mod ai_tools;
 mod annotations;
 mod app;
 mod doc_text;
@@ -42,7 +44,7 @@ use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
-                     [--translate-fake] [--translate-document] [--translate-selection] \
+                     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -61,6 +63,8 @@ fn parse_args() -> Result<Launch> {
         translate_fake: false,
         translate_document: false,
         translate_selection: false,
+        ai_fake: false,
+        ask: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -86,6 +90,8 @@ fn parse_args() -> Result<Launch> {
             "--translate-fake" => launch.translate_fake = true,
             "--translate-document" => launch.translate_document = true,
             "--translate-selection" => launch.translate_selection = true,
+            "--ai-fake" => launch.ai_fake = true,
+            "--ask" => launch.ask = Some(value()?),
             "--page" => {
                 let page: usize = value()?.parse().context("--page takes a page number")?;
                 launch.page = Some(page.max(1));

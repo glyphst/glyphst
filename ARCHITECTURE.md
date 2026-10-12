@@ -94,6 +94,14 @@ version shown, and a page's GPU drawing is replaced only when the new version
 is ready, so the original stays visible meanwhile. Selection, copy and search
 use the translated text; hovering a translated block shows the original.
 
+The assistant runs the `ai` crate's agent on a worker thread with the main
+model from the settings, the current page and selection as optional context,
+and document tools (`search_document`, `read_document`,
+`render_document_pages`) with the GPUI Reader's names and schemas,
+implemented over MuPDF and `pdf::text`. Conversations are the library's AI
+sessions, so both readers list them; image results are not stored.
+ChatGPT Subscription sign-in remains in the GPUI Reader.
+
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, as the GPUI Reader indexes it, so
 glyph offsets in reflowed positions and highlight anchors resolve in both

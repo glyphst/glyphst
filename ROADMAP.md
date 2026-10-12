@@ -10,47 +10,60 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. egui Reader: M3 translation and AI panels
+## 1. egui Reader: M4 settings, keys and command palette
 
-**Owner:** `reader-egui`, with the `pdf-translation` and `translation` domain crates.
+**Owner:** `reader-egui`, `settings`, `keymap`.
 
 **Current evidence:** egui hosts the GPU vector renderer (GPUI 0.3.8 cannot
 composite a wgpu texture on Linux); the user confirmed smooth zoom and fcitx5
-input in the spike. The [egui Reader](crates/reader-egui) has M1 (a library
-home, [craft-ui](https://github.com/storytold/craft-libs) tabs, the GPU
-document view, presentation mode, positions in the shared library, a theme
-after pdfcraft, [effects](crates/effects) for transitions and backgrounds)
-and M2: text selection (runs, Alt+drag columns, word and line clicks) and
-copy, a find bar and search panel after pdfcraft, internal links with back
-and forward history and external links, bookmarks, highlights and notes
-shared with the GPUI Reader through the library, a sidebar (outline, page
-thumbnails, bookmarks, notes, search) and EPUB reflow with a text size
-control. The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps
-are the reference, and old crates are reused only where cheap.
+input in the spike. The [egui Reader](crates/reader-egui) has:
+- **M1:** a library home, [craft-ui](https://github.com/storytold/craft-libs)
+  tabs, the GPU document view, presentation mode, shared reading positions,
+  a theme after pdfcraft, and [effects](crates/effects) for transitions and
+  backgrounds.
+- **M2:** text selection and copy, find and a search panel, links with
+  history, bookmarks/highlights/notes shared with the GPUI Reader, a
+  sidebar, and EPUB reflow.
+- **M3:** selection translation cards, whole-document translation with
+  translated pages swapped in as they are typeset, and an assistant panel
+  (streaming answers, page and selection context, document tools, sessions
+  in the library). `settings` and `ai` build without GPUI, and the egui
+  Reader reads the GPUI Reader's settings and keychain keys without editing
+  them.
+
+The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
+reference, and old crates are reused only where cheap.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
-8.7-8.9 ms); scrolling War and Peace (1,259 pages) has p95 8.8 ms and one
-upload frame over 25 ms; searching all of it for "the" finds 48,603 matches
-in 0.8-1.4 s with no frame over 25 ms. First pages appear after 0.07 s (War
-and Peace), 1.4 s (Murietta) and 10.6 s (Lower Level, measured with another
-process holding a core; 9.4 s at M1). The pdf.js corpus tier is unchanged:
-97 of 100 files render (2 unreadable, 1 parser timeout), 1 differs from
-MuPDF by more than 1%.
+8.7-8.9 ms); scrolling War and Peace (1,259 pages) has p95 8.7 ms and one
+upload frame over 25 ms; searching all of it finds 48,603 matches for "the"
+in 0.8-1.5 s with no frame over 25 ms. A fake document translation running
+alongside keeps those numbers; on the 15-page image-heavy brochure, 12
+pages swapped in during a run with the same 1 zoom and 5-6 scroll frames
+over 25 ms as without translation (image uploads up to 38 ms). The pdf.js
+corpus tier is unchanged: 97 of 100 files render, 1 differs from MuPDF by
+more than 1%.
 
-Known gaps: Lower Level (7.6M strokes) costs one 250 ms frame to upload its
-level buffers (uploading levels across frames needs level fallback); 4x MSAA
-gives small text coarser edges than MuPDF; a relayout of a large EPUB blocks
-the window while MuPDF lays it out; selections stay within one page.
+Known gaps:
+- Lower Level (7.6M strokes) costs one 250 ms frame to upload its level
+  buffers (uploading levels across frames needs level fallback), and
+  image-heavy pages cost 25-40 ms upload frames.
+- 4x MSAA gives small text coarser edges than MuPDF.
+- A relayout of a large EPUB blocks the window while MuPDF lays it out.
+- Selections stay within one page.
+- Translation sessions are not restored from the cache on reopening.
+- The assistant has no image or region mentions, no Mermaid diagrams and no
+  ChatGPT Subscription sign-in.
 
-**Next step (M3):** the translation view (pdf-translation's page jobs shown
-over or beside the GPU page) and the AI panel, reusing the domain crates and
-following artcraft's panels. Later milestones: M4 settings, keys and command
-palette, M5 split panes (craft-ui docking), the `files` app and removing the
-GPUI crates, M6 an effects manager (user effect directory, hot reload,
+**Next step (M4):** a settings window after pdfcraft's preferences (theme,
+reading, translation and AI providers with keys written where the GPUI
+Reader keeps them), configurable keys, and a command palette. Later
+milestones: M5 split panes (craft-ui docking), the `files` app and removing
+the GPUI crates, M6 an effects manager (user effect directory, hot reload,
 previews, per-book choices).
 
-**Done when:** M3's features work in the egui Reader with tests, `check.sh
+**Done when:** M4's features work in the egui Reader with tests, `check.sh
 quick` and `corpus` pass, and the bench shows no frames over 25 ms.
 
 ## 2. Workspace layout smoke test

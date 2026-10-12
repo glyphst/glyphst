@@ -2450,6 +2450,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_commonmark"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e757b2a0639f5f75793e6936ad4c86e8b58ee379d23578ad6924ba9f75ec38"
+dependencies = [
+ "egui",
+ "egui_commonmark_backend",
+ "egui_extras",
+ "pulldown-cmark 0.13.4",
+]
+
+[[package]]
+name = "egui_commonmark_backend"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67e182e6b923b0ade1152f67e7d827cbc266fca7782d50249de0c4cad1a2a4e5"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "pulldown-cmark 0.13.4",
+]
+
+[[package]]
+name = "egui_extras"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05cbdc785020861553f230f23d330ba1fb72613b9d8e0e457f3bdc8ba6db6dcf"
+dependencies = [
+ "ahash",
+ "egui",
+ "enum-map",
+ "itertools 0.15.0",
+ "log",
+ "profiling",
+]
+
+[[package]]
 name = "egui_glow"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2545,6 +2582,26 @@ name = "enum-iterator-derive"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "685adfa4d6f3d765a26bc5dbc936577de9abf756c1feeb3089b01dd395034842"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "enum-map"
+version = "2.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
+dependencies = [
+ "enum-map-derive",
+]
+
+[[package]]
+name = "enum-map-derive"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3871,7 +3928,9 @@ dependencies = [
  "dirs 7.0.0",
  "eframe",
  "egui",
+ "egui_commonmark",
  "gilrs",
+ "glyphst-ai",
  "glyphst-core",
  "glyphst-effects",
  "glyphst-library",
@@ -6510,7 +6569,7 @@ dependencies = [
  "indexmap",
  "manatee",
  "merman-core",
- "pulldown-cmark",
+ "pulldown-cmark 0.12.2",
  "roughr-merman",
  "rustc-hash 2.1.3",
  "ryu-js",
@@ -8418,6 +8477,17 @@ dependencies = [
  "getopts",
  "memchr",
  "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
  "unicase",
 ]
 

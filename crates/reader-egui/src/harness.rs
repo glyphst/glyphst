@@ -135,7 +135,9 @@ impl ReaderApp {
             return false;
         };
         if self.translator.settings().is_none() {
-            return self.launch_translate_document || self.launch_translate_selection;
+            return self.launch_translate_document
+                || self.launch_translate_selection
+                || self.launch_ask.is_some();
         }
         if self.launch_translate_document {
             self.launch_translate_document = false;
@@ -149,6 +151,16 @@ impl ReaderApp {
             let at = ctx.content_rect().center() - egui::vec2(180.0, 120.0);
             self.translate_selection(at, ctx);
         }
+        // A question asked once the page's text is read.
+        if self.launch_ask.is_some() {
+            let tab = &self.tabs[active];
+            if tab.text.get(tab.current_page()).is_none() {
+                return true;
+            }
+            let question = self.launch_ask.take().unwrap_or_default();
+            self.assistant.open = true;
+            self.ask(question, ctx);
+        }
         let document = self.tabs[active]
             .translation
             .as_ref()
@@ -158,7 +170,7 @@ impl ReaderApp {
             .card
             .as_ref()
             .is_some_and(|card| card.state == crate::translation::CardState::Loading);
-        document || selection || self.launch_translate_selection
+        document || selection || self.launch_translate_selection || self.assistant.is_running()
     }
 
     pub(crate) fn run_harness(&mut self, ctx: &egui::Context, pages_drawn: bool, now: Instant) {

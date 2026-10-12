@@ -14,6 +14,7 @@ use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore, SemanticTe
 use glyphst_pdf::text::LinkTarget;
 
 use crate::{
+    ai::{AskContext, Assistant, PanelAction},
     annotations::{self, AnnotationId, Annotations},
     document::FrameTimes,
     document_tab::{DocumentTab, ViewAction, ViewInput},
@@ -73,6 +74,9 @@ pub struct Launch {
     /// Scripted runs: translate the first document, or the selection.
     pub translate_document: bool,
     pub translate_selection: bool,
+    /// Ask through a local fake model; scripted runs ask this at startup.
+    pub ai_fake: bool,
+    pub ask: Option<String>,
 }
 
 /// What a primary-button drag on the document does.
@@ -123,6 +127,8 @@ pub struct ReaderApp {
     pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
     pub(crate) translator: Translator,
+    pub(crate) assistant: Assistant,
+    pub(crate) launch_ask: Option<String>,
     page_input: String,
     saved_positions: HashMap<u64, DocumentPosition>,
     last_position_save: Instant,
@@ -156,9 +162,17 @@ impl ReaderApp {
             prefs.sidebar = tab;
             prefs.show_sidebar = true;
         }
-        let fake_settings = if launch.translate_fake {
-            let port = crate::fake_providers::start_translation_server()?;
-            Some(crate::fake_providers::translation_settings(port))
+        let fake_settings = if launch.translate_fake || launch.ai_fake {
+            let mut settings = glyphst_settings::Settings::default();
+            if launch.translate_fake {
+                let port = crate::fake_providers::start_translation_server()?;
+                crate::fake_providers::use_fake_translation(&mut settings, port);
+            }
+            if launch.ai_fake {
+                let port = crate::fake_providers::start_ai_server()?;
+                crate::fake_providers::use_fake_ai(&mut settings, port);
+            }
+            Some(settings)
         } else {
             None
         };
@@ -192,6 +206,8 @@ impl ReaderApp {
             launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
             translator,
+            assistant: Assistant::default(),
+            launch_ask: launch.ask,
             page_input: String::new(),
             saved_positions: HashMap::new(),
             last_position_save: Instant::now(),
@@ -706,6 +722,38 @@ impl ReaderApp {
         }
     }
 
+    /// Shows or hides the assistant.
+    fn toggle_assistant(&mut self) {
+        self.assistant.open = !self.assistant.open;
+        if self.assistant.open {
+            self.assistant.refresh_sessions(&self.library);
+        }
+    }
+
+    /// Asks the assistant about the active document.
+    pub(crate) fn ask(&mut self, text: String, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(settings) = self.translator.settings().cloned() else {
+            self.assistant.error =
+                Some("Your AI settings are still loading; try again in a moment.".into());
+            return;
+        };
+        let tab = &self.tabs[active];
+        let current_page = tab.current_page();
+        let ask = AskContext {
+            path: tab.path.clone(),
+            title: tab.title.clone(),
+            layout: tab.document_layout,
+            page_count: tab.layout.len(),
+            current_page,
+            page_text: tab.text.get(current_page).map(|text| text.plain_text()),
+            selection: tab.selected_text(),
+        };
+        self.assistant.send(text, ask, &settings, ctx);
+    }
+
     fn copy_selection(&self, ctx: &egui::Context) {
         if let Some(text) = self
             .active
@@ -852,6 +900,9 @@ impl ReaderApp {
             }
             if ctrl && pressed(egui::Key::D) {
                 self.add_bookmark();
+            }
+            if ctrl && pressed(egui::Key::L) {
+                self.toggle_assistant();
             }
             if ctrl && pressed(egui::Key::T) && !typing {
                 let at = ctx
@@ -1147,6 +1198,7 @@ impl ReaderApp {
         let mut font_step = 0.0;
         let mut translate_document = false;
         let mut translation_shown = None;
+        let mut assistant = false;
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.prefs.show_sidebar, "☰")
                 .on_hover_text("Sidebar (F9)");
@@ -1253,6 +1305,13 @@ impl ReaderApp {
             }
             ui.separator();
             if ui
+                .selectable_label(self.assistant.open, "✦ Assistant")
+                .on_hover_text("Ask about this document (Ctrl+L)")
+                .clicked()
+            {
+                assistant = true;
+            }
+            if ui
                 .selectable_label(tab.find.open, "🔍 Find")
                 .on_hover_text("Find (Ctrl+F)")
                 .clicked()
@@ -1275,6 +1334,9 @@ impl ReaderApp {
         if translate_document {
             let ctx = ui.ctx().clone();
             self.start_document_translation(&ctx);
+        }
+        if assistant {
+            self.toggle_assistant();
         }
         if let Some(shown) = translation_shown
             && let Some(session) = self.tabs[active].translation.as_mut()
@@ -1947,6 +2009,8 @@ impl eframe::App for ReaderApp {
             self.open(&path, &ctx, None);
         }
         self.translator.poll();
+        self.assistant
+            .poll(self.persist.then_some(&mut self.library));
         if let Some((tab_id, path)) = self.pickers.take_saved()
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
             && let Some(session) = tab.translation.as_mut()
@@ -2025,6 +2089,26 @@ impl eframe::App for ReaderApp {
                     });
                 for request in requests {
                     self.apply_sidebar(request, &mut actions, &ctx);
+                }
+            }
+            if self.assistant.open
+                && let Some(active) = self.active
+            {
+                let tab = &self.tabs[active];
+                let has_page = tab.text.get(tab.current_page()).is_some();
+                let has_selection = tab.selection.is_some();
+                let mut request = None;
+                egui::Panel::right("assistant")
+                    .default_size(380.0)
+                    .frame(egui::Frame::new().fill(tokens.chrome).inner_margin(8))
+                    .show(ui, |ui| {
+                        request = self.assistant.ui(ui, has_page, has_selection);
+                    });
+                match request {
+                    Some(PanelAction::Send(text)) => self.ask(text, &ctx),
+                    Some(PanelAction::NewSession) => self.assistant.new_session(),
+                    Some(PanelAction::LoadSession(id)) => self.assistant.load_session(id),
+                    None => {}
                 }
             }
         }

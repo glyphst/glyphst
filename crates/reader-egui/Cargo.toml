@@ -19,7 +19,9 @@ eframe = { workspace = true, features = [
     "x11",
 ] }
 egui.workspace = true
+egui_commonmark.workspace = true
 gilrs.workspace = true
+glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-effects = { path = "../effects" }
 glyphst-library = { path = "../library" }

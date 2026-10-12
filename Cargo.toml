@@ -43,6 +43,8 @@ craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb
 dirs = "7"
 eframe = { version = "0.36", default-features = false }
 egui = "0.36"
+# Markdown in the egui Reader's assistant; MIT OR Apache-2.0.
+egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
 futures = "0.3"
 gilrs = "0.11"
 gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = [

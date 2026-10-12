@@ -1013,7 +1013,20 @@ impl DocumentTab {
 
     /// Advances the view for this frame and lists what to draw.
     pub fn frame(&mut self, viewport: [u32; 2], input: ViewInput<'_>, turning: bool) -> TabFrame {
-        self.viewport = [f64::from(viewport[0]), f64::from(viewport[1])];
+        // A view at fit width stays at fit width when it narrows or widens
+        // (a side panel opening).
+        let at_fit = self.fitted
+            && self.view.target_scale == self.view.scale
+            && (self.view.scale / self.fit_scale() - 1.0).abs() < 1e-3;
+        let width = f64::from(viewport[0]);
+        let resized = width != self.viewport[0];
+        self.viewport = [width, f64::from(viewport[1])];
+        if at_fit && resized {
+            let fit = self.fit_scale();
+            self.view.anchor = [0.0; 2];
+            self.view.set_scale(fit);
+            self.view.target_scale = fit;
+        }
         if !self.fitted {
             self.view = View::new(self.fit_scale());
             self.go_to_page(0);
@@ -1401,5 +1414,29 @@ mod tests {
             !tab.can_go_back(),
             "stepping through matches keeps no history"
         );
+    }
+
+    #[test]
+    fn a_view_at_fit_width_follows_the_view_width() {
+        let mut tab = tab(5);
+        settle(&mut tab);
+        let frame = |tab: &mut DocumentTab, width| {
+            tab.frame(
+                [width, 900],
+                ViewInput {
+                    zoom: 1.0,
+                    ..Default::default()
+                },
+                false,
+            )
+        };
+        frame(&mut tab, 900);
+        assert!((tab.view.scale / tab.fit_scale() - 1.0).abs() < 1e-9);
+        // Zoomed in, a narrower view keeps the zoom.
+        tab.view.set_scale(tab.fit_scale() * 2.0);
+        tab.view.target_scale = tab.view.scale;
+        let zoomed = tab.view.scale;
+        frame(&mut tab, 700);
+        assert_eq!(tab.view.scale, zoomed);
     }
 }
