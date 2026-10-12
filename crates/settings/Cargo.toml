@@ -9,9 +9,10 @@ workspace = true
 [features]
 # The GPUI settings store, credential worker and gpui-component themes,
 # for the GPUI crates. Without it the crate is the settings model, its KDL
-# persistence and a keychain reader for other hosts.
+# persistence and keychain access for other hosts.
 gpui = ["dep:futures", "dep:gpui", "dep:gpui_component"]
-# Reads provider secrets the GPUI apps keep in the system credential store.
+# Reads and writes provider secrets in the system credential store, as the
+# GPUI apps keep them.
 keychain = ["dep:oo7", "dep:pollster"]
 
 [dependencies]

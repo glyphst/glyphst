@@ -75,9 +75,14 @@ data-defined effects) rather than reproducing the GPUI Reader. It reuses
 `library`, `settings` and `ai` build without GPUI, and their `gpui` features
 add what the GPUI crates need (the app globals, the settings store with its
 credential worker, gpui-component themes, ChatGPT Subscription sign-in).
-The egui Reader reads the GPUI Reader's settings file and, with the
+The egui Reader shares the GPUI Reader's settings file and, with the
 `settings` crate's `keychain` feature, the provider keys it keeps in the
-system credential store; it does not edit either. Both readers
+system credential store (items written as GPUI writes them). Its settings
+window edits only the provider sections (AI, translation, OCR): a save
+re-reads the file and replaces just those, keys the file held stay in it and
+other keys go to the keychain. A GPUI Reader running at the same time keeps
+its own copy and overwrites those sections on its next save. Scripted runs
+and fake providers keep settings and keys in memory. Both readers
 share the redb library, which one process holds at a time: while the GPUI
 Reader runs, the egui Reader opens documents without history. Its own
 preferences (theme, transition, background, keyboard shortcuts, last

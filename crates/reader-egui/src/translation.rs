@@ -53,9 +53,9 @@ pub enum CardState {
 pub struct Translator {
     text: TranslationService,
     pdf: Arc<PdfTranslationService>,
+    /// The user's settings, once read (see `UserSettings`).
     settings: Option<Arc<Settings>>,
-    settings_rx: Option<Receiver<(Settings, Vec<String>)>>,
-    /// Problems reading the settings or keys.
+    /// Problems with the translation cache.
     pub warnings: Vec<String>,
     results_tx: Sender<(u64, Result<String, String>)>,
     results_rx: Receiver<(u64, Result<String, String>)>,
@@ -66,18 +66,11 @@ pub struct Translator {
 }
 
 impl Translator {
-    /// Starts reading the user's settings and keys, or uses `settings`
-    /// (scripted runs and tests). `persist` keeps translated text and
-    /// translation jobs where the GPUI Reader keeps them; otherwise they
-    /// stay in memory and a temporary directory. Typst typesets in a worker
-    /// process of this executable (see `main`), or in this process for
-    /// tests.
-    pub fn new(
-        ctx: &egui::Context,
-        settings: Option<Settings>,
-        persist: bool,
-        typst_in_process: bool,
-    ) -> Self {
+    /// `persist` keeps translated text and translation jobs where the GPUI
+    /// Reader keeps them; otherwise they stay in memory and a temporary
+    /// directory. Typst typesets in a worker process of this executable
+    /// (see `main`), or in this process for tests.
+    pub fn new(persist: bool, typst_in_process: bool) -> Self {
         let text = TranslationService::new().expect("failed to create the translation client");
         let mut warnings = Vec::new();
         if persist && let Err(error) = text.initialize_persistent_cache() {
@@ -92,16 +85,11 @@ impl Translator {
             pdf = pdf.with_artifact_root(scratch_artifacts());
         }
         let pdf = Arc::new(pdf);
-        let (settings, settings_rx) = match settings {
-            Some(settings) => (Some(Arc::new(settings)), None),
-            None => (None, Some(load_settings(ctx.clone()))),
-        };
         let (results_tx, results_rx) = mpsc::channel();
         Self {
             text,
             pdf,
-            settings,
-            settings_rx,
+            settings: None,
             warnings,
             results_tx,
             results_rx,
@@ -111,17 +99,13 @@ impl Translator {
         }
     }
 
-    /// Takes the loaded settings and finished translations.
+    /// The settings to translate with, as the user last edited them.
+    pub fn set_settings(&mut self, settings: Option<&Arc<Settings>>) {
+        self.settings = settings.cloned();
+    }
+
+    /// Takes finished translations.
     pub fn poll(&mut self) {
-        if let Some((settings, warnings)) = self
-            .settings_rx
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        {
-            self.settings = Some(Arc::new(settings));
-            self.warnings.extend(warnings);
-            self.settings_rx = None;
-        }
         while let Ok((id, result)) = self.results_rx.try_recv() {
             if let Some(card) = &mut self.card
                 && card.id == id
@@ -342,23 +326,6 @@ pub fn scratch_artifacts() -> PathBuf {
     ))
 }
 
-/// Reads the user's settings and keychain keys on a thread.
-fn load_settings(ctx: egui::Context) -> Receiver<(Settings, Vec<String>)> {
-    let (sender, receiver) = mpsc::channel();
-    let spawned = thread::Builder::new()
-        .name("settings".into())
-        .spawn(move || {
-            let mut settings = glyphst_settings::load_user_settings();
-            let warnings = glyphst_settings::read_keychain_secrets(&mut settings);
-            let _ = sender.send((settings, warnings));
-            ctx.request_repaint();
-        });
-    if spawned.is_err() {
-        eprintln!("could not start reading the settings");
-    }
-    receiver
-}
-
 enum SessionEvent {
     Progress(PdfTranslationProgress),
     Update(Box<PdfTranslationSessionUpdate>),
@@ -535,9 +502,11 @@ mod tests {
         }
     }
 
-    fn translator(ctx: &egui::Context) -> Translator {
+    fn translator(_ctx: &egui::Context) -> Translator {
         let port = start_translation_server().unwrap();
-        Translator::new(ctx, Some(translation_settings(port)), false, true)
+        let mut translator = Translator::new(false, true);
+        translator.set_settings(Some(&Arc::new(translation_settings(port))));
+        translator
     }
 
     #[test]

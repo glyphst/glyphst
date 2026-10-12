@@ -13,9 +13,9 @@ use glyphst_pdf_translation_service::{
     UnlimitedClientConfig, UnlimitedErrorCategory,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, AiThinkingLevel, ModelRef, OcrProvider, OcrSettings, ProviderSecretId,
-    ResolvedAiConfig, Settings, SettingsStore, WindowSettings, localize, parse_settings,
-    setup_ui_font, sync_component_theme, ui_rems,
+    AiModel, AiProvider, ModelRef, OcrProvider, OcrSettings, ProviderSecretId, ResolvedAiConfig,
+    Settings, SettingsStore, WindowSettings, localize, parse_settings, setup_ui_font,
+    sync_component_theme, ui_rems,
 };
 use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
@@ -458,28 +458,7 @@ impl SettingsWindow {
         settings: &Settings,
         provider: AiProvider,
     ) -> ResolvedAiConfig {
-        let config = settings.ai.provider_config(provider);
-        let model = config
-            .models
-            .first()
-            .map(|model| model.id.clone())
-            .unwrap_or_else(|| provider.default_model().to_string());
-        let base_url_overridden = provider.is_custom() && config.base_url.is_some();
-        ResolvedAiConfig {
-            provider,
-            provider_name: config.name,
-            api_style: config.api_style,
-            enabled: true,
-            model,
-            api_key: config.api_key,
-            base_url: if provider.is_custom() {
-                config.base_url.unwrap_or_default()
-            } else {
-                provider.default_base_url().to_string()
-            },
-            base_url_overridden,
-            thinking_level: AiThinkingLevel::Off,
-        }
+        settings.ai.resolved_provider(provider)
     }
 
     fn model_request_signature(config: &ResolvedAiConfig) -> ModelRequestSignature {

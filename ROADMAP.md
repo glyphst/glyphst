@@ -10,9 +10,9 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. egui Reader: M4 settings, keys and command palette
+## 1. egui Reader: M5 split panes, the files app, removing GPUI
 
-**Owner:** `reader-egui`, `settings`, `keymap`.
+**Owner:** `reader-egui`, `files`, `workspace`.
 
 **Current evidence:** egui hosts the GPU vector renderer (GPUI 0.3.8 cannot
 composite a wgpu texture on Linux); the user confirmed smooth zoom and fcitx5
@@ -27,18 +27,23 @@ input in the spike. The [egui Reader](crates/reader-egui) has:
 - **M3:** selection translation cards, whole-document translation with
   translated pages swapped in as they are typeset, and an assistant panel
   (streaming answers, page and selection context, document tools, sessions
-  in the library). `settings` and `ai` build without GPUI, and the egui
-  Reader reads the GPUI Reader's settings and keychain keys without editing
-  them.
+  in the library). `settings` and `ai` build without GPUI.
+- **M4:** a command registry behind keys, menus, buttons and a command
+  palette (Ctrl+K); configurable shortcuts kept in the egui Reader's
+  preferences; a settings window (appearance, reading, shortcuts,
+  translation, OCR, AI providers and models) that saves the provider
+  sections and keys where the GPUI Reader keeps them; and a model picker in
+  the assistant.
 
 The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
-8.7-8.9 ms); scrolling War and Peace (1,259 pages) has p95 8.7 ms and one
-upload frame over 25 ms; searching all of it finds 48,603 matches for "the"
-in 0.8-1.5 s with no frame over 25 ms. A fake document translation running
+8.7-9.1 ms; one Murietta run of four, under load from a corpus run, had one
+42 ms frame); scrolling War and Peace (1,259 pages) has p95 9.0 ms and no
+frame over 25 ms; searching all of it finds 48,603 matches for "the" in
+0.75-1.5 s with no frame over 25 ms. A fake document translation running
 alongside keeps those numbers; on the 15-page image-heavy brochure, 12
 pages swapped in during a run with the same 1 zoom and 5-6 scroll frames
 over 25 ms as without translation (image uploads up to 38 ms). The pdf.js
@@ -48,22 +53,24 @@ more than 1%.
 Known gaps:
 - Lower Level (7.6M strokes) costs one 250 ms frame to upload its level
   buffers (uploading levels across frames needs level fallback), and
-  image-heavy pages cost 25-40 ms upload frames.
+  image-heavy pages cost 25-80 ms upload frames.
 - 4x MSAA gives small text coarser edges than MuPDF.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Selections stay within one page.
 - Translation sessions are not restored from the cache on reopening.
 - The assistant has no image or region mentions, no Mermaid diagrams and no
   ChatGPT Subscription sign-in.
+- Settings saved from the egui Reader are overwritten by a GPUI Reader that
+  is running at the same time; provider order and connection tests are
+  GPUI-only. No automated run writes the real keychain: the user's check of
+  a key set in the egui Reader showing in the GPUI Reader is pending.
 
-**Next step (M4):** a settings window after pdfcraft's preferences (theme,
-reading, translation and AI providers with keys written where the GPUI
-Reader keeps them), configurable keys, and a command palette. Later
-milestones: M5 split panes (craft-ui docking), the `files` app and removing
-the GPUI crates, M6 an effects manager (user effect directory, hot reload,
-previews, per-book choices).
+**Next step (M5):** split panes (craft-ui docking), the `files` app on egui,
+and removing the GPUI crates (which also moves ChatGPT Subscription sign-in).
+Later: M6 an effects manager (user effect directory, hot reload, previews,
+per-book choices).
 
-**Done when:** M4's features work in the egui Reader with tests, `check.sh
+**Done when:** M5's features work in the egui Reader with tests, `check.sh
 quick` and `corpus` pass, and the bench shows no frames over 25 ms.
 
 ## 2. Workspace layout smoke test

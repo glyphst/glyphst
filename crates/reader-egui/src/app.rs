@@ -36,6 +36,7 @@ use crate::{
     theme::{self, ThemeKind, ThemePreference, Tokens},
     transition::ViewTransition,
     translation::{CardState, Translator},
+    user_settings::UserSettings,
 };
 
 /// Positions are written to the library at most this often while reading.
@@ -135,6 +136,7 @@ pub struct ReaderApp {
     pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
     pub(crate) translator: Translator,
+    pub(crate) user_settings: UserSettings,
     pub(crate) assistant: Assistant,
     pub(crate) launch_ask: Option<String>,
     page_input: String,
@@ -173,7 +175,9 @@ impl ReaderApp {
             prefs.sidebar = tab;
             prefs.show_sidebar = true;
         }
-        let fake_settings = if launch.translate_fake || launch.ai_fake {
+        // Scripted runs and fakes keep settings and keys in memory, so fake
+        // providers never reach the user's config or keychain.
+        let user_settings = if launch.translate_fake || launch.ai_fake || !persist {
             let mut settings = glyphst_settings::Settings::default();
             if launch.translate_fake {
                 let port = crate::fake_providers::start_translation_server()?;
@@ -183,11 +187,11 @@ impl ReaderApp {
                 let port = crate::fake_providers::start_ai_server()?;
                 crate::fake_providers::use_fake_ai(&mut settings, port);
             }
-            Some(settings)
+            UserSettings::in_memory(&cc.egui_ctx, settings, Default::default())
         } else {
-            None
+            UserSettings::load(&cc.egui_ctx)
         };
-        let translator = Translator::new(&cc.egui_ctx, fake_settings, persist, false);
+        let translator = Translator::new(persist, false);
         let mut app = Self {
             prefs,
             theme_kind: None,
@@ -217,6 +221,7 @@ impl ReaderApp {
             launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
             translator,
+            user_settings,
             assistant: Assistant::default(),
             launch_ask: launch.ask,
             page_input: String::new(),
@@ -238,6 +243,15 @@ impl ReaderApp {
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
+            // Scripted runs show the fake model's list.
+            if section == Section::Ai
+                && launch.ai_fake
+                && let Some(settings) = app.user_settings.get().cloned()
+            {
+                let provider = settings.ai.provider_order[0];
+                app.settings_window
+                    .fetch_models(&settings, provider, &cc.egui_ctx);
+            }
         }
         let ctx = cc.egui_ctx.clone();
         if launch.files.is_empty() && app.prefs.reopen_last_session && persist {
@@ -757,7 +771,7 @@ impl ReaderApp {
         let Some(active) = self.active else {
             return;
         };
-        let Some(settings) = self.translator.settings().cloned() else {
+        let Some(settings) = self.user_settings.get().cloned() else {
             self.assistant.error =
                 Some("Your AI settings are still loading; try again in a moment.".into());
             return;
@@ -1161,6 +1175,7 @@ impl ReaderApp {
                     prefs: &mut self.prefs,
                     keymap: &self.keymap,
                     effects: &effects,
+                    user: &mut self.user_settings,
                 },
             );
             if changed {
@@ -2198,6 +2213,8 @@ impl eframe::App for ReaderApp {
         for path in dropped {
             self.open(&path, &ctx, None);
         }
+        self.user_settings.poll(now);
+        self.translator.set_settings(self.user_settings.get());
         self.translator.poll();
         self.assistant
             .poll(self.persist.then_some(&mut self.library));
@@ -2256,13 +2273,20 @@ impl eframe::App for ReaderApp {
                 && let Some(active) = self.active
             {
                 let mut requests = Vec::new();
+                let warnings: Vec<String> = self
+                    .user_settings
+                    .warnings
+                    .iter()
+                    .chain(&self.translator.warnings)
+                    .cloned()
+                    .collect();
                 let info = TranslationInfo {
                     target: self
                         .translator
                         .target_language(self.prefs.target_language.as_deref()),
                     pinned: &self.translator.pinned,
-                    warnings: &self.translator.warnings,
-                    ready: self.translator.settings().is_some(),
+                    warnings: &warnings,
+                    ready: self.user_settings.get().is_some(),
                 };
                 egui::Panel::left("sidebar")
                     .default_size(SIDEBAR_WIDTH)
@@ -2287,17 +2311,33 @@ impl eframe::App for ReaderApp {
                 let tab = &self.tabs[active];
                 let has_page = tab.text.get(tab.current_page()).is_some();
                 let has_selection = tab.selection.is_some();
+                let (models, model) = match self.user_settings.get() {
+                    Some(settings) => {
+                        let main = settings.ai.resolved_main();
+                        (
+                            crate::settings_providers::model_choices(settings),
+                            Some(glyphst_settings::ModelRef::new(main.provider, main.model)),
+                        )
+                    }
+                    None => (Vec::new(), None),
+                };
                 let mut request = None;
                 egui::Panel::right("assistant")
                     .default_size(380.0)
                     .frame(egui::Frame::new().fill(tokens.chrome).inner_margin(8))
                     .show(ui, |ui| {
-                        request = self.assistant.ui(ui, has_page, has_selection);
+                        request =
+                            self.assistant
+                                .ui(ui, has_page, has_selection, &models, model.clone());
                     });
                 match request {
                     Some(PanelAction::Send(text)) => self.ask(text, &ctx),
                     Some(PanelAction::NewSession) => self.assistant.new_session(),
                     Some(PanelAction::LoadSession(id)) => self.assistant.load_session(id),
+                    Some(PanelAction::SetModel(model)) => {
+                        self.user_settings
+                            .edit(|settings| settings.ai.main_model = Some(model));
+                    }
                     None => {}
                 }
             }

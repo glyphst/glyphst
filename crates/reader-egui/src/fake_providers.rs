@@ -2,7 +2,8 @@
 //! and no keys. The translation server speaks the Google Translation API
 //! (as `translation/src/tests.rs` fakes it) and returns each text in «».
 //! The AI server speaks OpenAI's streaming chat completions: it first asks
-//! for a `search_document` call, then answers in Markdown.
+//! for a `search_document` call, then answers in Markdown. It lists
+//! [`FAKE_MODELS`] as its models.
 
 use std::thread;
 
@@ -96,6 +97,21 @@ pub fn start_ai_server() -> Result<u16> {
         .name("fake-ai".into())
         .spawn(move || {
             for mut request in server.incoming_requests() {
+                if request.url().ends_with("/models") {
+                    let data: Vec<Value> = FAKE_MODELS
+                        .iter()
+                        .map(|(id, name)| json!({"id": id, "name": name}))
+                        .collect();
+                    let response =
+                        tiny_http::Response::from_string(json!({ "data": data }).to_string())
+                            .with_header(
+                                "Content-Type: application/json"
+                                    .parse::<tiny_http::Header>()
+                                    .expect("valid header"),
+                            );
+                    let _ = request.respond(response);
+                    continue;
+                }
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 let query: Value = serde_json::from_str(&body).unwrap_or_default();
@@ -158,3 +174,8 @@ pub fn use_fake_ai(settings: &mut Settings, port: u16) {
 }
 
 const FAKE_MODEL: &str = "fake-model";
+/// The models the fake AI server lists: id and name.
+pub const FAKE_MODELS: [(&str, &str); 2] = [
+    (FAKE_MODEL, "Fake model"),
+    ("fake-large", "Fake large model"),
+];

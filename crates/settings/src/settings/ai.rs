@@ -1252,6 +1252,21 @@ impl AiSettings {
         self.resolved_for(model_ref.provider, model_ref.id, AiThinkingLevel::Off)
     }
 
+    /// A request config for `provider` itself, enabled or not, for listing
+    /// its models: its first model, or its default one.
+    pub fn resolved_provider(&self, provider: AiProvider) -> ResolvedAiConfig {
+        let model = self
+            .provider_config(provider)
+            .models
+            .first()
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| provider.default_model().to_string());
+        ResolvedAiConfig {
+            enabled: true,
+            ..self.resolved_for(provider, model, AiThinkingLevel::Off)
+        }
+    }
+
     pub fn resolved_model(&self, model_ref: &ModelRef) -> Option<ResolvedAiConfig> {
         self.is_enabled_model_ref(model_ref).then(|| {
             self.resolved_for(

@@ -29,7 +29,7 @@ use glyphst_library::{
     AiSession, AiSessionAgentPart, AiSessionMessage, AiSessionRole, AiSessionToolResultPart,
     AiSessionToolStatus, LibraryStore, current_timestamp,
 };
-use glyphst_settings::{AiProvider, Settings};
+use glyphst_settings::{AiProvider, ModelRef, Settings};
 
 use crate::{
     ai_tools::{ReaderAgentTools, describe_call},
@@ -128,6 +128,8 @@ pub enum PanelAction {
     Send(String),
     NewSession,
     LoadSession(u64),
+    /// The user chose the assistant's model.
+    SetModel(ModelRef),
 }
 
 impl Assistant {
@@ -418,6 +420,8 @@ impl Assistant {
         ui: &mut egui::Ui,
         has_page: bool,
         has_selection: bool,
+        models: &[(ModelRef, String)],
+        model: Option<ModelRef>,
     ) -> Option<PanelAction> {
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
@@ -430,6 +434,19 @@ impl Assistant {
                 ui.toggle_value(&mut self.show_sessions, "Chats");
             });
         });
+        if !models.is_empty() {
+            let mut chosen = model;
+            if crate::settings_providers::model_picker(
+                ui,
+                "assistant-model",
+                &mut chosen,
+                models,
+                None,
+            ) && let Some(chosen) = chosen
+            {
+                action = Some(PanelAction::SetModel(chosen));
+            }
+        }
         ui.separator();
         if self.show_sessions {
             egui::ScrollArea::vertical()

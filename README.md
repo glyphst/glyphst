@@ -116,7 +116,8 @@ translates through a local fake provider (no keys, no network), and
 screenshot waits for and a bench runs alongside. `--ai-fake` answers the
 assistant from a local fake model, and `--ask TEXT` asks it at startup.
 `--palette QUERY` opens the command palette and `--settings SECTION` the
-settings window (`appearance`, `reading`, `shortcuts`).
+settings window (`appearance`, `reading`, `shortcuts`, `translation`, `ocr`,
+`ai`). Scripted runs keep settings and keys in memory.
 
 Report baseline failures separately. The rendering debug panel's frame capture
 measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)

@@ -4,7 +4,7 @@
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
-//!     [--palette QUERY] [--settings appearance|reading|shortcuts]
+//!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
@@ -35,12 +35,14 @@ mod keys;
 mod palette;
 mod pickers;
 mod prefs;
+mod settings_providers;
 mod settings_window;
 mod sidebar;
 mod text_overlay;
 mod theme;
 mod transition;
 mod translation;
+mod user_settings;
 
 use std::path::PathBuf;
 
@@ -50,7 +52,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
-                     [--palette QUERY] [--settings appearance|reading|shortcuts] \
+                     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 

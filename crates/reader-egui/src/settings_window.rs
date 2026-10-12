@@ -9,7 +9,9 @@ use crate::{
     commands::{Category, Command},
     keys::{self, Keymap, Overrides, Shortcut},
     prefs::Prefs,
+    settings_providers::ProviderPages,
     theme::{ThemePreference, Tokens},
+    user_settings::{Persistence, UserSettings},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,10 +19,20 @@ pub enum Section {
     Appearance,
     Reading,
     Shortcuts,
+    Translation,
+    Ocr,
+    Ai,
 }
 
 impl Section {
-    pub const ALL: [Self; 3] = [Self::Appearance, Self::Reading, Self::Shortcuts];
+    pub const ALL: [Self; 6] = [
+        Self::Appearance,
+        Self::Reading,
+        Self::Shortcuts,
+        Self::Translation,
+        Self::Ocr,
+        Self::Ai,
+    ];
 
     /// The section a scripted run names: `appearance`, `shortcuts`…
     pub fn parse(name: &str) -> Option<Self> {
@@ -38,6 +50,9 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Reading => "Reading",
             Self::Shortcuts => "Keyboard shortcuts",
+            Self::Translation => "Translation",
+            Self::Ocr => "OCR",
+            Self::Ai => "AI",
         }
     }
 }
@@ -58,6 +73,7 @@ pub struct SettingsWindow {
     /// The command whose next key press is being recorded.
     recording: Option<Command>,
     conflict: Option<Conflict>,
+    providers: ProviderPages,
 }
 
 /// What the window needs from the app.
@@ -65,12 +81,23 @@ pub struct SettingsContext<'a> {
     pub prefs: &'a mut Prefs,
     pub keymap: &'a Keymap,
     pub effects: &'a [EffectDef],
+    pub user: &'a mut UserSettings,
 }
 
 impl SettingsWindow {
     pub fn show_section(&mut self, section: Section) {
         self.open = true;
         self.section = Some(section);
+    }
+
+    /// Lists a provider's models, as its Fetch models button does.
+    pub fn fetch_models(
+        &mut self,
+        settings: &glyphst_settings::Settings,
+        provider: glyphst_settings::AiProvider,
+        ctx: &egui::Context,
+    ) {
+        self.providers.fetch_models(settings, provider, ctx);
     }
 
     /// Whether key presses are going to a recording, so shortcuts must not
@@ -85,6 +112,7 @@ impl SettingsWindow {
             return false;
         }
         let mut changed = false;
+        self.providers.poll();
         let tokens = Tokens::get(ctx);
         let screen = ctx.content_rect();
         let size = egui::vec2(
@@ -115,6 +143,16 @@ impl SettingsWindow {
                             self.section = Some(section);
                         }
                     }
+                    if matches!(current, Section::Translation | Section::Ocr | Section::Ai) {
+                        ui.add_space(12.0);
+                        let note = match app.user.persistence() {
+                            Persistence::User => {
+                                "Shared with the GPUI Reader: saved in its config file and keychain."
+                            }
+                            Persistence::Memory => "Scripted run: changes are not saved.",
+                        };
+                        ui.label(RichText::new(note).small().color(tokens.text_muted));
+                    }
                 });
                 ui.separator();
                 ui.vertical(|ui| {
@@ -126,6 +164,9 @@ impl SettingsWindow {
                             Section::Shortcuts => {
                                 changed = self.shortcuts(ui, app.prefs, app.keymap, &tokens);
                             }
+                            Section::Translation => self.providers.translation(ui, app.user),
+                            Section::Ocr => self.providers.ocr(ui, app.user),
+                            Section::Ai => self.providers.ai(ui, app.user),
                         });
                 });
             });
@@ -402,6 +443,11 @@ mod tests {
             ..Default::default()
         };
         let mut changed = false;
+        let mut user = UserSettings::in_memory(
+            ctx,
+            glyphst_settings::Settings::default(),
+            Default::default(),
+        );
         let mut output = ctx.run_ui(input, |ui| {
             changed = window.show(
                 ui.ctx(),
@@ -409,6 +455,7 @@ mod tests {
                     prefs,
                     keymap,
                     effects: &[],
+                    user: &mut user,
                 },
             );
         });

@@ -3,7 +3,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-#[cfg(feature = "gpui")]
 use std::{fs::OpenOptions, io::Write as _};
 
 use anyhow::{Context as _, Result};
@@ -94,7 +93,11 @@ pub use translation::{
     PinnedTranslationSettings, TranslationBoxCorner, TranslationProvider,
     TranslationProviderConfig, TranslationSettings, TranslationTargetLanguage,
 };
-pub use user::{keychain_secret_ids, load_user_settings, read_keychain_secrets};
+pub use user::{
+    CredentialStore, MemoryCredentials, SystemKeychain, config_owned_secret_ids,
+    keychain_secret_ids, load_user_settings, read_keychain_secrets, save_user_settings,
+    save_user_settings_to,
+};
 
 #[cfg(all(test, feature = "gpui"))]
 mod tests;
