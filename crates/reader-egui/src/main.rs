@@ -4,6 +4,7 @@
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
+//!     [--palette QUERY] [--settings appearance|reading|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
@@ -19,6 +20,7 @@ mod ai;
 mod ai_tools;
 mod annotations;
 mod app;
+mod commands;
 mod doc_text;
 mod document;
 mod document_tab;
@@ -29,8 +31,11 @@ mod gamepad;
 mod gpu;
 mod harness;
 mod home;
+mod keys;
+mod palette;
 mod pickers;
 mod prefs;
+mod settings_window;
 mod sidebar;
 mod text_overlay;
 mod theme;
@@ -45,6 +50,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
+                     [--palette QUERY] [--settings appearance|reading|shortcuts] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -65,6 +71,8 @@ fn parse_args() -> Result<Launch> {
         translate_selection: false,
         ai_fake: false,
         ask: None,
+        palette: None,
+        settings: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -92,6 +100,14 @@ fn parse_args() -> Result<Launch> {
             "--translate-selection" => launch.translate_selection = true,
             "--ai-fake" => launch.ai_fake = true,
             "--ask" => launch.ask = Some(value()?),
+            "--palette" => launch.palette = Some(value()?),
+            "--settings" => {
+                let name = value()?;
+                launch.settings = Some(
+                    settings_window::Section::parse(&name)
+                        .with_context(|| format!("unknown settings section {name}\n{USAGE}"))?,
+                );
+            }
             "--page" => {
                 let page: usize = value()?.parse().context("--page takes a page number")?;
                 launch.page = Some(page.max(1));

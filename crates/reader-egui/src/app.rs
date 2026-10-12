@@ -9,13 +9,14 @@ use std::{
 
 use eframe::egui_wgpu;
 use glyphst_core::{DocumentFormat, DocumentLayout, EpubLayout};
-use glyphst_effects::EffectKind;
+use glyphst_effects::EffectDef;
 use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore, SemanticTextRange};
 use glyphst_pdf::text::LinkTarget;
 
 use crate::{
     ai::{AskContext, Assistant, PanelAction},
     annotations::{self, AnnotationId, Annotations},
+    commands::{Command, Needs},
     document::FrameTimes,
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
@@ -25,8 +26,11 @@ use crate::{
     },
     harness::Harness,
     home::{Home, HomeAction},
+    keys::Keymap,
+    palette::{self, Item, Palette},
     pickers::{Pickers, is_document},
     prefs::{LastSession, Prefs, SessionFile},
+    settings_window::{Section, SettingsContext, SettingsWindow},
     sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
     text_overlay::{PageMap, Selection, Span, fill_rects, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
@@ -77,6 +81,10 @@ pub struct Launch {
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
     pub ask: Option<String>,
+    /// Scripted runs: open the palette with this query, or settings at
+    /// this section.
+    pub palette: Option<String>,
+    pub settings: Option<Section>,
 }
 
 /// What a primary-button drag on the document does.
@@ -139,6 +147,9 @@ pub struct ReaderApp {
     pub(crate) upload_ms: Vec<f64>,
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
+    pub(crate) keymap: Keymap,
+    pub(crate) palette: Palette,
+    pub(crate) settings_window: SettingsWindow,
 }
 
 impl ReaderApp {
@@ -216,7 +227,18 @@ impl ReaderApp {
             first_page_ms: None,
             upload_ms: Vec::new(),
             pending_actions: Vec::new(),
+            keymap: Keymap::default(),
+            palette: Palette::default(),
+            settings_window: SettingsWindow::default(),
         };
+        app.keymap = Keymap::new(&app.prefs.shortcuts);
+        if let Some(query) = launch.palette {
+            app.palette.toggle();
+            app.palette.query = query;
+        }
+        if let Some(section) = launch.settings {
+            app.settings_window.show_section(section);
+        }
         let ctx = cc.egui_ctx.clone();
         if launch.files.is_empty() && app.prefs.reopen_last_session && persist {
             let session = app.prefs.last_session.clone();
@@ -887,38 +909,12 @@ impl ReaderApp {
     }
 
     fn global_actions(&mut self, ctx: &egui::Context) -> Vec<ViewAction> {
-        let typing = ctx.memory(|memory| memory.focused().is_some());
         let mut actions = Vec::new();
-        let (ctrl, shift, alt) =
-            ctx.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
-        let pressed = |key| ctx.input(|i| i.key_pressed(key));
-        if let Some(active) = self.active {
-            if ctrl && pressed(egui::Key::F) {
-                let tab = &mut self.tabs[active];
-                let page = tab.current_page();
-                tab.find.show(page);
-            }
-            if ctrl && pressed(egui::Key::D) {
-                self.add_bookmark();
-            }
-            if ctrl && pressed(egui::Key::L) {
-                self.toggle_assistant();
-            }
-            if ctrl && pressed(egui::Key::T) && !typing {
-                let at = ctx
-                    .pointer_latest_pos()
-                    .unwrap_or_else(|| ctx.content_rect().center());
-                self.translate_selection(at, ctx);
-            }
-            if pressed(egui::Key::F3) {
-                self.find_step(!shift);
-            }
+        if self.active.is_some() {
             let (back, forward) = ctx.input(|i| {
                 (
-                    i.pointer.button_pressed(egui::PointerButton::Extra1)
-                        || (alt && i.key_pressed(egui::Key::ArrowLeft)),
-                    i.pointer.button_pressed(egui::PointerButton::Extra2)
-                        || (alt && i.key_pressed(egui::Key::ArrowRight)),
+                    i.pointer.button_pressed(egui::PointerButton::Extra1),
+                    i.pointer.button_pressed(egui::PointerButton::Extra2),
                 )
             });
             if back {
@@ -927,74 +923,263 @@ impl ReaderApp {
             if forward {
                 actions.push(ViewAction::Forward);
             }
-            if !typing {
-                let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-                if copy {
-                    self.copy_selection(ctx);
+        }
+        // Key presses go to a shortcut being recorded, and the settings
+        // window stands in front of the document.
+        if self.settings_window.open {
+            return actions;
+        }
+        let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
+        for command in self.keymap.take_pressed(ctx, typing) {
+            if let Err(reason) = self.run(command, ctx)
+                && self.active.is_some()
+                && command.needs() != Needs::Document
+            {
+                self.notices.push(reason.to_string());
+            }
+        }
+        if let Some(active) = self.active
+            && !typing
+        {
+            let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+            if copy {
+                self.copy_selection(ctx);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let tab = &mut self.tabs[active];
+                if self.note_editor.is_some() {
+                    self.note_editor = None;
+                } else if tab.selection.is_some() {
+                    tab.selection = None;
+                } else if tab.find.open {
+                    tab.find.close();
                 }
-                if ctrl && pressed(egui::Key::A) {
+            }
+        }
+        actions
+    }
+
+    /// Why `command` can't run now, if it can't.
+    pub(crate) fn command_blocked(&self, command: Command) -> Option<&'static str> {
+        let Some(tab) = self.active.map(|active| &self.tabs[active]) else {
+            return (command.needs() != Needs::Nothing).then(|| Needs::Document.reason());
+        };
+        let can = match command.needs() {
+            Needs::Nothing | Needs::Document => true,
+            Needs::Selection => tab.selection.is_some(),
+            Needs::Reflow => matches!(tab.document_layout, DocumentLayout::Reflow(_)),
+            Needs::Translation => tab.translation.is_some(),
+        };
+        (!can).then(|| command.needs().reason())
+    }
+
+    /// Runs a command: keys, the palette, menus and buttons all come here.
+    pub(crate) fn run(
+        &mut self,
+        command: Command,
+        ctx: &egui::Context,
+    ) -> Result<(), &'static str> {
+        if let Some(reason) = self.command_blocked(command) {
+            return Err(reason);
+        }
+        let view = |action| Some(action);
+        let action = match command {
+            Command::Open => {
+                self.pickers.open_documents(ctx);
+                None
+            }
+            Command::CloseTab => {
+                if let Some(active) = self.active {
+                    self.close(active);
+                }
+                None
+            }
+            Command::NextTab | Command::PreviousTab => {
+                let count = self.tabs.len() + 1;
+                let current = self.active.map_or(0, |active| active + 1);
+                let next = if command == Command::PreviousTab {
+                    (current + count - 1) % count
+                } else {
+                    (current + 1) % count
+                };
+                self.activate(next.checked_sub(1));
+                None
+            }
+            Command::Palette => {
+                self.palette.toggle();
+                None
+            }
+            Command::Settings => {
+                self.settings_window.open = true;
+                None
+            }
+            Command::ToggleSidebar => {
+                self.prefs.show_sidebar = !self.prefs.show_sidebar;
+                None
+            }
+            Command::ToggleStats => {
+                self.show_stats = !self.show_stats;
+                None
+            }
+            Command::ThemeSystem => {
+                self.prefs.theme = ThemePreference::System;
+                None
+            }
+            Command::ThemeLight => {
+                self.prefs.theme = ThemePreference::Light;
+                None
+            }
+            Command::ThemeDark => {
+                self.prefs.theme = ThemePreference::Dark;
+                None
+            }
+            Command::NextPage => view(ViewAction::NextPage),
+            Command::PreviousPage => view(ViewAction::PreviousPage),
+            Command::FirstPage => view(ViewAction::GoToPage(0)),
+            Command::LastPage => view(ViewAction::GoToPage(usize::MAX)),
+            Command::Back => view(ViewAction::Back),
+            Command::Forward => view(ViewAction::Forward),
+            Command::ZoomIn => view(ViewAction::ZoomIn),
+            Command::ZoomOut => view(ViewAction::ZoomOut),
+            Command::FitWidth => view(ViewAction::FitWidth),
+            Command::Present => view(ViewAction::TogglePresent),
+            Command::LargerText | Command::SmallerText => {
+                let step = if command == Command::LargerText {
+                    1.0
+                } else {
+                    -1.0
+                };
+                self.change_font_size(step);
+                None
+            }
+            Command::Find => {
+                if let Some(active) = self.active {
+                    let tab = &mut self.tabs[active];
+                    let page = tab.current_page();
+                    tab.find.show(page);
+                }
+                None
+            }
+            Command::FindNext | Command::FindPrevious => {
+                self.find_step(command == Command::FindNext);
+                None
+            }
+            Command::SelectPage => {
+                if let Some(active) = self.active {
                     let tab = &mut self.tabs[active];
                     let page = tab.current_page();
                     tab.select_page(page);
                 }
-                if pressed(egui::Key::Escape) {
-                    let tab = &mut self.tabs[active];
-                    if self.note_editor.is_some() {
-                        self.note_editor = None;
-                    } else if tab.selection.is_some() {
-                        tab.selection = None;
-                    } else if tab.find.open {
-                        tab.find.close();
-                    }
+                None
+            }
+            Command::Bookmark => {
+                self.add_bookmark();
+                None
+            }
+            Command::TranslateSelection => {
+                let at = ctx
+                    .pointer_latest_pos()
+                    .unwrap_or_else(|| ctx.content_rect().center());
+                self.translate_selection(at, ctx);
+                None
+            }
+            Command::TranslateDocument => {
+                self.start_document_translation(ctx);
+                None
+            }
+            Command::ShowTranslated => {
+                if let Some(session) = self
+                    .active
+                    .and_then(|active| self.tabs[active].translation.as_mut())
+                {
+                    session.show_translated = !session.show_translated;
                 }
+                None
             }
+            Command::Assistant => {
+                self.toggle_assistant();
+                None
+            }
+        };
+        if let Some(action) = action {
+            self.pending_actions.push(action);
         }
-        if ctrl && pressed(egui::Key::O) {
-            self.pickers.open_documents(ctx);
+        ctx.request_repaint();
+        Ok(())
+    }
+
+    /// Runs a command, telling the user when it can't run.
+    pub(crate) fn run_or_notify(&mut self, command: Command, ctx: &egui::Context) {
+        if let Err(reason) = self.run(command, ctx) {
+            self.notices.push(reason.to_string());
         }
-        if ctrl
-            && pressed(egui::Key::W)
-            && let Some(active) = self.active
-        {
-            self.close(active);
+    }
+
+    /// A menu item's text with the command's key: "Translate  Ctrl+T".
+    fn menu_label(&self, text: &str, command: Command) -> String {
+        match self.keymap.label(command) {
+            Some(key) => format!("{text}  {key}"),
+            None => text.to_string(),
         }
-        if ctrl && pressed(egui::Key::Tab) {
-            let count = self.tabs.len() + 1;
-            let current = self.active.map_or(0, |active| active + 1);
-            let next = if shift {
-                (current + count - 1) % count
-            } else {
-                (current + 1) % count
+    }
+
+    /// The palette and the settings window, drawn over everything.
+    fn overlays(&mut self, ctx: &egui::Context) {
+        if self.palette.open {
+            let sources = palette::Sources {
+                commands: Command::ALL
+                    .into_iter()
+                    .map(|command| {
+                        (
+                            command,
+                            self.keymap.label(command),
+                            self.command_blocked(command),
+                        )
+                    })
+                    .collect(),
+                tabs: self.tabs.iter().map(|tab| tab.title.clone()).collect(),
+                recent: self.recent_documents(),
+                pages: self.active.map(|active| self.tabs[active].layout.len()),
             };
-            self.activate(next.checked_sub(1));
-        }
-        if typing || ctrl || alt {
-            return actions;
-        }
-        let map = [
-            (egui::Key::PageDown, ViewAction::NextPage),
-            (egui::Key::Space, ViewAction::NextPage),
-            (egui::Key::PageUp, ViewAction::PreviousPage),
-            (egui::Key::Plus, ViewAction::ZoomIn),
-            (egui::Key::Equals, ViewAction::ZoomIn),
-            (egui::Key::Minus, ViewAction::ZoomOut),
-            (egui::Key::Num0, ViewAction::FitWidth),
-            (egui::Key::P, ViewAction::TogglePresent),
-            (egui::Key::Home, ViewAction::GoToPage(0)),
-            (egui::Key::End, ViewAction::GoToPage(usize::MAX)),
-        ];
-        for (key, action) in map {
-            if pressed(key) {
-                actions.push(action);
+            let hits = palette::hits(&self.palette.query, &sources, self.palette.used());
+            match self.palette.show(ctx, &hits) {
+                Some(Item::Command(command)) => self.run_or_notify(command, ctx),
+                Some(Item::Tab(index)) => self.activate(Some(index)),
+                Some(Item::Open(path)) => self.open(&path, ctx, None),
+                Some(Item::GoToPage(page)) => self.pending_actions.push(ViewAction::GoToPage(page)),
+                Some(Item::Settings(section)) => self.settings_window.show_section(section),
+                None => {}
             }
         }
-        if pressed(egui::Key::F9) {
-            self.prefs.show_sidebar = !self.prefs.show_sidebar;
+        if self.settings_window.open {
+            let effects: Vec<EffectDef> = self
+                .with_gpu(|gpu| gpu.effects().defs().cloned().collect())
+                .unwrap_or_default();
+            let changed = self.settings_window.show(
+                ctx,
+                SettingsContext {
+                    prefs: &mut self.prefs,
+                    keymap: &self.keymap,
+                    effects: &effects,
+                },
+            );
+            if changed {
+                self.keymap = Keymap::new(&self.prefs.shortcuts);
+            }
         }
-        if pressed(egui::Key::F12) {
-            self.show_stats = !self.show_stats;
-        }
-        actions
+    }
+
+    /// Recently opened documents that still exist, latest first.
+    fn recent_documents(&self) -> Vec<PathBuf> {
+        let mut entries: Vec<_> = self.library.history_entries().iter().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.opened));
+        entries
+            .into_iter()
+            .filter(|entry| self.tabs.iter().all(|tab| tab.path != entry.path))
+            .map(|entry| entry.path.clone())
+            .filter(|path| path.exists())
+            .take(20)
+            .collect()
     }
 
     fn tab_strip(&mut self, ui: &mut egui::Ui) {
@@ -1125,44 +1310,33 @@ impl ReaderApp {
     }
 
     fn menu(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .add_enabled(
-                !self.pickers.is_showing(),
-                egui::Button::new("Open documents…  Ctrl+O"),
-            )
-            .clicked()
-        {
-            self.pickers.open_documents(ui.ctx());
-            ui.close();
+        let ctx = ui.ctx().clone();
+        let mut run = None;
+        for command in [Command::Open, Command::Palette, Command::Settings] {
+            let enabled = command != Command::Open || !self.pickers.is_showing();
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(command.label())
+                        .shortcut_text(self.keymap.label(command).unwrap_or_default()),
+                )
+                .clicked()
+            {
+                run = Some(command);
+                ui.close();
+            }
         }
         ui.separator();
-        ui.label("Theme");
-        for preference in ThemePreference::ALL {
-            ui.radio_value(&mut self.prefs.theme, preference, preference.label());
-        }
-        ui.separator();
-        let defs: Vec<_> = self
-            .with_gpu(|gpu| gpu.effects().defs().cloned().collect())
+        let sidebar = self
+            .keymap
+            .label(Command::ToggleSidebar)
             .unwrap_or_default();
-        ui.label("Transition");
-        ui.radio_value(&mut self.prefs.transition, None, "None");
-        for def in defs.iter().filter(|def| def.kind == EffectKind::Transition) {
-            ui.radio_value(&mut self.prefs.transition, Some(def.id.clone()), &def.name);
+        ui.checkbox(&mut self.prefs.show_sidebar, format!("Sidebar  {sidebar}"));
+        let stats = self.keymap.label(Command::ToggleStats).unwrap_or_default();
+        ui.checkbox(&mut self.show_stats, format!("Statistics  {stats}"));
+        if let Some(command) = run {
+            self.run_or_notify(command, &ctx);
         }
-        ui.separator();
-        ui.label("Background");
-        for def in defs.iter().filter(|def| def.kind == EffectKind::Background) {
-            let label = if def.animated {
-                format!("{} (animated)", def.name)
-            } else {
-                def.name.clone()
-            };
-            ui.radio_value(&mut self.prefs.background, def.id.clone(), label);
-        }
-        ui.separator();
-        ui.checkbox(&mut self.prefs.reopen_last_session, "Reopen last session");
-        ui.checkbox(&mut self.prefs.show_sidebar, "Sidebar  F9");
-        ui.checkbox(&mut self.show_stats, "Statistics  F12");
         let gamepads = match &self.gamepads {
             Ok(pads) if pads.connected().is_empty() => "none connected".to_string(),
             Ok(pads) => pads.connected().join(", "),
@@ -1201,17 +1375,17 @@ impl ReaderApp {
         let mut assistant = false;
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.prefs.show_sidebar, "☰")
-                .on_hover_text("Sidebar (F9)");
+                .on_hover_text(self.keymap.tip("Sidebar", Command::ToggleSidebar));
             if ui
                 .add_enabled(tab.can_go_back(), egui::Button::new("⏴"))
-                .on_hover_text("Back (Alt+Left)")
+                .on_hover_text(self.keymap.tip("Back", Command::Back))
                 .clicked()
             {
                 actions.push(ViewAction::Back);
             }
             if ui
                 .add_enabled(tab.can_go_forward(), egui::Button::new("⏵"))
-                .on_hover_text("Forward (Alt+Right)")
+                .on_hover_text(self.keymap.tip("Forward", Command::Forward))
                 .clicked()
             {
                 actions.push(ViewAction::Forward);
@@ -1259,7 +1433,11 @@ impl ReaderApp {
             }
             ui.separator();
             let presenting = tab.present.is_some();
-            if ui.selectable_label(presenting, "Present  P").clicked() {
+            if ui
+                .selectable_label(presenting, "Present")
+                .on_hover_text(self.keymap.tip("Present", Command::Present))
+                .clicked()
+            {
                 actions.push(ViewAction::TogglePresent);
             }
             ui.separator();
@@ -1306,14 +1484,17 @@ impl ReaderApp {
             ui.separator();
             if ui
                 .selectable_label(self.assistant.open, "✦ Assistant")
-                .on_hover_text("Ask about this document (Ctrl+L)")
+                .on_hover_text(
+                    self.keymap
+                        .tip("Ask about this document", Command::Assistant),
+                )
                 .clicked()
             {
                 assistant = true;
             }
             if ui
                 .selectable_label(tab.find.open, "🔍 Find")
-                .on_hover_text("Find (Ctrl+F)")
+                .on_hover_text(self.keymap.tip("Find", Command::Find))
                 .clicked()
             {
                 find = true;
@@ -1735,7 +1916,10 @@ impl ReaderApp {
                 ctx.copy_text(text.clone());
                 ui.close();
             }
-            if ui.button("Translate  Ctrl+T").clicked() {
+            if ui
+                .button(self.menu_label("Translate", Command::TranslateSelection))
+                .clicked()
+            {
                 self.translate_selection(at, ctx);
                 ui.close();
             }
@@ -1772,28 +1956,34 @@ impl ReaderApp {
             ui.separator();
         }
         if let Some(page) = self.context_page
-            && ui.button("Select all on page  Ctrl+A").clicked()
+            && ui
+                .button(self.menu_label("Select all on page", Command::SelectPage))
+                .clicked()
         {
             self.tabs[active].select_page(page);
             ui.close();
         }
-        if ui.button("Add bookmark  Ctrl+D").clicked() {
+        if ui
+            .button(self.menu_label("Add bookmark", Command::Bookmark))
+            .clicked()
+        {
             self.add_bookmark();
             ui.close();
         }
+        let (back, forward) = (
+            self.menu_label("Back", Command::Back),
+            self.menu_label("Forward", Command::Forward),
+        );
         let tab = &self.tabs[active];
         if ui
-            .add_enabled(tab.can_go_back(), egui::Button::new("Back  Alt+Left"))
+            .add_enabled(tab.can_go_back(), egui::Button::new(back))
             .clicked()
         {
             actions.push(ViewAction::Back);
             ui.close();
         }
         if ui
-            .add_enabled(
-                tab.can_go_forward(),
-                egui::Button::new("Forward  Alt+Right"),
-            )
+            .add_enabled(tab.can_go_forward(), egui::Button::new(forward))
             .clicked()
         {
             actions.push(ViewAction::Forward);
@@ -2142,6 +2332,7 @@ impl eframe::App for ReaderApp {
                 }
             });
 
+        self.overlays(&ctx);
         self.run_harness(&ctx, pages_drawn, now);
         if self
             .transition

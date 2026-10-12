@@ -4,7 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{sidebar::SidebarTab, theme::ThemePreference};
+use crate::{
+    keys::{self, Overrides},
+    sidebar::SidebarTab,
+    theme::ThemePreference,
+};
 
 const STORAGE_KEY: &str = "glyphst-reader-egui";
 /// More files than anyone keeps open; storage is untrusted.
@@ -25,6 +29,8 @@ pub struct Prefs {
     pub sidebar: SidebarTab,
     /// Language to translate into; `None` follows the translation settings.
     pub target_language: Option<String>,
+    /// Keyboard shortcuts the user changed: command id to keys.
+    pub shortcuts: Overrides,
     pub last_session: LastSession,
 }
 
@@ -39,6 +45,7 @@ impl Default for Prefs {
             show_sidebar: true,
             sidebar: SidebarTab::default(),
             target_language: None,
+            shortcuts: Overrides::new(),
             last_session: LastSession::default(),
         }
     }
@@ -77,6 +84,7 @@ impl Prefs {
             prefs.last_session.active = None;
         }
         prefs.background_fps = prefs.background_fps.clamp(1, 120);
+        prefs.shortcuts = keys::sanitize(&prefs.shortcuts);
         prefs
     }
 
@@ -120,6 +128,7 @@ mod tests {
             show_sidebar: false,
             sidebar: SidebarTab::Notes,
             target_language: Some("ja".into()),
+            shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
             last_session: LastSession {
                 files: vec![
                     SessionFile {
@@ -144,12 +153,16 @@ mod tests {
         let mut storage = MemoryStorage::default();
         storage.set_string(
             STORAGE_KEY,
-            r#"{"theme":"Light","background_fps":0,"last_session":{"files":[],"active":3},"unknown":1}"#.into(),
+            r#"{"theme":"Light","background_fps":0,"shortcuts":{"text.find":["Nope"],"gone":["F2"]},"last_session":{"files":[],"active":3},"unknown":1}"#.into(),
         );
         let prefs = Prefs::load(Some(&storage));
         assert_eq!(prefs.theme, ThemePreference::Light);
         assert_eq!(prefs.last_session.active, None);
         assert_eq!(prefs.background_fps, 1);
+        assert!(
+            prefs.shortcuts.is_empty(),
+            "unknown commands and keys are dropped"
+        );
         assert!(prefs.reopen_last_session, "missing fields take defaults");
 
         storage.set_string(STORAGE_KEY, "not json".into());

@@ -115,6 +115,8 @@ translates through a local fake provider (no keys, no network), and
 `--translate-document` / `--translate-selection` start a translation that a
 screenshot waits for and a bench runs alongside. `--ai-fake` answers the
 assistant from a local fake model, and `--ask TEXT` asks it at startup.
+`--palette QUERY` opens the command palette and `--settings SECTION` the
+settings window (`appearance`, `reading`, `shortcuts`).
 
 Report baseline failures separately. The rendering debug panel's frame capture
 measures interactive performance manually. Review [audit exceptions](ARCHITECTURE.md#dependency-audit)

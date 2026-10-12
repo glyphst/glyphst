@@ -15,7 +15,7 @@
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
 | `effects` | Shader effects (transitions, backgrounds, overlays) defined as data; wgpu only |
-| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view, text selection, find, links, annotations, EPUB reflow |
+| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view, text selection, find, links, annotations, EPUB reflow, translation, assistant, commands and settings |
 
 Private modules split implementation without introducing additional state
 owners. New-tab and workspace entities own their task handles; document views
@@ -80,10 +80,17 @@ The egui Reader reads the GPUI Reader's settings file and, with the
 system credential store; it does not edit either. Both readers
 share the redb library, which one process holds at a time: while the GPUI
 Reader runs, the egui Reader opens documents without history. Its own
-preferences (theme, transition, background, last session) live in eframe
+preferences (theme, transition, background, keyboard shortcuts, last
+session) live in eframe
 storage under the config directory; scripted runs (`--bench`,
 `--screenshot…`) save nothing and leave the library unwritten. User effects
 are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
+
+Every user action is a command in a registry (after pdfcraft's): an id,
+a label, default keys and when it can run. Keys, the command palette
+(Ctrl+K), menus and buttons all run commands through one dispatcher. The
+user's shortcuts replace a command's default keys and are kept by command
+id in the egui Reader's preferences; the GPUI Reader's keymap is separate.
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs

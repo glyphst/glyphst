@@ -224,7 +224,7 @@ fn translation_panel(
     if info.pinned.is_empty() {
         muted(
             ui,
-            "Translate a selection (right-click or Ctrl+T) and pin it to keep it here.",
+            "Translate a selection (right-click it) and pin it to keep it here.",
         );
         return;
     }
@@ -376,7 +376,7 @@ fn bookmarks(
     state: &mut SidebarState,
     actions: &mut Vec<SidebarAction>,
 ) {
-    if ui.button("＋ Add bookmark  Ctrl+D").clicked() {
+    if ui.button("＋ Add bookmark").clicked() {
         actions.push(SidebarAction::AddBookmark);
     }
     ui.separator();
