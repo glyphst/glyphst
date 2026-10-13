@@ -68,8 +68,9 @@ halfway through a transition. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run, `--theme system|light|dark` its
 colours, `--controls shown|hidden` the reading dock (scripted runs keep
 it shown), `--split right|down` shows the second document beside the
-first, and `--rotate 90|180|270` and `--spread` turn and spread the pages
-(without remembering it); `--find TEXT`, `--select-page N`,
+first, `--rotate 90|180|270` and `--spread` turn and spread the pages
+(without remembering it), and `--overlay ID|none` and `--wallpaper PATH`
+set the page tint and the wallpaper; `--find TEXT`, `--select-page N`,
 `--sidebar TAB` and `--font-size PT` (EPUB) show a search, a selection, a
 sidebar tab or a reflowed size in the screenshot. `--translate-fake`
 translates through a local fake provider (no keys, no network), and
@@ -77,8 +78,19 @@ translates through a local fake provider (no keys, no network), and
 screenshot waits for and a bench runs alongside. `--ai-fake` answers the
 assistant from a local fake model, and `--ask TEXT` asks it at startup.
 `--palette QUERY` opens the command palette and `--settings SECTION` the
-settings window (`appearance`, `reading`, `shortcuts`, `translation`, `ocr`,
-`ai`). Scripted runs keep settings and keys in memory.
+settings window (`appearance`, `effects`, `reading`, `shortcuts`,
+`translation`, `ocr`, `ai`). Scripted runs keep settings and keys in memory.
+
+### Writing an effect
+
+Settings › Effects › New effect writes a commented starter
+(`crates/effects/src/template.wgsl`) into `<config>/glyphst/effects` and
+opens the folder; the Reader reloads effects when a file there changes, and
+lists the ones that fail to compile on that page. An effect is a WGSL
+`fn effect(uv, pixel) -> vec4<f32>` returning premultiplied colour after
+the shared [prelude](crates/effects/src/prelude.wgsl), with `// @effect`
+lines naming it, its kind (`background`, `transition` or `overlay`) and up
+to four parameters for the sliders.
 
 Report baseline failures separately. The statistics overlay (F12) shows
 frame times and GPU memory while reading. Review

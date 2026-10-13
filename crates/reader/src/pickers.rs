@@ -20,6 +20,8 @@ pub struct Pickers {
     picked: Arc<Mutex<Vec<PathBuf>>>,
     /// A save dialog's answer: what it was for and the chosen path.
     saved: Arc<Mutex<Option<(u64, PathBuf)>>>,
+    /// The image chosen as the wallpaper.
+    image: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Pickers {
@@ -46,6 +48,39 @@ impl Pickers {
         if spawned.is_err() {
             self.showing.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Shows a dialog choosing a wallpaper image.
+    pub fn choose_image(&self, ctx: &egui::Context) {
+        if self.showing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Choose a wallpaper")
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"],
+            )
+            .pick_file();
+        let (showing, image, ctx) = (self.showing.clone(), self.image.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("image-dialog".into())
+            .spawn(move || {
+                let file = pollster::block_on(dialog);
+                if let (Some(file), Ok(mut image)) = (file, image.lock()) {
+                    *image = Some(file.path().to_path_buf());
+                }
+                showing.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            self.showing.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The wallpaper image chosen since last asked.
+    pub fn take_image(&self) -> Option<PathBuf> {
+        self.image.lock().ok().and_then(|mut image| image.take())
     }
 
     /// Shows a save dialog for a PDF named `name`; the answer is tagged

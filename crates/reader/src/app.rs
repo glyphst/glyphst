@@ -1468,15 +1468,17 @@ impl ReaderApp {
             }
         }
         if self.settings_window.open {
-            let effects: Vec<EffectDef> = self
-                .with_gpu(|gpu| gpu.effects().defs().cloned().collect())
-                .unwrap_or_default();
+            let effects = self.effect_defs();
+            let errors = self.effect_errors();
             let changed = self.settings_window.show(
                 ctx,
                 SettingsContext {
                     prefs: &mut self.prefs,
                     keymap: &self.keymap,
                     effects: &effects,
+                    effect_errors: &errors,
+                    effects_folder: self.effects_dir.as_deref(),
+                    time: self.started.elapsed().as_secs_f32(),
                     user: &mut self.user_settings,
                     chatgpt: &self.chatgpt,
                 },
@@ -1484,6 +1486,66 @@ impl ReaderApp {
             if changed {
                 self.keymap = Keymap::new(&self.prefs.shortcuts);
             }
+            let actions = std::mem::take(&mut self.settings_window.effects_actions);
+            for action in actions {
+                self.effects_action(action, ctx);
+            }
+        }
+        if let Some(path) = self.pickers.take_image() {
+            self.prefs.wallpaper = Some(path.display().to_string());
+        }
+    }
+
+    /// Every effect, for the galleries.
+    pub(crate) fn effect_defs(&self) -> Vec<EffectDef> {
+        self.with_gpu(|gpu| gpu.effects().defs().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The user's effects that failed to load, for display.
+    fn effect_errors(&self) -> Vec<String> {
+        self.with_gpu(|gpu| {
+            gpu.effects()
+                .errors()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Does what the Effects page asked.
+    fn effects_action(&mut self, action: crate::effects_page::Action, ctx: &egui::Context) {
+        use crate::effects_page::{Action, open_folder, write_template};
+        let Some(dir) = self.effects_dir.clone() else {
+            self.notices
+                .push("There is no configuration folder for effects.");
+            return;
+        };
+        match action {
+            Action::ChooseWallpaper => self.pickers.choose_image(ctx),
+            Action::OpenFolder => {
+                if let Err(error) = open_folder(&dir) {
+                    self.notices
+                        .push(format!("Could not open {}: {error}", dir.display()));
+                }
+            }
+            Action::NewEffect => match write_template(&dir) {
+                Ok(path) => {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.notices.push(format!(
+                        "Wrote {name}: edit it, and the Reader reloads it when you save."
+                    ));
+                    let _ = open_folder(&dir);
+                    self.reload_effects_if_changed(Instant::now());
+                }
+                Err(error) => self
+                    .notices
+                    .push(format!("Could not write a new effect: {error}")),
+            },
         }
     }
 
@@ -1731,23 +1793,6 @@ impl ReaderApp {
             Err(error) => format!("unavailable ({error})"),
         };
         ui.label(format!("Gamepad: {gamepads}"));
-        let errors = self
-            .with_gpu(|gpu| {
-                gpu.effects()
-                    .errors()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !errors.is_empty() {
-            ui.separator();
-            ui.collapsing(format!("Effect errors ({})", errors.len()), |ui| {
-                for error in errors {
-                    ui.label(error);
-                }
-            });
-        }
     }
 
     /// A pane's document view: input, layout, loading, the GPU callback

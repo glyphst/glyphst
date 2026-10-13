@@ -70,8 +70,23 @@ preferences (theme, transition, background, keyboard shortcuts, last
 session with its panes) live in eframe storage under the config directory
 (`glyphst/reader-egui/app.ron`, the path from before the switch); scripted
 runs (`--bench`, `--screenshot…`) save nothing and leave the library
-unwritten. User effects are WGSL files with `// @effect` manifests in
-`<config>/glyphst/effects`.
+unwritten.
+
+Effects are WGSL files with `// @effect` manifests ([effects](crates/effects)).
+The registry keeps the built-ins and the user's effects (from
+`<config>/glyphst/effects`) in two layers: a user effect may replace a
+built-in by id, and the user layer is reloaded whole when the folder's
+files change (checked once a second while the window has focus). Three
+kinds are chosen in the Reader: the background behind the whole stage
+(the focused book's; `image: true` backgrounds draw the wallpaper, read
+and mipmapped on a worker thread), the page transition (the incoming
+book's) and the page tint, an overlay that each view draws from its pages
+into a tinted image before the content effect, so tints survive
+transitions and splits. Defaults are set in Settings › Effects, with
+parameters per effect; a book's own choices (the Effects drawer) live in
+the Reader's preferences by document path, not in the library, whose
+formats are compatibility contracts. Preview cards are paint callbacks
+drawing each effect over two sample pages (or the wallpaper).
 
 Its components take pdfcraft's style: the design tokens (`theme.rs`, light
 and dark, white pages in both), Inter and JetBrains Mono embedded ahead of

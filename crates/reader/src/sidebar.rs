@@ -25,16 +25,19 @@ pub enum SidebarTab {
     Notes,
     Search,
     Translation,
+    /// This book's effects (drawn by the stage, not here).
+    Effects,
 }
 
 impl SidebarTab {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Outline,
         Self::Pages,
         Self::Bookmarks,
         Self::Notes,
         Self::Search,
         Self::Translation,
+        Self::Effects,
     ];
 
     pub fn label(self) -> &'static str {
@@ -45,6 +48,7 @@ impl SidebarTab {
             Self::Notes => "Notes",
             Self::Search => "Search",
             Self::Translation => "Translation",
+            Self::Effects => "Effects",
         }
     }
 
@@ -56,6 +60,7 @@ impl SidebarTab {
             Self::Notes => "sticky-note",
             Self::Search => "search",
             Self::Translation => "languages",
+            Self::Effects => "wand-sparkles",
         }
     }
 
@@ -121,6 +126,7 @@ pub fn show(
             find::search_panel(&mut tab.find, ui, now);
         }
         SidebarTab::Translation => translation_panel(ui, tab, translation, &mut actions),
+        SidebarTab::Effects => {}
     }
     actions
 }

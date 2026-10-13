@@ -423,6 +423,18 @@ impl ReaderApp {
             let mut requests = Vec::new();
             let mut close = false;
             let mut resize = 0.0;
+            // The Effects drawer edits a copy of this book's choices.
+            let showing_effects = self.prefs.sidebar == SidebarTab::Effects;
+            let effects = if showing_effects {
+                self.effect_defs()
+            } else {
+                Vec::new()
+            };
+            let key = self.book_key(active);
+            let mut book = self.prefs.books.get(&key).cloned().unwrap_or_default();
+            let mut book_changed = false;
+            let title = self.tabs[active].title.clone();
+            let time = self.started.elapsed().as_secs_f32();
             egui::Area::new(Id::new("stage-drawer"))
                 .order(Order::Middle)
                 .fixed_pos(rect.min)
@@ -437,14 +449,36 @@ impl ReaderApp {
                             self.prefs.sidebar.icon(),
                             self.prefs.sidebar.label(),
                         );
-                        requests = sidebar::show(
-                            ui,
-                            &mut self.tabs[active],
-                            &mut self.prefs.sidebar,
-                            &mut self.sidebar_state,
-                            &info,
-                            now,
-                        );
+                        if showing_effects {
+                            // The previews are animated.
+                            ui.ctx().request_repaint();
+                            let find = |id: Option<&str>| {
+                                id.and_then(|id| effects.iter().find(|def| def.id == id))
+                            };
+                            book_changed = crate::effects_page::book_page(
+                                ui,
+                                crate::effects_page::BookPage {
+                                    title: &title,
+                                    book: &mut book,
+                                    default_background: find(Some(&self.prefs.background)),
+                                    default_transition: find(self.prefs.transition.as_deref()),
+                                    default_overlay: find(self.prefs.overlay.as_deref()),
+                                    effects: &effects,
+                                    params: &self.prefs.effect_params,
+                                    has_wallpaper: self.prefs.wallpaper.is_some(),
+                                    time,
+                                },
+                            );
+                        } else {
+                            requests = sidebar::show(
+                                ui,
+                                &mut self.tabs[active],
+                                &mut self.prefs.sidebar,
+                                &mut self.sidebar_state,
+                                &info,
+                                now,
+                            );
+                        }
                     });
                     resize = resize_handle(
                         ui,
@@ -457,6 +491,13 @@ impl ReaderApp {
                 });
             if close {
                 self.prefs.show_sidebar = false;
+            }
+            if book_changed {
+                book.used = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs());
+                self.prefs.books.insert(key, book);
+                crate::book_effects::trim(&mut self.prefs.books);
             }
             if resize != 0.0 {
                 self.prefs.drawer_width =

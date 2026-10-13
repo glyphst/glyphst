@@ -167,6 +167,10 @@ pub struct ReaderGpu {
     blank: wgpu::TextureView,
     /// The wallpaper image, mipmapped, for backgrounds that draw it.
     wallpaper: Option<wgpu::TextureView>,
+    /// Two sample pages that previews of transitions and tints show.
+    samples: [wgpu::TextureView; 2],
+    /// This frame's previews, by card.
+    previews: HashMap<String, PreparedEffect>,
     backdrop: Option<PreparedEffect>,
     pub stats: FrameStats,
 }
@@ -278,6 +282,8 @@ impl ReaderGpu {
             paper_color,
             blank,
             wallpaper: None,
+            samples: [0, 1].map(|index| sample_page(device, &render_state.queue, index)),
+            previews: HashMap::new(),
             backdrop: None,
             stats: FrameStats::default(),
         };
@@ -840,6 +846,137 @@ impl CallbackTrait for ViewCallback {
             for prepared in &view.prepared {
                 gpu.effects.draw(prepared, pass);
             }
+        }
+    }
+}
+
+/// A sample page for previews, `index` 0 or 1: a page with a heading and
+/// text lines, or a warmer one with a picture, on a transparent margin.
+fn sample_page(device: &wgpu::Device, queue: &wgpu::Queue, index: usize) -> wgpu::TextureView {
+    const SIZE: [u32; 2] = [320, 200];
+    let mut rgba = vec![0u8; (SIZE[0] * SIZE[1] * 4) as usize];
+    let (paper, accent) = if index == 0 {
+        ([255, 255, 255], [37, 99, 235])
+    } else {
+        ([253, 246, 227], [217, 119, 6])
+    };
+    let mut fill = |x0: u32, y0: u32, x1: u32, y1: u32, rgb: [u8; 3]| {
+        for y in y0..y1.min(SIZE[1]) {
+            for x in x0..x1.min(SIZE[0]) {
+                let i = ((y * SIZE[0] + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
+    };
+    fill(90, 14, 230, 186, paper);
+    fill(104, 28, 190, 38, accent);
+    let first_line = if index == 0 {
+        52
+    } else {
+        // A picture above the text.
+        fill(104, 50, 216, 104, accent);
+        114
+    };
+    for (line, y) in (first_line..174).step_by(10).enumerate() {
+        let end = if line % 4 == 3 { 170 } else { 216 };
+        fill(104, y, end, y + 4, [120, 120, 128]);
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sample_page"),
+        size: wgpu::Extent3d {
+            width: SIZE[0],
+            height: SIZE[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        &rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE[0] * 4),
+            rows_per_image: Some(SIZE[1]),
+        },
+        wgpu::Extent3d {
+            width: SIZE[0],
+            height: SIZE[1],
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&Default::default())
+}
+
+/// A live preview of an effect in a card of the effects manager.
+pub struct PreviewCallback {
+    pub rect: egui::Rect,
+    /// Unique among this frame's previews.
+    pub key: String,
+    pub effect: EffectUse,
+    pub kind: glyphst_effects::EffectKind,
+    /// Seconds for animated effects; transitions loop on it.
+    pub time: f32,
+}
+
+impl CallbackTrait for PreviewCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        screen: &ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        use glyphst_effects::EffectKind;
+        let Some(gpu) = resources.get_mut::<ReaderGpu>() else {
+            return Vec::new();
+        };
+        let def = gpu.effects.find(&self.effect.id);
+        let image = def.is_some_and(|def| def.image);
+        // Transitions run, then hold the incoming page a moment.
+        let duration = def
+            .map_or(0.3, |def| def.duration_ms as f32 / 1000.0)
+            .max(0.05);
+        let progress = (self.time % (duration + 0.9) / duration).min(1.0);
+        let (from, to) = match (self.kind, &gpu.wallpaper) {
+            (EffectKind::Transition, _) => (&gpu.samples[0], &gpu.samples[1]),
+            (EffectKind::Overlay, _) => (&gpu.samples[0], &gpu.samples[0]),
+            (EffectKind::Background, Some(wallpaper)) if image => (wallpaper, wallpaper),
+            (EffectKind::Background, _) => (&gpu.blank, &gpu.blank),
+        };
+        let size = pixel_size(self.rect, screen.pixels_per_point);
+        let inputs = EffectInputs {
+            from,
+            to,
+            resolution: [size[0] as f32, size[1] as f32],
+            pointer: None,
+            time: self.time,
+            progress,
+            direction: 1.0,
+            params: self.effect.params,
+        };
+        match gpu.effects.prepare(device, &self.effect.id, &inputs) {
+            Some(prepared) => gpu.previews.insert(self.key.clone(), prepared),
+            None => gpu.previews.remove(&self.key),
+        };
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &CallbackResources,
+    ) {
+        if let Some(gpu) = resources.get::<ReaderGpu>()
+            && let Some(prepared) = gpu.previews.get(&self.key)
+        {
+            gpu.effects.draw(prepared, pass);
         }
     }
 }

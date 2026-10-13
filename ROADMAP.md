@@ -10,9 +10,9 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. Reader: M6 effects manager
+## 1. Reader: the next milestone
 
-**Owner:** `reader`, `effects`.
+**Owner:** `reader`.
 
 **Current evidence:** The [Reader](crates/reader) runs on egui with the GPU
 vector renderer; it replaced the GPUI Reader (removed with the GPUI crates
@@ -36,13 +36,21 @@ and the abandoned Files app in M5). It has:
   last session keeps them); two-page spreads, rotation (both kept per
   document) and reloading changed files; ChatGPT Subscription sign-in, the
   AI providers' order and AI and OCR connection tests.
+- **M6:** the effects manager: Settings › Effects with live preview cards
+  for backgrounds, transitions and page tints, parameter sliders, an image
+  wallpaper (Wallpaper, Soft and Parallax backgrounds) and the effects
+  folder (open it, write a commented starter effect, see load errors);
+  user effects reload when their files change; the Effects drawer gives a
+  book its own background, transition and tint; page tints Sepia, Night
+  and Paper grain.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level, War and Peace and the 15-page image-heavy brochure 1x-64x-1x,
 scrolls War and Peace (1,259 pages) and the brochure, and searches each
 whole document (48,603 matches for "the" in War and Peace) with no frame
 over 25 ms (worst 21 ms, p95 8.5-9 ms), also with War and Peace as a
-spread or turned; split side by side with Murietta, one search frame took
+spread or turned, with the Night tint, and with the Soft wallpaper and
+Sepia; split side by side with Murietta, one search frame took
 25.0 ms in one of three runs. Uploads go through a
 reused staging belt, 4 MiB per frame, and GPU memory comes in 8-32 MiB
 blocks. With a fake document translation running alongside, 12 brochure
@@ -67,13 +75,18 @@ Known gaps:
   context menu, and translated (i18n) interface text.
 - No automated run writes the real keychain or signs in to ChatGPT: the
   user's checks that a key set in the Reader is found again after a
-  restart, and of a ChatGPT Subscription sign-in, are pending.
+  restart, and of a ChatGPT Subscription sign-in, are pending. Editing an
+  effect file while the Reader runs (the reload) is also checked by hand.
+- The wallpaper is written to the GPU in one go when chosen (a 4K image
+  can cost a frame then), and Solid colour's preview card shows its
+  manifest colour rather than the theme's.
 
-**Next step (M6):** an effects manager: the user effect directory with hot
-reload, effect previews in the settings window, and per-book choices of
-background and transition.
+**Next step:** the user picks the next milestone. Candidates from the gaps
+above: showing dense pages a level at a time while they upload,
+selections across pages, restoring translation sessions from the cache,
+and Mermaid diagrams in the assistant.
 
-**Done when:** the effects manager works with tests, `check.sh quick`
+**Done when:** the chosen milestone works with tests, `check.sh quick`
 passes, and the bench still shows no frames over 25 ms.
 
 ## 2. Dependency audit follow-up

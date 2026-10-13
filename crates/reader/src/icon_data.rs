@@ -65,6 +65,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("eye", include_bytes!("../assets/icons/eye.svg")),
     ("eye-off", include_bytes!("../assets/icons/eye-off.svg")),
     ("file-down", include_bytes!("../assets/icons/file-down.svg")),
+    ("file-plus", include_bytes!("../assets/icons/file-plus.svg")),
     ("file-text", include_bytes!("../assets/icons/file-text.svg")),
     (
         "folder-open",
@@ -78,6 +79,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/highlighter.svg"),
     ),
     ("house", include_bytes!("../assets/icons/house.svg")),
+    ("image", include_bytes!("../assets/icons/image.svg")),
     ("info", include_bytes!("../assets/icons/info.svg")),
     ("keyboard", include_bytes!("../assets/icons/keyboard.svg")),
     ("languages", include_bytes!("../assets/icons/languages.svg")),
@@ -147,6 +149,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/triangle-alert.svg"),
     ),
     ("type", include_bytes!("../assets/icons/type.svg")),
+    (
+        "wand-sparkles",
+        include_bytes!("../assets/icons/wand-sparkles.svg"),
+    ),
     ("x", include_bytes!("../assets/icons/x.svg")),
     ("zoom-in", include_bytes!("../assets/icons/zoom-in.svg")),
     ("zoom-out", include_bytes!("../assets/icons/zoom-out.svg")),

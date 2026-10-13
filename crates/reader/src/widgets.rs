@@ -51,6 +51,10 @@ pub const ICONS_IN_USE: &[&str] = &[
     "log-in",
     "log-out",
     "columns-2",
+    "wand-sparkles",
+    "image",
+    "folder-open",
+    "file-plus",
 ];
 
 fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
@@ -255,6 +259,21 @@ pub fn paint_kbd(ui: &egui::Ui, rect: Rect, label: &str) {
         theme::medium(11.0),
         t.text_muted,
     );
+}
+
+/// A slider with a visible rail: the theme's flat inactive widgets would
+/// leave egui's slider without one.
+pub fn slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> Response {
+    let tokens = Tokens::get(ui.ctx());
+    ui.scope(|ui| {
+        let visuals = &mut ui.style_mut().visuals;
+        visuals.widgets.inactive.bg_fill = tokens.divider;
+        visuals.widgets.inactive.weak_bg_fill = tokens.divider;
+        visuals.selection.bg_fill = tokens.accent;
+        visuals.slider_trailing_fill = true;
+        ui.add(slider)
+    })
+    .inner
 }
 
 /// One choice of several, drawn as a row of joined buttons. Returns whether

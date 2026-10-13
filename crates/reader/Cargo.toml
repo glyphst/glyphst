@@ -13,6 +13,8 @@ dirs.workspace = true
 eframe = { workspace = true, features = [
     "accesskit",
     "default_fonts",
+    # Opens web links (and the ChatGPT sign-in page) in the browser.
+    "links",
     "persistence",
     "wayland",
     "wgpu",

@@ -4,7 +4,7 @@
 
 use egui::{Key, RichText};
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
-use glyphst_effects::{EffectDef, EffectKind};
+use glyphst_effects::EffectDef;
 
 use crate::{
     commands::{Category, Command},
@@ -20,6 +20,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Appearance,
+    Effects,
     Reading,
     Shortcuts,
     Translation,
@@ -28,8 +29,9 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Appearance,
+        Self::Effects,
         Self::Reading,
         Self::Shortcuts,
         Self::Translation,
@@ -51,6 +53,7 @@ impl Section {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Appearance => "palette",
+            Self::Effects => "wand-sparkles",
             Self::Reading => "book-open",
             Self::Shortcuts => "keyboard",
             Self::Translation => "languages",
@@ -62,6 +65,7 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Effects => "Effects",
             Self::Reading => "Reading",
             Self::Shortcuts => "Keyboard shortcuts",
             Self::Translation => "Translation",
@@ -88,6 +92,8 @@ pub struct SettingsWindow {
     recording: Option<Command>,
     conflict: Option<Conflict>,
     providers: ProviderPages,
+    /// What the Effects page asked for, for the app to do.
+    pub effects_actions: Vec<crate::effects_page::Action>,
 }
 
 /// What the window needs from the app.
@@ -95,6 +101,11 @@ pub struct SettingsContext<'a> {
     pub prefs: &'a mut Prefs,
     pub keymap: &'a Keymap,
     pub effects: &'a [EffectDef],
+    /// Effects that failed to load, and the user's effects folder.
+    pub effect_errors: &'a [String],
+    pub effects_folder: Option<&'a std::path::Path>,
+    /// Seconds, for previews.
+    pub time: f32,
     pub user: &'a mut UserSettings,
     pub chatgpt: &'a ChatGptSubscription,
 }
@@ -213,7 +224,22 @@ impl SettingsWindow {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| match current {
-                                Section::Appearance => appearance(ui, app.prefs, app.effects),
+                                Section::Appearance => appearance(ui, app.prefs),
+                                Section::Effects => {
+                                    // The previews are animated.
+                                    ui.ctx().request_repaint();
+                                    crate::effects_page::settings_page(
+                                        ui,
+                                        crate::effects_page::SettingsPage {
+                                            prefs: app.prefs,
+                                            effects: app.effects,
+                                            errors: app.effect_errors,
+                                            folder: app.effects_folder,
+                                            time: app.time,
+                                            actions: &mut self.effects_actions,
+                                        },
+                                    );
+                                }
                                 Section::Reading => reading(ui, app.prefs),
                                 Section::Shortcuts => {
                                     changed = self.shortcuts(ui, app.prefs, app.keymap, &tokens);
@@ -470,38 +496,17 @@ fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Respo
     response
 }
 
-fn appearance(ui: &mut egui::Ui, prefs: &mut Prefs, effects: &[EffectDef]) {
+fn appearance(ui: &mut egui::Ui, prefs: &mut Prefs) {
     widgets::section_title(ui, "Theme");
     let options: Vec<(ThemePreference, &str)> = ThemePreference::ALL
         .into_iter()
         .map(|preference| (preference, preference.label()))
         .collect();
     widgets::segmented(ui, &mut prefs.theme, &options);
-    ui.add_space(8.0);
-    widgets::section_title(ui, "Page transition");
-    ui.radio_value(&mut prefs.transition, None, "None");
-    for def in effects
-        .iter()
-        .filter(|def| def.kind == EffectKind::Transition)
-    {
-        ui.radio_value(&mut prefs.transition, Some(def.id.clone()), &def.name);
-    }
-    ui.add_space(8.0);
-    widgets::section_title(ui, "Background");
-    for def in effects
-        .iter()
-        .filter(|def| def.kind == EffectKind::Background)
-    {
-        let label = if def.animated {
-            format!("{} (animated)", def.name)
-        } else {
-            def.name.clone()
-        };
-        ui.radio_value(&mut prefs.background, def.id.clone(), label);
-    }
-    ui.add(
-        egui::Slider::new(&mut prefs.background_fps, 1..=120)
-            .text("frames per second for animated backgrounds"),
+    ui.label(
+        RichText::new("Backgrounds, page transitions and tints are under Effects.")
+            .small()
+            .color(Tokens::get(ui.ctx()).text_faint),
     );
 }
 
@@ -561,6 +566,9 @@ mod tests {
                     prefs,
                     keymap,
                     effects: &[],
+                    effect_errors: &[],
+                    effects_folder: None,
+                    time: 0.0,
                     user: &mut user,
                     chatgpt: &chatgpt,
                 },
@@ -621,5 +629,89 @@ mod tests {
         assert_eq!(Section::parse("shortcuts"), Some(Section::Shortcuts));
         assert_eq!(Section::parse("Appearance"), Some(Section::Appearance));
         assert_eq!(Section::parse("nope"), None);
+    }
+
+    #[test]
+    fn the_effects_page_shows_a_live_card_per_effect() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let def = |id: &str, kind, user| EffectDef {
+            id: id.into(),
+            name: id.into(),
+            kind,
+            animated: false,
+            duration_ms: 300,
+            image: false,
+            hidden: false,
+            params: vec![glyphst_effects::ParamDef {
+                id: "amount".into(),
+                label: "Amount".into(),
+                kind: glyphst_effects::ParamKind::Float { min: 0.0, max: 1.0 },
+                default: 0.5,
+            }],
+            source: format!("{id}.wgsl"),
+            user,
+        };
+        use glyphst_effects::EffectKind::{Background, Overlay, Transition};
+        let effects = [
+            def("solid", Background, false),
+            def("wave", Background, true),
+            def("crossfade", Transition, false),
+            def("night", Overlay, false),
+        ];
+        let mut prefs = Prefs {
+            background: "wave".into(),
+            overlay: Some("night".into()),
+            ..Prefs::default()
+        };
+        let keymap = Keymap::default();
+        let mut window = SettingsWindow::default();
+        window.show_section(Section::Effects);
+        let mut user = UserSettings::in_memory(
+            &ctx,
+            glyphst_settings::Settings::default(),
+            Default::default(),
+        );
+        let chatgpt = ChatGptSubscription::start(
+            std::sync::Arc::new(glyphst_settings::MemoryCredentials::default()),
+            || {},
+        );
+        let errors = ["wave.wgsl: line 3".to_string()];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        // A window's first frame only measures it.
+        let mut output = Default::default();
+        for _ in 0..3 {
+            output = ctx.run_ui(input.clone(), |ui| {
+                window.show(
+                    ui.ctx(),
+                    SettingsContext {
+                        prefs: &mut prefs,
+                        keymap: &keymap,
+                        effects: &effects,
+                        effect_errors: &errors,
+                        effects_folder: Some(std::path::Path::new("/config/glyphst/effects")),
+                        time: 1.0,
+                        user: &mut user,
+                        chatgpt: &chatgpt,
+                    },
+                );
+            });
+            output.textures_delta.clear();
+        }
+        let output: egui::FullOutput = output;
+        // Cards draw live previews: one per effect, none for "None".
+        let previews = output
+            .shapes
+            .iter()
+            .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
+            .count();
+        assert_eq!(previews, effects.len());
+        assert_eq!(window.effects_actions, []);
     }
 }

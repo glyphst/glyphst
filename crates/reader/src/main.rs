@@ -27,6 +27,7 @@ mod commands;
 mod doc_text;
 mod document;
 mod document_tab;
+mod effects_page;
 mod fake_providers;
 mod find;
 mod fonts;
