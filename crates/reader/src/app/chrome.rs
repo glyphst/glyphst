@@ -647,6 +647,25 @@ impl ReaderApp {
 
     /// The reading progress along the stage's bottom: the part read, ticks
     /// at chapters, and scrubbing to a page.
+    /// The start of a key sequence and its count (vim's showcmd), at the
+    /// bottom right, `lift` above the window's bottom.
+    pub(super) fn pending_keys_chip(&self, ctx: &egui::Context, lift: f32) {
+        let Some(label) = self.pending_keys.indicator() else {
+            return;
+        };
+        let corner = ctx.content_rect().right_bottom() - vec2(16.0, lift);
+        egui::Area::new(Id::new("pending-keys"))
+            .order(Order::Foreground)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(corner)
+            .interactable(false)
+            .show(ctx, |ui| {
+                let size = widgets::kbd_size(ui, &label);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                widgets::paint_kbd(ui, rect, &label);
+            });
+    }
+
     fn progress_line(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize) {
         let Some(line) = layout.progress else {
             return;

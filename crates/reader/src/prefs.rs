@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     book_effects::{self, BookEffects},
-    keys::{self, Overrides},
+    keys::{self, KeymapPreset, Overrides},
     sidebar::SidebarTab,
     theme::ThemePreference,
 };
@@ -49,6 +49,8 @@ pub struct Prefs {
     pub target_language: Option<String>,
     /// Keyboard shortcuts the user changed: command id to keys.
     pub shortcuts: Overrides,
+    /// Which default keys commands have.
+    pub keymap: KeymapPreset,
     pub last_session: LastSession,
 }
 
@@ -71,6 +73,7 @@ impl Default for Prefs {
             autohide_controls: true,
             target_language: None,
             shortcuts: Overrides::new(),
+            keymap: KeymapPreset::Standard,
             last_session: LastSession::default(),
         }
     }
@@ -175,6 +178,7 @@ mod tests {
             autohide_controls: false,
             target_language: Some("ja".into()),
             shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
+            keymap: KeymapPreset::Vim,
             overlay: Some("sepia".into()),
             wallpaper: Some("/pictures/lake.jpg".into()),
             effect_params: [("aurora".to_string(), [1.5, 0.2, 0.0, 0.0])].into(),
@@ -239,6 +243,7 @@ mod tests {
             "unknown commands and keys are dropped"
         );
         assert!(prefs.reopen_last_session, "missing fields take defaults");
+        assert_eq!(prefs.keymap, KeymapPreset::Standard);
 
         storage.set_string(STORAGE_KEY, "not json".into());
         assert_eq!(Prefs::load(Some(&storage)), Prefs::default());

@@ -9,7 +9,7 @@ use glyphst_effects::EffectDef;
 use crate::{
     commands::{Category, Command},
     icons,
-    keys::{self, Keymap, Overrides, Shortcut},
+    keys::{self, Keymap, KeymapPreset, Keys, Overrides, Shortcut},
     prefs::Prefs,
     settings_providers::ProviderPages,
     theme::{self, ThemePreference, Tokens},
@@ -75,21 +75,45 @@ impl Section {
     }
 }
 
-/// A shortcut recorded for `command` that `owner` has.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Keys recorded for `command` that other bindings have, start, or are
+/// the start of.
+#[derive(Clone, Debug, PartialEq)]
 struct Conflict {
     command: Command,
-    shortcut: Shortcut,
-    owner: Command,
+    keys: Keys,
+    others: Vec<(Keys, Command)>,
 }
+
+/// Keys being recorded for `command`: each press adds one, and a pause
+/// ends the sequence.
+#[derive(Clone, Debug, PartialEq)]
+struct Recording {
+    command: Command,
+    strokes: Vec<Shortcut>,
+    /// When the last key was pressed (egui's input time).
+    last: f64,
+}
+
+impl Recording {
+    fn new(command: Command) -> Self {
+        Self {
+            command,
+            strokes: Vec::new(),
+            last: 0.0,
+        }
+    }
+}
+
+/// Seconds without a key press that end a recorded sequence.
+const RECORD_PAUSE: f64 = 1.0;
 
 #[derive(Default)]
 pub struct SettingsWindow {
     pub open: bool,
     section: Option<Section>,
     filter: String,
-    /// The command whose next key press is being recorded.
-    recording: Option<Command>,
+    /// The keys being recorded for a command.
+    recording: Option<Recording>,
     conflict: Option<Conflict>,
     providers: ProviderPages,
     /// What the Effects page asked for, for the app to do.
@@ -269,23 +293,41 @@ impl SettingsWindow {
         tokens: &Tokens,
     ) -> bool {
         let mut changed = false;
-        if let Some(command) = self.recording
-            && let Some(shortcut) = take_recorded(ui.ctx(), &mut self.recording)
-        {
-            match keymap.owner(shortcut) {
-                Some(owner) if owner != command => {
-                    self.conflict = Some(Conflict {
-                        command,
-                        shortcut,
-                        owner,
-                    });
-                }
-                _ => {
-                    keys::assign(&mut prefs.shortcuts, keymap, command, shortcut);
-                    changed = true;
-                }
+        if let Some((command, recorded)) = take_recorded(ui.ctx(), &mut self.recording) {
+            let others: Vec<(Keys, Command)> = keymap
+                .conflicts(&recorded)
+                .into_iter()
+                .filter(|(_, owner)| *owner != command)
+                .collect();
+            if others.is_empty() {
+                keys::assign(&mut prefs.shortcuts, keymap, command, recorded);
+                changed = true;
+            } else {
+                self.conflict = Some(Conflict {
+                    command,
+                    keys: recorded,
+                    others,
+                });
             }
         }
+        ui.horizontal(|ui| {
+            ui.label("Keys");
+            let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
+            changed |= widgets::segmented(ui, &mut prefs.keymap, &options);
+        });
+        ui.label(
+            RichText::new(match prefs.keymap {
+                KeymapPreset::Standard => "Ctrl shortcuts, arrows and Page Up/Down.",
+                KeymapPreset::Vim => {
+                    "hjkl, gg and G (42G goes to page 42), Ctrl+D/U, / n N, \
+                     Ctrl+O/I, : for the palette, Ctrl+W v/s/w/q for panes. \
+                     A number typed first repeats a move."
+                }
+            })
+            .small()
+            .color(tokens.text_muted),
+        );
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
@@ -303,16 +345,21 @@ impl SettingsWindow {
                 changed = true;
             }
         });
-        if let Some(conflict) = self.conflict {
+        if let Some(conflict) = self.conflict.clone() {
             egui::Frame::new()
                 .fill(tokens.accent_soft)
                 .corner_radius(tokens.radius)
                 .inner_margin(8)
                 .show(ui, |ui| {
+                    let others: Vec<String> = conflict
+                        .others
+                        .iter()
+                        .map(|(keys, owner)| format!("{} (“{}”)", keys.label(), owner.label()))
+                        .collect();
                     ui.label(format!(
-                        "{} is used by “{}”.",
-                        conflict.shortcut.label(),
-                        conflict.owner.label()
+                        "{} meets {}.",
+                        conflict.keys.label(),
+                        others.join(", ")
                     ));
                     ui.horizontal(|ui| {
                         if ui
@@ -363,7 +410,7 @@ impl SettingsWindow {
                 &mut prefs.shortcuts,
                 keymap,
                 conflict.command,
-                conflict.shortcut,
+                conflict.keys,
             );
         }
         accept
@@ -388,17 +435,25 @@ impl SettingsWindow {
                     ui.add(egui::Label::new(command.label()).truncate());
                 },
             );
-            for &shortcut in keymap.keys(command) {
-                if shortcut_chip(ui, &shortcut.label(), tokens)
+            for bound in keymap.keys(command) {
+                if shortcut_chip(ui, &bound.label(), tokens)
                     .on_hover_text("Remove")
                     .clicked()
                 {
-                    keys::unbind(&mut prefs.shortcuts, keymap, command, shortcut);
+                    keys::unbind(&mut prefs.shortcuts, keymap, command, bound);
                     changed = true;
                 }
             }
-            if self.recording == Some(command) {
-                ui.label(RichText::new("Press a key… (Esc cancels)").color(tokens.accent_text));
+            if let Some(recording) = self
+                .recording
+                .as_ref()
+                .filter(|recording| recording.command == command)
+            {
+                let text = match Keys::new(recording.strokes.clone()) {
+                    Some(so_far) => format!("{} …", so_far.label()),
+                    None => "Press keys… (Esc cancels)".to_string(),
+                };
+                ui.label(RichText::new(text).color(tokens.accent_text));
             } else if ui
                 .push_id(("add", command.id()), |ui| {
                     icons::button(ui, "plus", 24.0, false, "Add a shortcut")
@@ -406,7 +461,7 @@ impl SettingsWindow {
                 .inner
                 .clicked()
             {
-                self.recording = Some(command);
+                self.recording = Some(Recording::new(command));
                 self.conflict = None;
             }
             if prefs.shortcuts.contains_key(command.id())
@@ -425,15 +480,19 @@ impl SettingsWindow {
     }
 }
 
-/// The shortcut of the key pressed for a recording, taking the press from
-/// egui's input. Escape ends the recording with nothing.
-fn take_recorded(ctx: &egui::Context, recording: &mut Option<Command>) -> Option<Shortcut> {
-    let mut recorded = None;
+/// The keys recorded once the user pauses (or presses the most a
+/// sequence has), taking the presses from egui's input. Escape ends the
+/// recording with nothing.
+fn take_recorded(
+    ctx: &egui::Context,
+    recording: &mut Option<Recording>,
+) -> Option<(Command, Keys)> {
+    let now = ctx.input(|input| input.time);
     ctx.input_mut(|input| {
         input.events.retain(|event| {
-            if recording.is_none() || recorded.is_some() {
+            let Some(active) = recording.as_mut() else {
                 return true;
-            }
+            };
             let egui::Event::Key {
                 key,
                 pressed: true,
@@ -443,21 +502,34 @@ fn take_recorded(ctx: &egui::Context, recording: &mut Option<Command>) -> Option
             else {
                 return true;
             };
+            if active.strokes.len() >= keys::MAX_KEYS {
+                return true;
+            }
             if *key == Key::Escape && modifiers.is_none() {
                 *recording = None;
                 return false;
             }
             match Shortcut::from_key(*key, *modifiers) {
                 Some(shortcut) => {
-                    recorded = Some(shortcut);
-                    *recording = None;
+                    active.strokes.push(shortcut);
+                    active.last = now;
                     false
                 }
                 None => true,
             }
         });
     });
-    recorded
+    let active = recording.as_ref()?;
+    if active.strokes.is_empty() {
+        return None;
+    }
+    let waited = now - active.last;
+    if active.strokes.len() < keys::MAX_KEYS && waited < RECORD_PAUSE {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(RECORD_PAUSE - waited));
+        return None;
+    }
+    let done = recording.take()?;
+    Some((done.command, Keys::new(done.strokes)?))
 }
 
 /// A key chip with an × that removes it.
@@ -528,25 +600,31 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
 mod tests {
     use super::*;
 
+    /// One frame at `time` seconds, pressing `key` if there is one.
     fn frame(
         ctx: &egui::Context,
         window: &mut SettingsWindow,
         prefs: &mut Prefs,
         keymap: &Keymap,
-        key: Key,
+        key: Option<(Key, egui::Modifiers)>,
+        time: f64,
     ) -> bool {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1000.0, 700.0),
             )),
-            events: vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
+            time: Some(time),
+            events: key
+                .into_iter()
+                .map(|(key, modifiers)| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                })
+                .collect(),
             ..Default::default()
         };
         let mut changed = false;
@@ -578,6 +656,30 @@ mod tests {
         changed
     }
 
+    fn keys(text: &str) -> Keys {
+        Keys::parse(text).expect("parses")
+    }
+
+    /// Records `key` for `command` and lets the pause pass; returns whether
+    /// the shortcuts changed.
+    fn record(
+        ctx: &egui::Context,
+        window: &mut SettingsWindow,
+        prefs: &mut Prefs,
+        keymap: &Keymap,
+        command: Command,
+        key: Key,
+        clock: &mut f64,
+    ) -> bool {
+        window.recording = Some(Recording::new(command));
+        let none = egui::Modifiers::NONE;
+        *clock += 1.0;
+        let mut changed = frame(ctx, window, prefs, keymap, Some((key, none)), *clock);
+        *clock += RECORD_PAUSE;
+        changed |= frame(ctx, window, prefs, keymap, None, *clock);
+        changed
+    }
+
     #[test]
     fn a_recorded_shortcut_another_command_has_moves_only_when_confirmed() {
         let ctx = egui::Context::default();
@@ -585,43 +687,108 @@ mod tests {
         let mut prefs = Prefs::default();
         let mut window = SettingsWindow::default();
         window.show_section(Section::Shortcuts);
-        let keymap = Keymap::new(&prefs.shortcuts);
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+        let mut clock = 0.0;
 
-        window.recording = Some(Command::Assistant);
-        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, Key::P));
-        let p = Shortcut::parse("P").expect("parses");
+        assert!(!record(
+            &ctx,
+            &mut window,
+            &mut prefs,
+            &keymap,
+            Command::Assistant,
+            Key::P,
+            &mut clock
+        ));
+        let p = keys("P");
         assert_eq!(
             window.conflict,
             Some(Conflict {
                 command: Command::Assistant,
-                shortcut: p,
-                owner: Command::Present,
+                keys: p.clone(),
+                others: vec![(p.clone(), Command::Present)],
             })
         );
         assert!(window.is_recording(), "shortcuts wait for the answer");
         assert!(!window.resolve_conflict(&mut prefs, &keymap, false));
         assert!(prefs.shortcuts.is_empty());
 
-        window.recording = Some(Command::Assistant);
-        frame(&ctx, &mut window, &mut prefs, &keymap, Key::P);
+        record(
+            &ctx,
+            &mut window,
+            &mut prefs,
+            &keymap,
+            Command::Assistant,
+            Key::P,
+            &mut clock,
+        );
         assert!(window.resolve_conflict(&mut prefs, &keymap, true));
-        let keymap = Keymap::new(&prefs.shortcuts);
-        assert_eq!(keymap.owner(p), Some(Command::Assistant));
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+        assert_eq!(keymap.owner(&p), Some(Command::Assistant));
         assert!(keymap.keys(Command::Present).is_empty());
 
-        // A free key is taken at once; Escape ends a recording with
-        // nothing, and the window stays open.
-        window.recording = Some(Command::Present);
-        assert!(frame(&ctx, &mut window, &mut prefs, &keymap, Key::F7));
-        let keymap = Keymap::new(&prefs.shortcuts);
-        assert_eq!(
-            keymap.keys(Command::Present),
-            &[Shortcut::parse("F7").expect("parses")]
-        );
-        window.recording = Some(Command::Present);
-        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, Key::Escape));
+        // A free key is taken after the pause; Escape ends a recording
+        // with nothing, and the window stays open.
+        window.recording = Some(Recording::new(Command::Present));
+        clock += 1.0;
+        let f7 = Some((Key::F7, egui::Modifiers::NONE));
+        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, f7, clock));
+        assert!(window.is_recording(), "a sequence may follow");
+        clock += RECORD_PAUSE;
+        assert!(frame(&ctx, &mut window, &mut prefs, &keymap, None, clock));
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+        assert_eq!(keymap.keys(Command::Present), &[keys("F7")]);
+        window.recording = Some(Recording::new(Command::Present));
+        let escape = Some((Key::Escape, egui::Modifiers::NONE));
+        assert!(!frame(
+            &ctx,
+            &mut window,
+            &mut prefs,
+            &keymap,
+            escape,
+            clock
+        ));
         assert_eq!(window.recording, None);
         assert!(window.open);
+    }
+
+    #[test]
+    fn sequences_are_recorded_and_prefixes_conflict() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut prefs = Prefs {
+            keymap: KeymapPreset::Vim,
+            ..Prefs::default()
+        };
+        let mut window = SettingsWindow::default();
+        window.show_section(Section::Shortcuts);
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+
+        window.recording = Some(Recording::new(Command::ToggleStats));
+        let ctrl_w = Some((Key::W, egui::Modifiers::COMMAND));
+        let x = Some((Key::X, egui::Modifiers::NONE));
+        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, ctrl_w, 1.0));
+        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, x, 1.5));
+        assert!(frame(&ctx, &mut window, &mut prefs, &keymap, None, 3.0));
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+        assert_eq!(keymap.owner(&keys("Ctrl+W X")), Some(Command::ToggleStats));
+
+        // G starts First page's and the tabs' sequences.
+        let mut clock = 3.0;
+        record(
+            &ctx,
+            &mut window,
+            &mut prefs,
+            &keymap,
+            Command::Zen,
+            Key::G,
+            &mut clock,
+        );
+        let conflict = window.conflict.clone().expect("G conflicts");
+        assert_eq!(conflict.others.len(), 3);
+        assert!(window.resolve_conflict(&mut prefs, &keymap, true));
+        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
+        assert_eq!(keymap.owner(&keys("G")), Some(Command::Zen));
+        assert_eq!(keymap.keys(Command::FirstPage), &[keys("Home")]);
     }
 
     #[test]

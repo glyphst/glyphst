@@ -120,9 +120,14 @@ or when its file changed while the window was in the background.
 
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette
-(Ctrl+K), menus and buttons all run commands through one dispatcher. The
-user's shortcuts replace a command's default keys and are kept by command
-id in the Reader's preferences.
+(Ctrl+K), menus and buttons all run commands through one dispatcher. Default
+keys come from a keymap preset: Standard, or Vim (hjkl, `gg`/`G`, `Ctrl+W`
+pane chords, `/` `n` `N`, `:` for the palette). A binding is a sequence of up
+to three shortcuts (`G G`, `Ctrl+W V`), and no binding may start another, so
+sequences need no timeout. In the Vim preset a count typed first repeats a
+move, or names the page for `G`/`gg`. The user's shortcuts replace a
+command's default keys in either preset and are kept by command id in the
+Reader's preferences.
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs

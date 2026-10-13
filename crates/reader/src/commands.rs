@@ -1,10 +1,13 @@
 //! The command registry, after pdfcraft's `engine/src/commands.rs`: every
 //! user-facing action by id. Keys, the palette, menus and toolbar buttons
 //! all run commands through `ReaderApp::run`; this table says what each is
-//! called, which keys run it by default and when it can run.
+//! called, which keys run it by default (in each keymap preset) and when it
+//! can run.
 //!
 //! Escape (its cancel chain), Copy (egui's copy event), the mouse's back and
-//! forward buttons and the view's own wheel, drag and arrow keys stay fixed.
+//! forward buttons and the view's own wheel and drag stay fixed.
+
+use crate::keys::KeymapPreset;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Command {
@@ -19,6 +22,12 @@ pub enum Command {
     ThemeSystem,
     ThemeLight,
     ThemeDark,
+    KeysStandard,
+    KeysVim,
+    ScrollDown,
+    ScrollUp,
+    ScrollLeft,
+    ScrollRight,
     NextPage,
     PreviousPage,
     NextHalfPage,
@@ -121,7 +130,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 52] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -133,6 +142,12 @@ impl Command {
         Self::ThemeSystem,
         Self::ThemeLight,
         Self::ThemeDark,
+        Self::KeysStandard,
+        Self::KeysVim,
+        Self::ScrollDown,
+        Self::ScrollUp,
+        Self::ScrollLeft,
+        Self::ScrollRight,
         Self::NextPage,
         Self::PreviousPage,
         Self::NextHalfPage,
@@ -184,6 +199,12 @@ impl Command {
             Self::ThemeSystem => "app.theme_system",
             Self::ThemeLight => "app.theme_light",
             Self::ThemeDark => "app.theme_dark",
+            Self::KeysStandard => "app.keys_standard",
+            Self::KeysVim => "app.keys_vim",
+            Self::ScrollDown => "navigation.scroll_down",
+            Self::ScrollUp => "navigation.scroll_up",
+            Self::ScrollLeft => "navigation.scroll_left",
+            Self::ScrollRight => "navigation.scroll_right",
             Self::NextPage => "navigation.next_page",
             Self::PreviousPage => "navigation.previous_page",
             Self::NextHalfPage => "navigation.next_half_page",
@@ -239,6 +260,12 @@ impl Command {
             Self::ThemeSystem => "Theme: System",
             Self::ThemeLight => "Theme: Light",
             Self::ThemeDark => "Theme: Dark",
+            Self::KeysStandard => "Keys: Standard",
+            Self::KeysVim => "Keys: Vim",
+            Self::ScrollDown => "Scroll down",
+            Self::ScrollUp => "Scroll up",
+            Self::ScrollLeft => "Scroll left",
+            Self::ScrollRight => "Scroll right",
             Self::NextPage => "Next page",
             Self::PreviousPage => "Previous page",
             Self::NextHalfPage => "Down half a screen",
@@ -291,6 +318,11 @@ impl Command {
             Self::ThemeSystem => "monitor",
             Self::ThemeLight => "sun",
             Self::ThemeDark => "moon",
+            Self::KeysStandard | Self::KeysVim => "keyboard",
+            Self::ScrollDown => "arrow-down",
+            Self::ScrollUp => "arrow-up",
+            Self::ScrollLeft => "arrow-left",
+            Self::ScrollRight => "arrow-right",
             Self::NextPage => "chevron-down",
             Self::PreviousPage => "chevron-up",
             Self::NextHalfPage => "chevron-down",
@@ -338,8 +370,14 @@ impl Command {
             | Self::ToggleStats
             | Self::ThemeSystem
             | Self::ThemeLight
-            | Self::ThemeDark => Category::App,
-            Self::NextPage
+            | Self::ThemeDark
+            | Self::KeysStandard
+            | Self::KeysVim => Category::App,
+            Self::ScrollDown
+            | Self::ScrollUp
+            | Self::ScrollLeft
+            | Self::ScrollRight
+            | Self::NextPage
             | Self::PreviousPage
             | Self::NextHalfPage
             | Self::PreviousHalfPage
@@ -376,9 +414,16 @@ impl Command {
         }
     }
 
-    /// The keys that run it unless the user changed them, in `keys`
-    /// notation.
-    pub fn default_keys(self) -> &'static [&'static str] {
+    /// The keys that run it in `preset` unless the user changed them, in
+    /// `keys` notation; keys of a sequence are separated by spaces.
+    pub fn default_keys(self, preset: KeymapPreset) -> &'static [&'static str] {
+        match preset {
+            KeymapPreset::Standard => self.standard_keys(),
+            KeymapPreset::Vim => self.vim_keys(),
+        }
+    }
+
+    fn standard_keys(self) -> &'static [&'static str] {
         match self {
             Self::Open => &["Ctrl+O"],
             Self::CloseTab => &["Ctrl+W"],
@@ -388,6 +433,10 @@ impl Command {
             Self::Settings => &["Ctrl+Comma"],
             Self::ToggleSidebar => &["F9"],
             Self::ToggleStats => &["F12"],
+            Self::ScrollDown => &["Down"],
+            Self::ScrollUp => &["Up"],
+            Self::ScrollLeft => &["Left"],
+            Self::ScrollRight => &["Right"],
             Self::NextPage => &["PageDown", "Space"],
             Self::PreviousPage => &["PageUp"],
             Self::NextHalfPage => &["Shift+PageDown"],
@@ -419,6 +468,8 @@ impl Command {
             Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
+            | Self::KeysStandard
+            | Self::KeysVim
             | Self::LargerText
             | Self::SmallerText
             | Self::TranslateDocument
@@ -427,6 +478,61 @@ impl Command {
             | Self::ClosePane
             | Self::ToggleSpread => &[],
         }
+    }
+
+    /// After the GPUI Reader's vim preset, zathura and sioyek: Ctrl+W, F, D
+    /// and O go to vim's meanings, so closing a tab, Find, Bookmark and Open
+    /// move to Q, /, M and O.
+    fn vim_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Open => &["O"],
+            Self::CloseTab => &["Q"],
+            Self::NextTab => &["G T", "Ctrl+Tab"],
+            Self::PreviousTab => &["G Shift+T", "Ctrl+Shift+Tab"],
+            Self::Palette => &["Colon", "Ctrl+K", "Ctrl+Shift+P"],
+            Self::ScrollDown => &["J", "Down"],
+            Self::ScrollUp => &["K", "Up"],
+            Self::ScrollLeft => &["H", "Left"],
+            Self::ScrollRight => &["L", "Right"],
+            Self::NextPage => &["Shift+J", "Ctrl+F", "Space", "PageDown"],
+            Self::PreviousPage => &["Shift+K", "Ctrl+B", "Shift+Space", "PageUp"],
+            Self::NextHalfPage => &["Ctrl+D", "Shift+PageDown"],
+            Self::PreviousHalfPage => &["Ctrl+U", "Shift+PageUp"],
+            Self::FirstPage => &["G G", "Home"],
+            Self::LastPage => &["Shift+G", "End"],
+            Self::Back => &["Ctrl+O", "Alt+Left"],
+            Self::Forward => &["Ctrl+I", "Alt+Right"],
+            Self::ToggleSpread => &["D"],
+            Self::SplitRight => &["Ctrl+W V", "Ctrl+Backslash"],
+            Self::SplitDown => &["Ctrl+W S"],
+            Self::FocusNextPane => &["Ctrl+W W", "Ctrl+W Ctrl+W", "F6"],
+            Self::ClosePane => &["Ctrl+W Q", "Ctrl+W C"],
+            Self::Find => &["Slash"],
+            Self::FindNext => &["N", "F3"],
+            Self::FindPrevious => &["Shift+N", "Shift+F3"],
+            Self::Bookmark => &["M"],
+            _ => self.standard_keys(),
+        }
+    }
+
+    /// Whether a count typed before its keys (vim's `5j`) repeats it.
+    /// First and last page take theirs as the page to go to.
+    pub fn counted(self) -> bool {
+        matches!(
+            self,
+            Self::ScrollDown
+                | Self::ScrollUp
+                | Self::ScrollLeft
+                | Self::ScrollRight
+                | Self::NextPage
+                | Self::PreviousPage
+                | Self::NextHalfPage
+                | Self::PreviousHalfPage
+                | Self::ZoomIn
+                | Self::ZoomOut
+                | Self::FindNext
+                | Self::FindPrevious
+        )
     }
 
     pub fn needs(self) -> Needs {
@@ -440,7 +546,9 @@ impl Command {
             | Self::ToggleStats
             | Self::ThemeSystem
             | Self::ThemeLight
-            | Self::ThemeDark => Needs::Nothing,
+            | Self::ThemeDark
+            | Self::KeysStandard
+            | Self::KeysVim => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
             Self::ShowTranslated => Needs::Translation,
@@ -463,6 +571,10 @@ impl Command {
                 | Self::SelectPage
                 | Self::RegionSelect
                 | Self::QuickAsk
+                | Self::ScrollDown
+                | Self::ScrollUp
+                | Self::ScrollLeft
+                | Self::ScrollRight
                 | Self::NextPage
                 | Self::PreviousPage
                 | Self::NextHalfPage

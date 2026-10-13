@@ -285,12 +285,15 @@ pub enum FindBarAction {
     Close,
 }
 
-/// The floating find bar at the top right of the document view.
+/// The floating find bar at the top right of the document view. Enter
+/// finds the next match and keeps the field focused for another, unless
+/// `enter_leaves` (the Vim preset, where n and N go on from the page).
 pub fn find_bar(
     find: &mut Find,
     area: egui::Rect,
     ctx: &egui::Context,
     now: Instant,
+    enter_leaves: bool,
 ) -> Option<FindBarAction> {
     let tokens = Tokens::get(ctx);
     let mut action = None;
@@ -322,7 +325,9 @@ pub fn find_bar(
                         }
                         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             action = Some(FindBarAction::Step(!ui.input(|i| i.modifiers.shift)));
-                            response.request_focus();
+                            if !enter_leaves {
+                                response.request_focus();
+                            }
                         }
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             action = Some(FindBarAction::Close);

@@ -9,7 +9,8 @@ drawn from their vectors on the GPU, so zooming stays sharp and smooth.
 Tabs and split panes, a library home, search, links and history,
 bookmarks, highlights and notes, two-page spreads and rotation, document and
 selection translation, an AI assistant, shader effects for page turns and
-backgrounds, a command palette and configurable shortcuts.
+backgrounds, a command palette and configurable shortcuts with a Vim
+keymap (Settings › Keyboard shortcuts, or "Keys: Vim" in the palette).
 
 ## Documentation
 

@@ -32,7 +32,7 @@ use crate::{
     harness::Harness,
     home::{Home, HomeAction},
     icons,
-    keys::Keymap,
+    keys::{self, Keymap, KeymapPreset},
     overview::Overview,
     palette::{self, Item, Palette},
     panes::{self, Panes},
@@ -69,6 +69,8 @@ const REFLOW_PAGE_HEIGHT: f32 = 960.0;
 const REFLOW_SETTLE: Duration = Duration::from_millis(300);
 /// Width the sidebar is assumed to take before it is first shown.
 const SIDEBAR_WIDTH: f32 = 280.0;
+/// The most times a count repeats a command (`999j`).
+const MAX_REPEAT: u32 = 999;
 /// Hit slop around glyphs, in egui points.
 const GLYPH_SLOP: f32 = 2.0;
 /// Pixels per frame the view scrolls while a selection is dragged past
@@ -245,6 +247,8 @@ pub struct ReaderApp {
     /// it was away are reloaded when it comes back).
     was_focused: bool,
     pub(crate) keymap: Keymap,
+    /// The start of a key sequence and a count typed so far.
+    pub(crate) pending_keys: keys::Pending,
     pub(crate) palette: Palette,
     pub(crate) settings_window: SettingsWindow,
 }
@@ -368,10 +372,11 @@ impl ReaderApp {
             was_focused: true,
             controls: launch.controls.or((!persist).then_some(true)),
             keymap: Keymap::default(),
+            pending_keys: keys::Pending::default(),
             palette: Palette::default(),
             settings_window: SettingsWindow::default(),
         };
-        app.keymap = Keymap::new(&app.prefs.shortcuts);
+        app.rebuild_keymap();
         if let Some(query) = launch.palette {
             app.palette.toggle();
             app.palette.query = query;
@@ -1456,8 +1461,11 @@ impl ReaderApp {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
-        for command in self.keymap.take_pressed(ctx, typing) {
-            if let Err(reason) = self.run(command, ctx)
+        let pressed = self
+            .keymap
+            .take_pressed(ctx, typing, &mut self.pending_keys);
+        for keys::Pressed { command, count } in pressed {
+            if let Err(reason) = self.run_counted(command, count, ctx)
                 && self.active.is_some()
                 && command.needs() != Needs::Document
             {
@@ -1471,7 +1479,6 @@ impl ReaderApp {
             if copy {
                 self.copy_selection(ctx);
             }
-            actions.extend(arrow_actions(ctx, self.tabs[active].present.is_some()));
             // Enter opens the overview's page.
             let tab = &mut self.tabs[active];
             if let Some(overview) = &tab.overview
@@ -1517,6 +1524,43 @@ impl ReaderApp {
             Needs::FixedLayout => !tab.is_reflowed(),
         };
         (!can).then(|| command.needs().reason())
+    }
+
+    /// The keymap for the preferences' preset and shortcuts.
+    pub(crate) fn rebuild_keymap(&mut self) {
+        self.keymap = Keymap::new(self.prefs.keymap, &self.prefs.shortcuts);
+        self.pending_keys.clear();
+    }
+
+    /// Runs a command a key ran, with the count typed before its keys:
+    /// first and last page go to that page, counted commands repeat.
+    fn run_counted(
+        &mut self,
+        command: Command,
+        count: Option<u32>,
+        ctx: &egui::Context,
+    ) -> Result<(), &'static str> {
+        let Some(count) = count else {
+            return self.run(command, ctx);
+        };
+        match command {
+            Command::FirstPage | Command::LastPage => {
+                if let Some(reason) = self.command_blocked(command) {
+                    return Err(reason);
+                }
+                let page = count.saturating_sub(1) as usize;
+                self.pending_actions.push(ViewAction::GoToPage(page));
+                ctx.request_repaint();
+                Ok(())
+            }
+            command if command.counted() => {
+                for _ in 0..count.min(MAX_REPEAT) {
+                    self.run(command, ctx)?;
+                }
+                Ok(())
+            }
+            command => self.run(command, ctx),
+        }
     }
 
     /// Runs a command: keys, the palette, menus and buttons all come here.
@@ -1618,6 +1662,34 @@ impl ReaderApp {
             Command::ThemeDark => {
                 self.prefs.theme = ThemePreference::Dark;
                 None
+            }
+            Command::KeysStandard | Command::KeysVim => {
+                self.prefs.keymap = if command == Command::KeysVim {
+                    KeymapPreset::Vim
+                } else {
+                    KeymapPreset::Standard
+                };
+                self.rebuild_keymap();
+                self.notices
+                    .push(format!("{} keys", self.prefs.keymap.label()));
+                None
+            }
+            Command::ScrollDown
+            | Command::ScrollUp
+            | Command::ScrollLeft
+            | Command::ScrollRight => {
+                // When presenting they turn the page.
+                let presenting = self
+                    .active
+                    .is_some_and(|active| self.tabs[active].present.is_some());
+                let forward = matches!(command, Command::ScrollDown | Command::ScrollRight);
+                let step = if forward { 1 } else { -1 };
+                view(match command {
+                    _ if presenting && forward => ViewAction::NextPage,
+                    _ if presenting => ViewAction::PreviousPage,
+                    Command::ScrollDown | Command::ScrollUp => ViewAction::Step(step),
+                    _ => ViewAction::Sideways(step),
+                })
             }
             Command::NextPage => view(ViewAction::NextPage),
             Command::PreviousPage => view(ViewAction::PreviousPage),
@@ -1803,7 +1875,7 @@ impl ReaderApp {
                 },
             );
             if changed {
-                self.keymap = Keymap::new(&self.prefs.shortcuts);
+                self.rebuild_keymap();
             }
             let actions = std::mem::take(&mut self.settings_window.effects_actions);
             for action in actions {
@@ -2336,10 +2408,11 @@ impl ReaderApp {
         if self.show_stats && focused {
             self.stats_overlay(&painter, rect, active);
         }
+        let enter_leaves = self.keymap.preset() == KeymapPreset::Vim;
         let tab = &mut self.tabs[active];
         if focused
             && tab.find.open
-            && let Some(action) = find::find_bar(&mut tab.find, rect, &ctx, now)
+            && let Some(action) = find::find_bar(&mut tab.find, rect, &ctx, now, enter_leaves)
         {
             match action {
                 FindBarAction::Step(forward) => self.find_step(forward),
@@ -3017,6 +3090,7 @@ impl eframe::App for ReaderApp {
             28.0
         };
         self.notices.show(&ctx, lift);
+        self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();
         self.run_harness(&ctx, pages_drawn && wallpaper_ready, now);
         if self
@@ -3257,35 +3331,6 @@ fn truncate(text: &str, limit: usize) -> String {
     let mut short: String = text.chars().take(limit - 1).collect();
     short.push('…');
     short
-}
-
-/// The view's fixed arrow keys: they scroll a step (sideways for left and
-/// right), and turn the page when presenting.
-fn arrow_actions(ctx: &egui::Context, presenting: bool) -> Vec<ViewAction> {
-    use egui::{Key, Modifiers};
-    let keys = [
-        (Key::ArrowUp, ViewAction::Step(-1), ViewAction::PreviousPage),
-        (Key::ArrowDown, ViewAction::Step(1), ViewAction::NextPage),
-        (
-            Key::ArrowLeft,
-            ViewAction::Sideways(-1),
-            ViewAction::PreviousPage,
-        ),
-        (
-            Key::ArrowRight,
-            ViewAction::Sideways(1),
-            ViewAction::NextPage,
-        ),
-    ];
-    let mut actions = Vec::new();
-    ctx.input_mut(|input| {
-        for (key, scroll, turn) in keys {
-            while input.consume_key(Modifiers::NONE, key) {
-                actions.push(if presenting { turn } else { scroll });
-            }
-        }
-    });
-    actions
 }
 
 #[cfg(test)]
