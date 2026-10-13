@@ -64,8 +64,10 @@ of 100 files render, 1 differs from MuPDF by more than 1%; turned 90
 degrees, 20 of them differ from MuPDF as little as upright.
 
 Known gaps:
-- A very dense page shows only once all of it is uploaded: Lower Level
-  (7.6M strokes) takes about 200 ms of 4 MiB frames before it appears.
+- A very dense page is slow to load: Lower Level (7.6M strokes) takes
+  about 10.5 s before its upload starts (MuPDF's display list 7.0 s,
+  capture 1.9 s, preparing levels 1.4 s). Once uploading it shows its
+  coarsest level after 49 ms and sharpens over 1.6 s of 4 MiB frames.
 - 4x MSAA gives small text coarser edges than MuPDF.
 - A turned page's loading placeholder (its thumbnail) shows upright, and
   presenting a spread shows one page at a time.

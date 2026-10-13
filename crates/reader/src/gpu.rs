@@ -95,14 +95,35 @@ struct Resident {
 enum Upload {
     Page {
         key: PageKey,
-        upload: PageUpload<Box<PreparedPage>>,
+        upload: Box<PageUpload<Box<PreparedPage>>>,
         /// Milliseconds spent on it so far.
         ms: f64,
+        begun: Instant,
+        /// Milliseconds from its start until it could first be drawn.
+        visible_ms: Option<f64>,
     },
     Layer {
         key: PageKey,
         upload: LayerUpload,
     },
+}
+
+/// How long a page upload took, in milliseconds.
+pub struct UploadTimes {
+    /// Time spent writing it, across frames.
+    pub cpu_ms: f64,
+    /// From its start until it could first be drawn (coarse).
+    pub visible_ms: f64,
+    /// From its start until every level was written.
+    pub complete_ms: f64,
+}
+
+/// The page `key` being uploaded, once it can be drawn.
+fn partial_page(uploads: &VecDeque<Upload>, key: PageKey) -> Option<&GpuPage> {
+    uploads.iter().find_map(|upload| match upload {
+        Upload::Page { key: k, upload, .. } if *k == key => upload.page(),
+        _ => None,
+    })
 }
 
 impl Upload {
@@ -362,9 +383,10 @@ impl ReaderGpu {
                 .any(|upload| matches!(upload, Upload::Page { key: k, .. } if *k == key))
     }
 
-    /// Whether `key` can be drawn.
+    /// Whether `key` can be drawn: it is resident, or enough of it is
+    /// written to draw a coarse version.
     pub fn is_drawable(&self, key: PageKey) -> bool {
-        self.pages.contains_key(&key)
+        self.pages.contains_key(&key) || partial_page(&self.uploads, key).is_some()
     }
 
     /// Whether a page is being uploaded.
@@ -375,8 +397,10 @@ impl ReaderGpu {
     }
 
     /// Starts writing a prepared page and its raster layers to the GPU;
-    /// [`ReaderGpu::step_upload`] continues it. A page already resident
-    /// (another version of it) stays drawn until this one is complete.
+    /// [`ReaderGpu::step_upload`] continues it. The page draws coarse once
+    /// its coarsest level is written, and sharpens as finer ones are; a page
+    /// already resident (another version of it) stays drawn until this one
+    /// is complete instead.
     pub fn begin_upload(
         &mut self,
         device: &wgpu::Device,
@@ -394,8 +418,10 @@ impl ReaderGpu {
         }
         self.uploads.push_back(Upload::Page {
             key,
-            upload,
+            upload: Box::new(upload),
             ms: started.elapsed().as_secs_f64() * 1000.0,
+            begun: started,
+            visible_ms: None,
         });
     }
 
@@ -418,18 +444,27 @@ impl ReaderGpu {
 
     /// Writes up to `budget` more bytes of the first upload. A completed
     /// page replaces any older drawing of it and starts its overview when
-    /// it is dense; then the milliseconds spent on it are returned.
+    /// it is dense; then its timings are returned.
     pub fn step_upload(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         budget: u64,
-    ) -> Option<f64> {
+    ) -> Option<UploadTimes> {
         let started = Instant::now();
         let done = match self.uploads.front_mut()? {
-            Upload::Page { upload, ms, .. } => {
+            Upload::Page {
+                upload,
+                ms,
+                begun,
+                visible_ms,
+                ..
+            } => {
                 let done = upload.step(device, queue, &mut self.belt, budget);
                 *ms += started.elapsed().as_secs_f64() * 1000.0;
+                if visible_ms.is_none() && upload.ready_levels() > 0 {
+                    *visible_ms = Some(begun.elapsed().as_secs_f64() * 1000.0);
+                }
                 done
             }
             Upload::Layer { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
@@ -440,17 +475,22 @@ impl ReaderGpu {
         match self.uploads.pop_front()? {
             Upload::Layer { key, upload } => {
                 if let Some(resident) = self.pages.get_mut(&key) {
-                    self.renderer
-                        .finish_layer(device, &mut resident.page, upload);
+                    self.renderer.finish_layer(&mut resident.page, upload);
                 }
                 None
             }
-            Upload::Page { key, upload, ms } => {
+            Upload::Page {
+                key,
+                upload,
+                ms,
+                begun,
+                visible_ms,
+            } => {
                 let started = Instant::now();
                 // A page replaced by another drawing (its translation) drops
                 // the overview being built for the old one.
                 self.overviews.remove(&key);
-                let page = self.renderer.finish_upload(device, upload);
+                let page = self.renderer.finish_upload(*upload);
                 if page.wants_overview() {
                     let dimension = device
                         .limits()
@@ -467,7 +507,11 @@ impl ReaderGpu {
                         last_drawn: self.frame,
                     },
                 );
-                Some(ms + started.elapsed().as_secs_f64() * 1000.0)
+                Some(UploadTimes {
+                    cpu_ms: ms + started.elapsed().as_secs_f64() * 1000.0,
+                    visible_ms: visible_ms.unwrap_or_default(),
+                    complete_ms: begun.elapsed().as_secs_f64() * 1000.0,
+                })
             }
         }
     }
@@ -708,6 +752,7 @@ impl CallbackTrait for ViewCallback {
         let ReaderGpu {
             views,
             pages,
+            uploads,
             renderer,
             effects,
             paper: paper_pipeline,
@@ -733,9 +778,15 @@ impl CallbackTrait for ViewCallback {
                     tab: self.tab,
                     page: draw.page,
                 };
-                if let Some(resident) = pages.get_mut(&key) {
-                    resident.last_drawn = frame;
-                    let page_stats = renderer.draw(queue, &resident.page, &draw.camera, &mut pass);
+                let page = match pages.get_mut(&key) {
+                    Some(resident) => {
+                        resident.last_drawn = frame;
+                        Some(&resident.page)
+                    }
+                    None => partial_page(uploads, key),
+                };
+                if let Some(page) = page {
+                    let page_stats = renderer.draw(queue, page, &draw.camera, &mut pass);
                     stats.draw_calls += page_stats.draw_calls;
                     stats.triangles += page_stats.triangles;
                     stats.segments += page_stats.segments;

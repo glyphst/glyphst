@@ -195,6 +195,10 @@ pub struct ReaderApp {
     pub(crate) harness: Option<Harness>,
     pub(crate) first_page_ms: Option<f64>,
     pub(crate) upload_ms: Vec<f64>,
+    /// Per uploaded page, milliseconds until it first showed (coarse) and
+    /// until it was complete.
+    pub(crate) upload_visible_ms: Vec<f64>,
+    pub(crate) upload_complete_ms: Vec<f64>,
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
     chrome: chrome::StageChrome,
@@ -315,6 +319,8 @@ impl ReaderApp {
             harness: launch.harness,
             first_page_ms: None,
             upload_ms: Vec::new(),
+            upload_visible_ms: Vec::new(),
+            upload_complete_ms: Vec::new(),
             pending_actions: Vec::new(),
             chrome: Default::default(),
             // Scripted runs show the controls unless told otherwise.
@@ -1151,10 +1157,12 @@ impl ReaderApp {
             };
             self.with_gpu(|gpu| gpu.begin_upload(&device, key, ready.prepared, ready.layers));
         }
-        if let Some(Some(ms)) =
+        if let Some(Some(times)) =
             self.with_gpu(|gpu| gpu.step_upload(&device, &queue, UPLOAD_BYTES_PER_FRAME))
         {
-            self.upload_ms.push(ms);
+            self.upload_ms.push(times.cpu_ms);
+            self.upload_visible_ms.push(times.visible_ms);
+            self.upload_complete_ms.push(times.complete_ms);
             if self.first_page_ms.is_none() {
                 self.first_page_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
             }

@@ -262,6 +262,9 @@ pub struct GpuPage {
     /// Exact-level stroke segments and fill triangles.
     segments: usize,
     triangles: usize,
+    /// Levels written so far, coarsest first: while a page uploads it draws
+    /// the finest of them, and nothing until the coarsest is written.
+    ready_levels: usize,
     pub gpu_bytes: u64,
 }
 
@@ -277,10 +280,22 @@ impl GpuPage {
         self.segments >= OVERVIEW_MIN_SEGMENTS || self.triangles >= OVERVIEW_MIN_TRIANGLES
     }
 
-    /// Index of the level drawn at `scale` device pixels per page point.
+    /// Index of the level drawn at `scale` device pixels per page point:
+    /// the one made for it, or the finest written so far if that is coarser.
     pub fn level_for_scale(&self, scale: f32) -> usize {
-        PreparedPage::level_for_scale(&self.max_scales, scale)
+        drawn_level(&self.max_scales, self.ready_levels, scale)
     }
+
+    /// Whether every level has been written.
+    pub fn is_complete(&self) -> bool {
+        self.ready_levels == self.levels.len()
+    }
+}
+
+/// The level drawn at `scale` when `ready` levels (coarsest first) are
+/// written: the one made for the scale, or the finest written if coarser.
+fn drawn_level(max_scales: &[f32], ready: usize, scale: f32) -> usize {
+    PreparedPage::level_for_scale(max_scales, scale).min(ready.saturating_sub(1))
 }
 
 const PREMULTIPLIED: wgpu::BlendState = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
@@ -496,12 +511,15 @@ impl Renderer {
         let mut upload = self.begin_upload(device, page);
         let mut belt = wgpu::util::StagingBelt::new(device.clone(), UPLOAD_CHUNK);
         while !upload.step(device, queue, &mut belt, u64::MAX) {}
-        self.finish_upload(device, upload)
+        self.finish_upload(upload)
     }
 
     /// Creates a page's buffers and textures; [`PageUpload::step`] fills
     /// them a chunk at a time, coarsest level first, and
     /// [`Renderer::finish_upload`] returns the page once they are full.
+    /// Meanwhile [`PageUpload::page`] draws what is written: the coarsest
+    /// level, images and raster layers come first, so a dense page shows
+    /// soon and only gets sharper.
     pub fn begin_upload<P: Borrow<PreparedPage>>(
         &self,
         device: &wgpu::Device,
@@ -557,12 +575,7 @@ impl Renderer {
                 }
             })
             .collect();
-        // The coarsest level first: it is the smallest.
-        writes.sort_by_key(|(write, _)| match write {
-            Write::Level { level, .. } => *level,
-            Write::Image { .. } => 0,
-        });
-        let textures = prepared
+        let textures: Vec<wgpu::Texture> = prepared
             .images
             .iter()
             .enumerate()
@@ -594,30 +607,14 @@ impl Renderer {
                 })
             })
             .collect();
+        let (preview_items, level_ends) = plan_writes(&mut writes, levels.len());
         let (writes, items) = writes.into_iter().unzip();
-        PageUpload {
-            page,
-            levels,
-            textures,
-            writes,
-            items,
-            cursor: UploadCursor::default(),
-            layers: Vec::new(),
-        }
-    }
 
-    /// The page of a finished upload (see [`PageUpload::step`]).
-    pub fn finish_upload<P: Borrow<PreparedPage>>(
-        &self,
-        device: &wgpu::Device,
-        upload: PageUpload<P>,
-    ) -> GpuPage {
-        let page = upload.page.borrow();
         let mut image_bytes = 0;
-        let images = page
+        let images = prepared
             .images
             .iter()
-            .zip(&upload.textures)
+            .zip(&textures)
             .map(|(image, texture)| {
                 image_bytes += std::iter::once(image.rgba.0.len())
                     .chain(image.mips.iter().map(|(pixels, _)| pixels.len()))
@@ -630,7 +627,6 @@ impl Renderer {
                 Some(self.textured_quad(device, texture, sampler, image.corners()))
             })
             .collect();
-        let (levels, layers) = (upload.levels, upload.layers);
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pdf_gpu_camera"),
             size: size_of::<CameraUniform>() as u64,
@@ -652,23 +648,41 @@ impl Renderer {
             .map(wgpu::Buffer::size)
             .sum::<u64>()
             + image_bytes;
-        let mut gpu_page = GpuPage {
-            bounds: page.bounds,
+        let gpu = GpuPage {
+            bounds: prepared.bounds,
             camera,
             camera_bind_group,
             max_scales: levels.iter().map(|level| level.max_scale).collect(),
             levels,
-            layers: page.raster_layers.iter().map(|_| None).collect(),
+            layers: prepared.raster_layers.iter().map(|_| None).collect(),
             images,
             overview: None,
-            segments: page.exact().segments.len(),
-            triangles: page.exact().fill_indices.len() / 3,
+            segments: prepared.exact().segments.len(),
+            triangles: prepared.exact().fill_indices.len() / 3,
+            ready_levels: 0,
             gpu_bytes,
         };
-        for layer in layers {
-            self.finish_layer(device, &mut gpu_page, layer);
+        PageUpload {
+            page,
+            gpu,
+            textures,
+            writes,
+            items,
+            preview_items,
+            level_ends,
+            cursor: UploadCursor::default(),
+            layers: Vec::new(),
         }
-        gpu_page
+    }
+
+    /// The page of a finished upload (see [`PageUpload::step`]).
+    pub fn finish_upload<P: Borrow<PreparedPage>>(&self, upload: PageUpload<P>) -> GpuPage {
+        let mut page = upload.gpu;
+        for layer in upload.layers {
+            self.finish_layer(&mut page, layer);
+        }
+        page.ready_levels = page.levels.len();
+        page
     }
 
     /// Creates the texture of raster layer `index`, premultiplied RGBA8
@@ -696,27 +710,22 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let mut layer = self.raster_layer(device, &texture, &self.sampler, rect);
+        layer.bytes = u64::from(size[0]) * u64::from(size[1]) * 4;
         LayerUpload {
             index,
-            rect,
             size,
             rgba,
             texture,
+            layer: Some(layer),
             cursor: UploadCursor::default(),
         }
     }
 
     /// Installs a written raster layer on `page`, replacing (and freeing)
     /// the one it had.
-    pub fn finish_layer(&self, device: &wgpu::Device, page: &mut GpuPage, upload: LayerUpload) {
-        let mut layer = self.raster_layer(device, &upload.texture, &self.sampler, upload.rect);
-        layer.bytes = u64::from(upload.size[0]) * u64::from(upload.size[1]) * 4;
-        page.gpu_bytes += layer.bytes;
-        if let Some(slot) = page.layers.get_mut(upload.index)
-            && let Some(old) = slot.replace(layer)
-        {
-            page.gpu_bytes = page.gpu_bytes.saturating_sub(old.bytes);
-        }
+    pub fn finish_layer(&self, page: &mut GpuPage, mut upload: LayerUpload) {
+        upload.install(page);
     }
 
     /// Supplies raster layer `index` as premultiplied RGBA8 covering `rect`.
@@ -1047,6 +1056,9 @@ impl Renderer {
         pass: &mut wgpu::RenderPass<'_>,
         stats: &mut DrawStats,
     ) {
+        if page.ready_levels == 0 {
+            return;
+        }
         self.write_camera(queue, page, camera);
         // Nothing shows outside the page box, as in MuPDF's pixmaps: EPUB
         // chapter backgrounds, for one, run past the pages they start on.
@@ -1238,12 +1250,18 @@ const UPLOAD_CHUNK: u64 = 4 << 20;
 /// so a dense page never costs one long frame.
 pub struct PageUpload<P> {
     page: P,
-    levels: Vec<GpuLevel>,
+    /// The page being filled, drawable once its coarsest level is written.
+    gpu: GpuPage,
     textures: Vec<wgpu::Texture>,
     writes: Vec<Write>,
     items: Vec<UploadItem>,
+    /// Items before this one (the coarsest level and the images) are
+    /// written before the raster layers, the rest after.
+    preview_items: usize,
+    /// Per level, the number of items written once it is complete.
+    level_ends: Vec<usize>,
     cursor: UploadCursor,
-    /// Raster layers to install with the page, written after it.
+    /// Raster layers, installed on the page as each is written.
     layers: Vec<LayerUpload>,
 }
 
@@ -1255,10 +1273,58 @@ enum Write {
     Image { image: usize, mip: u32 },
 }
 
+/// Where a write goes in an upload: the coarsest level, the images, then
+/// the finer levels.
+fn write_order(write: Write) -> usize {
+    match write {
+        Write::Level { level: 0, .. } => 0,
+        Write::Image { .. } => 1,
+        Write::Level { level, .. } => level + 1,
+    }
+}
+
+/// Orders an upload's writes: the coarsest level first, as it is the
+/// smallest, then the images (and the raster layers, see
+/// [`PageUpload::step`]), which together are the page, only blurrier; the
+/// finer levels follow. Returns how many writes precede the raster layers
+/// and, per level, how many are done once it is complete.
+fn plan_writes(writes: &mut [(Write, UploadItem)], levels: usize) -> (usize, Vec<usize>) {
+    writes.sort_by_key(|(write, _)| write_order(*write));
+    let before = |order: usize| {
+        writes
+            .iter()
+            .filter(|(write, _)| write_order(*write) <= order)
+            .count()
+    };
+    let preview = before(write_order(Write::Image { image: 0, mip: 0 }));
+    let level_ends = (0..levels)
+        .map(|level| before(write_order(Write::Level { level, part: 0 })))
+        .collect();
+    (preview, level_ends)
+}
+
+/// Levels complete once `written` writes are, coarsest first.
+fn written_levels(level_ends: &[usize], written: usize) -> usize {
+    level_ends.iter().take_while(|&&end| end <= written).count()
+}
+
 impl<P: Borrow<PreparedPage>> PageUpload<P> {
-    /// Installs `layer` on the page when the upload finishes.
+    /// Adds a raster layer, written after the coarsest level and the
+    /// images and before the finer levels.
     pub fn add_layer(&mut self, layer: LayerUpload) {
         self.layers.push(layer);
+    }
+
+    /// The page as written so far, once it can be drawn (see
+    /// [`Renderer::begin_upload`]).
+    pub fn page(&self) -> Option<&GpuPage> {
+        (self.gpu.ready_levels > 0).then_some(&self.gpu)
+    }
+
+    /// Levels written so far, coarsest first; none until the coarsest
+    /// level, the images and the raster layers are.
+    pub fn ready_levels(&self) -> usize {
+        self.gpu.ready_levels
     }
 
     /// Writes up to `budget` bytes more (at least one row or word) through
@@ -1275,56 +1341,79 @@ impl<P: Borrow<PreparedPage>> PageUpload<P> {
     ) -> bool {
         submit_writes(device, queue, belt, |encoder, belt| {
             let mut left = budget;
-            let page = self.page.borrow();
-            for (item, bytes) in self.cursor.next(&self.items, budget) {
-                left = left.saturating_sub(bytes.end - bytes.start);
-                let range = bytes.start as usize..bytes.end as usize;
-                match self.writes[item] {
-                    Write::Level { level, part } => {
-                        let (prepared, gpu) = (&page.levels[level], &self.levels[level]);
-                        let (source, buffer): (&[u8], _) = match part {
-                            0 => (
-                                bytemuck::cast_slice(&prepared.fill_vertices),
-                                &gpu.fill_vertices,
-                            ),
-                            1 => (
-                                bytemuck::cast_slice(&prepared.fill_indices),
-                                &gpu.fill_indices,
-                            ),
-                            _ => (bytemuck::cast_slice(&prepared.segments), &gpu.segments),
-                        };
-                        if let (Some(buffer), Some(size)) =
-                            (buffer, wgpu::BufferSize::new(range.len() as u64))
-                        {
-                            belt.write_buffer(encoder, buffer, bytes.start, size)
-                                .copy_from_slice(&source[range]);
-                        }
+            left = left.saturating_sub(self.write_items(encoder, belt, left, self.preview_items));
+            if self.cursor.item >= self.preview_items {
+                for layer in &mut self.layers {
+                    if left == 0 {
+                        break;
                     }
-                    Write::Image { image, mip } => {
-                        let (pixels, [width, _]) = image_mip(&page.images[image], mip);
-                        write_rows(
-                            encoder,
-                            belt,
-                            &self.textures[image],
-                            mip,
-                            pixels,
-                            width,
-                            bytes,
-                        );
+                    left = left.saturating_sub(layer.write(encoder, belt, left));
+                    if layer.done() {
+                        layer.install(&mut self.gpu);
                     }
                 }
             }
-            if !self.cursor.done(&self.items) {
-                return false;
+            let layers_done = self.layers.iter().all(LayerUpload::done);
+            if layers_done && left > 0 {
+                self.write_items(encoder, belt, left, self.items.len());
             }
-            for layer in &mut self.layers {
-                if left == 0 {
-                    break;
-                }
-                left = left.saturating_sub(layer.write(encoder, belt, left));
+            if layers_done && self.cursor.item >= self.preview_items {
+                self.gpu.ready_levels = written_levels(&self.level_ends, self.cursor.item);
             }
-            self.layers.iter().all(LayerUpload::done)
+            layers_done && self.cursor.done(&self.items)
         })
+    }
+
+    /// Records up to `budget` bytes (at least a unit) of the items before
+    /// `end`; returns the bytes.
+    fn write_items(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        belt: &mut wgpu::util::StagingBelt,
+        budget: u64,
+        end: usize,
+    ) -> u64 {
+        let page = self.page.borrow();
+        let mut written = 0;
+        for (item, bytes) in self.cursor.next(&self.items[..end], budget) {
+            written += bytes.end - bytes.start;
+            let range = bytes.start as usize..bytes.end as usize;
+            match self.writes[item] {
+                Write::Level { level, part } => {
+                    let (prepared, gpu) = (&page.levels[level], &self.gpu.levels[level]);
+                    let (source, buffer): (&[u8], _) = match part {
+                        0 => (
+                            bytemuck::cast_slice(&prepared.fill_vertices),
+                            &gpu.fill_vertices,
+                        ),
+                        1 => (
+                            bytemuck::cast_slice(&prepared.fill_indices),
+                            &gpu.fill_indices,
+                        ),
+                        _ => (bytemuck::cast_slice(&prepared.segments), &gpu.segments),
+                    };
+                    if let (Some(buffer), Some(size)) =
+                        (buffer, wgpu::BufferSize::new(range.len() as u64))
+                    {
+                        belt.write_buffer(encoder, buffer, bytes.start, size)
+                            .copy_from_slice(&source[range]);
+                    }
+                }
+                Write::Image { image, mip } => {
+                    let (pixels, [width, _]) = image_mip(&page.images[image], mip);
+                    write_rows(
+                        encoder,
+                        belt,
+                        &self.textures[image],
+                        mip,
+                        pixels,
+                        width,
+                        bytes,
+                    );
+                }
+            }
+        }
+        written
     }
 
     /// Bytes not written yet.
@@ -1342,14 +1431,28 @@ impl<P: Borrow<PreparedPage>> PageUpload<P> {
 /// [`Renderer::begin_layer`]).
 pub struct LayerUpload {
     index: usize,
-    rect: PageRect,
     size: [u32; 2],
     rgba: Vec<u8>,
     texture: wgpu::Texture,
+    /// The layer drawn from the texture, until it is installed on a page.
+    layer: Option<RasterLayer>,
     cursor: UploadCursor,
 }
 
 impl LayerUpload {
+    /// Puts the layer on `page`, replacing (and freeing) the one it had.
+    fn install(&mut self, page: &mut GpuPage) {
+        let Some(layer) = self.layer.take() else {
+            return;
+        };
+        page.gpu_bytes += layer.bytes;
+        if let Some(slot) = page.layers.get_mut(self.index)
+            && let Some(old) = slot.replace(layer)
+        {
+            page.gpu_bytes = page.gpu_bytes.saturating_sub(old.bytes);
+        }
+    }
+
     fn items(&self) -> [UploadItem; 1] {
         let row = u64::from(self.size[0]) * 4;
         [UploadItem {
@@ -1586,6 +1689,54 @@ mod tests {
             camera.scissor(clip_to([120.0, 0.0, 150.0, 10.0], page)),
             None
         );
+    }
+
+    #[test]
+    fn uploads_write_the_coarsest_level_and_images_before_finer_levels() {
+        let item = UploadItem { len: 4, unit: 4 };
+        let level = |level, part| (Write::Level { level, part }, item);
+        let image = |image, mip| (Write::Image { image, mip }, item);
+        // As `begin_upload` lists them: every level's parts, then images.
+        let mut writes = vec![
+            level(0, 0),
+            level(0, 2),
+            level(1, 0),
+            level(1, 1),
+            level(2, 2),
+            image(0, 0),
+            image(0, 1),
+        ];
+        let (preview, ends) = plan_writes(&mut writes, 4);
+        let order: Vec<_> = writes
+            .iter()
+            .map(|(write, _)| match *write {
+                Write::Level { level, .. } => format!("L{level}"),
+                Write::Image { .. } => "I".into(),
+            })
+            .collect();
+        assert_eq!(order, ["L0", "L0", "I", "I", "L1", "L1", "L2"]);
+        // The raster layers go after the coarsest level and the images.
+        assert_eq!(preview, 4);
+        // Level 3 writes nothing, so it is done with level 2.
+        assert_eq!(ends, [2, 6, 7, 7]);
+        assert_eq!(written_levels(&ends, 0), 0);
+        assert_eq!(
+            written_levels(&ends, 3),
+            1,
+            "level 0 is done before the images"
+        );
+        assert_eq!(written_levels(&ends, 6), 2);
+        assert_eq!(written_levels(&ends, 7), 4);
+    }
+
+    #[test]
+    fn a_partly_written_page_draws_its_finest_written_level() {
+        let max_scales = [0.25, 1.0, 4.0, f32::INFINITY];
+        assert_eq!(drawn_level(&max_scales, 4, 2.0), 2);
+        assert_eq!(drawn_level(&max_scales, 2, 2.0), 1);
+        assert_eq!(drawn_level(&max_scales, 1, 64.0), 0);
+        // Coarse views draw their own level whatever is written above it.
+        assert_eq!(drawn_level(&max_scales, 2, 0.1), 0);
     }
 
     #[test]

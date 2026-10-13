@@ -304,6 +304,8 @@ impl ReaderApp {
             "pages_loaded": tab.load_seconds.len(),
             "load_ms_p50": percentile_ms(&load, 0.5),
             "upload_ms_max": self.upload_ms.iter().copied().fold(0.0, f64::max),
+            "first_visible_ms_max": self.upload_visible_ms.iter().copied().fold(0.0, f64::max),
+            "complete_ms_max": self.upload_complete_ms.iter().copied().fold(0.0, f64::max),
             "translation": tab.translation.as_ref().map(|session| json!({
                 "status": session.status_line(),
                 "pages": session.previews.len(),
