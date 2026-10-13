@@ -11,6 +11,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/a-arrow-up.svg"),
     ),
     (
+        "arrow-down",
+        include_bytes!("../assets/icons/arrow-down.svg"),
+    ),
+    (
         "arrow-left",
         include_bytes!("../assets/icons/arrow-left.svg"),
     ),
@@ -18,6 +22,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "arrow-right",
         include_bytes!("../assets/icons/arrow-right.svg"),
     ),
+    ("arrow-up", include_bytes!("../assets/icons/arrow-up.svg")),
     ("book-open", include_bytes!("../assets/icons/book-open.svg")),
     (
         "book-open-text",
@@ -82,6 +87,8 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("library", include_bytes!("../assets/icons/library.svg")),
     ("list", include_bytes!("../assets/icons/list.svg")),
+    ("log-in", include_bytes!("../assets/icons/log-in.svg")),
+    ("log-out", include_bytes!("../assets/icons/log-out.svg")),
     (
         "message-square",
         include_bytes!("../assets/icons/message-square.svg"),

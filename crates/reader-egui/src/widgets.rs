@@ -46,6 +46,11 @@ pub const ICONS_IN_USE: &[&str] = &[
     "pen-line",
     "highlighter",
     "sticky-note",
+    "arrow-up",
+    "arrow-down",
+    "log-in",
+    "log-out",
+    "columns-2",
 ];
 
 fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {

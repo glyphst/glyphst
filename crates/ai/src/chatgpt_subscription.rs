@@ -1,7 +1,5 @@
-// Without GPUI nothing signs in or loads saved credentials, so the sign-in
-// and persistence machinery is unused and requests report the subscription as
-// not initialized.
-#![cfg_attr(not(feature = "gpui"), allow(dead_code, unused_imports))]
+// Hosts start the subscription with `ChatGptSubscription::start` (or, in
+// GPUI, `init`); until then requests report it as not initialized.
 
 use std::{
     str::FromStr as _,
@@ -27,6 +25,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use url::{Url, form_urlencoded};
 
+use crate::settings::CredentialStore;
 #[cfg(feature = "gpui")]
 use crate::settings::{AiProvider, SettingsStore};
 
@@ -106,9 +105,13 @@ struct AuthInner {
     persistence_tx: mpsc::UnboundedSender<PersistenceCommand>,
 }
 
+/// Runs whenever the sign-in state changes, on any thread (a host repaints).
+type Changed = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ChatGptSubscription {
     inner: Arc<AuthInner>,
+    changed: Option<Changed>,
 }
 
 #[cfg(feature = "gpui")]
@@ -137,6 +140,166 @@ impl ChatGptSubscription {
 
     pub fn is_authenticated(&self) -> bool {
         self.inner.lock_state().credentials.is_some()
+    }
+
+    /// Starts the subscription outside GPUI: the saved credentials load
+    /// from `store` on a worker thread, which then saves and deletes them
+    /// in order. `changed` runs on any thread whenever the state changes.
+    pub fn start(
+        store: Arc<dyn CredentialStore>,
+        changed: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let changed: Changed = Arc::new(changed);
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded();
+        let inner = Arc::new(AuthInner {
+            state: Mutex::new(AuthState {
+                credentials: None,
+                loading: true,
+                signing_in: false,
+                refreshing: false,
+                generation: 0,
+                last_error: None,
+            }),
+            changed: Condvar::new(),
+            persistence_tx,
+        });
+        *ACTIVE_AUTH
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::downgrade(&inner);
+        let worker = (inner.clone(), changed.clone());
+        std::thread::spawn(move || {
+            let (inner, changed) = worker;
+            let generation = inner.lock_state().generation;
+            match store.read_item(CREDENTIALS_KEY) {
+                Ok(Some(bytes)) => match serde_json::from_slice::<CodexCredentials>(&bytes) {
+                    Ok(credentials) => inner.finish_load(generation, Some(credentials), None),
+                    Err(error) => inner.finish_load(
+                        generation,
+                        None,
+                        Some(format!("saved ChatGPT credentials are invalid: {error}")),
+                    ),
+                },
+                Ok(None) => inner.finish_load(generation, None, None),
+                Err(error) => inner.finish_load(
+                    generation,
+                    None,
+                    Some(format!("failed to read ChatGPT credentials: {error:#}")),
+                ),
+            }
+            changed();
+            while let Some(command) = futures::executor::block_on(persistence_rx.next()) {
+                let (result, completion) = match command {
+                    PersistenceCommand::Write {
+                        generation,
+                        bytes,
+                        completion,
+                    } => {
+                        if inner.lock_state().generation != generation {
+                            if let Some(completion) = completion {
+                                let _ = completion.send(Err(
+                                    "ChatGPT sign-in changed before credentials were saved"
+                                        .to_string(),
+                                ));
+                            }
+                            continue;
+                        }
+                        (
+                            store.write_item(CREDENTIALS_KEY, "Bearer", &bytes),
+                            completion,
+                        )
+                    }
+                    PersistenceCommand::Delete => (store.delete_item(CREDENTIALS_KEY), None),
+                };
+                let result = result.map_err(|error| format!("{error:#}"));
+                if let Err(error) = &result {
+                    eprintln!("failed to update ChatGPT credentials in the keychain: {error}");
+                }
+                if let Some(completion) = completion {
+                    let _ = completion.send(result);
+                }
+                changed();
+            }
+        });
+        Self {
+            inner,
+            changed: Some(changed),
+        }
+    }
+
+    fn notify(&self) {
+        if let Some(changed) = &self.changed {
+            changed();
+        }
+    }
+
+    /// Starts signing in to a subscription started with
+    /// [`ChatGptSubscription::start`]: returns the authorization page to
+    /// open in the browser. Waiting for the browser's callback, the token
+    /// exchange and saving the credentials run on a worker thread.
+    pub fn begin_sign_in(&self) -> Result<String> {
+        let generation = {
+            let mut state = self.inner.lock_state();
+            if state.signing_in {
+                return Err(anyhow!("already signing in"));
+            }
+            state.generation = state.generation.wrapping_add(1);
+            state.signing_in = true;
+            state.last_error = None;
+            state.generation
+        };
+        self.notify();
+        let fail = |error: anyhow::Error| {
+            self.inner
+                .finish_sign_in_error(generation, format!("{error:#}"));
+            self.notify();
+            error
+        };
+        let (redirect_uri, callback_rx) = start_callback_server().map_err(fail)?;
+        let (verifier, challenge, oauth_state) = oauth_secrets();
+        let authorize = authorize_url(&redirect_uri, &challenge, &oauth_state).map_err(fail)?;
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let callback = futures::executor::block_on(callback_rx)
+                .map_err(|_| anyhow!("OAuth callback was cancelled"))
+                .and_then(|callback| callback);
+            let result = complete_sign_in(callback, &oauth_state, |code| {
+                exchange_code(code, &verifier, &redirect_uri)
+            })
+            .and_then(|credentials| {
+                let bytes =
+                    serde_json::to_vec(&credentials).context("failed to encode credentials")?;
+                futures::executor::block_on(this.inner.persist_and_wait(generation, bytes))
+                    .map_err(|_| anyhow!("credential persistence worker stopped"))?
+                    .map_err(|error| anyhow!(error))?;
+                Ok(credentials)
+            });
+            match result {
+                Ok(credentials) => {
+                    this.inner.finish_sign_in(generation, credentials);
+                }
+                Err(error) => this
+                    .inner
+                    .finish_sign_in_error(generation, format!("{error:#}")),
+            }
+            this.notify();
+        });
+        Ok(authorize.to_string())
+    }
+
+    /// Signs out of a subscription started with
+    /// [`ChatGptSubscription::start`], deleting the saved credentials.
+    pub fn forget(&self) {
+        {
+            let mut state = self.inner.lock_state();
+            state.generation = state.generation.wrapping_add(1);
+            state.credentials = None;
+            state.signing_in = false;
+            state.refreshing = false;
+            state.last_error = None;
+            self.inner.changed.notify_all();
+        }
+        self.notify();
+        self.inner.delete_persisted();
     }
 
     #[cfg(feature = "gpui")]
@@ -270,6 +433,7 @@ pub fn init(cx: &mut App) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::downgrade(&inner);
     cx.set_global(ChatGptSubscription {
         inner: inner.clone(),
+        changed: None,
     });
 
     spawn_persistence_worker(persistence_rx, inner.clone(), cx);
@@ -888,6 +1052,20 @@ fn start_callback_server() -> Result<(String, oneshot::Receiver<Result<OAuthCall
     Ok((redirect_uri, receiver))
 }
 
+/// The credentials for the browser's `callback`, exchanged by `exchange`
+/// once its state is the one the sign-in sent.
+fn complete_sign_in(
+    callback: Result<OAuthCallback>,
+    expected_state: &str,
+    exchange: impl FnOnce(&str) -> Result<CodexCredentials>,
+) -> Result<CodexCredentials> {
+    let callback = callback?;
+    if callback.state != expected_state {
+        return Err(anyhow!("OAuth state mismatch"));
+    }
+    exchange(&callback.code)
+}
+
 fn parse_callback(raw_url: &str) -> Result<OAuthCallback> {
     let url = Url::parse(&format!("http://localhost{raw_url}"))
         .context("failed to parse the ChatGPT OAuth callback")?;
@@ -1273,5 +1451,80 @@ mod tests {
         assert!(!state.loading);
         assert!(state.credentials.is_none());
         assert!(state.last_error.is_none());
+    }
+
+    fn sample_credentials() -> CodexCredentials {
+        CodexCredentials {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at_ms: now_ms() + 3_600_000,
+            account_id: Some("account".into()),
+            email: Some("reader@example.com".into()),
+        }
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn saved_credentials_load_and_signing_out_deletes_them() {
+        let store = Arc::new(crate::settings::MemoryCredentials::default());
+        store
+            .write_item(
+                CREDENTIALS_KEY,
+                "Bearer",
+                &serde_json::to_vec(&sample_credentials()).unwrap(),
+            )
+            .unwrap();
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = changes.clone();
+        let subscription = ChatGptSubscription::start(store.clone(), move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        wait_until(|| !subscription.snapshot().loading);
+        assert_eq!(
+            subscription.snapshot().email.as_deref(),
+            Some("reader@example.com")
+        );
+        assert!(changes.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(acquire_request_access().is_ok());
+
+        subscription.forget();
+        assert!(!subscription.is_authenticated());
+        wait_until(|| store.read_item(CREDENTIALS_KEY).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_callback_with_another_state_is_refused() {
+        let callback = |state: &str| {
+            Ok(OAuthCallback {
+                code: "code".into(),
+                state: state.into(),
+            })
+        };
+        let refused = complete_sign_in(callback("other"), "sent", |_| Ok(sample_credentials()));
+        assert!(
+            refused
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("state mismatch")
+        );
+        let mut exchanged = None;
+        let accepted = complete_sign_in(callback("sent"), "sent", |code| {
+            exchanged = Some(code.to_string());
+            Ok(sample_credentials())
+        });
+        assert_eq!(
+            accepted.unwrap().email.as_deref(),
+            Some("reader@example.com")
+        );
+        assert_eq!(exchanged.as_deref(), Some("code"));
+        assert!(complete_sign_in(Err(anyhow!("timed out")), "sent", |_| unreachable!()).is_err());
     }
 }

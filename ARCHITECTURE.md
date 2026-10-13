@@ -78,7 +78,8 @@ data-defined effects) rather than reproducing the GPUI Reader. It reuses
 `pdf`, `pdf-gpu`, `effects`, `library` and the translation domain crates;
 `library`, `settings` and `ai` build without GPUI, and their `gpui` features
 add what the GPUI crates need (the app globals, the settings store with its
-credential worker, gpui-component themes, ChatGPT Subscription sign-in).
+credential worker, gpui-component themes, GPUI's ChatGPT Subscription
+sign-in).
 The egui Reader shares the GPUI Reader's settings file and, with the
 `settings` crate's `keychain` feature, the provider keys it keeps in the
 system credential store (items written as GPUI writes them). Its settings
@@ -144,7 +145,11 @@ and document tools (`search_document`, `read_document`,
 `render_document_pages`) with the GPUI Reader's names and schemas,
 implemented over MuPDF and `pdf::text`. Conversations are the library's AI
 sessions, so both readers list them; image results are not stored.
-ChatGPT Subscription sign-in remains in the GPUI Reader.
+ChatGPT Subscription sign-in runs without GPUI: the browser's callback,
+the token exchange and saving the credentials (the keychain item GPUI
+wrote, so a sign-in carries over) run on worker threads, and the app
+repaints when the state changes. Connection tests (AI, OCR) run on
+threads, and a result for settings that changed meanwhile shows as stale.
 
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, as the GPUI Reader indexes it, so

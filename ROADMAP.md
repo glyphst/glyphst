@@ -44,7 +44,9 @@ input in the spike. The [egui Reader](crates/reader-egui) has:
   dragged onto a pane's edge, or Split right/down, opens beside it; each
   pane has a title chip, the focused one an outline, dividers resize them,
   and the last session keeps them); two-page spreads, rotation (both kept
-  per document) and reloading changed files.
+  per document) and reloading changed files; ChatGPT Subscription sign-in,
+  the AI providers' order and AI and OCR connection tests in the settings
+  window.
 
 The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
@@ -72,16 +74,15 @@ Known gaps:
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Selections stay within one page.
 - Translation sessions are not restored from the cache on reopening.
-- The assistant has no image or region mentions, no Mermaid diagrams and no
-  ChatGPT Subscription sign-in.
+- The assistant has no image or region mentions and no Mermaid diagrams.
 - Settings saved from the egui Reader are overwritten by a GPUI Reader that
-  is running at the same time; provider order and connection tests are
-  GPUI-only. No automated run writes the real keychain: the user's check of
-  a key set in the egui Reader showing in the GPUI Reader is pending.
+  is running at the same time. No automated run writes the real keychain
+  or signs in to ChatGPT: the user's checks of a key set in the egui Reader
+  showing in the GPUI Reader, and of a ChatGPT Subscription sign-in, are
+  pending.
 
-**Next step (M5):** ChatGPT Subscription
-sign-in, provider order and connection tests in the settings window; then
-removing the GPUI crates and the `files` app (abandoned, not ported).
+**Next step (M5):** removing the GPUI crates and the `files` app
+(abandoned, not ported).
 Later: M6 an effects manager (user effect directory, hot reload, previews,
 per-book choices).
 

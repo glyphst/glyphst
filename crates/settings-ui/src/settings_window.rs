@@ -9,13 +9,12 @@ use glyphst_files::path_chooser::{
 };
 use glyphst_keymap::keybindings;
 use glyphst_pdf_translation_service::{
-    CancellationToken, PaddleClient, PaddleClientConfig, PaddleErrorCategory, UnlimitedClient,
-    UnlimitedClientConfig, UnlimitedErrorCategory,
+    OcrProbeError, test_ocr_connection as test_ocr_connection_request,
 };
 use glyphst_settings::{
-    AiModel, AiProvider, ModelRef, OcrProvider, OcrSettings, ProviderSecretId, ResolvedAiConfig,
-    Settings, SettingsStore, WindowSettings, localize, parse_settings, setup_ui_font,
-    sync_component_theme, ui_rems,
+    AiModel, AiProvider, ModelRef, OcrProvider, ProviderSecretId, ResolvedAiConfig, Settings,
+    SettingsStore, WindowSettings, localize, parse_settings, setup_ui_font, sync_component_theme,
+    ui_rems,
 };
 use glyphst_translation_ui::TranslationServices;
 use glyphst_ui::{
@@ -138,60 +137,6 @@ pub(super) enum OcrConnectionResult {
 pub(super) struct OcrOperation {
     provider: OcrProvider,
     result: OcrConnectionResult,
-}
-
-enum OcrProbeError {
-    InvalidAuth,
-    Retryable,
-    Provider(Option<String>),
-}
-
-fn test_ocr_connection_request(settings: OcrSettings) -> Result<(), OcrProbeError> {
-    let cancellation = CancellationToken::new();
-    match settings.provider {
-        OcrProvider::Paddle => PaddleClient::new(
-            PaddleClientConfig {
-                base_url: settings.paddle.endpoint,
-                request_timeout: Duration::from_secs(15),
-                ..PaddleClientConfig::default()
-            },
-            settings.paddle.token,
-        )
-        .map_err(|_| OcrProbeError::InvalidAuth)?
-        .probe(&cancellation)
-        .map(|_| ())
-        .map_err(|error| match error.category {
-            PaddleErrorCategory::Unauthorized | PaddleErrorCategory::PermissionDenied => {
-                OcrProbeError::InvalidAuth
-            }
-            PaddleErrorCategory::QueueFull
-            | PaddleErrorCategory::ServiceUnavailable
-            | PaddleErrorCategory::PollTimeout => OcrProbeError::Retryable,
-            _ => OcrProbeError::Provider(error.provider_code),
-        }),
-        OcrProvider::Unlimited => UnlimitedClient::new(
-            UnlimitedClientConfig {
-                base_url: settings.unlimited.endpoint,
-                request_timeout: Duration::from_secs(15),
-                download_timeout: Duration::from_secs(15),
-                ..UnlimitedClientConfig::default()
-            },
-            settings.unlimited.api_key,
-            settings.unlimited.secret_key,
-        )
-        .map_err(|_| OcrProbeError::InvalidAuth)?
-        .probe(&cancellation)
-        .map(|_| ())
-        .map_err(|error| match error.category {
-            UnlimitedErrorCategory::Unauthorized | UnlimitedErrorCategory::PermissionDenied => {
-                OcrProbeError::InvalidAuth
-            }
-            UnlimitedErrorCategory::QueueFull
-            | UnlimitedErrorCategory::ServiceUnavailable
-            | UnlimitedErrorCategory::PollTimeout => OcrProbeError::Retryable,
-            _ => OcrProbeError::Provider(error.provider_code.map(|code| code.to_string())),
-        }),
-    }
 }
 
 pub struct SettingsWindow {

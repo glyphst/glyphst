@@ -60,6 +60,10 @@ pub trait CredentialStore: Send + Sync {
     fn read(&self, ids: &[ProviderSecretId]) -> Result<Vec<(ProviderSecretId, String)>>;
     fn write(&self, id: ProviderSecretId, secret: &str) -> Result<()>;
     fn delete(&self, id: ProviderSecretId) -> Result<()>;
+    /// Another item (a sign-in's credentials), by its URL.
+    fn read_item(&self, url: &str) -> Result<Option<Vec<u8>>>;
+    fn write_item(&self, url: &str, username: &str, secret: &[u8]) -> Result<()>;
+    fn delete_item(&self, url: &str) -> Result<()>;
 }
 
 /// The system credential store (Secret Service on Linux), with the items
@@ -77,17 +81,32 @@ impl CredentialStore for SystemKeychain {
     }
 
     fn delete(&self, id: ProviderSecretId) -> Result<()> {
-        keychain::delete(id)
+        keychain::delete_item(&id.credential_url())
+    }
+
+    fn read_item(&self, url: &str) -> Result<Option<Vec<u8>>> {
+        keychain::read_item(url)
+    }
+
+    fn write_item(&self, url: &str, username: &str, secret: &[u8]) -> Result<()> {
+        keychain::write_item(url, username, secret)
+    }
+
+    fn delete_item(&self, url: &str) -> Result<()> {
+        keychain::delete_item(url)
     }
 }
 
 /// Secrets kept in memory, for tests and scripted runs.
 #[derive(Debug, Default)]
-pub struct MemoryCredentials(Mutex<BTreeMap<ProviderSecretId, String>>);
+pub struct MemoryCredentials {
+    secrets: Mutex<BTreeMap<ProviderSecretId, String>>,
+    items: Mutex<BTreeMap<String, Vec<u8>>>,
+}
 
 impl MemoryCredentials {
     pub fn get(&self, id: ProviderSecretId) -> Option<String> {
-        self.0
+        self.secrets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&id)
@@ -104,7 +123,7 @@ impl CredentialStore for MemoryCredentials {
     }
 
     fn write(&self, id: ProviderSecretId, secret: &str) -> Result<()> {
-        self.0
+        self.secrets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id, secret.to_string());
@@ -112,10 +131,35 @@ impl CredentialStore for MemoryCredentials {
     }
 
     fn delete(&self, id: ProviderSecretId) -> Result<()> {
-        self.0
+        self.secrets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&id);
+        Ok(())
+    }
+
+    fn read_item(&self, url: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(url)
+            .cloned())
+    }
+
+    fn write_item(&self, url: &str, _username: &str, secret: &[u8]) -> Result<()> {
+        self.items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(url.to_string(), secret.to_vec());
+        Ok(())
+    }
+
+    fn delete_item(&self, url: &str) -> Result<()> {
+        self.items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(url);
         Ok(())
     }
 }
@@ -189,10 +233,9 @@ mod keychain {
         Ok(keyring)
     }
 
-    async fn gpui_items(keyring: &oo7::Keyring, id: ProviderSecretId) -> Result<Vec<oo7::Item>> {
-        let url = id.credential_url();
+    async fn gpui_items(keyring: &oo7::Keyring, url: &str) -> Result<Vec<oo7::Item>> {
         let mut found = Vec::new();
-        for item in keyring.search_items(&vec![("url", url.as_str())]).await? {
+        for item in keyring.search_items(&vec![("url", url)]).await? {
             if item
                 .label()
                 .await
@@ -209,7 +252,8 @@ mod keychain {
             let keyring = unlocked().await?;
             let mut found = Vec::new();
             for &id in ids {
-                if let Some(item) = gpui_items(&keyring, id).await?.into_iter().next() {
+                let url = id.credential_url();
+                if let Some(item) = gpui_items(&keyring, &url).await?.into_iter().next() {
                     item.unlock().await?;
                     let secret = item.secret().await?;
                     found.push((id, String::from_utf8_lossy(&secret).into_owned()));
@@ -219,19 +263,37 @@ mod keychain {
         })
     }
 
-    /// As gpui-pre-linux `write_credentials`: one item per URL, replaced.
     pub fn write(id: ProviderSecretId, secret: &str) -> Result<()> {
+        write_item(
+            &id.credential_url(),
+            id.credential_username(),
+            secret.as_bytes(),
+        )
+    }
+
+    /// As gpui-pre-linux `read_credentials`: the first item for the URL.
+    pub fn read_item(url: &str) -> Result<Option<Vec<u8>>> {
         pollster::block_on(async {
             let keyring = unlocked().await?;
-            let url = id.credential_url();
+            match gpui_items(&keyring, url).await?.into_iter().next() {
+                Some(item) => {
+                    item.unlock().await?;
+                    Ok(Some(item.secret().await?.to_vec()))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// As gpui-pre-linux `write_credentials`: one item per URL, replaced.
+    pub fn write_item(url: &str, username: &str, secret: &[u8]) -> Result<()> {
+        pollster::block_on(async {
+            let keyring = unlocked().await?;
             keyring
                 .create_item(
                     GPUI_KEYRING_LABEL,
-                    &vec![
-                        ("url", url.as_str()),
-                        ("username", id.credential_username()),
-                    ],
-                    secret.as_bytes().to_vec(),
+                    &vec![("url", url), ("username", username)],
+                    secret.to_vec(),
                     true,
                 )
                 .await?;
@@ -240,10 +302,10 @@ mod keychain {
     }
 
     /// As gpui-pre-linux `delete_credentials`.
-    pub fn delete(id: ProviderSecretId) -> Result<()> {
+    pub fn delete_item(url: &str) -> Result<()> {
         pollster::block_on(async {
             let keyring = unlocked().await?;
-            for item in gpui_items(&keyring, id).await? {
+            for item in gpui_items(&keyring, url).await? {
                 item.delete().await?;
             }
             Ok(())
@@ -263,7 +325,15 @@ mod keychain {
         anyhow::bail!("not supported in this build")
     }
 
-    pub fn delete(_: ProviderSecretId) -> Result<()> {
+    pub fn read_item(_: &str) -> Result<Option<Vec<u8>>> {
+        anyhow::bail!("not supported in this build")
+    }
+
+    pub fn write_item(_: &str, _: &str, _: &[u8]) -> Result<()> {
+        anyhow::bail!("not supported in this build")
+    }
+
+    pub fn delete_item(_: &str) -> Result<()> {
         anyhow::bail!("not supported in this build")
     }
 }

@@ -1,5 +1,6 @@
 mod backend;
 mod job;
+mod ocr_probe;
 mod reviewer;
 
 use glyphst_settings::{ModelRef, OcrSettings, PdfContentReviewMode, ResolvedAiConfig, Settings};
@@ -56,3 +57,4 @@ pub use job::{
     PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, PdfTranslationSessionResult,
     PdfTranslationSessionUpdate, PdfTranslationWarning,
 };
+pub use ocr_probe::{OcrProbeError, test_ocr_connection};

@@ -1,7 +1,8 @@
 //! The provider pages of the settings window: translation, OCR and AI,
-//! with their keys. They edit a copy of the user's settings and hand the
-//! changes to `UserSettings`, which saves them where the GPUI Reader
-//! keeps them.
+//! with their keys, connection tests, the AI providers' order and the
+//! ChatGPT Subscription sign-in. They edit a copy of the user's settings
+//! and hand the changes to `UserSettings`, which saves them where the GPUI
+//! Reader keeps them.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -10,10 +11,14 @@ use std::{
 };
 
 use egui::RichText;
-use glyphst_ai::ai_client::{AiModelInfo, list_ai_models};
+use glyphst_ai::{
+    ai_client::{AiModelInfo, list_ai_models, test_ai_connection},
+    chatgpt_subscription::ChatGptSubscription,
+};
+use glyphst_pdf_translation_service::{OcrProbeError, test_ocr_connection};
 use glyphst_settings::{
-    AiApiStyle, AiModel, AiProvider, ModelRef, OcrMode, OcrProvider, ProviderSecretId, Settings,
-    TranslationProvider, TranslationTargetLanguage,
+    AiApiStyle, AiModel, AiProvider, ModelRef, OcrMode, OcrProvider, OcrSettings, ProviderSecretId,
+    ResolvedAiConfig, Settings, TranslationProvider, TranslationTargetLanguage,
 };
 
 use crate::{
@@ -25,6 +30,77 @@ use crate::{
 /// A provider's models being listed.
 type Fetch = (AiProvider, Receiver<Result<Vec<AiModelInfo>, String>>);
 
+/// A connection test: what it tested, and its result once done. A result
+/// for settings that changed meanwhile is not shown as current.
+struct Test<C, E> {
+    config: C,
+    result: Option<Result<(), E>>,
+    receiver: Option<Receiver<Result<(), E>>>,
+}
+
+impl<C: PartialEq, E> Test<C, E> {
+    fn start(
+        config: C,
+        ctx: &egui::Context,
+        run: impl FnOnce() -> Result<(), E> + Send + 'static,
+    ) -> Self
+    where
+        E: Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        let ctx = ctx.clone();
+        let _ = thread::Builder::new()
+            .name("connection-test".into())
+            .spawn(move || {
+                let _ = sender.send(run());
+                ctx.request_repaint();
+            });
+        Self {
+            config,
+            result: None,
+            receiver: Some(receiver),
+        }
+    }
+
+    fn poll(&mut self) {
+        if let Some(result) = self.receiver.as_ref().and_then(|r| r.try_recv().ok()) {
+            self.result = Some(result);
+            self.receiver = None;
+        }
+    }
+
+    fn running(&self) -> bool {
+        self.receiver.is_some()
+    }
+}
+
+/// A test's status line: what it found, or that the settings changed.
+fn test_status<C: PartialEq, E: std::fmt::Display>(
+    ui: &mut egui::Ui,
+    test: Option<&Test<C, E>>,
+    current: &C,
+) {
+    let tokens = Tokens::get(ui.ctx());
+    let Some(test) = test else {
+        return;
+    };
+    if test.running() {
+        ui.spinner();
+        ui.label(RichText::new("Testing…").color(tokens.text_muted));
+        return;
+    }
+    let (text, color) = match &test.result {
+        _ if test.config != *current => (
+            "Settings changed since the test; test again.".to_string(),
+            tokens.text_muted,
+        ),
+        Some(Ok(())) => ("Connected".to_string(), tokens.text_muted),
+        Some(Err(error)) => (format!("Failed: {error}"), tokens.danger),
+        None => return,
+    };
+    ui.label(RichText::new(text).small().color(color));
+}
+
 /// State of the provider pages between frames.
 #[derive(Default)]
 pub struct ProviderPages {
@@ -34,10 +110,14 @@ pub struct ProviderPages {
     fetched: HashMap<AiProvider, Result<Vec<AiModelInfo>, String>>,
     new_model: HashMap<AiProvider, String>,
     new_provider: (String, String),
+    ai_tests: HashMap<AiProvider, Test<ResolvedAiConfig, String>>,
+    ocr_test: Option<Test<OcrSettings, OcrProbeError>>,
+    /// Sign-in started here: ChatGPT Subscription turns on when it is done.
+    signing_in: bool,
 }
 
 impl ProviderPages {
-    /// Takes a finished model list.
+    /// Takes a finished model list and finished connection tests.
     pub fn poll(&mut self) {
         if let Some((provider, receiver)) = &self.fetching
             && let Ok(result) = receiver.try_recv()
@@ -45,6 +125,22 @@ impl ProviderPages {
             self.fetched.insert(*provider, result);
             self.fetching = None;
         }
+        for test in self.ai_tests.values_mut() {
+            test.poll();
+        }
+        if let Some(test) = &mut self.ocr_test {
+            test.poll();
+        }
+    }
+
+    /// Tests `provider`'s connection on a thread.
+    pub fn test_ai(&mut self, settings: &Settings, provider: AiProvider, ctx: &egui::Context) {
+        let config = settings.ai.resolved_provider(provider);
+        let run = config.clone();
+        let test = Test::start(config, ctx, move || {
+            test_ai_connection(run).map_err(|error| format!("{error:#}"))
+        });
+        self.ai_tests.insert(provider, test);
     }
 
     /// Lists `provider`'s models on a thread.
@@ -194,10 +290,30 @@ impl ProviderPages {
                 text_field(ui, "Endpoint", &mut ocr.unlimited.endpoint, "");
             }
         }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let running = self.ocr_test.as_ref().is_some_and(Test::running);
+            if ui
+                .add_enabled(!running, egui::Button::new("Test connection"))
+                .clicked()
+            {
+                let config = current.ocr.clone();
+                let run = config.clone();
+                self.ocr_test = Some(Test::start(config, ui.ctx(), move || {
+                    test_ocr_connection(run)
+                }));
+            }
+            test_status(ui, self.ocr_test.as_ref(), &current.ocr);
+        });
         apply(user, &current, draft);
     }
 
-    pub fn ai(&mut self, ui: &mut egui::Ui, user: &mut UserSettings) {
+    pub fn ai(
+        &mut self,
+        ui: &mut egui::Ui,
+        user: &mut UserSettings,
+        chatgpt: &ChatGptSubscription,
+    ) {
         let Some(current) = user.draft().cloned() else {
             loading(ui);
             return;
@@ -205,6 +321,17 @@ impl ProviderPages {
         let tokens = Tokens::get(ui.ctx());
         let mut draft = Settings::clone(&current);
         let mut fetch = None;
+        let mut test = None;
+        // A sign-in started here turns the provider on once it is done.
+        let auth = chatgpt.snapshot();
+        if self.signing_in && !auth.signing_in {
+            self.signing_in = false;
+            if auth.is_authenticated() {
+                draft
+                    .ai
+                    .set_provider_enabled(AiProvider::ChatGptSubscription, true);
+            }
+        }
         ui.label(RichText::new("Models").strong());
         let choices = model_choices(&draft);
         egui::Grid::new("ai-models").num_columns(2).show(ui, |ui| {
@@ -229,8 +356,15 @@ impl ProviderPages {
         }
         ui.add_space(8.0);
         ui.label(RichText::new("Providers").strong());
+        ui.label(
+            RichText::new("The first provider turned on answers when a model is not chosen.")
+                .small()
+                .color(tokens.text_muted),
+        );
         let mut remove = None;
-        for provider in draft.ai.provider_order.clone() {
+        let mut reorder = None;
+        let order = draft.ai.provider_order.clone();
+        for (index, provider) in order.iter().copied().enumerate() {
             let config = draft.ai.provider_config(provider);
             let title = if config.enabled {
                 config.name.clone()
@@ -243,17 +377,39 @@ impl ProviderPages {
                 .id_salt(("ai-provider", provider.as_str()))
                 .default_open(listing)
                 .show(ui, |ui| {
-                    if provider == AiProvider::ChatGptSubscription {
-                        let mut enabled = config.enabled;
+                    let mut enabled = config.enabled;
+                    ui.horizontal(|ui| {
                         if ui.checkbox(&mut enabled, "On").changed() {
                             draft.ai.set_provider_enabled(provider, enabled);
                         }
-                        ui.label("Sign in from the GPUI Reader's settings.");
+                        ui.add_enabled_ui(index > 0, |ui| {
+                            if icons::button(ui, "arrow-up", 24.0, false, "Move up").clicked() {
+                                reorder = Some((index, index - 1));
+                            }
+                        });
+                        ui.add_enabled_ui(index + 1 < order.len(), |ui| {
+                            if icons::button(ui, "arrow-down", 24.0, false, "Move down").clicked() {
+                                reorder = Some((index, index + 1));
+                            }
+                        });
+                        let running = self.ai_tests.get(&provider).is_some_and(Test::running);
+                        if ui
+                            .add_enabled(!running, egui::Button::new("Test connection"))
+                            .clicked()
+                        {
+                            test = Some(provider);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        test_status(
+                            ui,
+                            self.ai_tests.get(&provider),
+                            &current.ai.resolved_provider(provider),
+                        );
+                    });
+                    if provider == AiProvider::ChatGptSubscription {
+                        self.chatgpt_account(ui, chatgpt);
                         return;
-                    }
-                    let mut enabled = config.enabled;
-                    if ui.checkbox(&mut enabled, "On").changed() {
-                        draft.ai.set_provider_enabled(provider, enabled);
                     }
                     let id = ProviderSecretId::AiApiKey(provider);
                     let status = user.status(id);
@@ -355,6 +511,9 @@ impl ProviderPages {
         if let Some(provider) = remove {
             draft.ai.remove_custom_provider(provider);
         }
+        if let Some((from, to)) = reorder {
+            draft.ai.provider_order.swap(from, to);
+        }
         ui.add_space(6.0);
         ui.label(RichText::new("Add an OpenAI-compatible provider").strong());
         ui.horizontal(|ui| {
@@ -389,6 +548,49 @@ impl ProviderPages {
         if let (Some(provider), Some(settings)) = (fetch, user.get().cloned()) {
             self.fetch_models(&settings, provider, ui.ctx());
         }
+        if let (Some(provider), Some(settings)) = (test, user.get().cloned()) {
+            self.test_ai(&settings, provider, ui.ctx());
+        }
+    }
+
+    /// The ChatGPT account: who is signed in, and signing in or out.
+    fn chatgpt_account(&mut self, ui: &mut egui::Ui, chatgpt: &ChatGptSubscription) {
+        let tokens = Tokens::get(ui.ctx());
+        let auth = chatgpt.snapshot();
+        ui.horizontal(|ui| {
+            if auth.loading {
+                ui.spinner();
+                ui.label(RichText::new("Reading the saved sign-in…").color(tokens.text_muted));
+            } else if auth.signing_in {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Finish signing in in your browser…").color(tokens.text_muted),
+                );
+            } else if let Some(email) = &auth.email {
+                ui.label(format!("Signed in as {email}"));
+                if crate::widgets::ghost_button(ui, "log-out", "Sign out").clicked() {
+                    chatgpt.forget();
+                }
+            } else if crate::widgets::pill_button(ui, Some("log-in"), "Sign in with ChatGPT", true)
+                .clicked()
+            {
+                match chatgpt.begin_sign_in() {
+                    Ok(url) => {
+                        self.signing_in = true;
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                    Err(_) => self.signing_in = false,
+                }
+            }
+        });
+        if let Some(error) = &auth.error {
+            ui.label(RichText::new(error).small().color(tokens.danger));
+        }
+        ui.label(
+            RichText::new("Uses your ChatGPT plan; the sign-in is kept in the system keychain.")
+                .small()
+                .color(tokens.text_muted),
+        );
     }
 
     /// A key field, hidden unless revealed, with where it is kept.
@@ -574,5 +776,72 @@ mod tests {
             (main.provider, main.model.as_str()),
             (provider, "fake-large")
         );
+    }
+
+    fn wait_for(pages: &mut ProviderPages, provider: AiProvider) {
+        let started = Instant::now();
+        while pages.ai_tests[&provider].running() {
+            assert!(started.elapsed() < Duration::from_secs(30), "timed out");
+            std::thread::sleep(Duration::from_millis(10));
+            pages.poll();
+        }
+    }
+
+    #[test]
+    fn connection_tests_report_the_provider_and_go_stale_when_settings_change() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        use_fake_ai(&mut settings, start_ai_server().unwrap());
+        let provider = settings.ai.provider_order[0];
+
+        let mut pages = ProviderPages::default();
+        pages.test_ai(&settings, provider, &ctx);
+        wait_for(&mut pages, provider);
+        let test = &pages.ai_tests[&provider];
+        assert!(matches!(test.result, Some(Ok(()))));
+        assert!(test.config == settings.ai.resolved_provider(provider));
+
+        // Another host: the test fails, and the old result is stale.
+        let mut moved = settings.clone();
+        moved.ai.provider_config_mut(provider).base_url = Some("http://127.0.0.1:9".into());
+        assert!(pages.ai_tests[&provider].config != moved.ai.resolved_provider(provider));
+        pages.test_ai(&moved, provider, &ctx);
+        wait_for(&mut pages, provider);
+        assert!(matches!(pages.ai_tests[&provider].result, Some(Err(_))));
+    }
+
+    #[test]
+    fn the_first_provider_on_answers_when_no_model_is_chosen() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        use_fake_ai(&mut settings, start_ai_server().unwrap());
+        let fake = settings.ai.provider_order[0];
+        let other =
+            settings
+                .ai
+                .add_custom_provider("Other", AiApiStyle::OpenAi, "http://127.0.0.1:9", "");
+        settings.ai.set_provider_enabled(other, true);
+        let config = settings.ai.provider_config_mut(other);
+        config.ensure_model(AiModel::new("other-model", "Other", "Other"));
+        settings.ai.main_model = None;
+        let mut user = UserSettings::in_memory(&ctx, settings, Default::default());
+        let main = |user: &UserSettings| user.get().unwrap().ai.resolved_main().provider;
+        assert_eq!(main(&user), fake);
+
+        // Moving the other provider above it, as the up button does.
+        let from = user
+            .get()
+            .unwrap()
+            .ai
+            .provider_order
+            .iter()
+            .position(|&p| p == other)
+            .unwrap();
+        user.edit(|settings| {
+            for index in (1..=from).rev() {
+                settings.ai.provider_order.swap(index, index - 1);
+            }
+        });
+        assert_eq!(main(&user), other);
     }
 }

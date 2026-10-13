@@ -127,6 +127,12 @@ impl UserSettings {
         user
     }
 
+    /// Where keys outside the settings file are kept (the system keychain,
+    /// or memory in scripted runs).
+    pub fn store(&self) -> Arc<dyn CredentialStore> {
+        self.store.clone()
+    }
+
     /// Settings kept in memory only, with keys in `store`.
     pub fn in_memory(
         ctx: &egui::Context,

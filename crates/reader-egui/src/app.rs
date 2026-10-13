@@ -9,6 +9,7 @@ use std::{
 
 use craft_ui::docking::Zone;
 use eframe::egui_wgpu;
+use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_core::{
     DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation, EpubLayout,
 };
@@ -174,6 +175,8 @@ pub struct ReaderApp {
     font_size: Option<f32>,
     pub(crate) translator: Translator,
     pub(crate) user_settings: UserSettings,
+    /// The ChatGPT Subscription sign-in, kept with the other keys.
+    chatgpt: ChatGptSubscription,
     pub(crate) assistant: Assistant,
     pub(crate) launch_ask: Option<String>,
     page_input: String,
@@ -241,6 +244,10 @@ impl ReaderApp {
             UserSettings::load(&cc.egui_ctx)
         };
         let translator = Translator::new(persist, false);
+        let chatgpt = {
+            let ctx = cc.egui_ctx.clone();
+            ChatGptSubscription::start(user_settings.store(), move || ctx.request_repaint())
+        };
         let mut app = Self {
             prefs,
             theme_kind: None,
@@ -272,6 +279,7 @@ impl ReaderApp {
             font_size: launch.font_size,
             translator,
             user_settings,
+            chatgpt,
             assistant: Assistant::default(),
             launch_ask: launch.ask,
             page_input: String::new(),
@@ -1440,6 +1448,7 @@ impl ReaderApp {
                     keymap: &self.keymap,
                     effects: &effects,
                     user: &mut self.user_settings,
+                    chatgpt: &self.chatgpt,
                 },
             );
             if changed {

@@ -3,6 +3,7 @@
 //! preferences.
 
 use egui::{Key, RichText};
+use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_effects::{EffectDef, EffectKind};
 
 use crate::{
@@ -95,6 +96,7 @@ pub struct SettingsContext<'a> {
     pub keymap: &'a Keymap,
     pub effects: &'a [EffectDef],
     pub user: &'a mut UserSettings,
+    pub chatgpt: &'a ChatGptSubscription,
 }
 
 impl SettingsWindow {
@@ -210,7 +212,7 @@ impl SettingsWindow {
                             }
                             Section::Translation => self.providers.translation(ui, app.user),
                             Section::Ocr => self.providers.ocr(ui, app.user),
-                            Section::Ai => self.providers.ai(ui, app.user),
+                            Section::Ai => self.providers.ai(ui, app.user, app.chatgpt),
                         });
                 });
             });
@@ -540,6 +542,10 @@ mod tests {
             glyphst_settings::Settings::default(),
             Default::default(),
         );
+        let chatgpt = ChatGptSubscription::start(
+            std::sync::Arc::new(glyphst_settings::MemoryCredentials::default()),
+            || {},
+        );
         let mut output = ctx.run_ui(input, |ui| {
             changed = window.show(
                 ui.ctx(),
@@ -548,6 +554,7 @@ mod tests {
                     keymap,
                     effects: &[],
                     user: &mut user,
+                    chatgpt: &chatgpt,
                 },
             );
         });
