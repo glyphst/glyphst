@@ -7,6 +7,7 @@ use egui::{Align2, CornerRadius, Id, Order, Rect, Stroke, pos2, vec2};
 
 use super::*;
 use crate::{
+    book_effects::{Defaults, Resolved, resolve},
     gpu::BackdropCallback,
     panes::{self, Divider},
     stage::{self, ChromeFade, StageInput, StageLayout},
@@ -301,21 +302,39 @@ impl ReaderApp {
         ctx.request_repaint();
     }
 
-    /// The background effect behind the pages.
+    /// The background effect behind the pages: the focused book's. Solid
+    /// takes the theme's colour until the user sets one.
     pub(super) fn background_effect(&self, tokens: &Tokens) -> EffectUse {
-        let id = self.prefs.background.clone();
-        let def = self
-            .with_gpu(|gpu| gpu.effects().find(&id).cloned())
-            .flatten();
-        let params = match (&def, id.as_str()) {
-            (_, glyphst_effects::SOLID) => {
-                let [r, g, b] = tokens.pasteboard_rgb();
-                [r, g, b, 1.0]
-            }
-            (Some(def), _) => def.default_params(),
-            (None, _) => [0.0; 4],
+        let mut background = self.effects_for(self.active).background;
+        if background.id == glyphst_effects::SOLID
+            && !self
+                .prefs
+                .effect_params
+                .contains_key(glyphst_effects::SOLID)
+        {
+            let [r, g, b] = tokens.pasteboard_rgb();
+            background.params = [r, g, b, 1.0];
+        }
+        background
+    }
+
+    /// The document path effects are chosen by.
+    pub(crate) fn book_key(&self, index: usize) -> String {
+        self.tabs[index].path.display().to_string()
+    }
+
+    /// The effects tab `index` shows: its book's choices, else the
+    /// defaults (`None`, the home tab, has only the defaults).
+    pub(crate) fn effects_for(&self, index: Option<usize>) -> Resolved {
+        let book = index.and_then(|index| self.prefs.books.get(&self.book_key(index)));
+        let defaults = Defaults {
+            background: &self.prefs.background,
+            transition: self.prefs.transition.as_deref(),
+            overlay: self.prefs.overlay.as_deref(),
+            params: &self.prefs.effect_params,
         };
-        EffectUse { id, params }
+        self.with_gpu(|gpu| resolve(book, defaults, |id| gpu.effects().find(id)))
+            .unwrap_or_else(|| resolve(book, defaults, |_| None))
     }
 
     /// Whether the dock and the rail show this frame: after pointer

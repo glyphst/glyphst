@@ -2,7 +2,8 @@
 //! and shader effects for transitions and backgrounds.
 //!
 //! glyphst-reader [documents…] [--background ID] [--transition ID|none] [--zoom Z]
-//!     [--split right|down] [--rotate 90|180|270] [--spread] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
+//!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
+//!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
 //!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
@@ -21,6 +22,7 @@ mod ai;
 mod ai_tools;
 mod annotations;
 mod app;
+mod book_effects;
 mod commands;
 mod doc_text;
 mod document;
@@ -48,6 +50,7 @@ mod theme;
 mod transition;
 mod translation;
 mod user_settings;
+mod wallpaper;
 mod widgets;
 
 use std::path::PathBuf;
@@ -56,7 +59,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -72,6 +75,8 @@ fn parse_args() -> Result<Launch> {
         controls: None,
         zoom: None,
         split: None,
+        overlay: None,
+        wallpaper: None,
         arrangement: None,
         find: None,
         page: None,
@@ -104,6 +109,8 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--background" => launch.background = Some(value()?),
+            "--overlay" => launch.overlay = Some(value()?),
+            "--wallpaper" => launch.wallpaper = Some(value()?),
             "--rotate" => {
                 let rotation = match value()?.as_str() {
                     "0" => 0,

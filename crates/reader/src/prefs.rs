@@ -2,9 +2,12 @@
 //! (as pdfcraft does), with the last session following pdfcraft's
 //! `last_session.rs`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    book_effects::{self, BookEffects},
     keys::{self, Overrides},
     sidebar::SidebarTab,
     theme::ThemePreference,
@@ -27,6 +30,14 @@ pub struct Prefs {
     pub background: String,
     /// Frames per second an animated background may repaint at.
     pub background_fps: u32,
+    /// Effect id of the tint over pages, or `None` for none.
+    pub overlay: Option<String>,
+    /// The image backgrounds with `image: true` draw.
+    pub wallpaper: Option<String>,
+    /// Parameter values the user set, by effect id (manifest order).
+    pub effect_params: BTreeMap<String, [f32; glyphst_effects::MAX_PARAMS]>,
+    /// Books' own effects, by document path.
+    pub books: BTreeMap<String, BookEffects>,
     pub show_sidebar: bool,
     pub sidebar: SidebarTab,
     /// Widths of the left drawer and the assistant, in points.
@@ -49,6 +60,10 @@ impl Default for Prefs {
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),
             background_fps: 30,
+            overlay: None,
+            wallpaper: None,
+            effect_params: BTreeMap::new(),
+            books: BTreeMap::new(),
             show_sidebar: true,
             sidebar: SidebarTab::default(),
             drawer_width: 300.0,
@@ -110,6 +125,10 @@ impl Prefs {
         }
         prefs.shortcuts = keys::sanitize(&prefs.shortcuts);
         prefs
+            .effect_params
+            .retain(|_, values| values.iter().all(|value| value.is_finite()));
+        book_effects::trim(&mut prefs.books);
+        prefs
     }
 
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
@@ -156,6 +175,19 @@ mod tests {
             autohide_controls: false,
             target_language: Some("ja".into()),
             shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
+            overlay: Some("sepia".into()),
+            wallpaper: Some("/pictures/lake.jpg".into()),
+            effect_params: [("aurora".to_string(), [1.5, 0.2, 0.0, 0.0])].into(),
+            books: [(
+                "/books/a.pdf".to_string(),
+                BookEffects {
+                    background: crate::book_effects::Choice::Effect("aurora".into()),
+                    overlay: crate::book_effects::Choice::Off,
+                    used: 3,
+                    ..Default::default()
+                },
+            )]
+            .into(),
             last_session: LastSession {
                 files: vec![
                     SessionFile {

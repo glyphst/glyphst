@@ -118,8 +118,22 @@ impl Upload {
 struct ViewState {
     target: OffscreenTarget,
     snapshot: Option<Snapshot>,
+    /// The pages with the view's overlay (page tint) applied.
+    tinted: Option<Snapshot>,
+    /// Whether the last frame's image is `tinted` rather than `target`.
+    shows_tinted: bool,
     prepared: Vec<PreparedEffect>,
     last_drawn: u64,
+}
+
+impl ViewState {
+    /// The view's last finished image.
+    fn image(&self) -> &wgpu::Texture {
+        match (&self.tinted, self.shows_tinted) {
+            (Some(tinted), true) => &tinted.texture,
+            _ => self.target.texture(),
+        }
+    }
 }
 
 /// Frames a view is kept after it was last drawn, for a transition from it.
@@ -151,6 +165,8 @@ pub struct ReaderGpu {
     /// A 1×1 texture for the backdrop's effect inputs; backgrounds don't
     /// sample them.
     blank: wgpu::TextureView,
+    /// The wallpaper image, mipmapped, for backgrounds that draw it.
+    wallpaper: Option<wgpu::TextureView>,
     backdrop: Option<PreparedEffect>,
     pub stats: FrameStats,
 }
@@ -261,6 +277,7 @@ impl ReaderGpu {
             paper_bind_group,
             paper_color,
             blank,
+            wallpaper: None,
             backdrop: None,
             stats: FrameStats::default(),
         };
@@ -269,6 +286,65 @@ impl ReaderGpu {
 
     pub fn effects(&self) -> &EffectRegistry {
         &self.effects
+    }
+
+    /// Loads the user's effects again from `dir`.
+    pub fn reload_effects(&mut self, device: &wgpu::Device, dir: &std::path::Path) {
+        self.effects.reload_user(device, dir);
+    }
+
+    /// Uses `image` (or none) as the wallpaper. Written at once: this
+    /// happens when the user picks one, not while reading.
+    pub fn set_wallpaper(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<&crate::wallpaper::WallpaperImage>,
+    ) {
+        self.wallpaper = image.map(|image| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wallpaper"),
+                size: wgpu::Extent3d {
+                    width: image.size[0],
+                    height: image.size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: image.mips.len() as u32 + 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let levels = std::iter::once((image.rgba.as_slice(), image.size)).chain(
+                image
+                    .mips
+                    .iter()
+                    .map(|(pixels, size)| (pixels.as_slice(), *size)),
+            );
+            for (mip, (pixels, [width, height])) in levels.enumerate() {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: mip as u32,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    pixels,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 4),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            texture.create_view(&Default::default())
+        });
     }
 
     /// Whether `key` is on the GPU or being written to it.
@@ -464,6 +540,8 @@ impl ReaderGpu {
         let view = self.views.entry(tab).or_insert_with(|| ViewState {
             target: OffscreenTarget::new(device, format, size, VIEW_TARGET_USAGE),
             snapshot: None,
+            tinted: None,
+            shows_tinted: false,
             prepared: Vec::new(),
             last_drawn: 0,
         });
@@ -492,6 +570,7 @@ fn snapshot(device: &wgpu::Device, format: wgpu::TextureFormat, size: [u32; 2]) 
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
@@ -511,6 +590,8 @@ pub struct ViewCallback {
     pub draws: Vec<PageDraw>,
     pub page_color: [f32; 4],
     pub transition: Option<TransitionUse>,
+    /// The tint over the pages (an overlay effect), if any.
+    pub overlay: Option<EffectUse>,
     /// Seconds for animated effects.
     pub time: f32,
     pub pointer: Option<[f32; 2]>,
@@ -560,7 +641,7 @@ impl CallbackTrait for ViewCallback {
         let outgoing = capture
             .and_then(|from| gpu.views.get(&from))
             .filter(|view| view.target.size() == size)
-            .map(|view| view.target.texture().clone());
+            .map(|view| view.image().clone());
         let format = gpu.format;
         let view = gpu.view(device, self.tab, size);
         view.last_drawn = frame;
@@ -625,6 +706,7 @@ impl CallbackTrait for ViewCallback {
             effects,
             paper: paper_pipeline,
             paper_bind_group,
+            format,
             ..
         } = gpu;
         let Some(view) = views.get_mut(&self.tab) else {
@@ -657,7 +739,52 @@ impl CallbackTrait for ViewCallback {
         }
 
         let resolution = [size[0] as f32, size[1] as f32];
-        let target = &view.target;
+        // The tint, drawn from the pages into the view's tinted image.
+        let tint = self.overlay.as_ref().and_then(|overlay| {
+            let inputs = EffectInputs {
+                from: view.target.view(),
+                to: view.target.view(),
+                resolution,
+                pointer: self.pointer,
+                time: self.time,
+                progress: 0.0,
+                direction: 1.0,
+                params: overlay.params,
+            };
+            effects.prepare(device, &overlay.id, &inputs)
+        });
+        view.shows_tinted = tint.is_some();
+        if let Some(tint) = tint {
+            if view
+                .tinted
+                .as_ref()
+                .is_none_or(|tinted| tinted.size != size)
+            {
+                view.tinted = Some(snapshot(device, *format, size));
+            }
+            let tinted = view.tinted.as_ref().expect("made above");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("page_tint"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &tinted.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            effects.draw(&tint, &mut pass);
+        }
+        let image = match (&view.tinted, view.shows_tinted) {
+            (Some(tinted), true) => &tinted.view,
+            _ => view.target.view(),
+        };
         let prepare = |id: &str,
                        fallback: &str,
                        from: &wgpu::TextureView,
@@ -666,7 +793,7 @@ impl CallbackTrait for ViewCallback {
                        direction: f32| {
             let effect_inputs = EffectInputs {
                 from,
-                to: target.view(),
+                to: image,
                 resolution,
                 pointer: self.pointer,
                 time: self.time,
@@ -687,7 +814,7 @@ impl CallbackTrait for ViewCallback {
                 transition.progress,
                 transition.direction,
             ),
-            _ => prepare(PRESENT, PRESENT, target.view(), [0.0; 4], 0.0, 1.0),
+            _ => prepare(PRESENT, PRESENT, image, [0.0; 4], 0.0, 1.0),
         };
         view.prepared = content.into_iter().collect();
         // Every pane adds to the frame's statistics.
@@ -747,9 +874,18 @@ impl CallbackTrait for BackdropCallback {
             .retain(|_, view| frame - view.last_drawn <= VIEW_KEEP_FRAMES);
         gpu.stats = FrameStats::default();
         let size = pixel_size(self.rect, screen.pixels_per_point);
+        // Backgrounds that draw the wallpaper get it as their input.
+        let image = gpu
+            .effects
+            .find(&self.background.id)
+            .is_some_and(|def| def.image);
+        let input = match (&gpu.wallpaper, image) {
+            (Some(wallpaper), true) => wallpaper,
+            _ => &gpu.blank,
+        };
         let inputs = EffectInputs {
-            from: &gpu.blank,
-            to: &gpu.blank,
+            from: input,
+            to: input,
             resolution: [size[0] as f32, size[1] as f32],
             pointer: self.pointer,
             time: self.time,

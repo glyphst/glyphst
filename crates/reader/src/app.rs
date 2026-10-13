@@ -49,6 +49,8 @@ use crate::{
 
 mod chrome;
 
+/// How often the effects folder is looked at for changes.
+const EFFECTS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Positions are written to the library at most this often while reading.
 const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const TAB_MIN_WIDTH: f32 = 90.0;
@@ -76,6 +78,10 @@ pub struct Launch {
     pub harness: Option<Harness>,
     pub background: Option<String>,
     pub transition: Option<String>,
+    /// The default page tint (an overlay effect id, or `none`).
+    pub overlay: Option<String>,
+    /// The wallpaper image.
+    pub wallpaper: Option<String>,
     pub theme: Option<ThemePreference>,
     /// Keeps the dock and the rail shown (`true`) or faded (`false`)
     /// instead of fading them after a pause.
@@ -194,6 +200,14 @@ pub struct ReaderApp {
     controls: Option<bool>,
     /// Present mode was on last frame (to say how to leave it).
     was_presenting: bool,
+    /// The user's effects folder, what it held when last loaded, and when
+    /// it was last looked at.
+    pub(crate) effects_dir: Option<PathBuf>,
+    effects_stamp: Vec<(PathBuf, Option<std::time::SystemTime>, u64)>,
+    effects_checked: Instant,
+    /// The wallpaper being read, and the one the GPU has.
+    wallpaper_loading: Option<crate::wallpaper::Loading>,
+    wallpaper_shown: Option<String>,
     /// The window had the keyboard focus last frame (files changed while
     /// it was away are reloaded when it comes back).
     was_focused: bool,
@@ -210,6 +224,10 @@ impl ReaderApp {
             .ok_or_else(|| anyhow::anyhow!("the reader needs eframe's wgpu renderer"))?;
         let user_effects = dirs::config_dir().map(|dir| dir.join("glyphst").join("effects"));
         ReaderGpu::install(&render_state, user_effects.as_deref());
+        let effects_stamp = user_effects
+            .as_deref()
+            .map(glyphst_effects::user_stamp)
+            .unwrap_or_default();
         crate::fonts::install(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let persist = launch.harness.is_none();
@@ -222,6 +240,12 @@ impl ReaderApp {
         }
         if let Some(transition) = launch.transition {
             prefs.transition = (transition != "none").then_some(transition);
+        }
+        if let Some(overlay) = launch.overlay {
+            prefs.overlay = (overlay != "none").then_some(overlay);
+        }
+        if let Some(wallpaper) = launch.wallpaper {
+            prefs.wallpaper = Some(wallpaper);
         }
         if let Some(tab) = launch.sidebar {
             prefs.sidebar = tab;
@@ -293,6 +317,11 @@ impl ReaderApp {
             chrome: Default::default(),
             // Scripted runs show the controls unless told otherwise.
             was_presenting: false,
+            effects_dir: user_effects,
+            effects_stamp,
+            effects_checked: Instant::now(),
+            wallpaper_loading: None,
+            wallpaper_shown: None,
             was_focused: true,
             controls: launch.controls.or((!persist).then_some(true)),
             keymap: Keymap::default(),
@@ -424,7 +453,7 @@ impl ReaderApp {
         let tab = self.tabs[next].id;
         let replaced = self.panes.show(tab);
         let (Some(_), Some(from), Some(effect)) =
-            (previous, replaced, self.prefs.transition.clone())
+            (previous, replaced, self.effects_for(Some(next)).transition)
         else {
             return;
         };
@@ -1010,13 +1039,14 @@ impl ReaderApp {
         }
     }
 
-    fn begin_transition(&mut self, effect: String, from_tab: u64, tab: u64, direction: f32) {
+    fn begin_transition(&mut self, effect: EffectUse, from_tab: u64, tab: u64, direction: f32) {
         let duration = self
-            .with_gpu(|gpu| gpu.effects().find(&effect).map(|def| def.duration_ms))
+            .with_gpu(|gpu| gpu.effects().find(&effect.id).map(|def| def.duration_ms))
             .flatten();
         if let Some(duration) = duration {
             self.transition = Some(ViewTransition::new(
-                effect,
+                effect.id,
+                effect.params,
                 from_tab,
                 tab,
                 direction,
@@ -1800,7 +1830,7 @@ impl ReaderApp {
         self.tabs[active].pixels_per_point = f64::from(ppp);
         let mut frame = self.tabs[active].frame(size, input, turning);
         if let Some(direction) = frame.turn
-            && let Some(effect) = self.prefs.transition.clone()
+            && let Some(effect) = self.effects_for(Some(active)).transition
         {
             self.begin_transition(effect, tab_id, tab_id, direction);
         }
@@ -1837,28 +1867,14 @@ impl ReaderApp {
             .transition
             .as_mut()
             .filter(|transition| transition.tab == tab_id)
-            .map(|transition| {
-                let params = self
-                    .render_state
-                    .renderer
-                    .write()
-                    .callback_resources
-                    .get::<ReaderGpu>()
-                    .and_then(|gpu| {
-                        gpu.effects()
-                            .find(&transition.effect)
-                            .map(|def| def.default_params())
-                    })
-                    .unwrap_or_default();
-                TransitionUse {
-                    effect: EffectUse {
-                        id: transition.effect.clone(),
-                        params,
-                    },
-                    progress: transition.progress(now),
-                    direction: transition.direction,
-                    capture_from: transition.take_capture(),
-                }
+            .map(|transition| TransitionUse {
+                effect: EffectUse {
+                    id: transition.effect.clone(),
+                    params: transition.params,
+                },
+                progress: transition.progress(now),
+                direction: transition.direction,
+                capture_from: transition.take_capture(),
             });
         let page_color = tokens.page.to_normalized_gamma_f32();
         // Shadows under the pages, between the backdrop and the pages; a
@@ -1888,6 +1904,7 @@ impl ReaderApp {
                 draws: frame.draws.clone(),
                 page_color,
                 transition,
+                overlay: self.effects_for(Some(active)).overlay,
                 time: self.started.elapsed().as_secs_f32(),
                 pointer: pointer.map(|[x, y]| [x as f32, y as f32]),
             },
@@ -2450,6 +2467,8 @@ impl eframe::App for ReaderApp {
         }
         self.upload_ready_page();
         self.upload_ready_layers();
+        self.watch_effects(&ctx, now);
+        self.update_wallpaper(&ctx);
         let pad = match &mut self.gamepads {
             Ok(pads) => pads.poll(),
             Err(_) => GamepadInput::default(),
@@ -2520,7 +2539,8 @@ impl eframe::App for ReaderApp {
             28.0
         };
         self.notices.show(&ctx, lift);
-        self.run_harness(&ctx, pages_drawn, now);
+        let wallpaper_ready = self.wallpaper_loading.is_none();
+        self.run_harness(&ctx, pages_drawn && wallpaper_ready, now);
         if self
             .transition
             .as_ref()
@@ -2570,8 +2590,100 @@ impl eframe::App for ReaderApp {
 }
 
 impl ReaderApp {
+    /// Reloads the user's effects when their files changed, looking at
+    /// most once a second while the window has focus.
+    pub(crate) fn watch_effects(&mut self, ctx: &egui::Context, now: Instant) {
+        let due = now - self.effects_checked >= EFFECTS_CHECK_INTERVAL
+            && (ctx.input(|i| i.focused) || self.harness.is_some());
+        if !due {
+            return;
+        }
+        self.reload_effects_if_changed(now);
+    }
+
+    pub(crate) fn reload_effects_if_changed(&mut self, now: Instant) {
+        self.effects_checked = now;
+        let Some(dir) = self.effects_dir.clone() else {
+            return;
+        };
+        let stamp = glyphst_effects::user_stamp(&dir);
+        if stamp == self.effects_stamp {
+            return;
+        }
+        self.effects_stamp = stamp;
+        let device = self.render_state.device.clone();
+        let report = self.with_gpu(|gpu| {
+            gpu.reload_effects(&device, &dir);
+            let loaded = gpu.effects().defs().filter(|def| def.user).count();
+            let errors: Vec<String> = gpu
+                .effects()
+                .errors()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            (loaded, errors)
+        });
+        if let Some((loaded, errors)) = report {
+            match errors.first() {
+                Some(first) => self.notices.push(format!(
+                    "Effects reloaded; {} could not load. {first}",
+                    errors.len()
+                )),
+                None => self.notices.push(format!(
+                    "Effects reloaded: {loaded} of your own effect{}.",
+                    if loaded == 1 { "" } else { "s" }
+                )),
+            }
+        }
+    }
+
+    /// Reads a newly chosen wallpaper, and hands a read one to the GPU.
+    fn update_wallpaper(&mut self, ctx: &egui::Context) {
+        if let Some(loading) = &self.wallpaper_loading
+            && let Some(result) = loading.take()
+        {
+            let path = loading.path.clone();
+            self.wallpaper_loading = None;
+            let (device, queue) = (
+                self.render_state.device.clone(),
+                self.render_state.queue.clone(),
+            );
+            match result {
+                Ok(image) => {
+                    self.with_gpu(|gpu| gpu.set_wallpaper(&device, &queue, Some(&image)));
+                }
+                Err(error) => {
+                    self.with_gpu(|gpu| gpu.set_wallpaper(&device, &queue, None));
+                    self.notices
+                        .push(format!("Could not use the wallpaper: {error}"));
+                }
+            }
+            self.wallpaper_shown = Some(path);
+            ctx.request_repaint();
+        }
+        let wanted = self.prefs.wallpaper.clone();
+        let loading = self.wallpaper_loading.as_ref().map(|l| &l.path);
+        if wanted == self.wallpaper_shown || wanted.as_ref() == loading {
+            return;
+        }
+        match wanted {
+            Some(path) => {
+                self.wallpaper_loading = Some(crate::wallpaper::Loading::start(path, ctx));
+            }
+            None => {
+                let (device, queue) = (
+                    self.render_state.device.clone(),
+                    self.render_state.queue.clone(),
+                );
+                self.with_gpu(|gpu| gpu.set_wallpaper(&device, &queue, None));
+                self.wallpaper_loading = None;
+                self.wallpaper_shown = None;
+            }
+        }
+    }
+
     fn background_is_animated(&self) -> bool {
-        let id = self.prefs.background.clone();
+        let id = self.effects_for(self.active).background.id;
         self.with_gpu(|gpu| gpu.effects().find(&id).is_some_and(|def| def.animated))
             .unwrap_or(false)
     }

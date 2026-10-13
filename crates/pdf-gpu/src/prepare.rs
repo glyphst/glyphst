@@ -855,7 +855,7 @@ fn lyon_path(path: &PagePath) -> LyonPath {
 }
 
 /// Mip levels 1.. of an RGBA8 image of `size` (level 0 is the image).
-fn mip_chain(rgba: &[u8], size: [u32; 2]) -> Vec<(Vec<u8>, [u32; 2])> {
+pub fn mip_chain(rgba: &[u8], size: [u32; 2]) -> Vec<(Vec<u8>, [u32; 2])> {
     let count = size[0].max(size[1]).max(1).ilog2();
     let mut mips: Vec<(Vec<u8>, [u32; 2])> = Vec::with_capacity(count as usize);
     for _ in 0..count {
