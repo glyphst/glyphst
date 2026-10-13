@@ -43,6 +43,7 @@ mod palette;
 mod panes;
 mod pickers;
 mod prefs;
+mod region;
 mod settings_providers;
 mod settings_window;
 mod sidebar;
@@ -63,7 +64,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
-                     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] [--command ID]… \
+                     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -93,6 +94,7 @@ fn parse_args() -> Result<Launch> {
         palette: None,
         settings: None,
         commands: Vec::new(),
+        select_region: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -159,6 +161,21 @@ fn parse_args() -> Result<Launch> {
             "--ai-fake" => launch.ai_fake = true,
             "--ask" => launch.ask = Some(value()?),
             "--palette" => launch.palette = Some(value()?),
+            "--select-region" => {
+                let usage = "--select-region takes PAGE:X0,Y0,X1,Y1 (page points)";
+                let value = value()?;
+                let (page, rect) = value.split_once(':').context(usage)?;
+                let numbers: Vec<f32> = rect
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .context(usage)?;
+                let [x0, y0, x1, y1] = numbers[..] else {
+                    bail!(usage);
+                };
+                let page: usize = page.parse().context(usage)?;
+                launch.select_region = Some((page.max(1), [x0, y0, x1, y1]));
+            }
             "--command" => {
                 let id = value()?;
                 launch.commands.push(

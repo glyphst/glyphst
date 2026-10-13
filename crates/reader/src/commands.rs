@@ -47,6 +47,7 @@ pub enum Command {
     FindNext,
     FindPrevious,
     SelectPage,
+    RegionSelect,
     Bookmark,
     TranslateSelection,
     TranslateDocument,
@@ -119,7 +120,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -159,6 +160,7 @@ impl Command {
         Self::FindNext,
         Self::FindPrevious,
         Self::SelectPage,
+        Self::RegionSelect,
         Self::Bookmark,
         Self::TranslateSelection,
         Self::TranslateDocument,
@@ -208,6 +210,7 @@ impl Command {
             Self::FindNext => "text.find_next",
             Self::FindPrevious => "text.find_previous",
             Self::SelectPage => "text.select_page",
+            Self::RegionSelect => "text.select_region",
             Self::Bookmark => "text.bookmark",
             Self::TranslateSelection => "translation.selection",
             Self::TranslateDocument => "translation.document",
@@ -261,6 +264,7 @@ impl Command {
             Self::FindNext => "Find next",
             Self::FindPrevious => "Find previous",
             Self::SelectPage => "Select the page's text",
+            Self::RegionSelect => "Select a region of the page",
             Self::Bookmark => "Bookmark this page",
             Self::TranslateSelection => "Translate the selection",
             Self::TranslateDocument => "Translate the document",
@@ -309,6 +313,7 @@ impl Command {
             Self::SmallerText => "a-arrow-down",
             Self::Find | Self::FindNext | Self::FindPrevious => "search",
             Self::SelectPage => "type",
+            Self::RegionSelect => "scan",
             Self::Bookmark => "bookmark-plus",
             Self::TranslateSelection | Self::TranslateDocument => "languages",
             Self::ShowTranslated => "globe",
@@ -357,6 +362,7 @@ impl Command {
             | Self::FindNext
             | Self::FindPrevious
             | Self::SelectPage
+            | Self::RegionSelect
             | Self::Bookmark => Category::Text,
             Self::TranslateSelection | Self::TranslateDocument | Self::ShowTranslated => {
                 Category::Translation
@@ -400,6 +406,7 @@ impl Command {
             Self::FindNext => &["F3"],
             Self::FindPrevious => &["Shift+F3"],
             Self::SelectPage => &["Ctrl+A"],
+            Self::RegionSelect => &["S"],
             Self::Bookmark => &["Ctrl+D"],
             Self::TranslateSelection => &["Ctrl+T"],
             Self::Assistant => &["Ctrl+L"],
@@ -432,9 +439,10 @@ impl Command {
             Self::TranslateSelection => Needs::Selection,
             Self::ShowTranslated => Needs::Translation,
             Self::FocusNextPane | Self::ClosePane => Needs::Panes,
-            Self::RotateClockwise | Self::RotateCounterclockwise | Self::ToggleSpread => {
-                Needs::FixedLayout
-            }
+            Self::RotateClockwise
+            | Self::RotateCounterclockwise
+            | Self::ToggleSpread
+            | Self::RegionSelect => Needs::FixedLayout,
             _ => Needs::Document,
         }
     }
@@ -447,6 +455,7 @@ impl Command {
             self,
             Self::TranslateSelection
                 | Self::SelectPage
+                | Self::RegionSelect
                 | Self::NextPage
                 | Self::PreviousPage
                 | Self::NextHalfPage

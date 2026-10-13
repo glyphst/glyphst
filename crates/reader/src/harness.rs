@@ -112,6 +112,15 @@ impl ReaderApp {
                 eprintln!("--command {}: {reason}", command.id());
             }
         }
+        if let Some((page, [x0, y0, x1, y1])) = self.launch_region.take() {
+            self.region = Some(crate::region::Region {
+                tab: self.tabs[active].id,
+                page: page - 1,
+                from: [x0, y0],
+                to: [x1, y1],
+            });
+            self.finish_region(active);
+        }
         let tab = &mut self.tabs[active];
         if let Some(query) = self.launch_find.take() {
             let page = tab.current_page();

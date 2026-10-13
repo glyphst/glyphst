@@ -21,7 +21,8 @@ use glyphst_ai::{
         AgentToolResultPart, run_agent,
     },
     ai_chat::{
-        ChatMessage, ContextBlock, DocumentContext, DocumentContextScope, MentionKind, Role,
+        ChatMessage, ContextBlock, DocumentContext, DocumentContextScope, ImageContext,
+        MentionKind, Role,
     },
 };
 use glyphst_core::DocumentLayout;
@@ -100,6 +101,17 @@ pub struct Assistant {
     markdown: egui_commonmark::CommonMarkCache,
     show_sessions: bool,
     sessions: Vec<AiSession>,
+    /// Images the next message carries (page regions).
+    pub attachments: Vec<Attachment>,
+    /// Thumbnails of the images sent with each message, by index.
+    sent_images: std::collections::HashMap<usize, Vec<egui::TextureHandle>>,
+}
+
+/// An image attached to the next message.
+pub struct Attachment {
+    pub image: ImageContext,
+    pub thumbnail: egui::TextureHandle,
+    pub label: String,
 }
 
 impl Default for Assistant {
@@ -116,6 +128,8 @@ impl Default for Assistant {
             run: None,
             error: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
+            attachments: Vec::new(),
+            sent_images: Default::default(),
             show_sessions: false,
             sessions: Vec::new(),
         }
@@ -191,10 +205,17 @@ impl Assistant {
             path: ask.path.clone(),
             label: ask.title.clone(),
         };
-        self.messages.push(
-            ChatMessage::user(text.clone(), text, contexts, Vec::new())
-                .with_document_scope(Some(scope)),
-        );
+        let mut message = ChatMessage::user(text.clone(), text, contexts, Vec::new())
+            .with_document_scope(Some(scope));
+        let mut thumbnails = Vec::new();
+        for attachment in std::mem::take(&mut self.attachments) {
+            message.attach_image(attachment.image);
+            thumbnails.push(attachment.thumbnail);
+        }
+        if !thumbnails.is_empty() {
+            self.sent_images.insert(self.messages.len(), thumbnails);
+        }
+        self.messages.push(message);
         self.tools.push(Vec::new());
 
         let config = settings.ai.resolved_main();
@@ -354,6 +375,7 @@ impl Assistant {
         self.created = 0;
         self.messages.clear();
         self.tools.clear();
+        self.sent_images.clear();
         self.error = None;
         self.show_sessions = false;
     }
@@ -517,7 +539,18 @@ impl Assistant {
                                     .inner_margin(egui::Margin::symmetric(12, 8))
                                     .show(ui, |ui| {
                                         ui.set_max_width(width * 0.85);
-                                        ui.add(egui::Label::new(message.display_text()).wrap());
+                                        ui.vertical(|ui| {
+                                            for thumbnail in
+                                                self.sent_images.get(&index).into_iter().flatten()
+                                            {
+                                                ui.add(
+                                                    egui::Image::new(thumbnail)
+                                                        .max_size(egui::vec2(width * 0.6, 160.0))
+                                                        .corner_radius(6),
+                                                );
+                                            }
+                                            ui.add(egui::Label::new(message.display_text()).wrap());
+                                        });
                                     });
                             });
                         }
@@ -571,6 +604,7 @@ impl Assistant {
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
+                attachment_chips(ui, &mut self.attachments, &tokens);
                 let input = ui.add(
                     egui::TextEdit::multiline(&mut self.composer)
                         .id(egui::Id::new("assistant-input"))
@@ -610,6 +644,43 @@ impl Assistant {
                 });
             });
         action
+    }
+}
+
+/// The images the next message carries, each with a button removing it.
+pub fn attachment_chips(ui: &mut egui::Ui, attachments: &mut Vec<Attachment>, tokens: &Tokens) {
+    let mut remove = None;
+    if attachments.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (index, attachment) in attachments.iter().enumerate() {
+            egui::Frame::new()
+                .fill(tokens.chrome)
+                .stroke(egui::Stroke::new(1.0, tokens.border))
+                .corner_radius(8)
+                .inner_margin(4)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Image::new(&attachment.thumbnail)
+                                .max_size(egui::vec2(48.0, 36.0))
+                                .corner_radius(4),
+                        );
+                        ui.label(
+                            egui::RichText::new(&attachment.label)
+                                .small()
+                                .color(tokens.text_muted),
+                        );
+                        if crate::icons::button(ui, "x", 20.0, false, "Remove").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                });
+        }
+    });
+    if let Some(index) = remove {
+        attachments.remove(index);
     }
 }
 
@@ -727,6 +798,59 @@ mod tests {
 
     use super::*;
     use crate::fake_providers::{FAKE_ANSWER, FAKE_SEARCH, start_ai_server, use_fake_ai};
+
+    #[test]
+    fn attached_region_images_go_with_the_next_message_only() {
+        let ctx = egui::Context::default();
+        let mut assistant = Assistant::default();
+        let thumbnail = ctx.load_texture(
+            "region",
+            egui::ColorImage::filled([2, 2], egui::Color32::RED),
+            egui::TextureOptions::LINEAR,
+        );
+        let reference = glyphst_core::RegionImageReference::new([glyphst_core::PageRegion {
+            page: glyphst_core::PageIndex(0),
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 10.0,
+        }]);
+        assistant.attachments.push(Attachment {
+            image: ImageContext::new_region(reference, "image/png", vec![1, 2, 3]),
+            thumbnail,
+            label: "Region of page 1".into(),
+        });
+        // No model is set up, so the message stays without an answer.
+        let mut settings = Settings::default();
+        settings
+            .ai
+            .provider_config_mut(AiProvider::OpenAi)
+            .api_key
+            .clear();
+        let ask = || AskContext {
+            path: "doc.pdf".into(),
+            title: "doc.pdf".into(),
+            layout: DocumentLayout::Fixed,
+            page_count: 1,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+        };
+        assistant.send("What is this?".into(), ask(), &settings, &ctx);
+        let images = |message: &ChatMessage| {
+            message
+                .into_agent_messages()
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter(|part| matches!(part, AgentContentPart::Image(_)))
+                .count()
+        };
+        assert_eq!(images(&assistant.messages()[0]), 1);
+        assert!(assistant.attachments.is_empty());
+        assert_eq!(assistant.sent_images.get(&0).map(Vec::len), Some(1));
+        assistant.send("And now?".into(), ask(), &settings, &ctx);
+        assert_eq!(images(&assistant.messages()[1]), 0, "sent once");
+    }
 
     #[test]
     fn a_turn_streams_uses_the_tools_and_is_saved_as_a_library_session() {

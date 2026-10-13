@@ -281,6 +281,51 @@ pub fn rasterize_ops(
     Ok(pixmap)
 }
 
+/// A page area rendered on white, for copying, saving or showing to a
+/// model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionImage {
+    pub size: [u32; 2],
+    /// RGB8 rows.
+    pub rgb: Vec<u8>,
+}
+
+/// Renders the page area `rect` (in page points, as the page's text) so
+/// its longer side is `max_dimension` pixels, at most 8 pixels per point.
+pub fn render_region(
+    page: &mupdf::Page,
+    rect: PageRect,
+    max_dimension: u32,
+) -> Result<RegionImage> {
+    let [x0, y0, x1, y1] = rect;
+    let (width, height) = (x1 - x0, y1 - y0);
+    anyhow::ensure!(width > 0.0 && height > 0.0, "the region is empty");
+    let scale = (max_dimension as f32 / width.max(height)).min(8.0);
+    let size = [
+        (width * scale).round().max(1.0) as u32,
+        (height * scale).round().max(1.0) as u32,
+    ];
+    let mut pixmap = Pixmap::new_with_w_h(
+        &Colorspace::device_rgb(),
+        i32::try_from(size[0]).context("region width overflow")?,
+        i32::try_from(size[1]).context("region height overflow")?,
+        false,
+    )
+    .context("failed to allocate the region image")?;
+    pixmap
+        .clear_with(0xff)
+        .context("failed to clear the region image")?;
+    let device = Device::from_pixmap(&pixmap).context("failed to create the region device")?;
+    let ctm = Matrix::new(scale, 0.0, 0.0, scale, -x0 * scale, -y0 * scale);
+    page.run(&device, &ctm)
+        .context("failed to render the region")?;
+    drop(device);
+    Ok(RegionImage {
+        size,
+        rgb: pixmap.samples().to_vec(),
+    })
+}
+
 /// A raster layer rasterized over its page bounds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerImage {
@@ -1139,6 +1184,27 @@ mod tests {
             .create_display_list(0, Rect::new(0.0, 0.0, 200.0, 100.0))
             .unwrap();
         (capture_display_list(&list).unwrap(), list)
+    }
+
+    #[test]
+    fn regions_render_their_area_at_the_size_asked() {
+        let bytes = crate::test_pdf::single_page_pdf("1 0 0 rg 10 10 30 20 re f", "<< >>", "");
+        let document = mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let page = document.load_page(0).unwrap();
+        // The red box, in MuPDF's page space (y down on a 100 pt page).
+        let image = render_region(&page, [10.0, 70.0, 40.0, 90.0], 120).unwrap();
+        assert_eq!(image.size, [120, 80]);
+        let center = ((40 * 120 + 60) * 3) as usize;
+        assert_eq!(&image.rgb[center..center + 3], [255, 0, 0]);
+        let blank = render_region(&page, [100.0, 10.0, 150.0, 40.0], 100).unwrap();
+        assert_eq!(blank.size, [100, 60]);
+        assert!(
+            blank.rgb.iter().all(|&value| value == 255),
+            "white where nothing is"
+        );
+        let small = render_region(&page, [10.0, 70.0, 40.0, 90.0], 4000).unwrap();
+        assert_eq!(small.size, [240, 160], "at most 8 pixels per point");
+        assert!(render_region(&page, [5.0, 5.0, 5.0, 9.0], 100).is_err());
     }
 
     fn kinds(page: &VectorPage) -> Vec<&'static str> {

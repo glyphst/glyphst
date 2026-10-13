@@ -38,6 +38,7 @@ use crate::{
     panes::{self, Panes},
     pickers::{Pickers, is_document},
     prefs::{LastSession, Prefs, SessionFile},
+    region::{self, Region},
     settings_window::{Section, SettingsContext, SettingsWindow},
     sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
     text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
@@ -117,6 +118,8 @@ pub struct Launch {
     pub settings: Option<Section>,
     /// Scripted runs: commands run once the documents are open.
     pub commands: Vec<Command>,
+    /// Scripted runs: a region drawn on a page (from 1) at startup.
+    pub select_region: Option<(usize, [f32; 4])>,
 }
 
 /// One pane's frame of the document view.
@@ -138,6 +141,8 @@ enum Drag {
     Pan,
     /// Extending the selection, onto other pages too.
     Select,
+    /// Drawing a region with the region tool.
+    Region,
 }
 
 /// The popover editing a highlight or note clicked on the page.
@@ -176,6 +181,14 @@ pub struct ReaderApp {
     /// Zen mode: the pages alone, without the tabs, rail, drawers, dock or
     /// title chips.
     pub(crate) zen: bool,
+    /// The next drag on a page draws a region (S).
+    region_tool: bool,
+    /// The region drawn, with its popover.
+    pub(crate) region: Option<Region>,
+    /// Region images being rendered.
+    region_jobs: Vec<region::Job>,
+    /// A region waiting for the save dialog's path.
+    region_save: Option<Region>,
     sidebar_state: SidebarState,
     /// The tab whose view a primary-button drag is in, and what it does.
     drag: Option<(u64, Drag)>,
@@ -194,6 +207,7 @@ pub struct ReaderApp {
     pub(crate) assistant: Assistant,
     pub(crate) launch_ask: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
+    pub(crate) launch_region: Option<(usize, [f32; 4])>,
     page_input: String,
     saved_positions: HashMap<u64, DocumentPosition>,
     last_position_save: Instant,
@@ -306,6 +320,10 @@ impl ReaderApp {
             notices: Default::default(),
             show_stats: launch.harness.is_some(),
             zen: false,
+            region_tool: false,
+            region: None,
+            region_jobs: Vec::new(),
+            region_save: None,
             sidebar_state: SidebarState::default(),
             drag: None,
             note_editor: None,
@@ -321,6 +339,7 @@ impl ReaderApp {
             assistant: Assistant::default(),
             launch_ask: launch.ask,
             launch_commands: launch.commands,
+            launch_region: launch.select_region,
             page_input: String::new(),
             saved_positions: HashMap::new(),
             last_position_save: Instant::now(),
@@ -1038,6 +1057,177 @@ impl ReaderApp {
         self.assistant.send(text, ask, &settings, ctx);
     }
 
+    /// Ends a region drag: the region keeps its page's part, and its text
+    /// becomes a column selection; too small a region is dropped.
+    pub(crate) fn finish_region(&mut self, active: usize) {
+        self.region_tool = false;
+        let tab = &mut self.tabs[active];
+        let clamped = self.region.and_then(|region| {
+            let bounds = *tab.layout.bounds.get(region.page)?;
+            region.clamped(bounds).map(|rect| (region, rect))
+        });
+        self.region = clamped.map(|(region, [x0, y0, x1, y1])| {
+            let region = Region {
+                from: [x0, y0],
+                to: [x1, y1],
+                ..region
+            };
+            tab.selection = Some(Selection::Column {
+                page: region.page,
+                from: region.from,
+                to: region.to,
+            });
+            region
+        });
+    }
+
+    /// Outlines the region drawn on tab `active` and, once drawn, shows its
+    /// popover. The region goes when its selection does (Esc, a click).
+    fn region_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        maps: &[PageMap],
+        active: usize,
+        tokens: &Tokens,
+    ) {
+        let tab = &self.tabs[active];
+        let Some(region) = self.region.filter(|region| region.tab == tab.id) else {
+            return;
+        };
+        let drawing = matches!(self.drag, Some((id, Drag::Region)) if id == tab.id);
+        let selected = matches!(tab.selection, Some(Selection::Column { page, from, to })
+            if page == region.page && from == region.from && to == region.to);
+        if !drawing && !selected {
+            self.region = None;
+            return;
+        }
+        let Some(map) = maps.iter().find(|map| map.page == region.page) else {
+            return;
+        };
+        let screen = map.rect_to_screen(region.rect());
+        painter.rect(
+            screen,
+            2.0,
+            tokens.accent.gamma_multiply(0.08),
+            egui::Stroke::new(1.5, tokens.accent),
+            egui::StrokeKind::Outside,
+        );
+        if drawing || self.active != Some(active) {
+            return;
+        }
+        let has_text = tab
+            .selected_text()
+            .is_some_and(|text| !text.trim().is_empty());
+        let Some(action) = region::popover(ctx, screen.right_bottom(), has_text) else {
+            return;
+        };
+        let path = tab.path.clone();
+        match action {
+            region::Action::CopyImage => self.region_jobs.push(region::Job::start(
+                &path,
+                region.page,
+                region.rect(),
+                region::Use::Copy,
+                ctx,
+            )),
+            region::Action::SaveImage => {
+                self.region_save = Some(region);
+                let name = format!(
+                    "{} p{}.png",
+                    path.file_stem().unwrap_or_default().to_string_lossy(),
+                    region.page + 1
+                );
+                self.pickers.save_png(ctx, &name);
+            }
+            region::Action::CopyText => self.copy_selection(ctx),
+            region::Action::Translate => self.translate_selection(screen.right_bottom(), ctx),
+            region::Action::Ask => {
+                self.region_jobs.push(region::Job::start(
+                    &path,
+                    region.page,
+                    region.rect(),
+                    region::Use::Ask(region),
+                    ctx,
+                ));
+            }
+            region::Action::Dismiss => {
+                self.region = None;
+                self.tabs[active].selection = None;
+            }
+        }
+    }
+
+    /// Takes region images that finished rendering, and the save dialog's
+    /// path for one.
+    fn finish_region_jobs(&mut self, ctx: &egui::Context) {
+        if let (Some(region), Some(path)) = (self.region_save, self.pickers.take_saved_image())
+            && let Some(tab) = self.tabs.iter().find(|tab| tab.id == region.tab)
+        {
+            self.region_save = None;
+            self.region_jobs.push(region::Job::start(
+                &tab.path,
+                region.page,
+                region.rect(),
+                region::Use::Save(path),
+                ctx,
+            ));
+        }
+        let mut finished = Vec::new();
+        self.region_jobs.retain(|job| match job.poll() {
+            Some(result) => {
+                finished.push((job.for_.clone(), result));
+                false
+            }
+            None => true,
+        });
+        for (for_, result) in finished {
+            let image = match result {
+                Ok(image) => image,
+                Err(error) => {
+                    self.notices
+                        .push(format!("Could not render the region: {error:#}"));
+                    continue;
+                }
+            };
+            match for_ {
+                region::Use::Copy => {
+                    ctx.copy_image(region::color_image(&image));
+                    self.notices.push("Copied the region as an image.");
+                }
+                region::Use::Save(path) => {
+                    let written = region::png(&image).and_then(|png| {
+                        std::fs::write(&path, png).map_err(|error| anyhow::anyhow!("{error}"))
+                    });
+                    self.notices.push(match written {
+                        Ok(()) => format!("Saved {}", path.display()),
+                        Err(error) => format!("Could not save {}: {error:#}", path.display()),
+                    });
+                }
+                region::Use::Ask(region) => match region::png(&image) {
+                    Ok(png) => {
+                        let thumbnail = ctx.load_texture(
+                            format!("region-{}-{}", region.tab, self.assistant.attachments.len()),
+                            region::color_image(&image),
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.assistant.attachments.push(crate::ai::Attachment {
+                            image: glyphst_ai::ai_chat::ImageContext::new_region(
+                                region.reference(),
+                                "image/png",
+                                png,
+                            ),
+                            thumbnail,
+                            label: format!("Region of page {}", region.page + 1),
+                        });
+                        self.assistant.open = true;
+                    }
+                    Err(error) => self.notices.push(format!("{error:#}")),
+                },
+            }
+        }
+    }
+
     fn copy_selection(&mut self, ctx: &egui::Context) {
         let Some(active) = self.active else {
             return;
@@ -1238,6 +1428,8 @@ impl ReaderApp {
                 let tab = &mut self.tabs[active];
                 if self.note_editor.is_some() {
                     self.note_editor = None;
+                } else if self.region_tool {
+                    self.region_tool = false;
                 } else if tab.overview.is_some() {
                     tab.overview = None;
                 } else if tab.selection.is_some() {
@@ -1330,6 +1522,14 @@ impl ReaderApp {
                             Some(Overview::new(tab.current_page()))
                         }
                     };
+                }
+                None
+            }
+            Command::RegionSelect => {
+                self.region_tool = !self.region_tool;
+                if self.region_tool {
+                    self.notices
+                        .push("Drag a rectangle on the page. Esc cancels.");
                 }
                 None
             }
@@ -2052,6 +2252,7 @@ impl ReaderApp {
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
         self.paint_text_overlays(&painter, &maps, active, &tokens);
+        self.region_overlay(&ctx, &painter, &maps, active, &tokens);
         let turns = self.tabs[active].layout.arrangement.rotation;
         for (paper, thumbnail) in &frame.placeholders {
             let paper = egui::Rect::from_min_max(
@@ -2117,7 +2318,9 @@ impl ReaderApp {
                 text.glyph_at(point[0], point[1], map.points(GLYPH_SLOP))
                     .is_some()
             });
-            if matches!(own(self.drag), Some(Drag::Select)) || (text && !link) {
+            if (self.region_tool && !reflowed) || matches!(own(self.drag), Some(Drag::Region)) {
+                ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            } else if matches!(own(self.drag), Some(Drag::Select)) || (text && !link) {
                 ctx.set_cursor_icon(egui::CursorIcon::Text);
             } else if link {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -2159,7 +2362,19 @@ impl ReaderApp {
             let origin = ctx
                 .input(|i| i.pointer.press_origin())
                 .or(response.interact_pointer_pos());
-            if let Some((map, point)) = origin.and_then(under)
+            let region_start = origin
+                .and_then(under)
+                .filter(|_| self.region_tool && !reflowed);
+            if let Some((map, point)) = region_start {
+                self.drag = Some((tab_id, Drag::Region));
+                self.region = Some(Region {
+                    tab: tab_id,
+                    page: map.page,
+                    from: point,
+                    to: point,
+                });
+                self.tabs[active].selection = None;
+            } else if let Some((map, point)) = origin.and_then(under)
                 && let Some(text) = self.tabs[active].text.get(map.page).cloned()
             {
                 let on_text = text
@@ -2224,7 +2439,22 @@ impl ReaderApp {
                 autoscroll = SELECT_SCROLL;
             }
         }
+        if let Some(Drag::Region) = own(self.drag)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some(region) = &mut self.region
+            && let Some(map) = maps.iter().find(|map| map.page == region.page)
+        {
+            region.to = map.page_point(pos);
+            if pos.y < rect.top() + 24.0 {
+                autoscroll = -SELECT_SCROLL;
+            } else if pos.y > rect.bottom() - 24.0 {
+                autoscroll = SELECT_SCROLL;
+            }
+        }
         if own(self.drag).is_some() && (response.drag_stopped() || !response.dragged()) {
+            if let Some(Drag::Region) = own(self.drag) {
+                self.finish_region(active);
+            }
             self.drag = None;
         }
 
@@ -2634,6 +2864,7 @@ impl eframe::App for ReaderApp {
             tab.update_text(now);
         }
         self.upload_ready_page();
+        self.finish_region_jobs(&ctx);
         self.upload_ready_layers();
         self.watch_effects(&ctx, now);
         self.update_wallpaper(&ctx);

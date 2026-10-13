@@ -22,6 +22,8 @@ pub struct Pickers {
     saved: Arc<Mutex<Option<(u64, PathBuf)>>>,
     /// The image chosen as the wallpaper.
     image: Arc<Mutex<Option<PathBuf>>>,
+    /// Where to save a region image.
+    saved_image: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Pickers {
@@ -109,6 +111,41 @@ impl Pickers {
         if spawned.is_err() {
             self.showing.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Shows a save dialog for a PNG image named `name`.
+    pub fn save_png(&self, ctx: &egui::Context, name: &str) {
+        if self.showing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Save image")
+            .add_filter("PNG image", &["png"])
+            .set_file_name(name)
+            .save_file();
+        let (showing, saved, ctx) = (self.showing.clone(), self.saved_image.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("save-dialog".into())
+            .spawn(move || {
+                if let Some(file) = pollster::block_on(dialog)
+                    && let Ok(mut saved) = saved.lock()
+                {
+                    *saved = Some(file.path().to_path_buf());
+                }
+                showing.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            self.showing.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The path the image save dialog chose since the last call.
+    pub fn take_saved_image(&self) -> Option<PathBuf> {
+        self.saved_image
+            .lock()
+            .ok()
+            .and_then(|mut saved| saved.take())
     }
 
     /// The path a save dialog chose since the last call, and its purpose.
