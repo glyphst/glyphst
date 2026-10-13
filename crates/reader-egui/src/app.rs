@@ -9,7 +9,9 @@ use std::{
 
 use craft_ui::docking::Zone;
 use eframe::egui_wgpu;
-use glyphst_core::{DocumentFormat, DocumentLayout, EpubLayout};
+use glyphst_core::{
+    DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation, EpubLayout,
+};
 use glyphst_effects::EffectDef;
 use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore, SemanticTextRange};
 use glyphst_pdf::text::LinkTarget;
@@ -18,7 +20,7 @@ use crate::{
     ai::{AskContext, Assistant, PanelAction},
     annotations::{self, AnnotationId, Annotations},
     commands::{Command, Needs},
-    document::FrameTimes,
+    document::{Arrangement, FrameTimes},
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
     gamepad::{GamepadInput, Gamepads},
@@ -81,6 +83,9 @@ pub struct Launch {
     pub zoom: Option<f32>,
     /// Shows the second document beside the first, on this side.
     pub split: Option<Zone>,
+    /// Turns (quarter turns clockwise) and spreads the documents' pages,
+    /// without remembering it.
+    pub arrangement: Option<Arrangement>,
     /// Scripted runs: search for this text, select this page's text (from
     /// 1), show this sidebar tab, lay EPUBs out at this font size.
     pub find: Option<String>,
@@ -186,6 +191,9 @@ pub struct ReaderApp {
     controls: Option<bool>,
     /// Present mode was on last frame (to say how to leave it).
     was_presenting: bool,
+    /// The window had the keyboard focus last frame (files changed while
+    /// it was away are reloaded when it comes back).
+    was_focused: bool,
     pub(crate) keymap: Keymap,
     pub(crate) palette: Palette,
     pub(crate) settings_window: SettingsWindow,
@@ -277,6 +285,7 @@ impl ReaderApp {
             chrome: Default::default(),
             // Scripted runs show the controls unless told otherwise.
             was_presenting: false,
+            was_focused: true,
             controls: launch.controls.or((!persist).then_some(true)),
             keymap: Keymap::default(),
             palette: Palette::default(),
@@ -325,8 +334,13 @@ impl ReaderApp {
             let page = launch.select_page.or(launch.page).map(|page| page - 1);
             for file in &launch.files {
                 app.open_quietly(file, &ctx, page);
-                if let (Some(zoom), Some(tab)) = (launch.zoom, app.tabs.last_mut()) {
-                    tab.set_initial_zoom(zoom);
+                if let Some(tab) = app.tabs.last_mut() {
+                    if let Some(arrangement) = launch.arrangement {
+                        tab.arrange(arrangement);
+                    }
+                    if let Some(zoom) = launch.zoom {
+                        tab.set_initial_zoom(zoom);
+                    }
                 }
             }
             if let (Some(zone), [first, second, ..]) = (launch.split, app.tabs.as_slice()) {
@@ -364,7 +378,8 @@ impl ReaderApp {
             restore = Some(position);
         }
         let layout = self.layout_for(path, ctx);
-        match DocumentTab::open(self.next_tab_id, path, ctx, restore, layout) {
+        let arrangement = self.arrangement_of(path);
+        match DocumentTab::open(self.next_tab_id, path, ctx, restore, layout, arrangement) {
             Ok(mut tab) => {
                 tab.annotations = Annotations::load(&self.library, path);
                 self.next_tab_id += 1;
@@ -444,6 +459,88 @@ impl ReaderApp {
     pub(crate) fn drop_tab(&mut self, tab: u64, pane: u64, zone: Zone) {
         if self.panes.split(tab, pane, zone) {
             self.focus_tab(tab);
+        }
+    }
+
+    /// How a document's pages were last arranged (kept in the library).
+    fn arrangement_of(&self, path: &Path) -> Arrangement {
+        Arrangement {
+            rotation: match self.library.document_rotation(path) {
+                DocumentRotation::Degrees0 => 0,
+                DocumentRotation::Degrees90 => 1,
+                DocumentRotation::Degrees180 => 2,
+                DocumentRotation::Degrees270 => 3,
+            },
+            spread: self.library.document_page_layout(path) == DocumentPageLayout::TwoColumn,
+        }
+    }
+
+    /// Turns or spreads the active document's pages and remembers it.
+    fn arrange(&mut self, change: impl FnOnce(&mut Arrangement)) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let tab = &mut self.tabs[active];
+        let mut arrangement = tab.layout.arrangement;
+        change(&mut arrangement);
+        tab.arrange(arrangement);
+        if self.persist {
+            let path = tab.path.clone();
+            let rotation = [
+                DocumentRotation::Degrees0,
+                DocumentRotation::Degrees90,
+                DocumentRotation::Degrees180,
+                DocumentRotation::Degrees270,
+            ][usize::from(arrangement.rotation % 4)];
+            let page_layout = if arrangement.spread {
+                DocumentPageLayout::TwoColumn
+            } else {
+                DocumentPageLayout::SingleColumn
+            };
+            let _ = self.library.set_document_rotation(&path, rotation);
+            let _ = self.library.set_document_page_layout(&path, page_layout);
+            let _ = self.library.save();
+        }
+    }
+
+    /// Opens tab `index`'s document again from its file, in place: the
+    /// position stays, and what was made from the old file (GPU pages,
+    /// text, a translation) goes.
+    pub(crate) fn reload(&mut self, index: usize, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let (id, path, position) = (tab.id, tab.path.clone(), tab.position());
+        let layout = self.layout_for(&path, ctx);
+        let arrangement = tab.layout.arrangement;
+        match DocumentTab::open(id, &path, ctx, Some(position), layout, arrangement) {
+            Ok(mut reloaded) => {
+                reloaded.annotations = Annotations::load(&self.library, &path);
+                self.with_gpu(|gpu| gpu.drop_tab(id));
+                self.tabs[index] = reloaded;
+            }
+            Err(error) => self
+                .notices
+                .push(format!("Could not reload {}: {error:#}", path.display())),
+        }
+    }
+
+    /// Reloads documents whose files changed while the window was away.
+    fn reload_changed(&mut self, ctx: &egui::Context) {
+        let changed: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| {
+                let now = std::fs::metadata(&tab.path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                now.is_some() && now != tab.modified
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in changed {
+            self.reload(index, ctx);
         }
     }
 
@@ -1102,6 +1199,7 @@ impl ReaderApp {
             Needs::Reflow => matches!(tab.document_layout, DocumentLayout::Reflow(_)),
             Needs::Translation => tab.translation.is_some(),
             Needs::Panes => self.panes.count() > 1,
+            Needs::FixedLayout => !tab.is_reflowed(),
         };
         (!can).then(|| command.needs().reason())
     }
@@ -1175,6 +1273,27 @@ impl ReaderApp {
             Command::ZoomIn => view(ViewAction::ZoomIn),
             Command::ZoomOut => view(ViewAction::ZoomOut),
             Command::FitWidth => view(ViewAction::FitWidth),
+            Command::RotateClockwise | Command::RotateCounterclockwise => {
+                let turn = if command == Command::RotateClockwise {
+                    1
+                } else {
+                    3
+                };
+                self.arrange(|arrangement| {
+                    arrangement.rotation = (arrangement.rotation + turn) % 4
+                });
+                None
+            }
+            Command::ToggleSpread => {
+                self.arrange(|arrangement| arrangement.spread = !arrangement.spread);
+                None
+            }
+            Command::Reload => {
+                if let Some(active) = self.active {
+                    self.reload(active, ctx);
+                }
+                None
+            }
             Command::Present => view(ViewAction::TogglePresent),
             Command::SplitRight | Command::SplitDown => {
                 let zone = if command == Command::SplitRight {
@@ -2298,6 +2417,11 @@ impl eframe::App for ReaderApp {
         for path in dropped {
             self.open(&path, &ctx, None);
         }
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            self.reload_changed(&ctx);
+        }
+        self.was_focused = focused;
         self.user_settings.poll(now);
         self.translator.set_settings(self.user_settings.get());
         self.translator.poll();

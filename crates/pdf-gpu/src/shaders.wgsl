@@ -1,5 +1,6 @@
 // Page-space vector rendering. Geometry never changes with zoom; the camera
-// maps page points to device pixels: pixel = (page - origin) * scale.
+// maps page points to device pixels: pixel = (axes * page - origin) * scale,
+// where axes turns the page by quarter turns.
 
 struct Camera {
     origin: vec2<f32>,
@@ -7,12 +8,18 @@ struct Camera {
     _padding: f32,
     viewport: vec2<f32>,
     _padding2: vec2<f32>,
+    // Row-major 2x2 rotation.
+    axes: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 fn to_pixels(page: vec2<f32>) -> vec2<f32> {
-    return (page - camera.origin) * camera.scale;
+    let view = vec2<f32>(
+        camera.axes.x * page.x + camera.axes.y * page.y,
+        camera.axes.z * page.x + camera.axes.w * page.y,
+    );
+    return (view - camera.origin) * camera.scale;
 }
 
 fn to_clip(pixels: vec2<f32>) -> vec4<f32> {

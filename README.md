@@ -110,8 +110,9 @@ times as JSON, and `--screenshot PATH`, `--screenshot-turn PATH` and
 halfway through a transition. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run, `--theme system|light|dark` its
 colours, `--controls shown|hidden` the reading dock (scripted runs keep
-it shown) and `--split right|down` shows the second document beside the
-first; `--find TEXT`, `--select-page N`,
+it shown) `--split right|down` shows the second document beside the
+first, and `--rotate 90|180|270` and `--spread` turn and spread the pages
+(without remembering it); `--find TEXT`, `--select-page N`,
 `--sidebar TAB` and `--font-size PT` (EPUB) show a search, a selection, a
 sidebar tab or a reflowed size in the screenshot. `--translate-fake`
 translates through a local fake provider (no keys, no network), and

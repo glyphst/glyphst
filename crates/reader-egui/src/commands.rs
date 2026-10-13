@@ -28,6 +28,10 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     FitWidth,
+    RotateClockwise,
+    RotateCounterclockwise,
+    ToggleSpread,
+    Reload,
     Present,
     SplitRight,
     SplitDown,
@@ -92,6 +96,8 @@ pub enum Needs {
     Translation,
     /// The stage is split into panes.
     Panes,
+    /// The active document has fixed pages (not a reflowed book).
+    FixedLayout,
 }
 
 impl Needs {
@@ -103,12 +109,13 @@ impl Needs {
             Self::Reflow => "Only for reflowed books",
             Self::Translation => "Translate the document first",
             Self::Panes => "Split the view first",
+            Self::FixedLayout => "Reflowed books don't turn or spread",
         }
     }
 }
 
 impl Command {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 40] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -129,6 +136,10 @@ impl Command {
         Self::ZoomIn,
         Self::ZoomOut,
         Self::FitWidth,
+        Self::RotateClockwise,
+        Self::RotateCounterclockwise,
+        Self::ToggleSpread,
+        Self::Reload,
         Self::Present,
         Self::SplitRight,
         Self::SplitDown,
@@ -170,6 +181,10 @@ impl Command {
             Self::ZoomIn => "view.zoom_in",
             Self::ZoomOut => "view.zoom_out",
             Self::FitWidth => "view.fit_width",
+            Self::RotateClockwise => "view.rotate_clockwise",
+            Self::RotateCounterclockwise => "view.rotate_counterclockwise",
+            Self::ToggleSpread => "view.two_page_spread",
+            Self::Reload => "view.reload",
             Self::Present => "view.present",
             Self::SplitRight => "view.split_right",
             Self::SplitDown => "view.split_down",
@@ -215,6 +230,10 @@ impl Command {
             Self::ZoomIn => "Zoom in",
             Self::ZoomOut => "Zoom out",
             Self::FitWidth => "Fit width",
+            Self::RotateClockwise => "Rotate clockwise",
+            Self::RotateCounterclockwise => "Rotate counterclockwise",
+            Self::ToggleSpread => "Two-page spread",
+            Self::Reload => "Reload the document",
             Self::Present => "Present",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
@@ -257,6 +276,10 @@ impl Command {
             Self::ZoomIn => "zoom-in",
             Self::ZoomOut => "zoom-out",
             Self::FitWidth => "scan",
+            Self::RotateClockwise => "rotate-cw",
+            Self::RotateCounterclockwise => "rotate-ccw",
+            Self::ToggleSpread => "book-open",
+            Self::Reload => "refresh-cw",
             Self::Present => "presentation",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
@@ -295,6 +318,10 @@ impl Command {
             Self::ZoomIn
             | Self::ZoomOut
             | Self::FitWidth
+            | Self::RotateClockwise
+            | Self::RotateCounterclockwise
+            | Self::ToggleSpread
+            | Self::Reload
             | Self::Present
             | Self::SplitRight
             | Self::SplitDown
@@ -335,6 +362,9 @@ impl Command {
             Self::ZoomIn => &["Plus", "Equals"],
             Self::ZoomOut => &["Minus"],
             Self::FitWidth => &["0"],
+            Self::RotateClockwise => &["R"],
+            Self::RotateCounterclockwise => &["Shift+R"],
+            Self::Reload => &["F5", "Ctrl+R"],
             Self::Present => &["P"],
             Self::SplitRight => &["Ctrl+Backslash"],
             Self::FocusNextPane => &["F6"],
@@ -353,7 +383,8 @@ impl Command {
             | Self::TranslateDocument
             | Self::ShowTranslated
             | Self::SplitDown
-            | Self::ClosePane => &[],
+            | Self::ClosePane
+            | Self::ToggleSpread => &[],
         }
     }
 
@@ -373,6 +404,9 @@ impl Command {
             Self::TranslateSelection => Needs::Selection,
             Self::ShowTranslated => Needs::Translation,
             Self::FocusNextPane | Self::ClosePane => Needs::Panes,
+            Self::RotateClockwise | Self::RotateCounterclockwise | Self::ToggleSpread => {
+                Needs::FixedLayout
+            }
             _ => Needs::Document,
         }
     }
@@ -392,6 +426,8 @@ impl Command {
                 | Self::ZoomIn
                 | Self::ZoomOut
                 | Self::FitWidth
+                | Self::RotateClockwise
+                | Self::RotateCounterclockwise
                 | Self::Present
         )
     }

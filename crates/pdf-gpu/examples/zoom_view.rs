@@ -78,7 +78,7 @@ impl View {
         surface.configure(&device, &config);
 
         let renderer = Renderer::new(&device, config.format);
-        let fit = loaded.fit_scale([config.width, config.height]);
+        let fit = loaded.fit_scale([config.width, config.height], 0);
         let uploaded = common::upload(&device, &queue, &renderer, loaded, fit * 4.0)?;
         let attachments = surface_attachments(&device, &config);
         let bounds = loaded.prepared.bounds;
@@ -167,6 +167,7 @@ impl View {
             origin: self.origin,
             scale: self.scale,
             viewport: [self.config.width, self.config.height],
+            rotation: 0,
         };
         let started = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());

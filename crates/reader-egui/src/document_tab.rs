@@ -23,7 +23,8 @@ use crate::{
     annotations::Annotations,
     doc_text::DocText,
     document::{
-        DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP, PageSource, View,
+        Arrangement, DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP,
+        PageSource, View,
     },
     find::Find,
     gamepad::GamepadInput,
@@ -150,6 +151,9 @@ pub struct DocumentTab {
     pub pixels_per_point: f64,
     fitted: bool,
     restore: Option<DocumentPosition>,
+    /// The file's modification time when it was opened, to reload it when
+    /// it changes.
+    pub modified: Option<std::time::SystemTime>,
     loader: Loader,
     indexer: Indexer,
     thumbnails: HashMap<usize, egui::TextureHandle>,
@@ -189,14 +193,19 @@ pub struct DocumentTab {
 }
 
 impl DocumentTab {
-    /// Opens `path` with `layout` (used by reflowable documents only).
+    /// Opens `path` with `layout` (used by reflowable documents only),
+    /// its pages arranged as `arrangement` unless it is reflowed.
     pub fn open(
         id: u64,
         path: &Path,
         ctx: &egui::Context,
         restore: Option<DocumentPosition>,
         layout: DocumentLayout,
+        arrangement: Arrangement,
     ) -> Result<Self> {
+        let modified = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
         let info = DocumentInfo::read(path, layout)?;
         if info.bounds.is_empty() {
             anyhow::bail!("{} has no pages", path.display());
@@ -211,12 +220,16 @@ impl DocumentTab {
             path: path.to_path_buf(),
             title: info.title.unwrap_or(file_name),
             document_layout: info.layout,
-            layout: Layout::new(info.bounds),
+            layout: match info.layout {
+                DocumentLayout::Fixed => Layout::arranged(info.bounds, arrangement),
+                DocumentLayout::Reflow(_) => Layout::new(info.bounds),
+            },
             view: View::new(1.0),
             viewport: [1.0, 1.0],
             pixels_per_point: 1.0,
             fitted: false,
             restore,
+            modified,
             loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
             indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
             thumbnails: HashMap::new(),
@@ -249,6 +262,21 @@ impl DocumentTab {
     /// Whether the document is laid out by the reader (an EPUB).
     pub fn is_reflowed(&self) -> bool {
         matches!(self.document_layout, DocumentLayout::Reflow(_))
+    }
+
+    /// Turns or spreads the pages, showing the page in view at fit width.
+    /// The pages themselves are unchanged, so nothing reloads.
+    pub fn arrange(&mut self, arrangement: Arrangement) {
+        if self.is_reflowed() || arrangement == self.layout.arrangement {
+            return;
+        }
+        // Before the first frame the position to restore still stands.
+        if self.fitted {
+            let page = self.current_page();
+            self.restore = Some(DocumentPosition::fixed(0.0, 0.0, 1.0, page + 1));
+            self.fitted = false;
+        }
+        self.layout = Layout::arranged(std::mem::take(&mut self.layout.bounds), arrangement);
     }
 
     /// Lays a reflowed document out again, keeping the reading position:
@@ -652,9 +680,22 @@ impl DocumentTab {
         !self.forward.is_empty()
     }
 
-    /// Document y of a page point.
-    fn document_y(&self, page: usize, y: f32) -> f64 {
-        self.layout.offsets[page][1] + f64::from(y - self.layout.bounds[page][1])
+    /// Document y of page height `y`; none when the page is on its side,
+    /// where a page's height runs across the view.
+    fn document_y(&self, page: usize, y: f32) -> Option<f64> {
+        self.layout.arrangement.rotation.is_multiple_of(2).then(|| {
+            self.layout
+                .to_document(page, [self.layout.bounds[page][0], y])[1]
+        })
+    }
+
+    /// The page height at document y, at the page's left edge (on a page
+    /// on its side, its top).
+    fn page_y(&self, page: usize, y: f64) -> f32 {
+        if self.layout.arrangement.rotation % 2 == 1 {
+            return self.layout.bounds[page][1];
+        }
+        self.layout.to_page(page, [self.layout.offsets[page][0], y])[1]
     }
 
     /// Shows page point `y` of `page` near the top of the view.
@@ -663,11 +704,11 @@ impl DocumentTab {
         self.go_to_page(page);
         if let Some(y) = y
             && self.present.is_none()
-        {
-            let y = self.document_y(
+            && let Some(y) = self.document_y(
                 page,
                 y.clamp(self.layout.bounds[page][1], self.layout.bounds[page][3]),
-            );
+            )
+        {
             self.view.origin[1] = y - TARGET_MARGIN / self.view.scale;
         }
     }
@@ -679,7 +720,7 @@ impl DocumentTab {
         let into = f64::from(position.scroll_y_doc) - self.layout.offsets[page][1];
         let y = (0.0..self.layout.page_size(page)[1])
             .contains(&into)
-            .then(|| self.layout.bounds[page][1] + into as f32);
+            .then(|| self.page_y(page, f64::from(position.scroll_y_doc)));
         self.go_to_point(page, y.filter(|_| position.semantic.is_none()));
         if self.is_reflowed()
             && let Some(semantic) = &position.semantic
@@ -694,8 +735,7 @@ impl DocumentTab {
     pub fn words_at_top(&self, count: usize) -> Option<String> {
         let page = self.position().page.saturating_sub(1);
         let text = self.text.get(page)?;
-        let top = (self.view.origin[1] - self.layout.offsets[page][1]) as f32
-            + self.layout.bounds[page][1];
+        let top = self.page_y(page, self.view.origin[1]);
         let first = text.glyphs.iter().position(|glyph| glyph.rect[3] >= top)?;
         let words: Vec<String> = text
             .text_of(first..(first + 200).min(text.len()))
@@ -713,12 +753,7 @@ impl DocumentTab {
             self.present = Some(page);
             return;
         }
-        let offset = self.layout.offsets[page];
-        let b = self.layout.bounds[page];
-        let x0 = offset[0] + f64::from(rect[0] - b[0]);
-        let x1 = offset[0] + f64::from(rect[2] - b[0]);
-        let y0 = self.document_y(page, rect[1]);
-        let y1 = self.document_y(page, rect[3]);
+        let [x0, y0, x1, y1] = self.layout.rect_to_document(page, rect);
         let [width, height] = [
             self.viewport[0] / self.view.scale,
             self.viewport[1] / self.view.scale,
@@ -754,12 +789,7 @@ impl DocumentTab {
                 continue;
             };
             let camera = draw.camera;
-            let shown = [
-                camera.origin[0],
-                camera.origin[1],
-                camera.origin[0] + camera.viewport[0] as f32 / camera.scale,
-                camera.origin[1] + camera.viewport[1] as f32 / camera.scale,
-            ];
+            let shown = camera.visible_page_rect(0.0);
             for (index, state) in states.iter_mut().enumerate() {
                 if state.pending {
                     continue;
@@ -879,14 +909,13 @@ impl DocumentTab {
     /// `page`, and where it is in the view (0 at the top, 1 at the bottom).
     fn anchor_at_top(&self, page: usize) -> Option<(SemanticTextAnchor, f32)> {
         let text = self.text.get(page)?;
-        let top = (self.view.origin[1] - self.layout.offsets[page][1]) as f32
-            + self.layout.bounds[page][1];
+        let top = self.page_y(page, self.view.origin[1]);
         let glyph = text
             .glyphs
             .iter()
             .position(|glyph| glyph.rect[3] >= top && !glyph.ch.is_whitespace())?;
         let anchor = self.text.anchor(page, glyph)?;
-        let y = self.document_y(page, text.glyphs[glyph].rect[1]);
+        let y = self.document_y(page, text.glyphs[glyph].rect[1])?;
         let height = self.viewport[1] / self.view.scale;
         let fraction = ((y - self.view.origin[1]) / height).clamp(0.0, 1.0) as f32;
         Some((anchor, fraction))
@@ -908,7 +937,9 @@ impl DocumentTab {
         let fraction = f64::from(*fraction);
         if let Some(rect) = self.text.get(page).map(|text| text.glyphs[glyph].rect) {
             let height = self.viewport[1] / self.view.scale;
-            self.view.origin[1] = self.document_y(page, rect[1]) - fraction * height;
+            if let Some(y) = self.document_y(page, rect[1]) {
+                self.view.origin[1] = y - fraction * height;
+            }
             self.view.clamp(&self.layout, self.viewport);
         }
         self.pending_anchor = None;
@@ -966,7 +997,12 @@ impl DocumentTab {
                         }
                     }
                     None => {
-                        let target = self.current_page().saturating_add_signed(delta).min(last);
+                        // A row at a time: a spread's two pages share one.
+                        let current = self.current_page();
+                        let target = self
+                            .layout
+                            .row_step(current, delta > 0)
+                            .unwrap_or(if delta > 0 { last } else { 0 });
                         self.go_to_page(target);
                     }
                 }
@@ -1192,6 +1228,7 @@ mod tests {
             pixels_per_point: 1.0,
             fitted: false,
             restore: None,
+            modified: None,
             loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
             indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
             thumbnails: HashMap::new(),
@@ -1438,5 +1475,62 @@ mod tests {
         let zoomed = tab.view.scale;
         frame(&mut tab, 700);
         assert_eq!(tab.view.scale, zoomed);
+    }
+
+    #[test]
+    fn spreads_pair_pages_after_the_first_and_turn_a_row_at_a_time() {
+        let mut tab = tab(6);
+        tab.arrange(Arrangement {
+            rotation: 0,
+            spread: true,
+        });
+        let layout = &tab.layout;
+        // The first page alone, then pairs side by side.
+        assert_eq!(layout.offsets[1][1], layout.offsets[2][1]);
+        assert!(layout.offsets[1][0] < layout.offsets[2][0]);
+        assert!(layout.offsets[0][1] < layout.offsets[1][1]);
+        assert!((layout.width - (1200.0 + PAGE_GAP)).abs() < 1e-9);
+        assert_eq!(
+            layout.visible(layout.offsets[3][1] + 10.0, layout.offsets[3][1] + 20.0),
+            3..5
+        );
+        assert_eq!(layout.row_step(0, true), Some(1));
+        assert_eq!(layout.row_step(2, true), Some(3));
+        assert_eq!(layout.row_step(4, false), Some(1));
+        assert_eq!(layout.row_step(1, false), Some(0));
+        assert_eq!(layout.row_step(5, true), None);
+
+        settle(&mut tab);
+        tab.apply(ViewAction::GoToPage(1), false);
+        tab.apply(ViewAction::NextPage, false);
+        assert_eq!(tab.view.origin[1], tab.layout.offsets[3][1] - PAGE_GAP);
+        tab.apply(ViewAction::PreviousPage, false);
+        assert_eq!(tab.view.origin[1], tab.layout.offsets[1][1] - PAGE_GAP);
+    }
+
+    #[test]
+    fn turned_pages_lie_on_their_side_and_map_points_back() {
+        let mut tab = tab(3);
+        tab.arrange(Arrangement {
+            rotation: 1,
+            spread: false,
+        });
+        let layout = &tab.layout;
+        assert_eq!(layout.page_size(0), [800.0, 600.0]);
+        for point in [[0.0, 0.0], [600.0, 800.0], [120.0, 40.0]] {
+            let document = layout.to_document(2, point);
+            let back = layout.to_page(2, document);
+            assert!((back[0] - point[0]).abs() < 1e-3 && (back[1] - point[1]).abs() < 1e-3);
+        }
+        // Turned clockwise, the page's top-left corner is at the top right.
+        let corner = layout.to_document(0, [0.0, 0.0]);
+        assert!((corner[0] - 800.0).abs() < 1e-9 && corner[1].abs() < 1e-9);
+        let rect = layout.rect_to_document(1, [0.0, 0.0, 600.0, 100.0]);
+        assert!(
+            rect[2] - rect[0] < rect[3] - rect[1],
+            "a wide strip stands up"
+        );
+        // Heights along the page run across the view: no document y.
+        assert_eq!(tab.document_y(0, 10.0), None);
     }
 }

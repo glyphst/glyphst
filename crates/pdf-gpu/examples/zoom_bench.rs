@@ -96,7 +96,7 @@ fn main() -> Result<()> {
 
     let gpu = Gpu::new(size)?;
     let renderer = Renderer::new(&gpu.device, FORMAT);
-    let fit = loaded.fit_scale(size);
+    let fit = loaded.fit_scale(size, 0);
     let uploaded = common::upload(&gpu.device, &gpu.queue, &renderer, &loaded, fit * 2.0)?;
     let gpu_page = &uploaded.page;
     let bounds = prepared.bounds;

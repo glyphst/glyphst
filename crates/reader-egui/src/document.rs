@@ -20,7 +20,7 @@ use glyphst_pdf::{
     text::{PageLink, PageText, page_links},
     vector::{LayerImage, PageRect, capture_display_list, rasterize_layer},
 };
-use glyphst_pdf_gpu::{Camera, PreparedPage};
+use glyphst_pdf_gpu::{Camera, PreparedPage, rotate, rotate_rect};
 use mupdf::{Colorspace, DisplayList, Matrix};
 
 /// Gap between pages, in page points.
@@ -35,37 +35,82 @@ const THUMBNAIL_MAX_POINTS: usize = 200_000;
 const LAYER_SCALE: f32 = 4.0;
 const MAX_LAYER_DIMENSION: u32 = 4096;
 
-/// Pages stacked vertically and centered on the widest one. Document
-/// coordinates are page points with the origin at the first page's top-left
-/// corner; they are kept in f64 so long documents stay exact at deep zoom.
+/// How pages are arranged: turned by quarter turns, and one or two to a
+/// row (a book's spread, the first page alone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arrangement {
+    /// Quarter turns clockwise (0-3).
+    pub rotation: u8,
+    pub spread: bool,
+}
+
+/// Pages in rows, one or two to a row, each row centered on the widest.
+/// Document coordinates are page points with the origin at the first
+/// page's top-left corner; they are kept in f64 so long documents stay
+/// exact at deep zoom. A page turned by the arrangement takes the space of
+/// its turned box.
 pub struct Layout {
+    /// Each page's box in its own (unturned) page space.
     pub bounds: Vec<PageRect>,
-    /// Document position of each page's top-left corner.
+    /// Document position of each page's turned box's top-left corner.
     pub offsets: Vec<[f64; 2]>,
     pub width: f64,
     pub height: f64,
+    pub arrangement: Arrangement,
+    /// Each page's turned box.
+    turned: Vec<PageRect>,
 }
 
 impl Layout {
     pub fn new(bounds: Vec<PageRect>) -> Self {
-        let width = bounds
+        Self::arranged(bounds, Arrangement::default())
+    }
+
+    pub fn arranged(bounds: Vec<PageRect>, arrangement: Arrangement) -> Self {
+        let turned: Vec<PageRect> = bounds
             .iter()
-            .map(|b| f64::from(b[2] - b[0]))
-            .fold(0.0, f64::max);
-        let mut y = 0.0;
-        let offsets = bounds
-            .iter()
-            .map(|b| {
-                let offset = [(width - f64::from(b[2] - b[0])) / 2.0, y];
-                y += f64::from(b[3] - b[1]) + PAGE_GAP;
-                offset
-            })
+            .map(|&b| rotate_rect(b, arrangement.rotation))
             .collect();
+        let size = |page: usize| {
+            let b = turned[page];
+            [f64::from(b[2] - b[0]), f64::from(b[3] - b[1])]
+        };
+        // Rows: the first page alone, then pairs, when spread.
+        let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut page = 0;
+        while page < bounds.len() {
+            let end = if arrangement.spread && page > 0 {
+                (page + 2).min(bounds.len())
+            } else {
+                page + 1
+            };
+            rows.push(page..end);
+            page = end;
+        }
+        let row_width = |row: &std::ops::Range<usize>| {
+            row.clone().map(|page| size(page)[0]).sum::<f64>()
+                + PAGE_GAP * (row.len().saturating_sub(1)) as f64
+        };
+        let width = rows.iter().map(row_width).fold(0.0, f64::max);
+        let mut offsets = vec![[0.0; 2]; bounds.len()];
+        let mut y = 0.0;
+        for row in &rows {
+            let mut x = (width - row_width(row)) / 2.0;
+            let mut height: f64 = 0.0;
+            for page in row.clone() {
+                offsets[page] = [x, y];
+                x += size(page)[0] + PAGE_GAP;
+                height = height.max(size(page)[1]);
+            }
+            y += height + PAGE_GAP;
+        }
         Self {
             bounds,
             offsets,
             width,
             height: (y - PAGE_GAP).max(0.0),
+            arrangement,
+            turned,
         }
     }
 
@@ -73,9 +118,58 @@ impl Layout {
         self.bounds.len()
     }
 
+    /// A page's size as laid out (turned).
     pub fn page_size(&self, page: usize) -> [f64; 2] {
-        let b = self.bounds[page];
+        let b = self.turned[page];
         [f64::from(b[2] - b[0]), f64::from(b[3] - b[1])]
+    }
+
+    /// The document position of a page point.
+    pub fn to_document(&self, page: usize, point: [f32; 2]) -> [f64; 2] {
+        let turned = rotate(point, self.arrangement.rotation);
+        let (offset, b) = (self.offsets[page], self.turned[page]);
+        [
+            offset[0] + f64::from(turned[0] - b[0]),
+            offset[1] + f64::from(turned[1] - b[1]),
+        ]
+    }
+
+    /// The page point at a document position.
+    pub fn to_page(&self, page: usize, point: [f64; 2]) -> [f32; 2] {
+        let (offset, b) = (self.offsets[page], self.turned[page]);
+        let turned = [
+            b[0] + (point[0] - offset[0]) as f32,
+            b[1] + (point[1] - offset[1]) as f32,
+        ];
+        rotate(turned, (4 - self.arrangement.rotation % 4) % 4)
+    }
+
+    /// The document rectangle covering a page rectangle.
+    pub fn rect_to_document(&self, page: usize, rect: PageRect) -> [f64; 4] {
+        let [a, b] = [
+            self.to_document(page, [rect[0], rect[1]]),
+            self.to_document(page, [rect[2], rect[3]]),
+        ];
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+        ]
+    }
+
+    /// The first page of the row after (or before) `page`'s, if any.
+    pub fn row_step(&self, page: usize, forward: bool) -> Option<usize> {
+        let row = self.offsets[page][1];
+        if forward {
+            (page + 1..self.len()).find(|&next| self.offsets[next][1] > row)
+        } else {
+            let before = (0..page)
+                .rev()
+                .find(|&previous| self.offsets[previous][1] < row)?;
+            let start = self.offsets[before][1];
+            (0..=before).find(|&first| self.offsets[first][1] == start)
+        }
     }
 
     /// Pages overlapping the document rows `y0..y1`.
@@ -84,6 +178,9 @@ impl Layout {
             .offsets
             .partition_point(|offset| offset[1] < y0)
             .saturating_sub(1);
+        // The row's first page, so a spread's left page is not skipped.
+        let row = self.offsets.get(first).map_or(0.0, |offset| offset[1]);
+        let first = self.offsets[..first].partition_point(|offset| offset[1] < row);
         let mut end = first;
         while end < self.len() && self.offsets[end][1] <= y1 {
             end += 1;
@@ -103,7 +200,7 @@ impl Layout {
         scale: f32,
         viewport: [u32; 2],
     ) -> Camera {
-        let b = self.bounds[page];
+        let b = self.turned[page];
         let offset = self.offsets[page];
         Camera {
             origin: [
@@ -112,6 +209,7 @@ impl Layout {
             ],
             scale,
             viewport,
+            rotation: self.arrangement.rotation,
         }
     }
 }

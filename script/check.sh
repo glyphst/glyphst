@@ -6,7 +6,8 @@
 #                           and a release Reader build
 #   script/check.sh corpus  GPU page rendering against MuPDF on sample PDFs
 #                           (GLYPHST_PDF_CORPUS, default: ../bak pdf.js corpus;
-#                           GLYPHST_PDF_CORPUS_LIMIT files, default 100)
+#                           GLYPHST_PDF_CORPUS_LIMIT files, default 100), and
+#                           20 of them turned 90 degrees
 #
 # Options:
 #   --local       build against sibling checkouts via .cargo/config.local.toml
@@ -40,7 +41,7 @@ for argument in "$@"; do
 done
 case ${tier} in
     quick | gate | corpus) ;;
-    *) sed -n '2,14p' "$0" >&2; exit 2 ;;
+    *) sed -n '2,15p' "$0" >&2; exit 2 ;;
 esac
 
 cd "${repo}"
@@ -109,6 +110,8 @@ if [[ ${tier} == corpus ]]; then
         -p glyphst-pdf-gpu --example corpus
     step corpus "${repo}/target/release/examples/corpus" "${corpus}" \
         --limit "${GLYPHST_PDF_CORPUS_LIMIT:-100}" --out "${run_dir}/corpus"
+    step corpus-rotated "${repo}/target/release/examples/corpus" "${corpus}" \
+        --limit 20 --rotate 90 --out "${run_dir}/corpus-rotated"
     finish
 fi
 step fmt cargo fmt --all -- --check

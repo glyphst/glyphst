@@ -49,7 +49,7 @@ Shadings, images, soft masks, non-normal blend groups, patterns and text or
 stroke clips stay ranges of display-list operations that MuPDF rasterizes as
 ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
 tessellates each page once per level of detail and draws it with a camera
-uniform; dense pages also get a mipmapped overview rendered from their own
+uniform (pan, zoom and quarter turns); dense pages also get a mipmapped overview rendered from their own
 vectors and drawn while it is at least as sharp as the screen. The Reader
 does not use it; GPUI 0.3.8 cannot composite a wgpu texture on Linux. The
 [egui Reader](crates/reader-egui) does (see [next work](ROADMAP.md)).
@@ -116,7 +116,12 @@ and the gamepad reach only it, and pressing in another pane focuses that
 one. Each tab has its own GPU view (target, transition snapshot, prepared
 effects), kept for a few seconds after it was last drawn, and a document
 shows in one pane at most, so a page's camera uniform serves one view per
-frame.
+frame. A fixed-layout document's pages can be turned and shown as a
+two-page spread (`document.rs` lays out rows of turned page boxes and
+converts between page and document coordinates); the camera turns them,
+so nothing reloads, and the library's document preferences keep both. A
+document reloads in place (same tab, same position) on the Reload command
+or when its file changed while the window was in the background.
 
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette

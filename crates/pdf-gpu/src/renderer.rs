@@ -38,18 +38,62 @@ pub struct OverviewJob {
 const OVERVIEW_MIN_SEGMENTS: usize = 100_000;
 const OVERVIEW_MIN_TRIANGLES: usize = 2_000_000;
 
-/// Maps page space to device pixels: `pixel = (page - origin) * scale`.
+/// Maps page space to device pixels:
+/// `pixel = (rotate(page, rotation) - origin) * scale`, where `origin` is in
+/// the rotated (view) space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub origin: [f32; 2],
     pub scale: f32,
     /// Viewport size in device pixels.
     pub viewport: [u32; 2],
+    /// Quarter turns clockwise of the page on screen (0-3).
+    pub rotation: u8,
+}
+
+/// `point` turned `quarter_turns` clockwise about the origin, with y down.
+pub fn rotate(point: [f32; 2], quarter_turns: u8) -> [f32; 2] {
+    let [m00, m01, m10, m11] = axes(quarter_turns);
+    [
+        m00 * point[0] + m01 * point[1],
+        m10 * point[0] + m11 * point[1],
+    ]
+}
+
+/// The rotation as a row-major 2×2 matrix.
+fn axes(quarter_turns: u8) -> [f32; 4] {
+    match quarter_turns % 4 {
+        0 => [1.0, 0.0, 0.0, 1.0],
+        1 => [0.0, -1.0, 1.0, 0.0],
+        2 => [-1.0, 0.0, 0.0, -1.0],
+        _ => [0.0, 1.0, -1.0, 0.0],
+    }
+}
+
+/// The bounding box of `rect` turned `quarter_turns` clockwise.
+pub fn rotate_rect(rect: PageRect, quarter_turns: u8) -> PageRect {
+    let [a, b] = [
+        rotate([rect[0], rect[1]], quarter_turns),
+        rotate([rect[2], rect[3]], quarter_turns),
+    ];
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+    ]
 }
 
 impl Camera {
     /// Centers `focus` (page space) in the viewport at `scale`.
     pub fn centered(focus: [f32; 2], scale: f32, viewport: [u32; 2]) -> Self {
+        Self::centered_rotated(focus, scale, viewport, 0)
+    }
+
+    /// Centers `focus` (page space) in the viewport at `scale`, with the
+    /// page turned `rotation` quarter turns clockwise.
+    pub fn centered_rotated(focus: [f32; 2], scale: f32, viewport: [u32; 2], rotation: u8) -> Self {
+        let focus = rotate(focus, rotation);
         Self {
             origin: [
                 focus[0] - viewport[0] as f32 / 2.0 / scale,
@@ -57,23 +101,53 @@ impl Camera {
             ],
             scale,
             viewport,
+            rotation: rotation % 4,
         }
+    }
+
+    /// The row-major page-to-view matrix.
+    pub fn axes(&self) -> [f32; 4] {
+        axes(self.rotation)
+    }
+
+    /// The device pixel of a page point.
+    pub fn to_pixels(&self, page: [f32; 2]) -> [f32; 2] {
+        let view = rotate(page, self.rotation);
+        [
+            (view[0] - self.origin[0]) * self.scale,
+            (view[1] - self.origin[1]) * self.scale,
+        ]
+    }
+
+    /// The page point at a device pixel.
+    pub fn to_page(&self, pixels: [f32; 2]) -> [f32; 2] {
+        let view = [
+            self.origin[0] + pixels[0] / self.scale,
+            self.origin[1] + pixels[1] / self.scale,
+        ];
+        rotate(view, (4 - self.rotation % 4) % 4)
     }
 
     /// The page-space rectangle visible in the viewport, widened by `margin`
     /// device pixels to cover hairlines widened in the shader.
-    fn visible_page_rect(&self, margin: f32) -> PageRect {
+    pub fn visible_page_rect(&self, margin: f32) -> PageRect {
         let margin = margin / self.scale;
-        [
+        let view = [
             self.origin[0] - margin,
             self.origin[1] - margin,
             self.origin[0] + self.viewport[0] as f32 / self.scale + margin,
             self.origin[1] + self.viewport[1] as f32 / self.scale + margin,
-        ]
+        ];
+        rotate_rect(view, (4 - self.rotation % 4) % 4)
     }
 
     /// Page-space rectangle to a pixel scissor clamped to the viewport.
     fn scissor(&self, rect: PageRect) -> Option<[u32; 4]> {
+        // An empty rectangle (a clip beside the page) stays empty.
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            return None;
+        }
+        let rect = rotate_rect(rect, self.rotation);
         let x0 = ((rect[0] - self.origin[0]) * self.scale).floor().max(0.0);
         let y0 = ((rect[1] - self.origin[1]) * self.scale).floor().max(0.0);
         let x1 = ((rect[2] - self.origin[0]) * self.scale)
@@ -103,6 +177,8 @@ struct CameraUniform {
     _padding: f32,
     viewport: [f32; 2],
     _padding2: [f32; 2],
+    /// Row-major page-to-view rotation.
+    axes: [f32; 4],
 }
 
 #[repr(C)]
@@ -840,6 +916,7 @@ impl Renderer {
                 ],
                 scale: mip_scale,
                 viewport: [OVERVIEW_TILE, OVERVIEW_TILE],
+                rotation: 0,
             };
             let mut encoder = device.create_command_encoder(&Default::default());
             {
@@ -957,6 +1034,7 @@ impl Renderer {
                 _padding: 0.0,
                 viewport: [camera.viewport[0] as f32, camera.viewport[1] as f32],
                 _padding2: [0.0; 2],
+                axes: camera.axes(),
             }),
         );
     }
@@ -1493,6 +1571,7 @@ mod tests {
             origin: [-10.0, -10.0],
             scale: 2.0,
             viewport: [400, 400],
+            rotation: 0,
         };
         let page = [0.0, 0.0, 100.0, 100.0];
         assert_eq!(camera.scissor(page), Some([20, 20, 200, 200]));
@@ -1551,5 +1630,39 @@ mod tests {
         let mut whole = UploadCursor::default();
         assert_eq!(whole.next(&items, u64::MAX).len(), 3);
         assert!(whole.done(&items));
+    }
+
+    #[test]
+    fn rotated_cameras_map_page_corners_and_back() {
+        let page = [10.0, 20.0, 110.0, 220.0];
+        for rotation in 0..4u8 {
+            let camera = Camera::centered_rotated([60.0, 120.0], 2.0, [600, 600], rotation);
+            // The page's centre stays in the middle of the view.
+            let center = camera.to_pixels([60.0, 120.0]);
+            assert!((center[0] - 300.0).abs() < 1e-3 && (center[1] - 300.0).abs() < 1e-3);
+            for corner in [[10.0, 20.0], [110.0, 20.0], [10.0, 220.0], [110.0, 220.0]] {
+                let back = camera.to_page(camera.to_pixels(corner));
+                assert!((back[0] - corner[0]).abs() < 1e-3 && (back[1] - corner[1]).abs() < 1e-3);
+            }
+            // A quarter turn puts the page on its side.
+            let [x, y, width, height] = camera.scissor(page).unwrap();
+            let expected = if rotation % 2 == 0 {
+                [200, 400]
+            } else {
+                [400, 200]
+            };
+            assert_eq!([width, height], expected, "rotation {rotation}");
+            assert_eq!([x + width / 2, y + height / 2], [300, 300]);
+            // The visible page rectangle covers the whole page here.
+            let visible = camera.visible_page_rect(0.0);
+            assert!(visible[0] <= 10.0 && visible[1] <= 20.0);
+            assert!(visible[2] >= 110.0 && visible[3] >= 220.0);
+        }
+        // Clockwise with y down: the top-right corner goes to the bottom
+        // right, a point to the right of the origin goes below it.
+        assert_eq!(rotate([1.0, 0.0], 1), [0.0, 1.0]);
+        assert_eq!(rotate([0.0, 1.0], 1), [-1.0, 0.0]);
+        assert_eq!(rotate([1.0, 2.0], 2), [-1.0, -2.0]);
+        assert_eq!(rotate(rotate([3.0, 4.0], 1), 3), [3.0, 4.0]);
     }
 }

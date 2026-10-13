@@ -11,6 +11,6 @@ mod target;
 pub use prepare::PreparedPage;
 pub use renderer::{
     Camera, DrawStats, GpuPage, LayerUpload, OverviewJob, PageUpload, Renderer, SAMPLE_COUNT,
-    STENCIL_FORMAT, stencil_attachment,
+    STENCIL_FORMAT, rotate, rotate_rect, stencil_attachment,
 };
 pub use target::OffscreenTarget;

@@ -61,9 +61,10 @@ impl LoadedPage {
         })
     }
 
-    /// Device pixels per page point that fit the page into `size`.
-    pub fn fit_scale(&self, size: [u32; 2]) -> f32 {
-        let [x0, y0, x1, y1] = self.prepared.bounds;
+    /// Device pixels per page point that fit the page, turned `rotation`
+    /// quarter turns, into `size`.
+    pub fn fit_scale(&self, size: [u32; 2], rotation: u8) -> f32 {
+        let [x0, y0, x1, y1] = glyphst_pdf_gpu::rotate_rect(self.prepared.bounds, rotation);
         (size[0] as f32 / (x1 - x0)).min(size[1] as f32 / (y1 - y0))
     }
 }
@@ -245,8 +246,17 @@ pub fn mupdf_view(list: &DisplayList, camera: &Camera) -> Result<Vec<u8>> {
     )?;
     pixmap.clear_with(255)?;
     let device = Device::from_pixmap(&pixmap)?;
+    // pixel = (axes * page - origin) * scale, as the GPU camera maps it.
     let s = camera.scale;
-    let ctm = Matrix::new(s, 0.0, 0.0, s, -camera.origin[0] * s, -camera.origin[1] * s);
+    let [m00, m01, m10, m11] = camera.axes();
+    let ctm = Matrix::new(
+        m00 * s,
+        m10 * s,
+        m01 * s,
+        m11 * s,
+        -camera.origin[0] * s,
+        -camera.origin[1] * s,
+    );
     list.run(
         &device,
         &ctm,

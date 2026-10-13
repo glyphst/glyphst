@@ -116,6 +116,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "rotate-ccw",
         include_bytes!("../assets/icons/rotate-ccw.svg"),
     ),
+    ("rotate-cw", include_bytes!("../assets/icons/rotate-cw.svg")),
     ("rows-2", include_bytes!("../assets/icons/rows-2.svg")),
     ("scan", include_bytes!("../assets/icons/scan.svg")),
     ("scan-text", include_bytes!("../assets/icons/scan-text.svg")),

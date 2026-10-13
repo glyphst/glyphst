@@ -43,7 +43,8 @@ input in the spike. The [egui Reader](crates/reader-egui) has:
 - **M5 so far:** page uploads spread across frames; split panes (a tab
   dragged onto a pane's edge, or Split right/down, opens beside it; each
   pane has a title chip, the focused one an outline, dividers resize them,
-  and the last session keeps them).
+  and the last session keeps them); two-page spreads, rotation (both kept
+  per document) and reloading changed files.
 
 The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
@@ -59,12 +60,15 @@ blocks: a new 256 MiB block used to cost a 16-23 ms submission, and page 19
 of War and Peace a 27 ms upload. With a fake document translation running
 alongside, 12 brochure pages swap in with 0-1 scroll frames over 25 ms. The
 pdf.js corpus tier is unchanged: 97 of 100 files render, 1 differs from
-MuPDF by more than 1%.
+MuPDF by more than 1%; turned 90 degrees, 20 of them differ from MuPDF as
+little as upright.
 
 Known gaps:
 - A very dense page shows only once all of it is uploaded: Lower Level
   (7.6M strokes) takes about 200 ms of 4 MiB frames before it appears.
 - 4x MSAA gives small text coarser edges than MuPDF.
+- A turned page's loading placeholder (its thumbnail) shows upright, and
+  presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Selections stay within one page.
 - Translation sessions are not restored from the cache on reopening.
@@ -75,7 +79,7 @@ Known gaps:
   GPUI-only. No automated run writes the real keychain: the user's check of
   a key set in the egui Reader showing in the GPUI Reader is pending.
 
-**Next step (M5):** two-page spreads, rotation and reload; ChatGPT Subscription
+**Next step (M5):** ChatGPT Subscription
 sign-in, provider order and connection tests in the settings window; then
 removing the GPUI crates and the `files` app (abandoned, not ported).
 Later: M6 an effects manager (user effect directory, hot reload, previews,

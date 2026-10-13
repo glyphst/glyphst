@@ -7,7 +7,7 @@
 //! counted separately; they test the parser, not this renderer.
 //!
 //! cargo run --release -p glyphst-pdf-gpu --example corpus -- <dir> \
-//!     [--limit N] [--timeout SECONDS] [--size WxH] [--out DIR]
+//!     [--limit N] [--timeout SECONDS] [--size WxH] [--rotate 0|90|180|270] [--out DIR]
 //!
 //! Exits non-zero when a child crashes or times out after parsing.
 
@@ -38,6 +38,8 @@ struct Options {
     limit: usize,
     timeout: Duration,
     size: [u32; 2],
+    /// Quarter turns clockwise of every compared view.
+    rotation: u8,
     out: Option<PathBuf>,
 }
 
@@ -49,6 +51,7 @@ fn parse_options() -> Result<Options> {
         limit: 100,
         timeout: Duration::from_secs(30),
         size: [1024, 768],
+        rotation: 0,
         out: None,
     };
     while let Some(arg) = args.next() {
@@ -62,19 +65,30 @@ fn parse_options() -> Result<Options> {
                 let (w, h) = size.split_once('x').context("size must be WxH")?;
                 options.size = [w.parse()?, h.parse()?];
             }
+            "--rotate" => {
+                options.rotation = match value()?.as_str() {
+                    "0" => 0,
+                    "90" => 1,
+                    "180" => 2,
+                    "270" => 3,
+                    other => bail!("--rotate takes 0, 90, 180 or 270, not {other}"),
+                };
+            }
             "--out" => options.out = Some(value()?.into()),
             _ if arg.starts_with("--") => bail!("unknown option {arg}"),
             _ => options.dir = arg.into(),
         }
     }
     if options.one.is_none() && options.dir.as_os_str().is_empty() {
-        bail!("usage: corpus <dir> [--limit N] [--timeout SECONDS] [--size WxH] [--out DIR]");
+        bail!(
+            "usage: corpus <dir> [--limit N] [--timeout SECONDS] [--size WxH] [--rotate DEGREES] [--out DIR]"
+        );
     }
     Ok(options)
 }
 
 /// Child mode: one file, one JSON line on stdout.
-fn check_one(path: &Path, size: [u32; 2]) -> Value {
+fn check_one(path: &Path, size: [u32; 2], rotation: u8) -> Value {
     let loaded = match LoadedPage::open_with(path, 0, || {
         println!("{PARSED_MARKER}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -82,7 +96,7 @@ fn check_one(path: &Path, size: [u32; 2]) -> Value {
         Ok(loaded) => loaded,
         Err(error) => return json!({ "status": "unreadable", "error": format!("{error:#}") }),
     };
-    match render_and_compare(&loaded, size) {
+    match render_and_compare(&loaded, size, rotation) {
         Ok(mut result) => {
             let stats = &loaded.vector.stats;
             result["status"] = json!("ok");
@@ -106,10 +120,10 @@ fn check_one(path: &Path, size: [u32; 2]) -> Value {
     }
 }
 
-fn render_and_compare(loaded: &LoadedPage, size: [u32; 2]) -> Result<Value> {
+fn render_and_compare(loaded: &LoadedPage, size: [u32; 2], rotation: u8) -> Result<Value> {
     let gpu = Gpu::new(size)?;
     let renderer = Renderer::new(&gpu.device, FORMAT);
-    let fit = loaded.fit_scale(size);
+    let fit = loaded.fit_scale(size, rotation);
     // Raster layers at the largest compared zoom, so the comparison checks
     // routing and order rather than layer resolution.
     let uploaded = common::upload(
@@ -123,7 +137,7 @@ fn render_and_compare(loaded: &LoadedPage, size: [u32; 2]) -> Result<Value> {
     let focus = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
     let mut views = Vec::new();
     for zoom in ZOOMS {
-        let camera = Camera::centered(focus, fit * zoom, size);
+        let camera = Camera::centered_rotated(focus, fit * zoom, size, rotation);
         let started = Instant::now();
         gpu.render(&renderer, &uploaded.page, &camera);
         gpu.wait()?;
@@ -166,6 +180,8 @@ fn run_child(exe: &Path, file: &Path, options: &Options) -> Value {
         .arg(file)
         .arg("--size")
         .arg(format!("{}x{}", options.size[0], options.size[1]))
+        .arg("--rotate")
+        .arg((u32::from(options.rotation) * 90).to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -211,7 +227,7 @@ fn run_child(exe: &Path, file: &Path, options: &Options) -> Value {
 fn main() -> Result<()> {
     let options = parse_options()?;
     if let Some(file) = &options.one {
-        println!("{}", check_one(file, options.size));
+        println!("{}", check_one(file, options.size, options.rotation));
         return Ok(());
     }
 
@@ -268,6 +284,7 @@ fn main() -> Result<()> {
         statuses.get("crash").copied().unwrap_or(0) + statuses.get("timeout").copied().unwrap_or(0);
     let summary = json!({
         "dir": options.dir.display().to_string(),
+        "rotation": u32::from(options.rotation) * 90,
         "files": results.len(),
         "seconds": started.elapsed().as_secs_f64(),
         "statuses": statuses,

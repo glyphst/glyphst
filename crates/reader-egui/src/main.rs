@@ -2,7 +2,7 @@
 //! shader effects for transitions and backgrounds.
 //!
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
-//!     [--split right|down] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
+//!     [--split right|down] [--rotate 90|180|270] [--spread] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
 //!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
@@ -56,7 +56,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] \
+const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -72,6 +72,7 @@ fn parse_args() -> Result<Launch> {
         controls: None,
         zoom: None,
         split: None,
+        arrangement: None,
         find: None,
         page: None,
         select_page: None,
@@ -103,6 +104,17 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--background" => launch.background = Some(value()?),
+            "--rotate" => {
+                let rotation = match value()?.as_str() {
+                    "0" => 0,
+                    "90" => 1,
+                    "180" => 2,
+                    "270" => 3,
+                    other => bail!("--rotate takes 0, 90, 180 or 270, not {other}"),
+                };
+                launch.arrangement.get_or_insert_default().rotation = rotation;
+            }
+            "--spread" => launch.arrangement.get_or_insert_default().spread = true,
             "--split" => {
                 launch.split = match value()?.as_str() {
                     "right" => Some(craft_ui::docking::Zone::Right),

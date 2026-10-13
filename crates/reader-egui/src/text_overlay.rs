@@ -6,6 +6,7 @@
 use std::ops::Range;
 
 use glyphst_pdf::{text::PageText, vector::PageRect};
+use glyphst_pdf_gpu::Camera;
 
 use crate::gpu::PageDraw;
 
@@ -66,10 +67,9 @@ impl Selection {
 #[derive(Clone, Copy, Debug)]
 pub struct PageMap {
     pub page: usize,
-    /// Page point at the view's top-left corner.
-    origin: [f32; 2],
-    /// egui points per page point.
-    scale: f32,
+    /// The page's camera, in device pixels from the view's top-left.
+    camera: Camera,
+    pixels_per_point: f32,
     view_min: egui::Pos2,
     /// The paper in egui points.
     pub paper: egui::Rect,
@@ -83,38 +83,35 @@ impl PageMap {
         );
         Self {
             page: draw.page,
-            origin: draw.camera.origin,
-            scale: draw.camera.scale / pixels_per_point,
+            camera: draw.camera,
+            pixels_per_point,
             view_min: view.min,
             paper,
         }
     }
 
     pub fn screen_pos(&self, point: [f32; 2]) -> egui::Pos2 {
-        self.view_min
-            + egui::vec2(
-                (point[0] - self.origin[0]) * self.scale,
-                (point[1] - self.origin[1]) * self.scale,
-            )
+        let [x, y] = self.camera.to_pixels(point);
+        self.view_min + egui::vec2(x, y) / self.pixels_per_point
     }
 
+    /// The screen rectangle covering a page rectangle (turned with the
+    /// page).
     pub fn rect_to_screen(&self, rect: PageRect) -> egui::Rect {
-        egui::Rect::from_min_max(
+        egui::Rect::from_two_pos(
             self.screen_pos([rect[0], rect[1]]),
             self.screen_pos([rect[2], rect[3]]),
         )
     }
 
     pub fn page_point(&self, pos: egui::Pos2) -> [f32; 2] {
-        [
-            self.origin[0] + (pos.x - self.view_min.x) / self.scale,
-            self.origin[1] + (pos.y - self.view_min.y) / self.scale,
-        ]
+        let pixels = (pos - self.view_min) * self.pixels_per_point;
+        self.camera.to_page([pixels.x, pixels.y])
     }
 
     /// Page points per egui point, for hit slop given in egui points.
     pub fn points(&self, screen: f32) -> f32 {
-        screen / self.scale
+        screen * self.pixels_per_point / self.camera.scale
     }
 }
 
@@ -139,7 +136,6 @@ pub fn fill_rects(
 #[cfg(test)]
 mod tests {
     use glyphst_pdf::text::Glyph;
-    use glyphst_pdf_gpu::Camera;
 
     use super::*;
 
@@ -151,6 +147,7 @@ mod tests {
                 origin: [-10.0, 50.0],
                 scale: 4.0,
                 viewport: [800, 600],
+                rotation: 0,
             },
             paper: [40.0, 0.0, 440.0, 600.0],
         };
@@ -162,6 +159,24 @@ mod tests {
         assert_eq!(map.page_point(egui::pos2(122.0, 34.0)), [1.0, 52.0]);
         assert!(page_at(&[map], egui::pos2(130.0, 40.0)).is_some());
         assert!(page_at(&[map], egui::pos2(110.0, 40.0)).is_none());
+
+        // A page turned a quarter: its points still map there and back,
+        // and its rectangles turn on their side.
+        let turned = PageMap::new(
+            &PageDraw {
+                camera: Camera::centered_rotated([50.0, 100.0], 4.0, [800, 600], 1),
+                ..draw
+            },
+            view,
+            2.0,
+        );
+        for point in [[0.0, 0.0], [100.0, 0.0], [30.0, 170.0]] {
+            let back = turned.page_point(turned.screen_pos(point));
+            assert!((back[0] - point[0]).abs() < 1e-3 && (back[1] - point[1]).abs() < 1e-3);
+        }
+        let wide = turned.rect_to_screen([0.0, 0.0, 100.0, 10.0]);
+        assert!(wide.height() > wide.width());
+        assert!(turned.points(2.0) - 1.0 < 1e-6);
     }
 
     #[test]

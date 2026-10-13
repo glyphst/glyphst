@@ -627,6 +627,7 @@ impl ReaderApp {
         let mut translate_document = false;
         let mut translation_shown = None;
         let mut assistant = false;
+        let mut run = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let tip = self.keymap.tip("Back", Command::Back);
@@ -717,6 +718,19 @@ impl ReaderApp {
             let tip = self.keymap.tip("Fit width", Command::FitWidth);
             if icons::button(ui, "scan", 30.0, false, &tip).clicked() {
                 actions.push(ViewAction::FitWidth);
+            }
+            if full && !tab.is_reflowed() {
+                let tip = self
+                    .keymap
+                    .tip("Rotate clockwise", Command::RotateClockwise);
+                if icons::button(ui, "rotate-cw", 30.0, false, &tip).clicked() {
+                    run = Some(Command::RotateClockwise);
+                }
+                let tip = self.keymap.tip("Two-page spread", Command::ToggleSpread);
+                let spread = tab.layout.arrangement.spread;
+                if icons::button(ui, "book-open", 30.0, spread, &tip).clicked() {
+                    run = Some(Command::ToggleSpread);
+                }
             }
             if let DocumentLayout::Reflow(layout) = tab.document_layout {
                 dock_divider(ui, &tokens);
@@ -817,6 +831,10 @@ impl ReaderApp {
         }
         if assistant {
             self.toggle_assistant();
+        }
+        if let Some(command) = run {
+            let ctx = ui.ctx().clone();
+            self.run_or_notify(command, &ctx);
         }
         if let Some(shown) = translation_shown
             && let Some(session) = self.tabs[active].translation.as_mut()
