@@ -29,6 +29,10 @@ pub enum Command {
     ZoomOut,
     FitWidth,
     Present,
+    SplitRight,
+    SplitDown,
+    FocusNextPane,
+    ClosePane,
     LargerText,
     SmallerText,
     Find,
@@ -86,6 +90,8 @@ pub enum Needs {
     Reflow,
     /// The active document has a translation.
     Translation,
+    /// The stage is split into panes.
+    Panes,
 }
 
 impl Needs {
@@ -96,12 +102,13 @@ impl Needs {
             Self::Selection => "Select text first",
             Self::Reflow => "Only for reflowed books",
             Self::Translation => "Translate the document first",
+            Self::Panes => "Split the view first",
         }
     }
 }
 
 impl Command {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 36] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -123,6 +130,10 @@ impl Command {
         Self::ZoomOut,
         Self::FitWidth,
         Self::Present,
+        Self::SplitRight,
+        Self::SplitDown,
+        Self::FocusNextPane,
+        Self::ClosePane,
         Self::LargerText,
         Self::SmallerText,
         Self::Find,
@@ -160,6 +171,10 @@ impl Command {
             Self::ZoomOut => "view.zoom_out",
             Self::FitWidth => "view.fit_width",
             Self::Present => "view.present",
+            Self::SplitRight => "view.split_right",
+            Self::SplitDown => "view.split_down",
+            Self::FocusNextPane => "view.focus_next_pane",
+            Self::ClosePane => "view.close_pane",
             Self::LargerText => "view.larger_text",
             Self::SmallerText => "view.smaller_text",
             Self::Find => "text.find",
@@ -201,6 +216,10 @@ impl Command {
             Self::ZoomOut => "Zoom out",
             Self::FitWidth => "Fit width",
             Self::Present => "Present",
+            Self::SplitRight => "Split right",
+            Self::SplitDown => "Split down",
+            Self::FocusNextPane => "Focus the next pane",
+            Self::ClosePane => "Close the pane",
             Self::LargerText => "Larger text",
             Self::SmallerText => "Smaller text",
             Self::Find => "Find",
@@ -239,6 +258,10 @@ impl Command {
             Self::ZoomOut => "zoom-out",
             Self::FitWidth => "scan",
             Self::Present => "presentation",
+            Self::SplitRight => "columns-2",
+            Self::SplitDown => "rows-2",
+            Self::FocusNextPane => "panels-top-left",
+            Self::ClosePane => "x",
             Self::LargerText => "a-arrow-up",
             Self::SmallerText => "a-arrow-down",
             Self::Find | Self::FindNext | Self::FindPrevious => "search",
@@ -273,6 +296,10 @@ impl Command {
             | Self::ZoomOut
             | Self::FitWidth
             | Self::Present
+            | Self::SplitRight
+            | Self::SplitDown
+            | Self::FocusNextPane
+            | Self::ClosePane
             | Self::LargerText
             | Self::SmallerText => Category::View,
             Self::Find
@@ -309,6 +336,8 @@ impl Command {
             Self::ZoomOut => &["Minus"],
             Self::FitWidth => &["0"],
             Self::Present => &["P"],
+            Self::SplitRight => &["Ctrl+Backslash"],
+            Self::FocusNextPane => &["F6"],
             Self::Find => &["Ctrl+F"],
             Self::FindNext => &["F3"],
             Self::FindPrevious => &["Shift+F3"],
@@ -322,7 +351,9 @@ impl Command {
             | Self::LargerText
             | Self::SmallerText
             | Self::TranslateDocument
-            | Self::ShowTranslated => &[],
+            | Self::ShowTranslated
+            | Self::SplitDown
+            | Self::ClosePane => &[],
         }
     }
 
@@ -341,6 +372,7 @@ impl Command {
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
             Self::ShowTranslated => Needs::Translation,
+            Self::FocusNextPane | Self::ClosePane => Needs::Panes,
             _ => Needs::Document,
         }
     }

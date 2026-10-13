@@ -7,12 +7,12 @@
 //!
 //! 1. [`BackdropCallback`]: a background effect fills the whole stage, the
 //!    window below the top bar, so it runs on behind floating panels.
-//! 2. [`ViewCallback`], over the reading area: `prepare` draws paper and
-//!    resident pages with `pdf-gpu` into a multisampled [`OffscreenTarget`]
+//! 2. A [`ViewCallback`] per pane: `prepare` draws paper and resident pages
+//!    with `pdf-gpu` into the tab's own multisampled [`OffscreenTarget`]
 //!    (egui's own pass has no MSAA or stencil), then a content effect
 //!    composites the page image over the backdrop: the plain "present"
 //!    effect, or a transition from a snapshot of the previous view (another
-//!    tab, or the page before a turn) to the new image.
+//!    tab's last image, or the page before a turn) to the new image.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -113,6 +113,18 @@ impl Upload {
     }
 }
 
+/// A tab's view: the target its pages are drawn into, the outgoing image
+/// of a transition, and this frame's prepared effects.
+struct ViewState {
+    target: OffscreenTarget,
+    snapshot: Option<Snapshot>,
+    prepared: Vec<PreparedEffect>,
+    last_drawn: u64,
+}
+
+/// Frames a view is kept after it was last drawn, for a transition from it.
+const VIEW_KEEP_FRAMES: u64 = 240;
+
 struct Snapshot {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -131,14 +143,11 @@ pub struct ReaderGpu {
     /// Staging memory for uploads, reused from frame to frame.
     belt: wgpu::util::StagingBelt,
     frame: u64,
-    target: Option<OffscreenTarget>,
-    /// The tab whose pages the target holds.
-    target_owner: Option<u64>,
-    snapshot: Option<Snapshot>,
+    /// Each shown tab's view, by tab id.
+    views: HashMap<u64, ViewState>,
     paper: wgpu::RenderPipeline,
     paper_bind_group: wgpu::BindGroup,
     paper_color: wgpu::Buffer,
-    prepared: Vec<PreparedEffect>,
     /// A 1×1 texture for the backdrop's effect inputs; backgrounds don't
     /// sample them.
     blank: wgpu::TextureView,
@@ -247,13 +256,10 @@ impl ReaderGpu {
             uploads: VecDeque::new(),
             belt: wgpu::util::StagingBelt::new(device.clone(), UPLOAD_BYTES_PER_FRAME),
             frame: 0,
-            target: None,
-            target_owner: None,
-            snapshot: None,
+            views: HashMap::new(),
             paper,
             paper_bind_group,
             paper_color,
-            prepared: Vec::new(),
             blank,
             backdrop: None,
             stats: FrameStats::default(),
@@ -433,9 +439,7 @@ impl ReaderGpu {
         self.pages.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
         self.uploads.retain(|upload| upload.key().tab != tab);
-        if self.target_owner == Some(tab) {
-            self.target_owner = None;
-        }
+        self.views.remove(&tab);
     }
 
     fn resident_bytes(&self) -> u64 {
@@ -454,51 +458,48 @@ impl ReaderGpu {
         })
     }
 
-    fn ensure_target(&mut self, device: &wgpu::Device, size: [u32; 2]) {
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|target| target.size() != size)
-        {
-            self.target = Some(OffscreenTarget::new(
-                device,
-                self.format,
-                size,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            ));
-            self.target_owner = None;
+    /// The view of `tab` with a target of `size`, made or remade.
+    fn view(&mut self, device: &wgpu::Device, tab: u64, size: [u32; 2]) -> &mut ViewState {
+        let format = self.format;
+        let view = self.views.entry(tab).or_insert_with(|| ViewState {
+            target: OffscreenTarget::new(device, format, size, VIEW_TARGET_USAGE),
+            snapshot: None,
+            prepared: Vec::new(),
+            last_drawn: 0,
+        });
+        if view.target.size() != size {
+            view.target = OffscreenTarget::new(device, format, size, VIEW_TARGET_USAGE);
         }
+        view
     }
+}
 
-    fn ensure_snapshot(&mut self, device: &wgpu::Device, size: [u32; 2]) {
-        if self
-            .snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.size != size)
-        {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("view_snapshot"),
-                size: wgpu::Extent3d {
-                    width: size[0],
-                    height: size[1],
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            self.snapshot = Some(Snapshot {
-                texture,
-                view,
-                size,
-            });
-        }
+const VIEW_TARGET_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_SRC);
+
+/// A texture for a transition's outgoing image.
+fn snapshot(device: &wgpu::Device, format: wgpu::TextureFormat, size: [u32; 2]) -> Snapshot {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("view_snapshot"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    Snapshot {
+        texture,
+        view,
+        size,
     }
 }
 
@@ -549,45 +550,57 @@ impl CallbackTrait for ViewCallback {
         };
         let started = Instant::now();
         let size = pixel_size(self.rect, screen.pixels_per_point);
-        gpu.ensure_target(device, size);
-        gpu.frame += 1;
+        let frame = gpu.frame;
         let mut encoder = device.create_command_encoder(&Default::default());
 
-        // A transition's first frame keeps the previous view before the new
-        // one replaces it; without one (another size, nothing drawn yet)
-        // the outgoing view is empty.
-        if let Some(from) = self.transition.as_ref().and_then(|t| t.capture_from) {
-            gpu.ensure_snapshot(device, size);
-            let (Some(target), Some(snapshot)) = (&gpu.target, &gpu.snapshot) else {
-                return Vec::new();
-            };
-            if gpu.target_owner == Some(from) {
-                encoder.copy_texture_to_texture(
-                    target.texture().as_image_copy(),
+        // A transition's first frame keeps the outgoing view (another tab's
+        // last image, or this view's before a turn) before the new one
+        // replaces it; without one of this size the outgoing view is empty.
+        let capture = self.transition.as_ref().and_then(|t| t.capture_from);
+        let outgoing = capture
+            .and_then(|from| gpu.views.get(&from))
+            .filter(|view| view.target.size() == size)
+            .map(|view| view.target.texture().clone());
+        let format = gpu.format;
+        let view = gpu.view(device, self.tab, size);
+        view.last_drawn = frame;
+        if capture.is_some() {
+            if view
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.size != size)
+            {
+                view.snapshot = Some(snapshot(device, format, size));
+            }
+            let snapshot = view.snapshot.as_ref().expect("made above");
+            match outgoing {
+                Some(texture) => encoder.copy_texture_to_texture(
+                    texture.as_image_copy(),
                     snapshot.texture.as_image_copy(),
                     wgpu::Extent3d {
                         width: size[0],
                         height: size[1],
                         depth_or_array_layers: 1,
                     },
-                );
-            } else {
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("clear_snapshot"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &snapshot.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+                ),
+                None => {
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear_snapshot"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &snapshot.view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                }
             }
         }
 
@@ -605,14 +618,25 @@ impl CallbackTrait for ViewCallback {
             })
         });
         let mut stats = DrawStats::default();
+        let ReaderGpu {
+            views,
+            pages,
+            renderer,
+            effects,
+            paper: paper_pipeline,
+            paper_bind_group,
+            ..
+        } = gpu;
+        let Some(view) = views.get_mut(&self.tab) else {
+            return Vec::new();
+        };
         {
-            let Some(target) = &gpu.target else {
-                return Vec::new();
-            };
-            let mut pass = target.begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
+            let mut pass = view
+                .target
+                .begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
             if let Some(paper) = &paper {
-                pass.set_pipeline(&gpu.paper);
-                pass.set_bind_group(0, &gpu.paper_bind_group, &[]);
+                pass.set_pipeline(paper_pipeline);
+                pass.set_bind_group(0, &*paper_bind_group, &[]);
                 pass.set_vertex_buffer(0, paper.slice(..));
                 pass.draw(0..(self.draws.len() * 6) as u32, 0..1);
             }
@@ -621,11 +645,9 @@ impl CallbackTrait for ViewCallback {
                     tab: self.tab,
                     page: draw.page,
                 };
-                if let Some(resident) = gpu.pages.get_mut(&key) {
-                    resident.last_drawn = gpu.frame;
-                    let page_stats =
-                        gpu.renderer
-                            .draw(queue, &resident.page, &draw.camera, &mut pass);
+                if let Some(resident) = pages.get_mut(&key) {
+                    resident.last_drawn = frame;
+                    let page_stats = renderer.draw(queue, &resident.page, &draw.camera, &mut pass);
                     stats.draw_calls += page_stats.draw_calls;
                     stats.triangles += page_stats.triangles;
                     stats.segments += page_stats.segments;
@@ -633,12 +655,9 @@ impl CallbackTrait for ViewCallback {
                 }
             }
         }
-        gpu.target_owner = Some(self.tab);
 
-        let (Some(target), effects) = (&gpu.target, &gpu.effects) else {
-            return Vec::new();
-        };
         let resolution = [size[0] as f32, size[1] as f32];
+        let target = &view.target;
         let prepare = |id: &str,
                        fallback: &str,
                        from: &wgpu::TextureView,
@@ -659,8 +678,7 @@ impl CallbackTrait for ViewCallback {
                 .prepare(device, id, &effect_inputs)
                 .or_else(|| effects.prepare(device, fallback, &effect_inputs))
         };
-        let mut prepared = Vec::new();
-        let content = match (&self.transition, &gpu.snapshot) {
+        let content = match (&self.transition, &view.snapshot) {
             (Some(transition), Some(snapshot)) if snapshot.size == size => prepare(
                 &transition.effect.id,
                 PRESENT,
@@ -671,14 +689,15 @@ impl CallbackTrait for ViewCallback {
             ),
             _ => prepare(PRESENT, PRESENT, target.view(), [0.0; 4], 0.0, 1.0),
         };
-        prepared.extend(content);
-        gpu.prepared = prepared;
-        gpu.stats = FrameStats {
-            encode_ms: started.elapsed().as_secs_f64() * 1000.0,
-            draw: stats,
-            resident: gpu.pages.len(),
-            gpu_bytes: gpu.resident_bytes(),
-        };
+        view.prepared = content.into_iter().collect();
+        // Every pane adds to the frame's statistics.
+        gpu.stats.encode_ms += started.elapsed().as_secs_f64() * 1000.0;
+        gpu.stats.draw.draw_calls += stats.draw_calls;
+        gpu.stats.draw.triangles += stats.triangles;
+        gpu.stats.draw.segments += stats.segments;
+        gpu.stats.draw.used_overview |= stats.used_overview;
+        gpu.stats.resident = gpu.pages.len();
+        gpu.stats.gpu_bytes = gpu.resident_bytes();
         vec![encoder.finish()]
     }
 
@@ -688,8 +707,10 @@ impl CallbackTrait for ViewCallback {
         pass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
-        if let Some(gpu) = resources.get::<ReaderGpu>() {
-            for prepared in &gpu.prepared {
+        if let Some(gpu) = resources.get::<ReaderGpu>()
+            && let Some(view) = gpu.views.get(&self.tab)
+        {
+            for prepared in &view.prepared {
                 gpu.effects.draw(prepared, pass);
             }
         }
@@ -718,6 +739,13 @@ impl CallbackTrait for BackdropCallback {
         let Some(gpu) = resources.get_mut::<ReaderGpu>() else {
             return Vec::new();
         };
+        // The backdrop is the stage's first callback: a new frame for the
+        // pages' and views' last use, and for the statistics.
+        gpu.frame += 1;
+        let frame = gpu.frame;
+        gpu.views
+            .retain(|_, view| frame - view.last_drawn <= VIEW_KEEP_FRAMES);
+        gpu.stats = FrameStats::default();
         let size = pixel_size(self.rect, screen.pixels_per_point);
         let inputs = EffectInputs {
             from: &gpu.blank,

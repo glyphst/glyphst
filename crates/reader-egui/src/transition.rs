@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 pub struct ViewTransition {
     pub effect: String,
+    /// The tab whose view (pane) runs the transition.
+    pub tab: u64,
     /// +1 forward (next page, a tab to the right), -1 backward.
     pub direction: f32,
     started: Instant,
@@ -19,12 +21,14 @@ impl ViewTransition {
     pub fn new(
         effect: String,
         from_tab: u64,
+        tab: u64,
         direction: f32,
         duration_ms: u32,
         now: Instant,
     ) -> Self {
         Self {
             effect,
+            tab,
             direction,
             started: now,
             duration: Duration::from_millis(u64::from(duration_ms.max(1))),
@@ -55,7 +59,7 @@ mod tests {
     #[test]
     fn progress_runs_over_the_duration_and_the_capture_happens_once() {
         let start = Instant::now();
-        let mut transition = ViewTransition::new("slide-over".into(), 7, 1.0, 300, start);
+        let mut transition = ViewTransition::new("slide-over".into(), 7, 8, 1.0, 300, start);
         assert_eq!(transition.progress(start), 0.0);
         assert!((transition.progress(start + Duration::from_millis(150)) - 0.5).abs() < 1e-3);
         assert!(transition.finished(start + Duration::from_millis(300)));

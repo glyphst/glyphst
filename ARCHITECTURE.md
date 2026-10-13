@@ -102,12 +102,21 @@ icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
 pills, search box, section titles, segmented choices, cards, toasts). The
 fonts and icons ship in `crates/reader-egui/assets` with their licences.
 The layout is its own: below the top bar (tabs, the palette's search box,
-theme, settings) a document's stage draws in two GPU callbacks, the
-background effect over the whole stage and then the pages over a reading
-rectangle, with egui page shadows between them. The rail, the drawers, the
+theme, settings) a document's stage draws the background effect over the
+whole stage in one GPU callback and then the pages of each pane in its own,
+with egui page shadows between them. The rail, the drawers, the
 dock and the progress line are egui Areas above the stage; `stage.rs` lays
 them out (drawers push the pages aside, or float over them in a narrow
 window) and fades the dock and rail after a pause in pointer movement.
+Split panes (`panes.rs`) divide the reading rectangle with craft-ui's
+docking model, one document per pane: its tree has tab ids as panels and
+one panel per group, and the last session keeps it. The focused pane's tab
+is the active tab, so commands, the dock and the drawers follow it; keys
+and the gamepad reach only it, and pressing in another pane focuses that
+one. Each tab has its own GPU view (target, transition snapshot, prepared
+effects), kept for a few seconds after it was last drawn, and a document
+shows in one pane at most, so a page's camera uniform serves one view per
+frame.
 
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette

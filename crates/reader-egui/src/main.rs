@@ -2,7 +2,7 @@
 //! shader effects for transitions and backgrounds.
 //!
 //! glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--zoom Z]
-//!     [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
+//!     [--split right|down] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
 //!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
@@ -14,7 +14,8 @@
 //! and fit, Page Up / Page Down / Space turn pages, Home / End, P presents,
 //! Ctrl+F find (F3 next), Ctrl+C copy, Ctrl+A select the page, Ctrl+D
 //! bookmark, Ctrl+T translate the selection, Ctrl+L assistant, Alt+Left /
-//! Alt+Right back and forward, F9 sidebar, F12 statistics.
+//! Alt+Right back and forward, Ctrl+\ split right, F6 next pane, F9
+//! sidebar, F12 statistics. Dragging a tab onto the pages splits them.
 
 mod ai;
 mod ai_tools;
@@ -35,6 +36,7 @@ mod icon_data;
 mod icons;
 mod keys;
 mod palette;
+mod panes;
 mod pickers;
 mod prefs;
 mod settings_providers;
@@ -54,7 +56,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] \
+const USAGE: &str = "usage: glyphst-reader-egui [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
                      [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -69,6 +71,7 @@ fn parse_args() -> Result<Launch> {
         theme: None,
         controls: None,
         zoom: None,
+        split: None,
         find: None,
         page: None,
         select_page: None,
@@ -100,6 +103,13 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--background" => launch.background = Some(value()?),
+            "--split" => {
+                launch.split = match value()?.as_str() {
+                    "right" => Some(craft_ui::docking::Zone::Right),
+                    "down" => Some(craft_ui::docking::Zone::Bottom),
+                    other => bail!("--split takes right or down, not {other}"),
+                };
+            }
             "--controls" => {
                 launch.controls = match value()?.as_str() {
                     "shown" => Some(true),

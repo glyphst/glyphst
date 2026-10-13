@@ -40,6 +40,10 @@ input in the spike. The [egui Reader](crates/reader-egui) has:
   a rail, a dock of reading controls that fades while reading, a progress
   line with chapter scrubbing, page shadows, and a home page with the
   book to continue and cover cards.
+- **M5 so far:** page uploads spread across frames; split panes (a tab
+  dragged onto a pane's edge, or Split right/down, opens beside it; each
+  pane has a title chip, the focused one an outline, dividers resize them,
+  and the last session keeps them).
 
 The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
@@ -48,7 +52,8 @@ Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level, War and Peace and the 15-page image-heavy brochure 1x-64x-1x,
 scrolls War and Peace (1,259 pages) and the brochure, and searches each
 whole document (48,603 matches for "the" in War and Peace) with no frame
-over 25 ms (worst 21 ms, p95 8.5-8.8 ms). Uploads are spread across frames
+over 25 ms (worst 21 ms, p95 8.5-9 ms), also with two documents split
+side by side. Uploads are spread across frames
 (4 MiB each, through a reused staging belt) and GPU memory comes in small
 blocks: a new 256 MiB block used to cost a 16-23 ms submission, and page 19
 of War and Peace a 27 ms upload. With a fake document translation running
@@ -70,8 +75,7 @@ Known gaps:
   GPUI-only. No automated run writes the real keychain: the user's check of
   a key set in the egui Reader showing in the GPUI Reader is pending.
 
-**Next step (M5):** split panes (craft-ui's docking model, side by side
-in the stage); two-page spreads, rotation and reload; ChatGPT Subscription
+**Next step (M5):** two-page spreads, rotation and reload; ChatGPT Subscription
 sign-in, provider order and connection tests in the settings window; then
 removing the GPUI crates and the `files` app (abandoned, not ported).
 Later: M6 an effects manager (user effect directory, hot reload, previews,

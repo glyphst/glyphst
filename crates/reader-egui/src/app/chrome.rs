@@ -8,6 +8,7 @@ use egui::{Align2, CornerRadius, Id, Order, Rect, Stroke, pos2, vec2};
 use super::*;
 use crate::{
     gpu::BackdropCallback,
+    panes::{self, Divider},
     stage::{self, ChromeFade, StageInput, StageLayout},
 };
 
@@ -20,6 +21,11 @@ pub(super) struct StageChrome {
     dock: Option<Rect>,
     /// The page last asked for while scrubbing the progress line.
     scrub: Option<usize>,
+    /// Where the panes were drawn last frame, for dropping a tab dragged
+    /// from the top bar.
+    pub panes: Vec<(u64, Rect)>,
+    /// The tab being dragged from the top bar.
+    pub tab_drag: Option<u64>,
 }
 
 impl ReaderApp {
@@ -61,17 +67,238 @@ impl ReaderApp {
                 pointer,
             },
         ));
-        let drawn = self.document_view(ui, layout.reading, actions, pad, seconds, now);
-        if presenting {
-            return drawn;
+        // The focused pane's tab is always on the stage.
+        let focused_id = self.tabs[active].id;
+        if !self.panes.contains(focused_id) {
+            self.panes.show(focused_id);
         }
+        let (panes, dividers) = if presenting {
+            (vec![(focused_id, layout.reading)], Vec::new())
+        } else {
+            self.panes.rects(layout.reading)
+        };
+        let mut actions = Some(actions);
+        let (mut animating, mut drawn) = (false, true);
+        let mut keep = Vec::new();
+        let split = panes.len() > 1;
+        for &(id, pane) in &panes {
+            // Split panes keep a strip at the top for their title chip.
+            let rect = if split {
+                pane.with_min_y((pane.top() + PANE_HEADER).min(pane.bottom()))
+            } else {
+                pane
+            };
+            let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+                continue;
+            };
+            let focused = index == active;
+            let view = PaneView {
+                rect,
+                index,
+                focused,
+                actions: if focused {
+                    actions.take().unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                pad: focused.then_some(pad),
+                seconds,
+                now,
+            };
+            let (pane_animating, pane_drawn) = self.document_view(ui, view, &mut keep);
+            animating |= pane_animating;
+            drawn &= pane_drawn;
+        }
+        if let Some(dropped) = self.with_gpu(|gpu| gpu.evict(&keep, PAGE_BUDGET_BYTES)) {
+            for key in dropped {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == key.tab) {
+                    tab.forget(key.page);
+                }
+            }
+        }
+        self.chrome.panes = panes.clone();
+        self.note_popover(&ctx);
+        self.translation_card(&ctx);
+        if presenting {
+            return (animating, drawn);
+        }
+        if panes.len() > 1 {
+            self.pane_chrome(ui, &panes, &dividers);
+        }
+        self.tab_drop(&ctx);
+        let active = self.active.unwrap_or(active);
         let visible = self.controls_visible(&ctx, active);
         let opacity = ctx.animate_bool_with_time(Id::new("stage-controls"), visible, 0.25);
         self.rail(&ctx, &layout, opacity);
         self.drawers(&ctx, &layout, active, now);
         self.progress_line(&ctx, &layout, active);
         self.dock(&ctx, &layout, active, opacity);
-        drawn
+        (animating, drawn)
+    }
+
+    /// With two or more panes: each pane's title chip (with a button that
+    /// closes the pane), the focused pane's outline, and the dividers.
+    fn pane_chrome(&mut self, ui: &mut egui::Ui, panes: &[(u64, Rect)], dividers: &[Divider]) {
+        let ctx = ui.ctx().clone();
+        let tokens = Tokens::get(&ctx);
+        let focused = self.active.map(|active| self.tabs[active].id);
+        let mut close = None;
+        let mut focus = None;
+        for &(id, rect) in panes {
+            let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+                continue;
+            };
+            let is_focused = focused == Some(id);
+            if is_focused {
+                ui.painter().rect_stroke(
+                    rect.shrink(1.0),
+                    CornerRadius::same(10),
+                    Stroke::new(1.5, tokens.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let icon = if tab.is_reflowed() {
+                "book-open"
+            } else {
+                "file-text"
+            };
+            let title = truncate(&tab.title, 40);
+            egui::Area::new(Id::new(("pane-chip", id)))
+                .order(Order::Middle)
+                .fixed_pos(rect.min + vec2(4.0, 5.0))
+                .show(&ctx, |ui| {
+                    let frame = egui::Frame::new()
+                        .fill(if is_focused {
+                            tokens.accent_soft
+                        } else {
+                            tokens.card
+                        })
+                        .stroke(Stroke::new(1.0, tokens.border))
+                        .corner_radius(CornerRadius::same(8))
+                        .shadow(tokens.card_shadow())
+                        .inner_margin(egui::Margin {
+                            left: 8,
+                            right: 2,
+                            top: 2,
+                            bottom: 2,
+                        });
+                    let response = frame
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.horizontal(|ui| {
+                                let color = if is_focused {
+                                    tokens.accent_text
+                                } else {
+                                    tokens.text_muted
+                                };
+                                ui.add(icons::image(icon, 14.0, color));
+                                ui.label(
+                                    egui::RichText::new(title)
+                                        .font(theme::medium(12.5))
+                                        .color(color),
+                                );
+                                if icons::button(ui, "x", 22.0, false, "Close the pane").clicked() {
+                                    close = Some(id);
+                                }
+                            });
+                        })
+                        .response
+                        .interact(egui::Sense::click());
+                    if response.clicked() {
+                        focus = Some(id);
+                    }
+                });
+        }
+        for divider in dividers {
+            let horizontal = divider.axis == craft_ui::layout::SplitAxis::Horizontal;
+            let style = craft_ui::layout::ResizeHandleStyle {
+                hovered: tokens.accent.gamma_multiply(0.5),
+                dragged: tokens.accent,
+                focused: tokens.accent,
+            };
+            let handle = if horizontal {
+                Rect::from_center_size(
+                    divider.rect.center(),
+                    vec2(4.0, divider.rect.height() - 28.0),
+                )
+            } else {
+                Rect::from_center_size(
+                    divider.rect.center(),
+                    vec2(divider.rect.width() - 28.0, 4.0),
+                )
+            };
+            let delta = craft_ui::layout::ResizeHandle::new(
+                Id::new(("pane-divider", divider.path_bits, divider.depth)),
+                divider.axis,
+                handle,
+                "Resize panes",
+                style,
+            )
+            .value(divider.first, 0.0..=divider.available)
+            .show(ui)
+            .delta;
+            if delta != 0.0 {
+                let first = (divider.first + delta).clamp(
+                    panes::MIN_PANE.min(divider.available / 2.0),
+                    (divider.available - panes::MIN_PANE).max(divider.available / 2.0),
+                );
+                self.panes.resize(
+                    divider.path(),
+                    craft_ui::layout::SplitSize::Ratio(first / divider.available.max(1.0)),
+                );
+            }
+        }
+        if let Some(id) = close
+            && self.panes.close_pane(id)
+            && let Some(focused) = self.panes.focused()
+        {
+            self.focus_tab(focused);
+        } else if let Some(id) = focus {
+            self.focus_tab(id);
+        }
+    }
+
+    /// While a tab is dragged from the top bar over the stage: where it
+    /// would go (beside a pane, or in it), and putting it there on release.
+    fn tab_drop(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.chrome.tab_drag else {
+            return;
+        };
+        let (pointer, released) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.any_released()));
+        let target = pointer.and_then(|pos| {
+            self.chrome
+                .panes
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+                .and_then(|&(pane, rect)| {
+                    let zone = craft_ui::docking::drop_zone(rect, 0.0, pos)?;
+                    Some((pane, zone, craft_ui::docking::zone_rect(rect, zone)?))
+                })
+        });
+        if released {
+            self.chrome.tab_drag = None;
+            if let Some((pane, zone, _)) = target {
+                self.drop_tab(tab, pane, zone);
+            }
+            return;
+        }
+        if let Some((pane, _, preview)) = target
+            && pane != tab
+        {
+            let tokens = Tokens::get(ctx);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                Order::Foreground,
+                Id::new("tab-drop-preview"),
+            ));
+            painter.rect(
+                preview.shrink(4.0),
+                CornerRadius::same(12),
+                tokens.accent.gamma_multiply(0.18),
+                Stroke::new(2.0, tokens.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ctx.request_repaint();
     }
 
     /// The background effect behind the pages.
@@ -598,6 +825,9 @@ impl ReaderApp {
         }
     }
 }
+
+/// The strip at the top of each split pane, for its title chip.
+const PANE_HEADER: f32 = 40.0;
 
 /// Reading widths from which the dock shows all its buttons, or the
 /// zoom, text, present and translation groups.

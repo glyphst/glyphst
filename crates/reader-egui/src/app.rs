@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use craft_ui::docking::Zone;
 use eframe::egui_wgpu;
 use glyphst_core::{DocumentFormat, DocumentLayout, EpubLayout};
 use glyphst_effects::EffectDef;
@@ -30,6 +31,7 @@ use crate::{
     icons,
     keys::Keymap,
     palette::{self, Item, Palette},
+    panes::{self, Panes},
     pickers::{Pickers, is_document},
     prefs::{LastSession, Prefs, SessionFile},
     settings_window::{Section, SettingsContext, SettingsWindow},
@@ -77,6 +79,8 @@ pub struct Launch {
     pub controls: Option<bool>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
+    /// Shows the second document beside the first, on this side.
+    pub split: Option<Zone>,
     /// Scripted runs: search for this text, select this page's text (from
     /// 1), show this sidebar tab, lay EPUBs out at this font size.
     pub find: Option<String>,
@@ -97,6 +101,19 @@ pub struct Launch {
     /// this section.
     pub palette: Option<String>,
     pub settings: Option<Section>,
+}
+
+/// One pane's frame of the document view.
+struct PaneView<'a> {
+    rect: egui::Rect,
+    /// The tab shown, an index into `tabs`.
+    index: usize,
+    focused: bool,
+    /// Keys, commands and the gamepad reach only the focused pane.
+    actions: Vec<ViewAction>,
+    pad: Option<&'a GamepadInput>,
+    seconds: f64,
+    now: Instant,
 }
 
 /// What a primary-button drag on the document does.
@@ -121,8 +138,11 @@ pub struct ReaderApp {
     theme_kind: Option<ThemeKind>,
     library: LibraryStore,
     pub(crate) tabs: Vec<DocumentTab>,
-    /// Index into `tabs`; `None` shows the home tab.
+    /// Index into `tabs` of the focused pane's tab; `None` shows the home
+    /// tab.
     pub(crate) active: Option<usize>,
+    /// The documents shown side by side on the stage.
+    pub(crate) panes: Panes,
     next_tab_id: u64,
     home: Home,
     pickers: Pickers,
@@ -137,7 +157,8 @@ pub struct ReaderApp {
     notices: crate::widgets::Toasts,
     show_stats: bool,
     sidebar_state: SidebarState,
-    drag: Option<Drag>,
+    /// The tab whose view a primary-button drag is in, and what it does.
+    drag: Option<(u64, Drag)>,
     note_editor: Option<NoteEditor>,
     /// The page a context menu was opened over.
     context_page: Option<usize>,
@@ -218,6 +239,7 @@ impl ReaderApp {
             library: LibraryStore::load(),
             tabs: Vec::new(),
             active: None,
+            panes: Panes::default(),
             next_tab_id: 1,
             home: Home::default(),
             pickers: Pickers::default(),
@@ -284,6 +306,21 @@ impl ReaderApp {
                 app.open_quietly(Path::new(&file.path), &ctx, Some(file.page));
             }
             app.active = session.active.filter(|&active| active < app.tabs.len());
+            // Panes only when every document opened again, so the indices
+            // still match.
+            let ids: Vec<u64> = app.tabs.iter().map(|tab| tab.id).collect();
+            if ids.len() == session.files.len()
+                && let Some(layout) = session
+                    .panes
+                    .as_ref()
+                    .and_then(|layout| panes::map_layout(layout, |&index| ids.get(index).copied()))
+            {
+                let focused = app.active.map(|active| ids[active]);
+                app.panes = Panes::restore(layout, focused);
+            }
+            if let Some(active) = app.active {
+                app.panes.show(ids[active]);
+            }
         } else {
             let page = launch.select_page.or(launch.page).map(|page| page - 1);
             for file in &launch.files {
@@ -291,6 +328,12 @@ impl ReaderApp {
                 if let (Some(zoom), Some(tab)) = (launch.zoom, app.tabs.last_mut()) {
                     tab.set_initial_zoom(zoom);
                 }
+            }
+            if let (Some(zone), [first, second, ..]) = (launch.split, app.tabs.as_slice()) {
+                let (first, second) = (first.id, second.id);
+                app.panes.show(first);
+                app.panes.split(second, first, zone);
+                app.active = Some(1);
             }
         }
         app.transition = None;
@@ -343,23 +386,65 @@ impl ReaderApp {
         self.transition = None;
     }
 
-    /// Makes another tab active, with the transition effect between two
-    /// document views.
+    /// Makes another tab active: it shows in the focused pane (or its own
+    /// pane gets the focus), with the transition effect from the document
+    /// it replaces.
     pub(crate) fn activate(&mut self, next: Option<usize>) {
         if next == self.active {
             return;
         }
         let previous = self.active;
         self.active = next;
-        let (Some(previous), Some(next)) = (previous, next) else {
+        let Some(next) = next else {
             return;
         };
-        let (Some(from), Some(effect)) = (self.tabs.get(previous), self.prefs.transition.clone())
+        let tab = self.tabs[next].id;
+        let replaced = self.panes.show(tab);
+        let (Some(_), Some(from), Some(effect)) =
+            (previous, replaced, self.prefs.transition.clone())
         else {
             return;
         };
-        let direction = if next >= previous { 1.0 } else { -1.0 };
-        self.begin_transition(effect, from.id, direction);
+        let from_index = self.tabs.iter().position(|tab| tab.id == from);
+        let direction = if from_index.is_none_or(|from| next >= from) {
+            1.0
+        } else {
+            -1.0
+        };
+        self.begin_transition(effect, from, tab, direction);
+    }
+
+    /// Focuses the pane showing tab `id`, without a transition.
+    fn focus_tab(&mut self, id: u64) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+            self.active = Some(index);
+            self.panes.show(id);
+        }
+    }
+
+    /// Opens the next document not on the stage in a new pane beside the
+    /// focused one.
+    fn split_next(&mut self, zone: Zone) -> Result<(), &'static str> {
+        let active = self.active.ok_or(Needs::Document.reason())?;
+        let beside = self.tabs[active].id;
+        let count = self.tabs.len();
+        let next = (1..count)
+            .map(|step| self.tabs[(active + step) % count].id)
+            .find(|&id| !self.panes.contains(id))
+            .ok_or("Open another document to split")?;
+        self.panes.show(beside);
+        if self.panes.split(next, beside, zone) {
+            self.focus_tab(next);
+        }
+        Ok(())
+    }
+
+    /// Shows a dragged tab on the stage: beside the pane under the pointer,
+    /// or in it.
+    pub(crate) fn drop_tab(&mut self, tab: u64, pane: u64, zone: Zone) {
+        if self.panes.split(tab, pane, zone) {
+            self.focus_tab(tab);
+        }
     }
 
     /// Reflowable documents (EPUB) open laid out for the view; others keep
@@ -820,7 +905,7 @@ impl ReaderApp {
         }
     }
 
-    fn begin_transition(&mut self, effect: String, from_tab: u64, direction: f32) {
+    fn begin_transition(&mut self, effect: String, from_tab: u64, tab: u64, direction: f32) {
         let duration = self
             .with_gpu(|gpu| gpu.effects().find(&effect).map(|def| def.duration_ms))
             .flatten();
@@ -828,6 +913,7 @@ impl ReaderApp {
             self.transition = Some(ViewTransition::new(
                 effect,
                 from_tab,
+                tab,
                 direction,
                 duration,
                 Instant::now(),
@@ -840,18 +926,26 @@ impl ReaderApp {
         let tab = self.tabs.remove(index);
         self.saved_positions.remove(&tab.id);
         self.with_gpu(|gpu| gpu.drop_tab(tab.id));
+        self.panes.remove_tab(tab.id);
         self.transition = None;
+        let focused = self
+            .panes
+            .focused()
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id));
         self.active = match self.active {
             Some(active) if active == index => {
                 if self.tabs.is_empty() {
                     None
                 } else {
-                    Some(index.min(self.tabs.len() - 1))
+                    focused.or(Some(index.min(self.tabs.len() - 1)))
                 }
             }
             Some(active) if active > index => Some(active - 1),
             other => other,
         };
+        if let Some(active) = self.active {
+            self.panes.show(self.tabs[active].id);
+        }
     }
 
     /// Records a tab's position in the library when it moved.
@@ -883,6 +977,9 @@ impl ReaderApp {
                 })
                 .collect(),
             active: self.active,
+            panes: panes::map_layout(self.panes.layout(), |id| {
+                self.tabs.iter().position(|tab| tab.id == *id)
+            }),
         }
     }
 
@@ -1004,6 +1101,7 @@ impl ReaderApp {
             Needs::Selection => tab.selection.is_some(),
             Needs::Reflow => matches!(tab.document_layout, DocumentLayout::Reflow(_)),
             Needs::Translation => tab.translation.is_some(),
+            Needs::Panes => self.panes.count() > 1,
         };
         (!can).then(|| command.needs().reason())
     }
@@ -1078,6 +1176,30 @@ impl ReaderApp {
             Command::ZoomOut => view(ViewAction::ZoomOut),
             Command::FitWidth => view(ViewAction::FitWidth),
             Command::Present => view(ViewAction::TogglePresent),
+            Command::SplitRight | Command::SplitDown => {
+                let zone = if command == Command::SplitRight {
+                    Zone::Right
+                } else {
+                    Zone::Bottom
+                };
+                self.split_next(zone)?;
+                None
+            }
+            Command::FocusNextPane => {
+                if let Some(next) = self.panes.next() {
+                    self.focus_tab(next);
+                }
+                None
+            }
+            Command::ClosePane => {
+                if let Some(active) = self.active
+                    && self.panes.close_pane(self.tabs[active].id)
+                    && let Some(focused) = self.panes.focused()
+                {
+                    self.focus_tab(focused);
+                }
+                None
+            }
             Command::LargerText | Command::SmallerText => {
                 let step = if command == Command::LargerText {
                     1.0
@@ -1272,7 +1394,10 @@ impl ReaderApp {
                 } else {
                     "file-text"
                 };
+                // Shown in another pane: a faint fill.
+                let on_stage = self.panes.count() > 1 && self.panes.contains(self.tabs[index].id);
                 let response = craft_ui::tabs::Tab::new(id, label, is_selected)
+                    .sense(egui::Sense::click_and_drag())
                     .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
                     .show_at(ui, rect, |ui, response| {
                         if is_selected {
@@ -1283,7 +1408,7 @@ impl ReaderApp {
                                 egui::Stroke::new(1.0, tokens.border),
                                 egui::StrokeKind::Inside,
                             );
-                        } else if response.hovered() {
+                        } else if response.hovered() || on_stage {
                             ui.painter().rect_filled(rect, 8.0, tokens.hover);
                         }
                         icons::paint(
@@ -1316,6 +1441,13 @@ impl ReaderApp {
                     .on_hover_text(&self.tabs[index].title);
                 if response.clicked() {
                     select = Some(Some(index));
+                }
+                // Dragged onto the stage, it opens beside a pane.
+                if response.drag_started() {
+                    self.chrome.tab_drag = Some(self.tabs[index].id);
+                }
+                if response.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                 }
                 if response.middle_clicked() {
                     close = Some(index);
@@ -1460,22 +1592,31 @@ impl ReaderApp {
         }
     }
 
-    /// The document view: input, layout, loading, the GPU callback and
-    /// loading placeholders. Returns whether it is animating and whether
-    /// every visible page is drawn.
+    /// A pane's document view: input, layout, loading, the GPU callback
+    /// and loading placeholders. Pages it wants are added to `keep`.
+    /// Returns whether it is animating and whether every visible page is
+    /// drawn.
     fn document_view(
         &mut self,
         ui: &mut egui::Ui,
-        rect: egui::Rect,
-        actions: Vec<ViewAction>,
-        pad: &GamepadInput,
-        seconds: f64,
-        now: Instant,
+        view: PaneView<'_>,
+        keep: &mut Vec<PageKey>,
     ) -> (bool, bool) {
-        let Some(active) = self.active else {
-            return (false, true);
-        };
+        let PaneView {
+            rect,
+            index: active,
+            focused,
+            actions,
+            pad,
+            seconds,
+            now,
+        } = view;
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        // Pressing in another pane focuses it, before its input runs.
+        if !focused && response.is_pointer_button_down_on() {
+            let id = self.tabs[active].id;
+            self.focus_tab(id);
+        }
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let size = pixel_size(rect, ppp);
@@ -1493,7 +1634,8 @@ impl ReaderApp {
             .collect();
         let mut actions = actions;
         let autoscroll = self.text_input(&ctx, &response, &maps, active, rect, &mut actions);
-        let drag = if self.drag == Some(Drag::Pan) {
+        let tab_id = self.tabs[active].id;
+        let drag = if self.drag == Some((tab_id, Drag::Pan)) {
             response.drag_delta()
         } else {
             egui::Vec2::ZERO
@@ -1522,26 +1664,27 @@ impl ReaderApp {
             ],
             pointer,
             actions,
-            gamepad: Some(pad),
+            gamepad: pad,
             seconds,
             now: Some(now),
         };
         let turning = self.transition.is_some();
         self.tabs[active].pixels_per_point = f64::from(ppp);
-        let tab_id = self.tabs[active].id;
         let mut frame = self.tabs[active].frame(size, input, turning);
         if let Some(direction) = frame.turn
             && let Some(effect) = self.prefs.transition.clone()
         {
-            self.begin_transition(effect, tab_id, direction);
+            self.begin_transition(effect, tab_id, tab_id, direction);
         }
 
-        // Loading: ask for wanted pages, drop pages over the budget.
-        let keep: Vec<PageKey> = frame
-            .wanted
-            .iter()
-            .map(|&page| PageKey { tab: tab_id, page })
-            .collect();
+        // Loading: ask for wanted pages; the stage drops pages over the
+        // budget once every pane has said what it keeps.
+        keep.extend(
+            frame
+                .wanted
+                .iter()
+                .map(|&page| PageKey { tab: tab_id, page }),
+        );
         let resident: std::collections::HashSet<usize> = frame
             .wanted
             .iter()
@@ -1549,13 +1692,6 @@ impl ReaderApp {
             .filter(|&page| self.is_resident(PageKey { tab: tab_id, page }))
             .collect();
         self.tabs[active].want(&frame.wanted, |page| resident.contains(&page));
-        if let Some(dropped) = self.with_gpu(|gpu| gpu.evict(&keep, PAGE_BUDGET_BYTES)) {
-            for key in dropped {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == key.tab) {
-                    tab.forget(key.page);
-                }
-            }
-        }
         // A page being uploaded keeps its placeholder until it can be drawn.
         let drawable: std::collections::HashSet<usize> = frame
             .wanted
@@ -1569,29 +1705,33 @@ impl ReaderApp {
         self.tabs[active].placeholders(&mut frame, |page| drawable.contains(&page));
 
         let tokens = Tokens::get(&ctx);
-        let transition = self.transition.as_mut().map(|transition| {
-            let params = self
-                .render_state
-                .renderer
-                .write()
-                .callback_resources
-                .get::<ReaderGpu>()
-                .and_then(|gpu| {
-                    gpu.effects()
-                        .find(&transition.effect)
-                        .map(|def| def.default_params())
-                })
-                .unwrap_or_default();
-            TransitionUse {
-                effect: EffectUse {
-                    id: transition.effect.clone(),
-                    params,
-                },
-                progress: transition.progress(now),
-                direction: transition.direction,
-                capture_from: transition.take_capture(),
-            }
-        });
+        let transition = self
+            .transition
+            .as_mut()
+            .filter(|transition| transition.tab == tab_id)
+            .map(|transition| {
+                let params = self
+                    .render_state
+                    .renderer
+                    .write()
+                    .callback_resources
+                    .get::<ReaderGpu>()
+                    .and_then(|gpu| {
+                        gpu.effects()
+                            .find(&transition.effect)
+                            .map(|def| def.default_params())
+                    })
+                    .unwrap_or_default();
+                TransitionUse {
+                    effect: EffectUse {
+                        id: transition.effect.clone(),
+                        params,
+                    },
+                    progress: transition.progress(now),
+                    direction: transition.direction,
+                    capture_from: transition.take_capture(),
+                }
+            });
         let page_color = tokens.page.to_normalized_gamma_f32();
         // Shadows under the pages, between the backdrop and the pages; a
         // transition's outgoing pages sit elsewhere, so none then.
@@ -1645,11 +1785,13 @@ impl ReaderApp {
                 );
             }
         }
-        if self.show_stats {
+        let focused = self.active == Some(active);
+        if self.show_stats && focused {
             self.stats_overlay(&painter, rect, active);
         }
         let tab = &mut self.tabs[active];
-        if tab.find.open
+        if focused
+            && tab.find.open
             && let Some(action) = find::find_bar(&mut tab.find, rect, &ctx, now)
         {
             match action {
@@ -1657,8 +1799,6 @@ impl ReaderApp {
                 FindBarAction::Close => tab.find.close(),
             }
         }
-        self.note_popover(&ctx);
-        self.translation_card(&ctx);
         if self.tabs[active].is_reflowed() {
             self.reflow_to_view(active, rect.width(), now, &ctx);
         }
@@ -1683,6 +1823,11 @@ impl ReaderApp {
     ) -> f64 {
         let modifiers = ctx.input(|i| i.modifiers);
         let tab = &self.tabs[active];
+        let tab_id = tab.id;
+        // This view's drag; another pane may have its own.
+        let own = |drag: Option<(u64, Drag)>| {
+            drag.filter(|(tab, _)| *tab == tab_id).map(|(_, drag)| drag)
+        };
         let reflowed = tab.is_reflowed();
         // What is under a screen position: the page map and page point.
         let under = |pos: egui::Pos2| page_at(maps, pos).map(|map| (*map, map.page_point(pos)));
@@ -1695,7 +1840,7 @@ impl ReaderApp {
                 text.glyph_at(point[0], point[1], map.points(GLYPH_SLOP))
                     .is_some()
             });
-            if matches!(self.drag, Some(Drag::Select { .. })) || (text && !link) {
+            if matches!(own(self.drag), Some(Drag::Select { .. })) || (text && !link) {
                 ctx.set_cursor_icon(egui::CursorIcon::Text);
             } else if link {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1733,7 +1878,7 @@ impl ReaderApp {
         }
 
         if response.drag_started_by(egui::PointerButton::Primary) {
-            self.drag = Some(Drag::Pan);
+            self.drag = Some((tab_id, Drag::Pan));
             let origin = ctx
                 .input(|i| i.pointer.press_origin())
                 .or(response.interact_pointer_pos());
@@ -1757,7 +1902,7 @@ impl ReaderApp {
                     None
                 };
                 if let Some(span) = span {
-                    self.drag = Some(Drag::Select { page: map.page });
+                    self.drag = Some((tab_id, Drag::Select { page: map.page }));
                     self.tabs[active].selection = Some(Selection {
                         page: map.page,
                         span,
@@ -1766,7 +1911,7 @@ impl ReaderApp {
             }
         }
         let mut autoscroll = 0.0;
-        if let Some(Drag::Select { page }) = self.drag
+        if let Some(Drag::Select { page }) = own(self.drag)
             && let Some(pos) = response.interact_pointer_pos()
         {
             let tab = &mut self.tabs[active];
@@ -1790,7 +1935,7 @@ impl ReaderApp {
                 autoscroll = SELECT_SCROLL;
             }
         }
-        if response.drag_stopped() || !response.dragged() {
+        if own(self.drag).is_some() && (response.drag_stopped() || !response.dragged()) {
             self.drag = None;
         }
 
@@ -2231,6 +2376,9 @@ impl eframe::App for ReaderApp {
                 }
             });
 
+        if ctx.input(|i| !i.pointer.any_down()) {
+            self.chrome.tab_drag = None;
+        }
         self.overlays(&ctx);
         // Above the dock while it shows.
         let lift = if self.active.is_some() && !presenting {
