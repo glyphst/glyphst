@@ -107,6 +107,11 @@ impl ReaderApp {
         let Some(active) = self.active else {
             return false;
         };
+        for command in std::mem::take(&mut self.launch_commands) {
+            if let Err(reason) = self.run(command, ctx) {
+                eprintln!("--command {}: {reason}", command.id());
+            }
+        }
         let tab = &mut self.tabs[active];
         if let Some(query) = self.launch_find.take() {
             let page = tab.current_page();

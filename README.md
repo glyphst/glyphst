@@ -78,6 +78,8 @@ translates through a local fake provider (no keys, no network), and
 `--translate-document` / `--translate-selection` start a translation that a
 screenshot waits for and a bench runs alongside. `--ai-fake` answers the
 assistant from a local fake model, and `--ask TEXT` asks it at startup.
+`--command ID` (repeatable) runs a command by its id, such as `view.zen`,
+once the documents are open.
 `--palette QUERY` opens the command palette and `--settings SECTION` the
 settings window (`appearance`, `effects`, `reading`, `shortcuts`,
 `translation`, `ocr`, `ai`). Scripted runs keep settings and keys in memory.

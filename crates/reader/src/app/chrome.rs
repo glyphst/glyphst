@@ -52,7 +52,7 @@ impl ReaderApp {
             rail_buttons: SidebarTab::ALL.len(),
             drawer: self.prefs.show_sidebar.then_some(self.prefs.drawer_width),
             assistant: self.assistant.open.then_some(self.prefs.assistant_width),
-            present: presenting,
+            present: presenting || self.zen,
         });
         let ppp = ctx.pixels_per_point();
         let pointer = ctx
@@ -81,7 +81,7 @@ impl ReaderApp {
         let mut actions = Some(actions);
         let (mut animating, mut drawn) = (false, true);
         let mut keep = Vec::new();
-        let split = panes.len() > 1;
+        let split = panes.len() > 1 && !self.zen;
         for &(id, pane) in &panes {
             // Split panes keep a strip at the top for their title chip.
             let rect = if split {
@@ -120,7 +120,7 @@ impl ReaderApp {
         self.chrome.panes = panes.clone();
         self.note_popover(&ctx);
         self.translation_card(&ctx);
-        if presenting {
+        if presenting || self.zen {
             return (animating, drawn);
         }
         if panes.len() > 1 {

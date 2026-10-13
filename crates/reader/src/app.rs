@@ -114,6 +114,8 @@ pub struct Launch {
     /// this section.
     pub palette: Option<String>,
     pub settings: Option<Section>,
+    /// Scripted runs: commands run once the documents are open.
+    pub commands: Vec<Command>,
 }
 
 /// One pane's frame of the document view.
@@ -170,6 +172,9 @@ pub struct ReaderApp {
     last_update: Instant,
     notices: crate::widgets::Toasts,
     show_stats: bool,
+    /// Zen mode: the pages alone, without the tabs, rail, drawers, dock or
+    /// title chips.
+    pub(crate) zen: bool,
     sidebar_state: SidebarState,
     /// The tab whose view a primary-button drag is in, and what it does.
     drag: Option<(u64, Drag)>,
@@ -187,6 +192,7 @@ pub struct ReaderApp {
     chatgpt: ChatGptSubscription,
     pub(crate) assistant: Assistant,
     pub(crate) launch_ask: Option<String>,
+    pub(crate) launch_commands: Vec<Command>,
     page_input: String,
     saved_positions: HashMap<u64, DocumentPosition>,
     last_position_save: Instant,
@@ -298,6 +304,7 @@ impl ReaderApp {
             last_update: Instant::now(),
             notices: Default::default(),
             show_stats: launch.harness.is_some(),
+            zen: false,
             sidebar_state: SidebarState::default(),
             drag: None,
             note_editor: None,
@@ -312,6 +319,7 @@ impl ReaderApp {
             chatgpt,
             assistant: Assistant::default(),
             launch_ask: launch.ask,
+            launch_commands: launch.commands,
             page_input: String::new(),
             saved_positions: HashMap::new(),
             last_position_save: Instant::now(),
@@ -1226,6 +1234,8 @@ impl ReaderApp {
                     tab.find.close();
                 } else if tab.present.is_some() {
                     actions.push(ViewAction::TogglePresent);
+                } else if self.zen {
+                    self.zen = false;
                 }
             }
         }
@@ -1294,6 +1304,15 @@ impl ReaderApp {
             }
             Command::ToggleStats => {
                 self.show_stats = !self.show_stats;
+                None
+            }
+            Command::Zen => {
+                self.zen = !self.zen;
+                if self.zen {
+                    let key = self.keymap.label(Command::Zen).unwrap_or_default();
+                    self.notices
+                        .push(format!("Zen mode. Press Esc or {key} to leave."));
+                }
                 None
             }
             Command::ThemeSystem => {
@@ -2625,7 +2644,9 @@ impl eframe::App for ReaderApp {
                 .push(format!("Presenting. Press Esc or {key} to leave."));
         }
         self.was_presenting = presenting;
-        if !presenting {
+        // Zen mode is for reading a document; the home page leaves it.
+        self.zen &= self.active.is_some();
+        if !presenting && !self.zen {
             egui::Panel::top("tabs")
                 .exact_size(40.0)
                 .frame(
@@ -2659,7 +2680,7 @@ impl eframe::App for ReaderApp {
         }
         self.overlays(&ctx);
         // Above the dock while it shows.
-        let lift = if self.active.is_some() && !presenting {
+        let lift = if self.active.is_some() && !presenting && !self.zen {
             84.0
         } else {
             28.0

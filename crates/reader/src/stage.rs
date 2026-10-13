@@ -33,7 +33,7 @@ pub struct StageInput {
     pub drawer: Option<f32>,
     /// The assistant's width, when open.
     pub assistant: Option<f32>,
-    /// Present mode hides everything but the pages.
+    /// Present and zen modes hide everything but the pages.
     pub present: bool,
 }
 

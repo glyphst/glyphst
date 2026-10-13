@@ -35,6 +35,7 @@ pub enum Command {
     ToggleSpread,
     Reload,
     Present,
+    Zen,
     SplitRight,
     SplitDown,
     FocusNextPane,
@@ -117,7 +118,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -145,6 +146,7 @@ impl Command {
         Self::ToggleSpread,
         Self::Reload,
         Self::Present,
+        Self::Zen,
         Self::SplitRight,
         Self::SplitDown,
         Self::FocusNextPane,
@@ -192,6 +194,7 @@ impl Command {
             Self::ToggleSpread => "view.two_page_spread",
             Self::Reload => "view.reload",
             Self::Present => "view.present",
+            Self::Zen => "view.zen",
             Self::SplitRight => "view.split_right",
             Self::SplitDown => "view.split_down",
             Self::FocusNextPane => "view.focus_next_pane",
@@ -243,6 +246,7 @@ impl Command {
             Self::ToggleSpread => "Two-page spread",
             Self::Reload => "Reload the document",
             Self::Present => "Present",
+            Self::Zen => "Zen mode: hide everything but the pages",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
             Self::FocusNextPane => "Focus the next pane",
@@ -291,6 +295,7 @@ impl Command {
             Self::ToggleSpread => "book-open",
             Self::Reload => "refresh-cw",
             Self::Present => "presentation",
+            Self::Zen => "eye-off",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
             Self::FocusNextPane => "panels-top-left",
@@ -335,6 +340,7 @@ impl Command {
             | Self::ToggleSpread
             | Self::Reload
             | Self::Present
+            | Self::Zen
             | Self::SplitRight
             | Self::SplitDown
             | Self::FocusNextPane
@@ -380,6 +386,7 @@ impl Command {
             Self::RotateCounterclockwise => &["Shift+R"],
             Self::Reload => &["F5", "Ctrl+R"],
             Self::Present => &["P"],
+            Self::Zen => &["Z"],
             Self::SplitRight => &["Ctrl+Backslash"],
             Self::FocusNextPane => &["F6"],
             Self::Find => &["Ctrl+F"],
@@ -445,6 +452,7 @@ impl Command {
                 | Self::RotateClockwise
                 | Self::RotateCounterclockwise
                 | Self::Present
+                | Self::Zen
         )
     }
 }
