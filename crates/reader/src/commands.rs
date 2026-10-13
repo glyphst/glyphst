@@ -21,6 +21,8 @@ pub enum Command {
     ThemeDark,
     NextPage,
     PreviousPage,
+    NextHalfPage,
+    PreviousHalfPage,
     FirstPage,
     LastPage,
     Back,
@@ -115,7 +117,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 42] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -129,6 +131,8 @@ impl Command {
         Self::ThemeDark,
         Self::NextPage,
         Self::PreviousPage,
+        Self::NextHalfPage,
+        Self::PreviousHalfPage,
         Self::FirstPage,
         Self::LastPage,
         Self::Back,
@@ -174,6 +178,8 @@ impl Command {
             Self::ThemeDark => "app.theme_dark",
             Self::NextPage => "navigation.next_page",
             Self::PreviousPage => "navigation.previous_page",
+            Self::NextHalfPage => "navigation.next_half_page",
+            Self::PreviousHalfPage => "navigation.previous_half_page",
             Self::FirstPage => "navigation.first_page",
             Self::LastPage => "navigation.last_page",
             Self::Back => "navigation.back",
@@ -223,6 +229,8 @@ impl Command {
             Self::ThemeDark => "Theme: Dark",
             Self::NextPage => "Next page",
             Self::PreviousPage => "Previous page",
+            Self::NextHalfPage => "Down half a screen",
+            Self::PreviousHalfPage => "Up half a screen",
             Self::FirstPage => "First page",
             Self::LastPage => "Last page",
             Self::Back => "Back",
@@ -269,6 +277,8 @@ impl Command {
             Self::ThemeDark => "moon",
             Self::NextPage => "chevron-down",
             Self::PreviousPage => "chevron-up",
+            Self::NextHalfPage => "chevron-down",
+            Self::PreviousHalfPage => "chevron-up",
             Self::FirstPage => "chevron-up",
             Self::LastPage => "chevron-down",
             Self::Back => "arrow-left",
@@ -311,6 +321,8 @@ impl Command {
             | Self::ThemeDark => Category::App,
             Self::NextPage
             | Self::PreviousPage
+            | Self::NextHalfPage
+            | Self::PreviousHalfPage
             | Self::FirstPage
             | Self::LastPage
             | Self::Back
@@ -355,6 +367,8 @@ impl Command {
             Self::ToggleStats => &["F12"],
             Self::NextPage => &["PageDown", "Space"],
             Self::PreviousPage => &["PageUp"],
+            Self::NextHalfPage => &["Shift+PageDown"],
+            Self::PreviousHalfPage => &["Shift+PageUp"],
             Self::FirstPage => &["Home"],
             Self::LastPage => &["End"],
             Self::Back => &["Alt+Left"],
@@ -421,6 +435,8 @@ impl Command {
                 | Self::SelectPage
                 | Self::NextPage
                 | Self::PreviousPage
+                | Self::NextHalfPage
+                | Self::PreviousHalfPage
                 | Self::FirstPage
                 | Self::LastPage
                 | Self::ZoomIn

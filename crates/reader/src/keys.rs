@@ -494,6 +494,14 @@ mod tests {
         );
         assert_eq!(press(&keymap, Key::Space, none, false), [Command::NextPage]);
         assert_eq!(
+            press(&keymap, Key::PageDown, Modifiers::SHIFT, false),
+            [Command::NextHalfPage]
+        );
+        assert_eq!(
+            press(&keymap, Key::PageUp, Modifiers::SHIFT, false),
+            [Command::PreviousHalfPage]
+        );
+        assert_eq!(
             press(&keymap, Key::Plus, Modifiers::SHIFT, false),
             [Command::ZoomIn],
             "layouts type + with Shift"

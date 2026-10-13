@@ -68,6 +68,11 @@ pub enum ViewAction {
     ZoomOut,
     /// Scrolls by whole steps; positive scrolls down.
     Step(i32),
+    /// Scrolls sideways by whole steps; positive scrolls right.
+    Sideways(i32),
+    /// Scrolls by half the view's height; positive scrolls down. When
+    /// presenting it turns the page.
+    HalfPage(i32),
     GoToPage(usize),
     /// Goes to a page point (a link or a bookmark), remembering where the
     /// view was.
@@ -1083,6 +1088,21 @@ impl DocumentTab {
             ViewAction::Step(steps) => self
                 .view
                 .scroll_by_pixels(0.0, f64::from(steps) * STEP_PIXELS),
+            ViewAction::Sideways(steps) => self
+                .view
+                .scroll_by_pixels(f64::from(steps) * STEP_PIXELS, 0.0),
+            ViewAction::HalfPage(direction) => {
+                if self.present.is_some() {
+                    let turn = if direction > 0 {
+                        ViewAction::NextPage
+                    } else {
+                        ViewAction::PreviousPage
+                    };
+                    return self.apply(turn, turning);
+                }
+                self.view
+                    .scroll_by_pixels(0.0, f64::from(direction) * self.viewport[1] / 2.0);
+            }
             ViewAction::GoToPage(page) => {
                 self.remember();
                 self.go_to_page(page);
@@ -1368,6 +1388,25 @@ mod tests {
         tab.restore = Some(DocumentPosition::fixed(0.0, 99_999.0, 1.0, 5));
         settle(&mut tab);
         assert_eq!(tab.position().page, 5);
+    }
+
+    #[test]
+    fn half_pages_scroll_half_the_view_or_turn_when_presenting() {
+        let mut tab = tab(3);
+        settle(&mut tab);
+        let (top, scale) = (tab.view.origin[1], tab.view.scale);
+        tab.apply(ViewAction::HalfPage(1), false);
+        let moved = (tab.view.origin[1] - top) * scale;
+        assert!((moved - tab.viewport[1] / 2.0).abs() < 1e-6, "{moved}");
+        tab.apply(ViewAction::HalfPage(-1), false);
+        assert!((tab.view.origin[1] - top).abs() < 1e-9);
+        let left = tab.view.origin[0];
+        tab.apply(ViewAction::Sideways(1), false);
+        assert!(tab.view.origin[0] > left, "right scrolls right");
+
+        tab.apply(ViewAction::TogglePresent, false);
+        assert_eq!(tab.apply(ViewAction::HalfPage(1), false), Some(1.0));
+        assert_eq!(tab.present, Some(1));
     }
 
     #[test]

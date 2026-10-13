@@ -1215,6 +1215,7 @@ impl ReaderApp {
             if copy {
                 self.copy_selection(ctx);
             }
+            actions.extend(arrow_actions(ctx, self.tabs[active].present.is_some()));
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 let tab = &mut self.tabs[active];
                 if self.note_editor.is_some() {
@@ -1309,6 +1310,8 @@ impl ReaderApp {
             }
             Command::NextPage => view(ViewAction::NextPage),
             Command::PreviousPage => view(ViewAction::PreviousPage),
+            Command::NextHalfPage => view(ViewAction::HalfPage(1)),
+            Command::PreviousHalfPage => view(ViewAction::HalfPage(-1)),
             Command::FirstPage => view(ViewAction::GoToPage(0)),
             Command::LastPage => view(ViewAction::GoToPage(usize::MAX)),
             Command::Back => view(ViewAction::Back),
@@ -2789,6 +2792,35 @@ fn truncate(text: &str, limit: usize) -> String {
     let mut short: String = text.chars().take(limit - 1).collect();
     short.push('…');
     short
+}
+
+/// The view's fixed arrow keys: they scroll a step (sideways for left and
+/// right), and turn the page when presenting.
+fn arrow_actions(ctx: &egui::Context, presenting: bool) -> Vec<ViewAction> {
+    use egui::{Key, Modifiers};
+    let keys = [
+        (Key::ArrowUp, ViewAction::Step(-1), ViewAction::PreviousPage),
+        (Key::ArrowDown, ViewAction::Step(1), ViewAction::NextPage),
+        (
+            Key::ArrowLeft,
+            ViewAction::Sideways(-1),
+            ViewAction::PreviousPage,
+        ),
+        (
+            Key::ArrowRight,
+            ViewAction::Sideways(1),
+            ViewAction::NextPage,
+        ),
+    ];
+    let mut actions = Vec::new();
+    ctx.input_mut(|input| {
+        for (key, scroll, turn) in keys {
+            while input.consume_key(Modifiers::NONE, key) {
+                actions.push(if presenting { turn } else { scroll });
+            }
+        }
+    });
+    actions
 }
 
 #[cfg(test)]
