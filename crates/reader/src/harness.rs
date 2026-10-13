@@ -114,13 +114,15 @@ impl ReaderApp {
             tab.find.query = query;
             tab.find.edited(now - Duration::from_secs(1));
         }
-        if let Some(page) = self.launch_select {
-            // The documents opened at this page.
-            let page = (page - 1).min(tab.layout.len() - 1);
-            if tab.text.get(page).is_none() {
+        if let Some((first, last)) = self.launch_select {
+            // The documents opened at the first page.
+            let last_page = tab.layout.len() - 1;
+            let (first, last) = ((first - 1).min(last_page), (last - 1).min(last_page));
+            if !tab.select_pages(first, last) {
+                // Waits for the pages' text (the next page's comes with it
+                // once in view).
                 return true;
             }
-            tab.select_page(page);
             self.launch_select = None;
         }
         // A search shows its final count, with the current match in view.

@@ -70,8 +70,9 @@ colours, `--controls shown|hidden` the reading dock (scripted runs keep
 it shown), `--split right|down` shows the second document beside the
 first, `--rotate 90|180|270` and `--spread` turn and spread the pages
 (without remembering it), and `--overlay ID|none` and `--wallpaper PATH`
-set the page tint and the wallpaper; `--find TEXT`, `--select-page N`,
-`--sidebar TAB` and `--font-size PT` (EPUB) show a search, a selection, a
+set the page tint and the wallpaper; `--find TEXT`, `--select-page N`
+(or `--select-pages A-B`), `--sidebar TAB` and `--font-size PT` (EPUB)
+show a search, a selection, a
 sidebar tab or a reflowed size in the screenshot. `--translate-fake`
 translates through a local fake provider (no keys, no network), and
 `--translate-document` / `--translate-selection` start a translation that a

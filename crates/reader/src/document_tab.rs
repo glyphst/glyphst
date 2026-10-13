@@ -517,7 +517,7 @@ impl DocumentTab {
                 if self
                     .selection
                     .as_ref()
-                    .is_some_and(|selection| selection.page == page)
+                    .is_some_and(|selection| selection.touches(page))
                 {
                     self.selection = None;
                 }
@@ -550,8 +550,11 @@ impl DocumentTab {
         self.original_text.remove(&page);
         // Text goes with the page unless a search, the reflowed layout or
         // the selection needs it.
-        let selected = self.selection.as_ref().map(|selection| selection.page);
-        if !self.find.is_active() && !self.is_reflowed() && selected != Some(page) {
+        let selected = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.touches(page));
+        if !self.find.is_active() && !self.is_reflowed() && !selected {
             self.text.remove(page);
         }
     }
@@ -579,14 +582,50 @@ impl DocumentTab {
                         .collect(),
                 );
             }
-        } else if self.text_requested.iter().any(|requested| *requested) {
-            self.indexer.cancel_text();
-            self.text_requested.fill(false);
-            let near = |page: usize| page.abs_diff(current) <= 8;
-            let selected = self.selection.as_ref().map(|selection| selection.page);
-            self.text.retain(|page| {
-                near(page) || Some(page) == selected || self.links.contains_key(&page)
-            });
+        } else {
+            let selected = |page: usize| {
+                self.selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.touches(page))
+            };
+            // Requests left over from a search go; the selection's stay.
+            let stale = self
+                .text_requested
+                .iter()
+                .enumerate()
+                .any(|(page, requested)| *requested && !selected(page));
+            if stale {
+                self.indexer.cancel_text();
+                self.text_requested.fill(false);
+                let near = |page: usize| page.abs_diff(current) <= 8;
+                self.text
+                    .retain(|page| near(page) || selected(page) || self.links.contains_key(&page));
+            }
+            // Pages a selection runs over that were never loaded (a drag
+            // that scrolled past them) have their text read.
+            let missing: Vec<usize> = self
+                .selection
+                .as_ref()
+                .map(|selection| selection.pages().collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|&page| {
+                    page < self.layout.len()
+                        && self.text.get(page).is_none()
+                        && !self.text_requested[page]
+                })
+                .collect();
+            if !missing.is_empty() {
+                for &page in &missing {
+                    self.text_requested[page] = true;
+                }
+                self.indexer.request_text(
+                    missing
+                        .into_iter()
+                        .map(|page| (page, self.source(page)))
+                        .collect(),
+                );
+            }
         }
         if self.is_reflowed() {
             self.annotations.resolve(&self.text);
@@ -630,11 +669,33 @@ impl DocumentTab {
         })
     }
 
-    /// The text of the selection.
+    /// The text of the selection; `None` while a selected page's text is
+    /// still being read.
     pub fn selected_text(&self) -> Option<String> {
         let selection = self.selection.as_ref()?;
-        let text = selection.text(self.text.get(selection.page)?);
+        let text = selection.text(|page| self.text.get(page).map(|text| text.as_ref()))?;
         (!text.is_empty()).then_some(text)
+    }
+
+    /// Selects pages `first..=last` whole, once their text is read;
+    /// returns whether it did.
+    pub fn select_pages(&mut self, first: usize, last: usize) -> bool {
+        let last = last.min(self.layout.len().saturating_sub(1));
+        let (Some(_), Some(end)) = (self.text.get(first), self.text.get(last)) else {
+            return false;
+        };
+        let end = end.len().saturating_sub(1);
+        self.selection = Some(Selection::Run {
+            anchor: crate::text_overlay::TextPos {
+                page: first,
+                glyph: 0,
+            },
+            head: crate::text_overlay::TextPos {
+                page: last,
+                glyph: end,
+            },
+        });
+        true
     }
 
     /// Selects all text of the page at the view's center.
@@ -1532,5 +1593,43 @@ mod tests {
         );
         // Heights along the page run across the view: no document y.
         assert_eq!(tab.document_y(0, 10.0), None);
+    }
+
+    #[test]
+    fn a_selection_keeps_and_reads_the_text_of_its_pages() {
+        use crate::text_overlay::TextPos;
+        let mut tab = tab(30);
+        let text = |content: &str| {
+            Arc::new(PageText {
+                glyphs: content
+                    .chars()
+                    .map(|ch| glyphst_pdf::text::Glyph {
+                        ch,
+                        rect: [0.0, 0.0, 6.0, 12.0],
+                    })
+                    .collect(),
+                line_of: vec![0; content.chars().count()],
+            })
+        };
+        for page in [20, 22] {
+            tab.text.insert(page, text("words"));
+        }
+        tab.selection = Some(Selection::Run {
+            anchor: TextPos { page: 20, glyph: 0 },
+            head: TextPos { page: 22, glyph: 4 },
+        });
+        assert_eq!(tab.selected_text(), None, "page 21's text is not read yet");
+        // The page in between is asked for, far from the view as it is.
+        tab.update_text(Instant::now());
+        assert!(tab.text_requested[21]);
+        assert!(!tab.text_requested[25]);
+        tab.text.insert(21, text("middle"));
+        assert_eq!(tab.selected_text().as_deref(), Some("words\nmiddle\nwords"));
+        // Dropping a selected page from the GPU keeps its text.
+        tab.forget(22);
+        assert!(tab.text.get(22).is_some());
+        tab.selection = None;
+        tab.forget(22);
+        assert!(tab.text.get(22).is_none());
     }
 }

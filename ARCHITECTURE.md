@@ -148,7 +148,11 @@ positions and highlight anchors saved by the GPUI Reader still resolve.
 Text follows each loaded page; a second worker per document reads
 the remaining pages' text for search and reflowed documents, and sidebar
 thumbnails. Selections, search matches and highlights are egui shapes over
-the GPU view. Positions store pages from 1, as the library does. Fixed-layout
+the GPU view. A selection is a run from one glyph to another, across
+pages (the pages between whole), or a column on one page; the text of its
+pages is kept, and read when missing, while it lasts. Text fields take
+the keyboard focus once rather than every frame: egui's request_focus
+also interrupts an input method's composition. Positions store pages from 1, as the library does. Fixed-layout
 highlights and notes keep page rectangles; reflowed ones keep a semantic range
 and are found again after a relayout. EPUBs are laid out for the view's width
 (capped by the document's reading preferences) and shown at actual size.

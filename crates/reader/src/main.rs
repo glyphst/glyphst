@@ -3,7 +3,7 @@
 //!
 //! glyphst-reader [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
-//!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--sidebar TAB] [--font-size PT]
+//!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
 //!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
@@ -63,7 +63,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
                      [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] \
-                     [--page N] [--find TEXT] [--select-page N] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
+                     [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
 fn parse_args() -> Result<Launch> {
@@ -81,7 +81,7 @@ fn parse_args() -> Result<Launch> {
         arrangement: None,
         find: None,
         page: None,
-        select_page: None,
+        select_pages: None,
         sidebar: None,
         font_size: None,
         translate_fake: false,
@@ -172,7 +172,16 @@ fn parse_args() -> Result<Launch> {
                 let page: usize = value()?
                     .parse()
                     .context("--select-page takes a page number")?;
-                launch.select_page = Some(page.max(1));
+                launch.select_pages = Some((page.max(1), page.max(1)));
+            }
+            "--select-pages" => {
+                let pages = value()?;
+                let (first, last) = pages
+                    .split_once('-')
+                    .context("--select-pages takes FIRST-LAST")?;
+                let first: usize = first.parse().context("--select-pages takes FIRST-LAST")?;
+                let last: usize = last.parse().context("--select-pages takes FIRST-LAST")?;
+                launch.select_pages = Some((first.max(1), last.max(first).max(1)));
             }
             "--sidebar" => {
                 let name = value()?;

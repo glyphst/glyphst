@@ -221,6 +221,69 @@ pub fn color_name(color: HighlightColor) -> &'static str {
 }
 
 /// Converts selection rectangles on a page for the library.
+/// What a highlight or note made from a selection stores.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectionRecord {
+    /// Rectangles on every selected page, each with its page.
+    pub rects: Vec<HighlightRect>,
+    /// The selected text, pages joined by a line break.
+    pub quote: String,
+    /// For reflowed books, where the text starts and ends.
+    pub semantic: Option<SemanticTextRange>,
+}
+
+/// Why a selection can't be recorded yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordError {
+    /// A selected page's text is still being read.
+    TextPending,
+    /// Nothing is selected (blank text only).
+    Empty,
+}
+
+/// The record of `selection` over `text`; `reflowed` books also store its
+/// semantic range, which survives a relayout.
+pub fn selection_record(
+    selection: &crate::text_overlay::Selection,
+    text: &DocText,
+    reflowed: bool,
+) -> Result<SelectionRecord, RecordError> {
+    let mut rects = Vec::new();
+    let (mut first, mut last) = (None, None);
+    for page in selection.pages() {
+        let page_text = text.get(page).ok_or(RecordError::TextPending)?;
+        let glyphs = selection.glyphs_on(page, page_text);
+        if let (Some(&start), Some(&end)) = (glyphs.first(), glyphs.last()) {
+            first = first.or(Some((page, start)));
+            last = Some((page, end));
+        }
+        rects.extend(library_rects(page, &page_text.rects_of_glyphs(&glyphs)));
+    }
+    let (Some(first), Some(last)) = (first, last) else {
+        return Err(RecordError::Empty);
+    };
+    if rects.is_empty() {
+        return Err(RecordError::Empty);
+    }
+    let quote = selection
+        .text(|page| text.get(page).map(|text| text.as_ref()))
+        .ok_or(RecordError::TextPending)?;
+    let semantic = if reflowed {
+        let range = text
+            .anchor(first.0, first.1)
+            .zip(text.anchor(last.0, last.1))
+            .map(|(start, end)| SemanticTextRange { start, end });
+        Some(range.ok_or(RecordError::TextPending)?)
+    } else {
+        None
+    };
+    Ok(SelectionRecord {
+        rects,
+        quote,
+        semantic,
+    })
+}
+
 pub fn library_rects(page: usize, rects: &[PageRect]) -> Vec<HighlightRect> {
     rects
         .iter()
@@ -318,5 +381,34 @@ mod tests {
         assert_eq!(fixed.on_page(2, false)[0].1, vec![[1.0, 2.0, 3.0, 4.0]]);
         drop(library);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_selection_over_two_pages_records_both() {
+        use crate::text_overlay::{Selection, TextPos};
+        let text = document(&["first page", "second page"]);
+        let selection = Selection::Run {
+            anchor: TextPos { page: 0, glyph: 6 },
+            head: TextPos { page: 1, glyph: 5 },
+        };
+        let record = selection_record(&selection, &text, false).unwrap();
+        assert_eq!(record.quote, "page\nsecond");
+        let pages: Vec<usize> = record.rects.iter().map(|rect| rect.page_idx).collect();
+        assert_eq!(pages, [0, 1]);
+        assert_eq!(record.semantic, None);
+
+        // Reflowed books store where the text starts and ends.
+        let record = selection_record(&selection, &text, true).unwrap();
+        let range = record.semantic.unwrap();
+        assert_eq!(text.resolve(&range.start), Some((0, 6)));
+        assert_eq!(text.resolve(&range.end), Some((1, 5)));
+
+        // A page whose text is not read yet.
+        let mut partial = DocText::new(2);
+        partial.insert(0, page("first page", 100.0));
+        assert_eq!(
+            selection_record(&selection, &partial, false),
+            Err(RecordError::TextPending)
+        );
     }
 }

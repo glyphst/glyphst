@@ -14,7 +14,7 @@ use glyphst_core::{
     DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation, EpubLayout,
 };
 use glyphst_effects::EffectDef;
-use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore, SemanticTextRange};
+use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
 
 use crate::{
@@ -39,7 +39,7 @@ use crate::{
     prefs::{LastSession, Prefs, SessionFile},
     settings_window::{Section, SettingsContext, SettingsWindow},
     sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
-    text_overlay::{PageMap, Selection, Span, fill_rects, page_at},
+    text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
     transition::ViewTransition,
     translation::{CardState, Translator},
@@ -98,7 +98,8 @@ pub struct Launch {
     pub find: Option<String>,
     /// Opens the documents at this page (from 1).
     pub page: Option<usize>,
-    pub select_page: Option<usize>,
+    /// Selects the text of these pages, first to last (from 1).
+    pub select_pages: Option<(usize, usize)>,
     pub sidebar: Option<SidebarTab>,
     pub font_size: Option<f32>,
     /// Translate through a local fake provider instead of the settings'.
@@ -132,7 +133,8 @@ struct PaneView<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     Pan,
-    Select { page: usize },
+    /// Extending the selection, onto other pages too.
+    Select,
 }
 
 /// The popover editing a highlight or note clicked on the page.
@@ -175,7 +177,7 @@ pub struct ReaderApp {
     /// The page a context menu was opened over.
     context_page: Option<usize>,
     pub(crate) launch_find: Option<String>,
-    pub(crate) launch_select: Option<usize>,
+    pub(crate) launch_select: Option<(usize, usize)>,
     pub(crate) launch_translate_document: bool,
     pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
@@ -297,7 +299,7 @@ impl ReaderApp {
             note_editor: None,
             context_page: None,
             launch_find: launch.find,
-            launch_select: launch.select_page,
+            launch_select: launch.select_pages,
             launch_translate_document: launch.translate_document,
             launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
@@ -368,7 +370,11 @@ impl ReaderApp {
                 app.panes.show(ids[active]);
             }
         } else {
-            let page = launch.select_page.or(launch.page).map(|page| page - 1);
+            let page = launch
+                .select_pages
+                .map(|(first, _)| first)
+                .or(launch.page)
+                .map(|page| page - 1);
             for file in &launch.files {
                 app.open_quietly(file, &ctx, page);
                 if let Some(tab) = app.tabs.last_mut() {
@@ -682,36 +688,23 @@ impl ReaderApp {
             return;
         };
         let tab = &self.tabs[active];
-        let Some(selection) = tab.selection.clone() else {
+        let Some(selection) = tab.selection.as_ref() else {
             return;
         };
-        let Some(text) = tab.text.get(selection.page).cloned() else {
-            return;
-        };
-        let glyphs = selection.glyphs(&text);
-        let rects = annotations::library_rects(selection.page, &selection.rects(&text));
-        let quote = selection.text(&text);
-        let (Some(&first), Some(&last)) = (glyphs.first(), glyphs.last()) else {
-            return;
-        };
-        if rects.is_empty() {
-            return;
-        }
-        let semantic = if tab.is_reflowed() {
-            let range = tab
-                .text
-                .anchor(selection.page, first)
-                .zip(tab.text.anchor(selection.page, last))
-                .map(|(start, end)| SemanticTextRange { start, end });
-            if range.is_none() {
+        let record = match annotations::selection_record(selection, &tab.text, tab.is_reflowed()) {
+            Ok(record) => record,
+            Err(annotations::RecordError::TextPending) => {
                 self.notices
-                    .push("The book's text is still being read; try again in a moment.");
+                    .push("The selection's text is still being read; try again in a moment.");
                 return;
             }
-            range
-        } else {
-            None
+            Err(annotations::RecordError::Empty) => return,
         };
+        let annotations::SelectionRecord {
+            rects,
+            quote,
+            semantic,
+        } = record;
         let path = tab.path.clone();
         let created = match (semantic, note) {
             (Some(range), false) => self
@@ -1030,12 +1023,16 @@ impl ReaderApp {
         self.assistant.send(text, ask, &settings, ctx);
     }
 
-    fn copy_selection(&self, ctx: &egui::Context) {
-        if let Some(text) = self
-            .active
-            .and_then(|active| self.tabs[active].selected_text())
-        {
-            ctx.copy_text(text);
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        match self.tabs[active].selected_text() {
+            Some(text) => ctx.copy_text(text),
+            None if self.tabs[active].selection.is_some() => self
+                .notices
+                .push("The selection's text is still being read; try again in a moment."),
+            None => {}
         }
     }
 
@@ -2030,7 +2027,7 @@ impl ReaderApp {
                 text.glyph_at(point[0], point[1], map.points(GLYPH_SLOP))
                     .is_some()
             });
-            if matches!(own(self.drag), Some(Drag::Select { .. })) || (text && !link) {
+            if matches!(own(self.drag), Some(Drag::Select)) || (text && !link) {
                 ctx.set_cursor_icon(egui::CursorIcon::Text);
             } else if link {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -2078,46 +2075,58 @@ impl ReaderApp {
                 let on_text = text
                     .glyph_at(point[0], point[1], map.points(GLYPH_SLOP))
                     .is_some();
-                let span = if modifiers.alt {
-                    Some(Span::Column {
+                let selection = if modifiers.alt {
+                    Some(Selection::Column {
+                        page: map.page,
                         from: point,
                         to: point,
                     })
                 } else if on_text {
-                    text.nearest(point[0], point[1]).map(|glyph| Span::Run {
-                        anchor: glyph,
-                        head: glyph,
+                    text.nearest(point[0], point[1]).map(|glyph| {
+                        let at = TextPos {
+                            page: map.page,
+                            glyph,
+                        };
+                        Selection::Run {
+                            anchor: at,
+                            head: at,
+                        }
                     })
                 } else {
                     None
                 };
-                if let Some(span) = span {
-                    self.drag = Some((tab_id, Drag::Select { page: map.page }));
-                    self.tabs[active].selection = Some(Selection {
-                        page: map.page,
-                        span,
-                    });
+                if let Some(selection) = selection {
+                    self.drag = Some((tab_id, Drag::Select));
+                    self.tabs[active].selection = Some(selection);
                 }
             }
         }
         let mut autoscroll = 0.0;
-        if let Some(Drag::Select { page }) = own(self.drag)
+        if let Some(Drag::Select) = own(self.drag)
             && let Some(pos) = response.interact_pointer_pos()
         {
             let tab = &mut self.tabs[active];
-            if let Some(map) = maps.iter().find(|map| map.page == page)
-                && let Some(text) = tab.text.get(page).cloned()
-                && let Some(selection) = &mut tab.selection
-            {
-                let point = map.page_point(pos);
-                match &mut selection.span {
-                    Span::Run { head, .. } => {
+            match &mut tab.selection {
+                // A run follows the pointer onto any page shown.
+                Some(Selection::Run { head, .. }) => {
+                    if let Some(map) = nearest_page(maps, pos)
+                        && let Some(text) = tab.text.get(map.page)
+                    {
+                        let point = map.page_point(pos);
                         if let Some(glyph) = text.nearest(point[0], point[1]) {
-                            *head = glyph;
+                            *head = TextPos {
+                                page: map.page,
+                                glyph,
+                            };
                         }
                     }
-                    Span::Column { to, .. } => *to = point,
                 }
+                Some(Selection::Column { page, to, .. }) => {
+                    if let Some(map) = maps.iter().find(|map| map.page == *page) {
+                        *to = map.page_point(pos);
+                    }
+                }
+                None => {}
             }
             if pos.y < rect.top() + 24.0 {
                 autoscroll = -SELECT_SCROLL;
@@ -2130,7 +2139,27 @@ impl ReaderApp {
         }
 
         let click = response.interact_pointer_pos().and_then(under);
-        if response.clicked_by(egui::PointerButton::Primary) {
+        // Shift+click extends a run to the glyph clicked, on any page.
+        let extended = response.clicked_by(egui::PointerButton::Primary)
+            && modifiers.shift
+            && click.is_some_and(|(map, point)| {
+                let tab = &mut self.tabs[active];
+                let glyph = tab
+                    .text
+                    .get(map.page)
+                    .and_then(|text| text.nearest(point[0], point[1]));
+                match (&mut tab.selection, glyph) {
+                    (Some(Selection::Run { head, .. }), Some(glyph)) => {
+                        *head = TextPos {
+                            page: map.page,
+                            glyph,
+                        };
+                        true
+                    }
+                    _ => false,
+                }
+            });
+        if response.clicked_by(egui::PointerButton::Primary) && !extended {
             let tab = &mut self.tabs[active];
             match click {
                 Some((map, point)) => {
@@ -2192,7 +2221,11 @@ impl ReaderApp {
         let translated = self.tabs[active]
             .selection
             .as_ref()
-            .is_some_and(|selection| self.tabs[active].shows_translation(selection.page));
+            .is_some_and(|selection| {
+                selection
+                    .pages()
+                    .any(|page| self.tabs[active].shows_translation(page))
+            });
         if let Some(text) = &selected {
             if ui.add(menu_entry(ui, "copy", "Copy", "Ctrl+C")).clicked() {
                 ctx.copy_text(text.clone());
@@ -2321,12 +2354,12 @@ impl ReaderApp {
                 );
             }
             if let Some(selection) = &tab.selection
-                && selection.page == map.page
+                && selection.touches(map.page)
             {
                 fill_rects(
                     painter,
                     map,
-                    selection.rects(text),
+                    selection.rects_on(map.page, text),
                     tokens.accent.gamma_multiply(0.35),
                 );
             }

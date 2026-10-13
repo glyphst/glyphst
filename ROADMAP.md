@@ -43,6 +43,11 @@ and the abandoned Files app in M5). It has:
   user effects reload when their files change; the Effects drawer gives a
   book its own background, transition and tint; page tints Sepia, Night
   and Paper grain.
+- **After M6:** selections run across pages (a drag follows the pointer
+  onto other pages, Shift+click extends; copy, highlights, notes,
+  translation and the assistant get all of it); typing Chinese or
+  Japanese in the command palette no longer resets the input method's
+  composition.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
 Lower Level, War and Peace and the 15-page image-heavy brochure 1x-64x-1x,
@@ -65,7 +70,6 @@ Known gaps:
 - A turned page's loading placeholder (its thumbnail) shows upright, and
   presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
-- Selections stay within one page.
 - Translation sessions are not restored from the cache on reopening.
 - The assistant has no image or region mentions and no Mermaid diagrams
   (`mermaid-render` is kept for them).
@@ -82,9 +86,9 @@ Known gaps:
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates from the gaps
-above: showing dense pages a level at a time while they upload,
-selections across pages, restoring translation sessions from the cache,
-and Mermaid diagrams in the assistant.
+above: showing dense pages a level at a time while they upload, restoring
+translation sessions from the cache, and Mermaid diagrams in the
+assistant.
 
 **Done when:** the chosen milestone works with tests, `check.sh quick`
 passes, and the bench still shows no frames over 25 ms.

@@ -3,63 +3,109 @@
 //! `ui-egui/src/canvas.rs`), and painting selections, search matches and
 //! highlights as egui shapes over the page image.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use glyphst_pdf::{text::PageText, vector::PageRect};
 use glyphst_pdf_gpu::Camera;
 
 use crate::gpu::PageDraw;
 
-/// A selection on one page.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Selection {
+/// A glyph of a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPos {
     pub page: usize,
-    pub span: Span,
+    pub glyph: usize,
 }
 
+/// A text selection: a run of glyphs, possibly over several pages, or a
+/// column of one page.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Span {
-    /// Glyphs in reading order from `anchor` to `head`, both included.
-    Run { anchor: usize, head: usize },
+pub enum Selection {
+    /// Glyphs in reading order from `anchor` to `head`, both included;
+    /// pages between them are selected whole.
+    Run { anchor: TextPos, head: TextPos },
     /// Glyphs whose centres lie in a page rectangle (Alt+drag).
-    Column { from: [f32; 2], to: [f32; 2] },
+    Column {
+        page: usize,
+        from: [f32; 2],
+        to: [f32; 2],
+    },
 }
 
 impl Selection {
+    /// Glyphs `range` of `page`.
     pub fn run(page: usize, range: Range<usize>) -> Self {
-        Self {
-            page,
-            span: Span::Run {
-                anchor: range.start,
-                head: range.end.saturating_sub(1).max(range.start),
+        Self::Run {
+            anchor: TextPos {
+                page,
+                glyph: range.start,
+            },
+            head: TextPos {
+                page,
+                glyph: range.end.saturating_sub(1).max(range.start),
             },
         }
     }
 
-    /// The selected glyph range of a run, end excluded.
-    pub fn range(&self) -> Option<Range<usize>> {
-        match self.span {
-            Span::Run { anchor, head } => Some(anchor.min(head)..anchor.max(head) + 1),
-            Span::Column { .. } => None,
+    /// A run's first and last glyph in reading order.
+    pub fn ordered(&self) -> Option<(TextPos, TextPos)> {
+        match *self {
+            Self::Run { anchor, head } => Some((anchor.min(head), anchor.max(head))),
+            Self::Column { .. } => None,
         }
     }
 
-    pub fn glyphs(&self, text: &PageText) -> Vec<usize> {
-        match &self.span {
-            Span::Run { .. } => self
-                .range()
-                .map(|range| (range.start..range.end.min(text.len())).collect())
-                .unwrap_or_default(),
-            Span::Column { from, to } => text.glyphs_in([from[0], from[1], to[0], to[1]]),
+    /// The pages it covers.
+    pub fn pages(&self) -> RangeInclusive<usize> {
+        match *self {
+            Self::Run { anchor, head } => anchor.min(head).page..=anchor.max(head).page,
+            Self::Column { page, .. } => page..=page,
         }
     }
 
-    pub fn text(&self, text: &PageText) -> String {
-        text.text_of_glyphs(&self.glyphs(text))
+    pub fn touches(&self, page: usize) -> bool {
+        self.pages().contains(&page)
     }
 
-    pub fn rects(&self, text: &PageText) -> Vec<PageRect> {
-        text.rects_of_glyphs(&self.glyphs(text))
+    /// The selected glyphs of `page`, whose text is `text`.
+    pub fn glyphs_on(&self, page: usize, text: &PageText) -> Vec<usize> {
+        match self {
+            Self::Run { .. } => {
+                let Some((start, end)) = self.ordered().filter(|_| self.touches(page)) else {
+                    return Vec::new();
+                };
+                let from = if page == start.page { start.glyph } else { 0 };
+                let to = if page == end.page {
+                    end.glyph + 1
+                } else {
+                    text.len()
+                };
+                (from..to.min(text.len())).collect()
+            }
+            Self::Column {
+                page: on, from, to, ..
+            } if *on == page => text.glyphs_in([from[0], from[1], to[0], to[1]]),
+            Self::Column { .. } => Vec::new(),
+        }
+    }
+
+    /// One rectangle per selected line of `page`.
+    pub fn rects_on(&self, page: usize, text: &PageText) -> Vec<PageRect> {
+        text.rects_of_glyphs(&self.glyphs_on(page, text))
+    }
+
+    /// The selected text, pages joined by a line break; `None` while a
+    /// page's text is not read yet.
+    pub fn text<'a>(&self, text_of: impl Fn(usize) -> Option<&'a PageText>) -> Option<String> {
+        let mut parts = Vec::new();
+        for page in self.pages() {
+            let text = text_of(page)?;
+            let part = text.text_of_glyphs(&self.glyphs_on(page, text));
+            if !part.is_empty() {
+                parts.push(part);
+            }
+        }
+        Some(parts.join("\n"))
     }
 }
 
@@ -118,6 +164,18 @@ impl PageMap {
 /// The page under a screen position.
 pub fn page_at(maps: &[PageMap], pos: egui::Pos2) -> Option<&PageMap> {
     maps.iter().find(|map| map.paper.contains(pos))
+}
+
+/// The page under a screen position, or else the nearest one (between
+/// pages, or past the last), for extending a selection.
+pub fn nearest_page(maps: &[PageMap], pos: egui::Pos2) -> Option<&PageMap> {
+    page_at(maps, pos).or_else(|| {
+        maps.iter().min_by(|a, b| {
+            a.paper
+                .distance_sq_to_pos(pos)
+                .total_cmp(&b.paper.distance_sq_to_pos(pos))
+        })
+    })
 }
 
 /// Fills page rectangles on screen, clipped to the paper.
@@ -179,10 +237,9 @@ mod tests {
         assert!(turned.points(2.0) - 1.0 < 1e-6);
     }
 
-    #[test]
-    fn runs_select_in_either_direction_and_columns_by_area() {
-        let text = PageText {
-            glyphs: "ab cd"
+    fn line(text: &str) -> PageText {
+        PageText {
+            glyphs: text
                 .chars()
                 .enumerate()
                 .map(|(i, ch)| Glyph {
@@ -190,23 +247,80 @@ mod tests {
                     rect: [i as f32 * 10.0, 0.0, i as f32 * 10.0 + 10.0, 10.0],
                 })
                 .collect(),
-            line_of: vec![0; 5],
+            line_of: vec![0; text.chars().count()],
+        }
+    }
+
+    #[test]
+    fn runs_select_in_either_direction_and_columns_by_area() {
+        let text = line("ab cd");
+        let backwards = Selection::Run {
+            anchor: TextPos { page: 0, glyph: 4 },
+            head: TextPos { page: 0, glyph: 1 },
         };
-        let backwards = Selection {
+        assert_eq!(backwards.glyphs_on(0, &text), vec![1, 2, 3, 4]);
+        assert_eq!(backwards.text(|_| Some(&text)).unwrap(), "b cd");
+        assert_eq!(backwards.rects_on(0, &text), vec![[10.0, 0.0, 50.0, 10.0]]);
+        assert_eq!(Selection::run(0, 3..5).text(|_| Some(&text)).unwrap(), "cd");
+        let column = Selection::Column {
             page: 0,
-            span: Span::Run { anchor: 4, head: 1 },
+            from: [12.0, 0.0],
+            to: [38.0, 10.0],
         };
-        assert_eq!(backwards.range(), Some(1..5));
-        assert_eq!(backwards.text(&text), "b cd");
-        assert_eq!(backwards.rects(&text), vec![[10.0, 0.0, 50.0, 10.0]]);
-        assert_eq!(Selection::run(0, 3..5).text(&text), "cd");
-        let column = Selection {
-            page: 0,
-            span: Span::Column {
-                from: [12.0, 0.0],
-                to: [38.0, 10.0],
+        assert_eq!(column.text(|_| Some(&text)).unwrap(), "b c");
+        assert!(
+            column.glyphs_on(1, &text).is_empty(),
+            "a column stays on its page"
+        );
+    }
+
+    #[test]
+    fn runs_cross_pages_in_either_direction() {
+        let pages = [line("one two"), line("middle"), line("end here")];
+        let text_of = |page: usize| pages.get(page);
+        // From "two" on the first page to "end" on the third, dragged up.
+        let run = Selection::Run {
+            anchor: TextPos { page: 2, glyph: 2 },
+            head: TextPos { page: 0, glyph: 4 },
+        };
+        assert_eq!(run.pages(), 0..=2);
+        assert!(run.touches(1) && !run.touches(3));
+        assert_eq!(run.glyphs_on(0, &pages[0]), vec![4, 5, 6]);
+        assert_eq!(
+            run.glyphs_on(1, &pages[1]).len(),
+            6,
+            "a page between, whole"
+        );
+        assert_eq!(run.glyphs_on(2, &pages[2]), vec![0, 1, 2]);
+        assert!(run.glyphs_on(3, &pages[2]).is_empty());
+        assert_eq!(run.text(text_of).unwrap(), "two\nmiddle\nend");
+        assert_eq!(run.rects_on(2, &pages[2]), vec![[0.0, 0.0, 30.0, 10.0]]);
+        // A page whose text is not read yet: no text rather than part.
+        assert_eq!(run.text(|page| (page != 1).then(|| &pages[page])), None);
+    }
+
+    #[test]
+    fn a_selection_extends_to_the_nearest_page() {
+        let draw = |page: usize, y: f32| PageDraw {
+            page,
+            camera: Camera {
+                origin: [0.0, 0.0],
+                scale: 1.0,
+                viewport: [800, 600],
+                rotation: 0,
             },
+            paper: [0.0, y, 400.0, y + 200.0],
         };
-        assert_eq!(column.text(&text), "b c");
+        let view = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let maps = [
+            PageMap::new(&draw(4, 0.0), view, 1.0),
+            PageMap::new(&draw(5, 220.0), view, 1.0),
+        ];
+        let page = |x: f32, y: f32| nearest_page(&maps, egui::pos2(x, y)).map(|map| map.page);
+        assert_eq!(page(100.0, 100.0), Some(4), "on a page");
+        assert_eq!(page(100.0, 215.0), Some(5), "in the gap, nearer the next");
+        assert_eq!(page(100.0, 205.0), Some(4));
+        assert_eq!(page(100.0, 590.0), Some(5), "past the last");
+        assert_eq!(page(600.0, 300.0), Some(5), "beside it");
     }
 }
