@@ -167,6 +167,27 @@ fn parse_args() -> Result<Launch> {
     Ok(launch)
 }
 
+/// egui's wgpu setup with smaller GPU memory blocks. wgpu's default
+/// (`MemoryHints::Performance`) suballocates from 128-256 MiB blocks, and the
+/// first submission using a new block waits while the driver prepares all
+/// of it: 16-23 ms on Intel Arc, a dropped frame whenever pages outgrow the
+/// blocks. With 8-32 MiB blocks a new one costs a few milliseconds.
+fn wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    let default_descriptor = setup.device_descriptor.clone();
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| wgpu::DeviceDescriptor {
+        memory_hints: wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: (8 << 20)..(32 << 20),
+        },
+        ..default_descriptor(adapter)
+    });
+    WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
+}
+
 fn main() -> Result<()> {
     // Translation typesets pages with Typst in a worker process that runs
     // this executable.
@@ -190,6 +211,7 @@ fn main() -> Result<()> {
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: wgpu_configuration(),
         persistence_path,
         ..Default::default()
     };

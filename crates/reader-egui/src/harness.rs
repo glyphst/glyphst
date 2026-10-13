@@ -200,9 +200,7 @@ impl ReaderApp {
         let stats = self.with_gpu(|gpu| gpu.stats.clone()).unwrap_or_default();
         bench.max_encode_ms = bench.max_encode_ms.max(stats.encode_ms);
         bench.peak_gpu_bytes = bench.peak_gpu_bytes.max(stats.gpu_bytes);
-        let overviews = self
-            .with_gpu(|gpu| gpu.has_pending_overview())
-            .unwrap_or(false);
+        let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
         let (Some(active), Some(fit)) = (self.active, self.fit_scale()) else {
             // Nothing to measure without a document.
             return bench.phase == Phase::Done;

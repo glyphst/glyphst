@@ -63,8 +63,12 @@ content effect composites the pages, or a transition from a snapshot of the
 previous view (another tab, the page before a turn). Raster layers are
 re-rasterized for the view once it is still. Each page is scissored to its
 page box, as MuPDF clips to its pixmap. Pages load on a worker thread per
-document and stay within a GPU byte budget; overviews are built one tile per
-frame.
+document (which also builds image mip chains) and stay within a GPU byte
+budget. A loaded page, and a raster layer re-rasterized for the view, is
+written to the GPU at most 4 MiB per frame through one reused
+`StagingBelt` and drawn once complete; overviews are built one tile per
+frame. The device uses 8-32 MiB memory blocks instead of wgpu's 128-256 MiB:
+the first submission into a new block waits while the driver prepares it.
 
 ## egui Reader boundaries
 

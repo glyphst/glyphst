@@ -22,7 +22,8 @@ use crate::{
     find::{self, FindBarAction},
     gamepad::{GamepadInput, Gamepads},
     gpu::{
-        EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse, ViewCallback, pixel_size,
+        EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse, UPLOAD_BYTES_PER_FRAME,
+        ViewCallback, pixel_size,
     },
     harness::Harness,
     home::{Home, HomeAction},
@@ -885,51 +886,49 @@ impl ReaderApp {
         }
     }
 
-    /// Uploads at most one loaded page per frame (the active tab's first),
-    /// so a heavy page costs one long frame rather than several in a row.
-    /// Swaps in raster layers re-rasterized for the current view.
+    /// Queues raster layers re-rasterized for the current view; they are
+    /// written after the uploads before them, a chunk per frame.
     fn upload_ready_layers(&mut self) {
-        let (device, queue) = (
-            self.render_state.device.clone(),
-            self.render_state.queue.clone(),
-        );
+        let device = self.render_state.device.clone();
         for index in 0..self.tabs.len() {
             let tab_id = self.tabs[index].id;
             while let Some((page, layer, image)) = self.tabs[index].ready_layers.pop_front() {
                 let key = PageKey { tab: tab_id, page };
-                self.with_gpu(|gpu| gpu.replace_layer(&device, &queue, key, layer, &image));
+                self.with_gpu(|gpu| gpu.replace_layer(&device, key, layer, image));
             }
         }
     }
 
+    /// Writes the current upload a chunk further, starting the next loaded
+    /// page (the active tab's first) when no page is being uploaded, so a
+    /// heavy page costs a few ordinary frames rather than one long one.
     fn upload_ready_page(&mut self) {
         let (device, queue) = (
             self.render_state.device.clone(),
             self.render_state.queue.clone(),
         );
         self.with_gpu(|gpu| gpu.step_overview(&device, &queue));
-        let order: Vec<usize> = self.active.into_iter().chain(0..self.tabs.len()).collect();
-        for index in order {
-            let Some(ready) = self.tabs[index].ready.pop_front() else {
-                continue;
+        if !self.with_gpu(|gpu| gpu.is_uploading()).unwrap_or(false) {
+            let order: Vec<usize> = self.active.into_iter().chain(0..self.tabs.len()).collect();
+            let Some((key, ready)) = order.into_iter().find_map(|index| {
+                let ready = self.tabs[index].ready.pop_front()?;
+                let key = PageKey {
+                    tab: self.tabs[index].id,
+                    page: ready.page,
+                };
+                Some((key, ready))
+            }) else {
+                return;
             };
-            let key = PageKey {
-                tab: self.tabs[index].id,
-                page: ready.page,
-            };
-            let (device, queue) = (
-                self.render_state.device.clone(),
-                self.render_state.queue.clone(),
-            );
-            if let Some(ms) = self
-                .with_gpu(|gpu| gpu.upload(&device, &queue, key, &ready.prepared, &ready.layers))
-            {
-                self.upload_ms.push(ms);
-            }
+            self.with_gpu(|gpu| gpu.begin_upload(&device, key, ready.prepared, ready.layers));
+        }
+        if let Some(Some(ms)) =
+            self.with_gpu(|gpu| gpu.step_upload(&device, &queue, UPLOAD_BYTES_PER_FRAME))
+        {
+            self.upload_ms.push(ms);
             if self.first_page_ms.is_none() {
                 self.first_page_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
             }
-            return;
         }
     }
 
@@ -1557,7 +1556,17 @@ impl ReaderApp {
                 }
             }
         }
-        self.tabs[active].placeholders(&mut frame, |page| resident.contains(&page));
+        // A page being uploaded keeps its placeholder until it can be drawn.
+        let drawable: std::collections::HashSet<usize> = frame
+            .wanted
+            .iter()
+            .copied()
+            .filter(|&page| {
+                self.with_gpu(|gpu| gpu.is_drawable(PageKey { tab: tab_id, page }))
+                    .unwrap_or(false)
+            })
+            .collect();
+        self.tabs[active].placeholders(&mut frame, |page| drawable.contains(&page));
 
         let tokens = Tokens::get(&ctx);
         let transition = self.transition.as_mut().map(|transition| {
@@ -2246,9 +2255,7 @@ impl eframe::App for ReaderApp {
         }
 
         // A pending overview advances one tile per frame, so keep drawing.
-        let overviews = self
-            .with_gpu(|gpu| gpu.has_pending_overview())
-            .unwrap_or(false);
+        let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
         let continuous = animating
             || self.transition.is_some()
             || pad.is_active()

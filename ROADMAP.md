@@ -10,7 +10,7 @@ checkpoint or evidence.
 Use [architecture](ARCHITECTURE.md) for boundaries and
 [verification](README.md#verification) for commands.
 
-## 1. egui Reader: M5 split panes, the files app, removing GPUI
+## 1. egui Reader: M5 split panes, the GPUI-only features, removing GPUI
 
 **Owner:** `reader-egui`, `files`, `workspace`.
 
@@ -45,24 +45,20 @@ The app is not a 1:1 port of the GPUI Reader: artcraft's egui apps are the
 reference, and old crates are reused only where cheap.
 
 Measured on a 120 Hz display (Intel Arc): `--bench` zooms Murietta_Level1,
-Lower Level and War and Peace 1x-64x-1x with no frame over 25 ms (p95
-8.7-10 ms); scrolling War and Peace (1,259 pages) has p95 9.2-11.8 ms with
-1-2 frames of 32-34 ms, and searching all of it finds 48,603 matches for
-"the" in 0.75-1.5 s with 0-1 frames over 25 ms. The stage shows more pages
-than the old toolbar layout, so the scroll now reaches page 19, whose level
-buffers (11.6 MiB) take 27 ms to upload; the old layout has the same two
-frames when its scroll starts at page 16. A fake document translation running
-alongside keeps those numbers; on the 15-page image-heavy brochure, 12
-pages swapped in during a run with the same 1 zoom and 5-6 scroll frames
-over 25 ms as without translation (image uploads up to 38 ms). The pdf.js
-corpus tier is unchanged: 97 of 100 files render, 1 differs from MuPDF by
-more than 1%.
+Lower Level, War and Peace and the 15-page image-heavy brochure 1x-64x-1x,
+scrolls War and Peace (1,259 pages) and the brochure, and searches each
+whole document (48,603 matches for "the" in War and Peace) with no frame
+over 25 ms (worst 21 ms, p95 8.5-8.8 ms). Uploads are spread across frames
+(4 MiB each, through a reused staging belt) and GPU memory comes in small
+blocks: a new 256 MiB block used to cost a 16-23 ms submission, and page 19
+of War and Peace a 27 ms upload. With a fake document translation running
+alongside, 12 brochure pages swap in with 0-1 scroll frames over 25 ms. The
+pdf.js corpus tier is unchanged: 97 of 100 files render, 1 differs from
+MuPDF by more than 1%.
 
 Known gaps:
-- Uploads block a frame: Lower Level (7.6M strokes) costs one 250 ms
-  frame to upload its level buffers, dense text pages (War and Peace page
-  19) 27 ms, and image-heavy pages 25-80 ms. Uploading levels across frames
-  needs level fallback.
+- A very dense page shows only once all of it is uploaded: Lower Level
+  (7.6M strokes) takes about 200 ms of 4 MiB frames before it appears.
 - 4x MSAA gives small text coarser edges than MuPDF.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Selections stay within one page.
@@ -74,9 +70,10 @@ Known gaps:
   GPUI-only. No automated run writes the real keychain: the user's check of
   a key set in the egui Reader showing in the GPUI Reader is pending.
 
-**Next step (M5):** spread page uploads across frames (so the bench is back
-to no frames over 25 ms), then split panes (craft-ui docking), the `files` app on egui,
-and removing the GPUI crates (which also moves ChatGPT Subscription sign-in).
+**Next step (M5):** split panes (craft-ui's docking model, side by side
+in the stage); two-page spreads, rotation and reload; ChatGPT Subscription
+sign-in, provider order and connection tests in the settings window; then
+removing the GPUI crates and the `files` app (abandoned, not ported).
 Later: M6 an effects manager (user effect directory, hot reload, previews,
 per-book choices).
 

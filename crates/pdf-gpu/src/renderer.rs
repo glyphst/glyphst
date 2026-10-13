@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{borrow::Borrow, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
 use glyphst_pdf::vector::PageRect;
@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::{
     OffscreenTarget,
-    prepare::{Batch, BatchKind, FillVertex, PreparedLevel, PreparedPage, StrokeSegment},
+    prepare::{Batch, BatchKind, FillVertex, PreparedImage, PreparedPage, StrokeSegment},
 };
 
 pub const SAMPLE_COUNT: u32 = 4;
@@ -409,33 +409,152 @@ impl Renderer {
     }
 
     /// Uploads a prepared page: its levels' buffers, and its images as
-    /// mipmapped textures at their own resolution.
+    /// mipmapped textures at their own resolution, all at once.
+    /// Interactive hosts use [`Renderer::begin_upload`].
     pub fn upload(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         page: &PreparedPage,
     ) -> GpuPage {
+        let mut upload = self.begin_upload(device, page);
+        let mut belt = wgpu::util::StagingBelt::new(device.clone(), UPLOAD_CHUNK);
+        while !upload.step(device, queue, &mut belt, u64::MAX) {}
+        self.finish_upload(device, upload)
+    }
+
+    /// Creates a page's buffers and textures; [`PageUpload::step`] fills
+    /// them a chunk at a time, coarsest level first, and
+    /// [`Renderer::finish_upload`] returns the page once they are full.
+    pub fn begin_upload<P: Borrow<PreparedPage>>(
+        &self,
+        device: &wgpu::Device,
+        page: P,
+    ) -> PageUpload<P> {
+        let prepared = page.borrow();
+        let mut writes = Vec::new();
+        let buffer = |label: &str, len: usize, usage: wgpu::BufferUsages| {
+            (len > 0).then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: len as u64,
+                    usage: usage | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+        };
+        let levels: Vec<GpuLevel> = prepared
+            .levels
+            .iter()
+            .enumerate()
+            .map(|(index, level)| {
+                let sizes = [
+                    size_of_val(level.fill_vertices.as_slice()),
+                    size_of_val(level.fill_indices.as_slice()),
+                    size_of_val(level.segments.as_slice()),
+                ];
+                for (part, len) in sizes.into_iter().enumerate() {
+                    if len > 0 {
+                        writes.push((
+                            Write::Level { level: index, part },
+                            UploadItem {
+                                len: len as u64,
+                                unit: wgpu::COPY_BUFFER_ALIGNMENT,
+                            },
+                        ));
+                    }
+                }
+                GpuLevel {
+                    max_scale: level.max_scale,
+                    fill_vertices: buffer(
+                        "pdf_gpu_fill_vertices",
+                        sizes[0],
+                        wgpu::BufferUsages::VERTEX,
+                    ),
+                    fill_indices: buffer(
+                        "pdf_gpu_fill_indices",
+                        sizes[1],
+                        wgpu::BufferUsages::INDEX,
+                    ),
+                    segments: buffer("pdf_gpu_segments", sizes[2], wgpu::BufferUsages::VERTEX),
+                    batches: level.batches.clone(),
+                }
+            })
+            .collect();
+        // The coarsest level first: it is the smallest.
+        writes.sort_by_key(|(write, _)| match write {
+            Write::Level { level, .. } => *level,
+            Write::Image { .. } => 0,
+        });
+        let textures = prepared
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                let mip_level_count = image.mips.len() as u32 + 1;
+                for mip in 0..mip_level_count {
+                    let [width, height] = image_mip(image, mip).1;
+                    writes.push((
+                        Write::Image { image: index, mip },
+                        UploadItem {
+                            len: u64::from(width) * u64::from(height) * 4,
+                            unit: u64::from(width) * 4,
+                        },
+                    ));
+                }
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("pdf_gpu_image"),
+                    size: wgpu::Extent3d {
+                        width: image.size[0],
+                        height: image.size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            })
+            .collect();
+        let (writes, items) = writes.into_iter().unzip();
+        PageUpload {
+            page,
+            levels,
+            textures,
+            writes,
+            items,
+            cursor: UploadCursor::default(),
+            layers: Vec::new(),
+        }
+    }
+
+    /// The page of a finished upload (see [`PageUpload::step`]).
+    pub fn finish_upload<P: Borrow<PreparedPage>>(
+        &self,
+        device: &wgpu::Device,
+        upload: PageUpload<P>,
+    ) -> GpuPage {
+        let page = upload.page.borrow();
         let mut image_bytes = 0;
         let images = page
             .images
             .iter()
-            .map(|image| {
-                let (texture, bytes) = upload_mipmapped(device, queue, &image.rgba.0, image.size);
-                image_bytes += bytes;
+            .zip(&upload.textures)
+            .map(|(image, texture)| {
+                image_bytes += std::iter::once(image.rgba.0.len())
+                    .chain(image.mips.iter().map(|(pixels, _)| pixels.len()))
+                    .sum::<usize>() as u64;
                 let sampler = if image.interpolate {
                     &self.mip_sampler
                 } else {
                     &self.pixel_sampler
                 };
-                Some(self.textured_quad(device, &texture, sampler, image.corners()))
+                Some(self.textured_quad(device, texture, sampler, image.corners()))
             })
             .collect();
-        let levels: Vec<GpuLevel> = page
-            .levels
-            .iter()
-            .map(|level| upload_level(device, level))
-            .collect();
+        let (levels, layers) = (upload.levels, upload.layers);
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pdf_gpu_camera"),
             size: size_of::<CameraUniform>() as u64,
@@ -457,7 +576,7 @@ impl Renderer {
             .map(wgpu::Buffer::size)
             .sum::<u64>()
             + image_bytes;
-        GpuPage {
+        let mut gpu_page = GpuPage {
             bounds: page.bounds,
             camera,
             camera_bind_group,
@@ -469,6 +588,58 @@ impl Renderer {
             segments: page.exact().segments.len(),
             triangles: page.exact().fill_indices.len() / 3,
             gpu_bytes,
+        };
+        for layer in layers {
+            self.finish_layer(device, &mut gpu_page, layer);
+        }
+        gpu_page
+    }
+
+    /// Creates the texture of raster layer `index`, premultiplied RGBA8
+    /// covering `rect`; [`LayerUpload::step`] (or [`PageUpload::add_layer`])
+    /// writes it and [`Renderer::finish_layer`] installs it.
+    pub fn begin_layer(
+        &self,
+        device: &wgpu::Device,
+        index: usize,
+        rect: PageRect,
+        rgba: Vec<u8>,
+        size: [u32; 2],
+    ) -> LayerUpload {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pdf_gpu_raster_layer"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        LayerUpload {
+            index,
+            rect,
+            size,
+            rgba,
+            texture,
+            cursor: UploadCursor::default(),
+        }
+    }
+
+    /// Installs a written raster layer on `page`, replacing (and freeing)
+    /// the one it had.
+    pub fn finish_layer(&self, device: &wgpu::Device, page: &mut GpuPage, upload: LayerUpload) {
+        let mut layer = self.raster_layer(device, &upload.texture, &self.sampler, upload.rect);
+        layer.bytes = u64::from(upload.size[0]) * u64::from(upload.size[1]) * 4;
+        page.gpu_bytes += layer.bytes;
+        if let Some(slot) = page.layers.get_mut(upload.index)
+            && let Some(old) = slot.replace(layer)
+        {
+            page.gpu_bytes = page.gpu_bytes.saturating_sub(old.bytes);
         }
     }
 
@@ -958,37 +1129,6 @@ fn intersects(a: PageRect, b: PageRect) -> bool {
     a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
 }
 
-fn upload_level(device: &wgpu::Device, level: &PreparedLevel) -> GpuLevel {
-    let buffer = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
-        (!contents.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage,
-            })
-        })
-    };
-    GpuLevel {
-        max_scale: level.max_scale,
-        fill_vertices: buffer(
-            "pdf_gpu_fill_vertices",
-            bytemuck::cast_slice(&level.fill_vertices),
-            wgpu::BufferUsages::VERTEX,
-        ),
-        fill_indices: buffer(
-            "pdf_gpu_fill_indices",
-            bytemuck::cast_slice(&level.fill_indices),
-            wgpu::BufferUsages::INDEX,
-        ),
-        segments: buffer(
-            "pdf_gpu_segments",
-            bytemuck::cast_slice(&level.segments),
-            wgpu::BufferUsages::VERTEX,
-        ),
-        batches: level.batches.clone(),
-    }
-}
-
 /// Ranges of the chunks overlapping `visible`, merging adjacent ones; a batch
 /// without chunks is drawn whole.
 fn visible_ranges(
@@ -1013,6 +1153,322 @@ fn visible_ranges(
     ranges
 }
 
+/// Staging chunk size for [`Renderer::upload`]'s own belt.
+const UPLOAD_CHUNK: u64 = 4 << 20;
+
+/// A page being uploaded a chunk at a time (see [`Renderer::begin_upload`]),
+/// so a dense page never costs one long frame.
+pub struct PageUpload<P> {
+    page: P,
+    levels: Vec<GpuLevel>,
+    textures: Vec<wgpu::Texture>,
+    writes: Vec<Write>,
+    items: Vec<UploadItem>,
+    cursor: UploadCursor,
+    /// Raster layers to install with the page, written after it.
+    layers: Vec<LayerUpload>,
+}
+
+/// What one upload item fills: a level's vertex, index or segment buffer
+/// (`part` 0, 1, 2), or one mip level of an image.
+#[derive(Clone, Copy, Debug)]
+enum Write {
+    Level { level: usize, part: usize },
+    Image { image: usize, mip: u32 },
+}
+
+impl<P: Borrow<PreparedPage>> PageUpload<P> {
+    /// Installs `layer` on the page when the upload finishes.
+    pub fn add_layer(&mut self, layer: LayerUpload) {
+        self.layers.push(layer);
+    }
+
+    /// Writes up to `budget` bytes more (at least one row or word) through
+    /// `belt` and submits them; returns whether the upload is complete.
+    /// Hosts keep one belt, whose staging buffers are reused once the GPU
+    /// has copied from them: `Queue::write_buffer` allocates staging memory
+    /// per call, which now and then costs tens of milliseconds.
+    pub fn step(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        belt: &mut wgpu::util::StagingBelt,
+        budget: u64,
+    ) -> bool {
+        submit_writes(device, queue, belt, |encoder, belt| {
+            let mut left = budget;
+            let page = self.page.borrow();
+            for (item, bytes) in self.cursor.next(&self.items, budget) {
+                left = left.saturating_sub(bytes.end - bytes.start);
+                let range = bytes.start as usize..bytes.end as usize;
+                match self.writes[item] {
+                    Write::Level { level, part } => {
+                        let (prepared, gpu) = (&page.levels[level], &self.levels[level]);
+                        let (source, buffer): (&[u8], _) = match part {
+                            0 => (
+                                bytemuck::cast_slice(&prepared.fill_vertices),
+                                &gpu.fill_vertices,
+                            ),
+                            1 => (
+                                bytemuck::cast_slice(&prepared.fill_indices),
+                                &gpu.fill_indices,
+                            ),
+                            _ => (bytemuck::cast_slice(&prepared.segments), &gpu.segments),
+                        };
+                        if let (Some(buffer), Some(size)) =
+                            (buffer, wgpu::BufferSize::new(range.len() as u64))
+                        {
+                            belt.write_buffer(encoder, buffer, bytes.start, size)
+                                .copy_from_slice(&source[range]);
+                        }
+                    }
+                    Write::Image { image, mip } => {
+                        let (pixels, [width, _]) = image_mip(&page.images[image], mip);
+                        write_rows(
+                            encoder,
+                            belt,
+                            &self.textures[image],
+                            mip,
+                            pixels,
+                            width,
+                            bytes,
+                        );
+                    }
+                }
+            }
+            if !self.cursor.done(&self.items) {
+                return false;
+            }
+            for layer in &mut self.layers {
+                if left == 0 {
+                    break;
+                }
+                left = left.saturating_sub(layer.write(encoder, belt, left));
+            }
+            self.layers.iter().all(LayerUpload::done)
+        })
+    }
+
+    /// Bytes not written yet.
+    pub fn remaining_bytes(&self) -> u64 {
+        self.cursor.remaining(&self.items)
+            + self
+                .layers
+                .iter()
+                .map(|layer| layer.cursor.remaining(&layer.items()))
+                .sum::<u64>()
+    }
+}
+
+/// A raster layer texture written a chunk at a time (see
+/// [`Renderer::begin_layer`]).
+pub struct LayerUpload {
+    index: usize,
+    rect: PageRect,
+    size: [u32; 2],
+    rgba: Vec<u8>,
+    texture: wgpu::Texture,
+    cursor: UploadCursor,
+}
+
+impl LayerUpload {
+    fn items(&self) -> [UploadItem; 1] {
+        let row = u64::from(self.size[0]) * 4;
+        [UploadItem {
+            len: row * u64::from(self.size[1]),
+            unit: row,
+        }]
+    }
+
+    fn done(&self) -> bool {
+        self.cursor.done(&self.items())
+    }
+
+    /// Records up to `budget` more bytes (at least a row); returns the bytes.
+    fn write(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        belt: &mut wgpu::util::StagingBelt,
+        budget: u64,
+    ) -> u64 {
+        let items = self.items();
+        let mut written = 0;
+        for (_, bytes) in self.cursor.next(&items, budget) {
+            written += bytes.end - bytes.start;
+            write_rows(
+                encoder,
+                belt,
+                &self.texture,
+                0,
+                &self.rgba,
+                self.size[0],
+                bytes,
+            );
+        }
+        written
+    }
+
+    /// Writes up to `budget` more bytes and submits them; returns whether
+    /// the layer is complete.
+    pub fn step(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        belt: &mut wgpu::util::StagingBelt,
+        budget: u64,
+    ) -> bool {
+        submit_writes(device, queue, belt, |encoder, belt| {
+            self.write(encoder, belt, budget);
+            self.done()
+        })
+    }
+}
+
+/// Records writes through `belt` in a fresh encoder and submits them.
+fn submit_writes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    belt: &mut wgpu::util::StagingBelt,
+    record: impl FnOnce(&mut wgpu::CommandEncoder, &mut wgpu::util::StagingBelt) -> bool,
+) -> bool {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("pdf_gpu_upload"),
+    });
+    let done = record(&mut encoder, belt);
+    belt.finish();
+    queue.submit([encoder.finish()]);
+    belt.recall();
+    done
+}
+
+/// Copies whole rows `bytes` of a `width`-pixel RGBA8 image into `mip` of
+/// `texture` through `belt`, padding rows to the copy alignment.
+fn write_rows(
+    encoder: &mut wgpu::CommandEncoder,
+    belt: &mut wgpu::util::StagingBelt,
+    texture: &wgpu::Texture,
+    mip: u32,
+    pixels: &[u8],
+    width: u32,
+    bytes: Range<u64>,
+) {
+    let row_bytes = width as usize * 4;
+    let padded = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let range = bytes.start as usize..bytes.end as usize;
+    let (first_row, rows) = (range.start / row_bytes, range.len() / row_bytes);
+    let Some(size) = wgpu::BufferSize::new((padded * rows) as u64) else {
+        return;
+    };
+    // Texel copies start at a multiple of the texel size.
+    let alignment = wgpu::BufferSize::new(4).expect("non-zero");
+    let slice = belt.allocate(size, alignment);
+    {
+        let mut view = slice
+            .get_mapped_range_mut()
+            .expect("staging belt slices are mapped");
+        for (row, source) in pixels[range].chunks_exact(row_bytes).enumerate() {
+            view.slice(row * padded..row * padded + row_bytes)
+                .copy_from_slice(source);
+        }
+    }
+    encoder.copy_buffer_to_texture(
+        wgpu::TexelCopyBufferInfo {
+            buffer: slice.buffer(),
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: slice.offset(),
+                bytes_per_row: Some(padded as u32),
+                rows_per_image: Some(rows as u32),
+            },
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: mip,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: first_row as u32,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width,
+            height: rows as u32,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// Pixels and size of mip level `mip` of `image`.
+fn image_mip(image: &PreparedImage, mip: u32) -> (&[u8], [u32; 2]) {
+    match mip.checked_sub(1) {
+        None => (&image.rgba.0, image.size),
+        Some(index) => {
+            let (pixels, size) = &image.mips[index as usize];
+            (pixels, *size)
+        }
+    }
+}
+
+/// `len` bytes to write in whole `unit`s (a row of a texture, a word of a
+/// buffer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UploadItem {
+    len: u64,
+    unit: u64,
+}
+
+/// Where an upload has got to: the next item and the offset in it.
+#[derive(Clone, Copy, Debug, Default)]
+struct UploadCursor {
+    item: usize,
+    offset: u64,
+}
+
+impl UploadCursor {
+    /// The next chunks, in order, together at most `budget` bytes, except
+    /// that at least one unit is always taken so every call progresses.
+    fn next(&mut self, items: &[UploadItem], budget: u64) -> Vec<(usize, Range<u64>)> {
+        let mut chunks = Vec::new();
+        let mut left = budget;
+        while let Some(item) = items.get(self.item) {
+            let unit = item.unit.max(1);
+            let mut take = (left / unit * unit).min(item.len - self.offset);
+            if take == 0 && item.len > self.offset {
+                if !chunks.is_empty() {
+                    break;
+                }
+                take = unit.min(item.len - self.offset);
+            }
+            if take > 0 {
+                chunks.push((self.item, self.offset..self.offset + take));
+            }
+            self.offset += take;
+            left = left.saturating_sub(take);
+            if self.offset >= item.len {
+                self.item += 1;
+                self.offset = 0;
+            }
+            if left == 0 {
+                break;
+            }
+        }
+        chunks
+    }
+
+    fn done(&self, items: &[UploadItem]) -> bool {
+        self.item >= items.len()
+    }
+
+    fn remaining(&self, items: &[UploadItem]) -> u64 {
+        items
+            .iter()
+            .skip(self.item)
+            .map(|item| item.len)
+            .sum::<u64>()
+            - self.offset
+    }
+}
+
 /// A stencil attachment cleared to zero for one page render pass.
 pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthStencilAttachment<'_> {
     wgpu::RenderPassDepthStencilAttachment {
@@ -1023,81 +1479,6 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
             store: wgpu::StoreOp::Discard,
         }),
     }
-}
-
-/// Uploads premultiplied RGBA8 pixels as a texture with a full mip chain
-/// (box-filtered on the CPU); returns it and its size in bytes.
-fn upload_mipmapped(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    rgba: &[u8],
-    size: [u32; 2],
-) -> (wgpu::Texture, u64) {
-    let mip_level_count = size[0].max(size[1]).max(1).ilog2() + 1;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("pdf_gpu_image"),
-        size: wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        },
-        mip_level_count,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let mut level = rgba.to_vec();
-    let [mut width, mut height] = size;
-    let mut bytes = 0;
-    for mip in 0..mip_level_count {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: mip,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &level,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        bytes += level.len() as u64;
-        if mip + 1 < mip_level_count {
-            (level, width, height) = downsample(&level, width, height);
-        }
-    }
-    (texture, bytes)
-}
-
-/// Halves an RGBA8 image (2x2 box filter; odd edges repeat).
-fn downsample(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let (half_width, half_height) = ((width / 2).max(1), (height / 2).max(1));
-    let mut out = Vec::with_capacity((half_width * half_height * 4) as usize);
-    let pixel = |x: u32, y: u32, channel: usize| {
-        u32::from(rgba[((y.min(height - 1) * width + x.min(width - 1)) * 4) as usize + channel])
-    };
-    for y in 0..half_height {
-        for x in 0..half_width {
-            for channel in 0..4 {
-                let sum = pixel(2 * x, 2 * y, channel)
-                    + pixel(2 * x + 1, 2 * y, channel)
-                    + pixel(2 * x, 2 * y + 1, channel)
-                    + pixel(2 * x + 1, 2 * y + 1, channel);
-                out.push(((sum + 2) / 4) as u8);
-            }
-        }
-    }
-    (out, half_width, half_height)
 }
 
 #[cfg(test)]
@@ -1129,18 +1510,46 @@ mod tests {
     }
 
     #[test]
-    fn downsampling_averages_two_by_two_blocks_and_repeats_odd_edges() {
-        let rgba = [
-            0, 0, 0, 0, 100, 100, 100, 100, 200, 200, 200, 200, //
-            100, 100, 100, 100, 0, 0, 0, 0, 40, 40, 40, 40,
+    fn uploads_write_every_byte_once_within_the_budget() {
+        let items = [
+            UploadItem { len: 10, unit: 2 },
+            UploadItem { len: 0, unit: 4 },
+            UploadItem { len: 12, unit: 4 },
+            UploadItem { len: 30, unit: 10 },
         ];
-        let (half, width, height) = downsample(&rgba, 3, 2);
-        assert_eq!((width, height), (1, 1));
-        assert_eq!(half, [50, 50, 50, 50]);
-        let (single, width, height) = downsample(&[9, 9, 9, 9], 1, 1);
-        assert_eq!(
-            (single.as_slice(), width, height),
-            (&[9u8, 9, 9, 9][..], 1, 1)
-        );
+        let mut cursor = UploadCursor::default();
+        let mut written = vec![Vec::new(); items.len()];
+        let mut steps = 0;
+        while !cursor.done(&items) {
+            let before = cursor.remaining(&items);
+            let chunks = cursor.next(&items, 8);
+            let total: u64 = chunks
+                .iter()
+                .map(|(_, range)| range.end - range.start)
+                .sum();
+            assert!(total > 0, "every step progresses");
+            // Over the budget only for a single unit larger than it.
+            assert!(total <= 8 || chunks.len() == 1 && total == items[chunks[0].0].unit);
+            assert_eq!(cursor.remaining(&items), before - total);
+            for (item, range) in chunks {
+                assert_eq!(range.start % items[item].unit, 0);
+                assert_eq!((range.end - range.start) % items[item].unit, 0);
+                written[item].push(range);
+            }
+            steps += 1;
+        }
+        assert!(steps > 1);
+        for (item, ranges) in items.iter().zip(&written) {
+            let mut end = 0;
+            for range in ranges {
+                assert_eq!(range.start, end, "contiguous, without overlap");
+                end = range.end;
+            }
+            assert_eq!(end, item.len);
+        }
+        assert!(cursor.next(&items, 8).is_empty());
+        let mut whole = UploadCursor::default();
+        assert_eq!(whole.next(&items, u64::MAX).len(), 3);
+        assert!(whole.done(&items));
     }
 }

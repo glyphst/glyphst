@@ -14,14 +14,17 @@
 //!    effect, or a transition from a snapshot of the previous view (another
 //!    tab, or the page before a turn) to the new image.
 
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
 use glyphst_effects::{EffectInputs, EffectRegistry, PRESENT, PreparedEffect, SOLID};
 use glyphst_pdf::vector::LayerImage;
 use glyphst_pdf_gpu::{
-    Camera, DrawStats, GpuPage, OffscreenTarget, OverviewJob, PreparedPage, Renderer, SAMPLE_COUNT,
-    STENCIL_FORMAT,
+    Camera, DrawStats, GpuPage, LayerUpload, OffscreenTarget, OverviewJob, PageUpload,
+    PreparedPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT,
 };
 use wgpu::util::DeviceExt as _;
 
@@ -29,6 +32,9 @@ use wgpu::util::DeviceExt as _;
 /// are dropped (visible pages never are).
 pub const PAGE_BUDGET_BYTES: u64 = 1 << 30;
 const OVERVIEW_DIMENSION: u32 = 8192;
+/// Bytes of page geometry and images written to the GPU per frame, so a
+/// dense page loads over a few frames instead of in one long one.
+pub const UPLOAD_BYTES_PER_FRAME: u64 = 4 << 20;
 
 /// A page of a document tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,6 +90,29 @@ struct Resident {
     last_drawn: u64,
 }
 
+/// Something being written to the GPU a chunk per frame: a page (with its
+/// first raster layers), or a raster layer re-rasterized for the view.
+enum Upload {
+    Page {
+        key: PageKey,
+        upload: PageUpload<Box<PreparedPage>>,
+        /// Milliseconds spent on it so far.
+        ms: f64,
+    },
+    Layer {
+        key: PageKey,
+        upload: LayerUpload,
+    },
+}
+
+impl Upload {
+    fn key(&self) -> PageKey {
+        match self {
+            Self::Page { key, .. } | Self::Layer { key, .. } => *key,
+        }
+    }
+}
+
 struct Snapshot {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -97,6 +126,10 @@ pub struct ReaderGpu {
     pages: HashMap<PageKey, Resident>,
     /// Overviews being built, one tile per frame (see `step_overview`).
     overviews: HashMap<PageKey, OverviewJob>,
+    /// Uploads in order; the first is written a chunk per frame.
+    uploads: VecDeque<Upload>,
+    /// Staging memory for uploads, reused from frame to frame.
+    belt: wgpu::util::StagingBelt,
     frame: u64,
     target: Option<OffscreenTarget>,
     /// The tab whose pages the target holds.
@@ -211,6 +244,8 @@ impl ReaderGpu {
             effects,
             pages: HashMap::new(),
             overviews: HashMap::new(),
+            uploads: VecDeque::new(),
+            belt: wgpu::util::StagingBelt::new(device.clone(), UPLOAD_BYTES_PER_FRAME),
             frame: 0,
             target: None,
             target_owner: None,
@@ -230,75 +265,122 @@ impl ReaderGpu {
         &self.effects
     }
 
+    /// Whether `key` is on the GPU or being written to it.
     pub fn is_resident(&self, key: PageKey) -> bool {
+        self.pages.contains_key(&key)
+            || self
+                .uploads
+                .iter()
+                .any(|upload| matches!(upload, Upload::Page { key: k, .. } if *k == key))
+    }
+
+    /// Whether `key` can be drawn.
+    pub fn is_drawable(&self, key: PageKey) -> bool {
         self.pages.contains_key(&key)
     }
 
-    /// Uploads a prepared page with its raster layers and, when the page is
-    /// dense, starts its overview. Returns the time taken in milliseconds.
-    pub fn upload(
+    /// Whether a page is being uploaded.
+    pub fn is_uploading(&self) -> bool {
+        self.uploads
+            .iter()
+            .any(|upload| matches!(upload, Upload::Page { .. }))
+    }
+
+    /// Starts writing a prepared page and its raster layers to the GPU;
+    /// [`ReaderGpu::step_upload`] continues it. A page already resident
+    /// (another version of it) stays drawn until this one is complete.
+    pub fn begin_upload(
         &mut self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         key: PageKey,
-        prepared: &PreparedPage,
-        layers: &[(usize, LayerImage)],
-    ) -> f64 {
+        prepared: Box<PreparedPage>,
+        layers: Vec<(usize, LayerImage)>,
+    ) {
         let started = Instant::now();
-        // A page replaced by another drawing (its translation) drops the
-        // overview being built for the old one.
-        self.overviews.remove(&key);
-        let mut page = self.renderer.upload(device, queue, prepared);
-        for (layer, image) in layers {
-            self.renderer.set_raster_layer(
-                device,
-                queue,
-                &mut page,
-                *layer,
-                image.rect,
-                &image.rgba,
-                image.size,
+        let mut upload = self.renderer.begin_upload(device, prepared);
+        for (index, image) in layers {
+            upload.add_layer(
+                self.renderer
+                    .begin_layer(device, index, image.rect, image.rgba, image.size),
             );
         }
-        if page.wants_overview() {
-            let dimension = device
-                .limits()
-                .max_texture_dimension_2d
-                .min(OVERVIEW_DIMENSION);
-            if let Some(job) = self.renderer.begin_overview(device, &page, dimension) {
-                self.overviews.insert(key, job);
-            }
-        }
-        self.pages.insert(
+        self.uploads.push_back(Upload::Page {
             key,
-            Resident {
-                page,
-                last_drawn: self.frame,
-            },
-        );
-        started.elapsed().as_secs_f64() * 1000.0
+            upload,
+            ms: started.elapsed().as_secs_f64() * 1000.0,
+        });
     }
 
     /// Replaces raster layer `layer` of a resident page with a texture
-    /// rasterized for the current view.
+    /// rasterized for the current view, once it is written.
     pub fn replace_layer(
         &mut self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         key: PageKey,
         layer: usize,
-        image: &LayerImage,
+        image: LayerImage,
     ) {
-        if let Some(resident) = self.pages.get_mut(&key) {
-            self.renderer.set_raster_layer(
-                device,
-                queue,
-                &mut resident.page,
-                layer,
-                image.rect,
-                &image.rgba,
-                image.size,
-            );
+        if self.pages.contains_key(&key) {
+            let upload = self
+                .renderer
+                .begin_layer(device, layer, image.rect, image.rgba, image.size);
+            self.uploads.push_back(Upload::Layer { key, upload });
+        }
+    }
+
+    /// Writes up to `budget` more bytes of the first upload. A completed
+    /// page replaces any older drawing of it and starts its overview when
+    /// it is dense; then the milliseconds spent on it are returned.
+    pub fn step_upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        budget: u64,
+    ) -> Option<f64> {
+        let started = Instant::now();
+        let done = match self.uploads.front_mut()? {
+            Upload::Page { upload, ms, .. } => {
+                let done = upload.step(device, queue, &mut self.belt, budget);
+                *ms += started.elapsed().as_secs_f64() * 1000.0;
+                done
+            }
+            Upload::Layer { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
+        };
+        if !done {
+            return None;
+        }
+        match self.uploads.pop_front()? {
+            Upload::Layer { key, upload } => {
+                if let Some(resident) = self.pages.get_mut(&key) {
+                    self.renderer
+                        .finish_layer(device, &mut resident.page, upload);
+                }
+                None
+            }
+            Upload::Page { key, upload, ms } => {
+                let started = Instant::now();
+                // A page replaced by another drawing (its translation) drops
+                // the overview being built for the old one.
+                self.overviews.remove(&key);
+                let page = self.renderer.finish_upload(device, upload);
+                if page.wants_overview() {
+                    let dimension = device
+                        .limits()
+                        .max_texture_dimension_2d
+                        .min(OVERVIEW_DIMENSION);
+                    if let Some(job) = self.renderer.begin_overview(device, &page, dimension) {
+                        self.overviews.insert(key, job);
+                    }
+                }
+                self.pages.insert(
+                    key,
+                    Resident {
+                        page,
+                        last_drawn: self.frame,
+                    },
+                );
+                Some(ms + started.elapsed().as_secs_f64() * 1000.0)
+            }
         }
     }
 
@@ -321,8 +403,9 @@ impl ReaderGpu {
         }
     }
 
-    pub fn has_pending_overview(&self) -> bool {
-        !self.overviews.is_empty()
+    /// Whether an overview or an upload is under way, a step per frame.
+    pub fn has_pending_work(&self) -> bool {
+        !self.overviews.is_empty() || !self.uploads.is_empty()
     }
 
     /// Drops least recently drawn pages outside `keep` until the resident
@@ -349,6 +432,7 @@ impl ReaderGpu {
     pub fn drop_tab(&mut self, tab: u64) {
         self.pages.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
+        self.uploads.retain(|upload| upload.key().tab != tab);
         if self.target_owner == Some(tab) {
             self.target_owner = None;
         }

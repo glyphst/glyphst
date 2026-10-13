@@ -121,6 +121,9 @@ pub struct PreparedImage {
     pub size: [u32; 2],
     pub transform: [f32; 6],
     pub interpolate: bool,
+    /// The rest of the mip chain, box-filtered from `rgba`: each level's
+    /// pixels and size, halving down to one pixel.
+    pub mips: Vec<(Vec<u8>, [u32; 2])>,
 }
 
 impl PreparedImage {
@@ -164,6 +167,7 @@ impl PreparedPage {
                     size: *size,
                     transform: *transform,
                     interpolate: *interpolate,
+                    mips: mip_chain(&rgba.0, *size),
                 }),
                 _ => None,
             })
@@ -850,6 +854,42 @@ fn lyon_path(path: &PagePath) -> LyonPath {
     builder.build()
 }
 
+/// Mip levels 1.. of an RGBA8 image of `size` (level 0 is the image).
+fn mip_chain(rgba: &[u8], size: [u32; 2]) -> Vec<(Vec<u8>, [u32; 2])> {
+    let count = size[0].max(size[1]).max(1).ilog2();
+    let mut mips: Vec<(Vec<u8>, [u32; 2])> = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (pixels, [width, height]) = match mips.last() {
+            Some((pixels, size)) => (pixels.as_slice(), *size),
+            None => (rgba, size),
+        };
+        let (half, half_width, half_height) = downsample(pixels, width, height);
+        mips.push((half, [half_width, half_height]));
+    }
+    mips
+}
+
+/// Halves an RGBA8 image (2x2 box filter; odd edges repeat).
+pub(crate) fn downsample(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let (half_width, half_height) = ((width / 2).max(1), (height / 2).max(1));
+    let mut out = Vec::with_capacity((half_width * half_height * 4) as usize);
+    let pixel = |x: u32, y: u32, channel: usize| {
+        u32::from(rgba[((y.min(height - 1) * width + x.min(width - 1)) * 4) as usize + channel])
+    };
+    for y in 0..half_height {
+        for x in 0..half_width {
+            for channel in 0..4 {
+                let sum = pixel(2 * x, 2 * y, channel)
+                    + pixel(2 * x + 1, 2 * y, channel)
+                    + pixel(2 * x, 2 * y + 1, channel)
+                    + pixel(2 * x + 1, 2 * y + 1, channel);
+                out.push(((sum + 2) / 4) as u8);
+            }
+        }
+    }
+    (out, half_width, half_height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1132,34 @@ mod tests {
             prepared.levels.len() < LOD_MAX_SCALES.len() + 1,
             "similar levels are dropped"
         );
+    }
+
+    #[test]
+    fn downsampling_averages_two_by_two_blocks_and_repeats_odd_edges() {
+        let rgba = [
+            0, 0, 0, 0, 100, 100, 100, 100, 200, 200, 200, 200, //
+            100, 100, 100, 100, 0, 0, 0, 0, 40, 40, 40, 40,
+        ];
+        let (half, width, height) = downsample(&rgba, 3, 2);
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(half, [50, 50, 50, 50]);
+        let (single, width, height) = downsample(&[9, 9, 9, 9], 1, 1);
+        assert_eq!(
+            (single.as_slice(), width, height),
+            (&[9u8, 9, 9, 9][..], 1, 1)
+        );
+    }
+
+    #[test]
+    fn mip_chains_halve_down_to_one_pixel() {
+        let sizes: Vec<[u32; 2]> = mip_chain(&[7; 5 * 3 * 4], [5, 3])
+            .into_iter()
+            .map(|(pixels, size)| {
+                assert_eq!(pixels.len() as u32, size[0] * size[1] * 4);
+                size
+            })
+            .collect();
+        assert_eq!(sizes, [[2, 1], [1, 1]]);
+        assert!(mip_chain(&[0; 4], [1, 1]).is_empty());
     }
 }
