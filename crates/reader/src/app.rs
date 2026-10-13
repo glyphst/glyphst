@@ -1606,6 +1606,7 @@ impl ReaderApp {
         let mut select = None;
         let mut close = None;
         let mut run = None;
+        let mut tab_menu = None;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             if icons::button(ui, "house", 28.0, self.active.is_none(), "Home").clicked() {
@@ -1680,6 +1681,14 @@ impl ReaderApp {
                 if response.middle_clicked() {
                     close = Some(index);
                 }
+                let shown = self.panes.contains(self.tabs[index].id);
+                let count = self.tabs.len();
+                response.context_menu(|ui| {
+                    if let Some(action) = tab_menu_entries(ui, index, count, shown) {
+                        tab_menu = Some((index, action));
+                        ui.close();
+                    }
+                });
                 let close_rect = egui::Rect::from_center_size(
                     egui::pos2(rect.right() - 15.0, rect.center().y),
                     egui::vec2(20.0, 20.0),
@@ -1764,10 +1773,38 @@ impl ReaderApp {
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
         }
-        if let Some(index) = close {
+        if let Some((index, action)) = tab_menu {
+            self.tab_menu_action(index, action, &ctx);
+        } else if let Some(index) = close {
             self.close(index);
         } else if let Some(index) = select {
             self.activate(index);
+        }
+    }
+
+    /// Does what a tab's context menu chose for tab `index`.
+    fn tab_menu_action(&mut self, index: usize, action: TabMenu, ctx: &egui::Context) {
+        let id = self.tabs[index].id;
+        match action {
+            TabMenu::Close | TabMenu::CloseOthers | TabMenu::CloseToTheRight => {
+                for other in tabs_to_close(self.tabs.len(), index, action) {
+                    self.close(other);
+                }
+            }
+            TabMenu::Open(zone) => match self.panes.focused() {
+                Some(pane) if self.active.is_some() => self.drop_tab(id, pane, zone),
+                _ => self.activate(Some(index)),
+            },
+            TabMenu::Reload => self.reload(index, ctx),
+            TabMenu::CopyPath => ctx.copy_text(self.tabs[index].path.display().to_string()),
+            TabMenu::ShowInFolder => {
+                let path = &self.tabs[index].path;
+                let folder = path.parent().unwrap_or(path);
+                if let Err(error) = crate::effects_page::open_folder(folder) {
+                    self.notices
+                        .push(format!("Could not open {}: {error}", folder.display()));
+                }
+            }
         }
     }
 
@@ -2785,6 +2822,82 @@ fn menu_entry(ui: &egui::Ui, icon: &str, text: &str, key: &str) -> egui::Button<
         .shortcut_text(egui::RichText::new(key.to_string()).color(tokens.text_faint))
 }
 
+/// What a tab's context menu does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabMenu {
+    Close,
+    CloseOthers,
+    CloseToTheRight,
+    /// Shows the tab beside the focused pane.
+    Open(Zone),
+    Reload,
+    CopyPath,
+    ShowInFolder,
+}
+
+/// The context menu of tab `index` of `count`; `shown` when it is on the
+/// stage already. Returns the entry chosen.
+fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) -> Option<TabMenu> {
+    let mut chosen = None;
+    let mut entry = |ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str, action| {
+        if ui
+            .add_enabled(enabled, menu_entry(ui, icon, text, ""))
+            .clicked()
+        {
+            chosen = Some(action);
+        }
+    };
+    entry(ui, true, "x", "Close", TabMenu::Close);
+    entry(ui, count > 1, "x", "Close other tabs", TabMenu::CloseOthers);
+    entry(
+        ui,
+        index + 1 < count,
+        "x",
+        "Close tabs to the right",
+        TabMenu::CloseToTheRight,
+    );
+    ui.separator();
+    if !shown {
+        entry(
+            ui,
+            true,
+            "columns-2",
+            "Open to the right",
+            TabMenu::Open(Zone::Right),
+        );
+        entry(
+            ui,
+            true,
+            "rows-2",
+            "Open below",
+            TabMenu::Open(Zone::Bottom),
+        );
+    }
+    entry(ui, true, "refresh-cw", "Reload", TabMenu::Reload);
+    ui.separator();
+    entry(ui, true, "copy", "Copy path", TabMenu::CopyPath);
+    entry(
+        ui,
+        true,
+        "folder-open",
+        "Show in folder",
+        TabMenu::ShowInFolder,
+    );
+    chosen
+}
+
+/// The tabs a close entry of tab `index`'s menu closes, last first so each
+/// index stays valid as the ones after it go.
+fn tabs_to_close(count: usize, index: usize, action: TabMenu) -> Vec<usize> {
+    let all = (0..count).rev();
+    match action {
+        TabMenu::Close => vec![index],
+        TabMenu::CloseOthers => all.filter(|&other| other != index).collect(),
+        TabMenu::CloseToTheRight => all.filter(|&other| other > index).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();
@@ -2826,6 +2939,14 @@ fn arrow_actions(ctx: &egui::Context, presenting: bool) -> Vec<ViewAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_menus_close_the_tabs_they_name_last_first() {
+        assert_eq!(tabs_to_close(4, 1, TabMenu::Close), [1]);
+        assert_eq!(tabs_to_close(4, 1, TabMenu::CloseOthers), [3, 2, 0]);
+        assert_eq!(tabs_to_close(4, 1, TabMenu::CloseToTheRight), [3, 2]);
+        assert!(tabs_to_close(4, 3, TabMenu::CloseToTheRight).is_empty());
+    }
 
     #[test]
     fn long_tab_titles_are_shortened() {
