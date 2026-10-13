@@ -89,6 +89,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("library", include_bytes!("../assets/icons/library.svg")),
     ("list", include_bytes!("../assets/icons/list.svg")),
+    (
+        "locate-fixed",
+        include_bytes!("../assets/icons/locate-fixed.svg"),
+    ),
     ("log-in", include_bytes!("../assets/icons/log-in.svg")),
     ("log-out", include_bytes!("../assets/icons/log-out.svg")),
     (

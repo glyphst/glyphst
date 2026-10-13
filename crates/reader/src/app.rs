@@ -924,6 +924,11 @@ impl ReaderApp {
             SidebarAction::SetColor(id, color) => self.set_annotation_color(id, color),
             SidebarAction::SetBody(id, body) => self.set_note_body(id, body),
             SidebarAction::Remove(id) => self.remove_annotation(id),
+            SidebarAction::LocateOutline => {
+                if let Some(active) = self.active {
+                    self.tabs[active].outline_view.locate();
+                }
+            }
         }
     }
 

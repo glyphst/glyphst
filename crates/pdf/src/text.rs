@@ -316,6 +316,17 @@ pub struct PageLink {
     pub target: LinkTarget,
 }
 
+/// The page-space y a destination brings to the top, when it names one.
+pub fn destination_top(kind: &DestinationKind) -> Option<f32> {
+    match *kind {
+        DestinationKind::XYZ { top, .. }
+        | DestinationKind::FitH { top }
+        | DestinationKind::FitBH { top } => top,
+        DestinationKind::FitR { bottom, top, .. } => Some(bottom.min(top)),
+        _ => None,
+    }
+}
+
 /// The links of a page; links MuPDF cannot resolve are left out.
 pub fn page_links(page: &Page) -> Vec<PageLink> {
     let Ok(links) = page.links() else {
@@ -330,19 +341,10 @@ pub fn page_links(page: &Page) -> Vec<PageLink> {
                 link.bounds.y1,
             ];
             let target = match link.dest {
-                Some(dest) => {
-                    let y = match dest.kind {
-                        DestinationKind::XYZ { top, .. }
-                        | DestinationKind::FitH { top }
-                        | DestinationKind::FitBH { top } => top,
-                        DestinationKind::FitR { bottom, top, .. } => Some(bottom.min(top)),
-                        _ => None,
-                    };
-                    LinkTarget::Page {
-                        page: dest.loc.page_number as usize,
-                        y,
-                    }
-                }
+                Some(dest) => LinkTarget::Page {
+                    page: dest.loc.page_number as usize,
+                    y: destination_top(&dest.kind),
+                },
                 None if !link.uri.is_empty() => LinkTarget::Uri(link.uri),
                 None => return None,
             };

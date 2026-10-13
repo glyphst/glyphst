@@ -30,6 +30,7 @@ use crate::{
     gamepad::GamepadInput,
     gpu::PageDraw,
     overview::Overview,
+    sidebar::OutlineView,
     text_overlay::Selection,
     translation::DocSession,
 };
@@ -186,6 +187,9 @@ pub struct DocumentTab {
     /// The view's last origin and scale, and when they last changed.
     last_view: ([f64; 2], f64, Option<Instant>),
     pub outline: Vec<OutlineEntry>,
+    /// The sidebar's outline and thumbnail lists: collapsed entries and
+    /// what they follow.
+    pub outline_view: OutlineView,
     pub present: Option<usize>,
     pub load_seconds: Vec<f64>,
     pub text: DocText,
@@ -263,6 +267,7 @@ impl DocumentTab {
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
             outline: info.outline,
+            outline_view: OutlineView::default(),
             present: None,
             load_seconds: Vec::new(),
             text: DocText::new(pages),
@@ -315,6 +320,7 @@ impl DocumentTab {
         self.document_layout = info.layout;
         self.layout = Layout::new(info.bounds);
         self.outline = info.outline;
+        self.outline_view = OutlineView::default();
         self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
         self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
         self.thumbnails.clear();
@@ -980,6 +986,26 @@ impl DocumentTab {
             .saturating_sub(1)
     }
 
+    /// The outline entry being read: the last one whose destination is at
+    /// or above the middle of the view (of the page, presenting).
+    pub fn current_outline_entry(&self) -> Option<usize> {
+        let anchor = match self.present {
+            Some(page) => self.layout.offsets[page][1] + self.layout.page_size(page)[1] / 2.0,
+            None => self.view.origin[1] + self.viewport[1] / 2.0 / self.view.scale,
+        };
+        current_entry_for_anchor(&self.outline, anchor, |entry| {
+            let page = entry.page.filter(|&page| page < self.layout.len())?;
+            let top = self.layout.bounds[page][1];
+            let y = entry
+                .y
+                .map_or(top, |y| y.clamp(top, self.layout.bounds[page][3]));
+            Some(
+                self.document_y(page, y)
+                    .unwrap_or(self.layout.offsets[page][1]),
+            )
+        })
+    }
+
     pub fn go_to_page(&mut self, page: usize) {
         let page = page.min(self.layout.len() - 1);
         if self.present.is_some() {
@@ -1342,6 +1368,28 @@ fn contains(outer: PageRect, inner: PageRect) -> bool {
     outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
 }
 
+/// The entry being read at document y `anchor`: the last destination at or
+/// above it, a later entry winning a tie, else the first entry with a
+/// destination. Entries without one (links out) are skipped.
+fn current_entry_for_anchor(
+    entries: &[OutlineEntry],
+    anchor: f64,
+    mut destination: impl FnMut(&OutlineEntry) -> Option<f64>,
+) -> Option<usize> {
+    let mut first = None;
+    let mut best = None::<(usize, f64)>;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(y) = destination(entry) else {
+            continue;
+        };
+        first.get_or_insert(index);
+        if y <= anchor && best.is_none_or(|(_, best_y)| y >= best_y) {
+            best = Some((index, y));
+        }
+    }
+    best.map(|(index, _)| index).or(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1424,7 @@ mod tests {
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
             outline: Vec::new(),
+            outline_view: OutlineView::default(),
             present: None,
             load_seconds: Vec::new(),
             text: DocText::new(pages),
@@ -1753,5 +1802,62 @@ mod tests {
         tab.selection = None;
         tab.forget(22);
         assert!(tab.text.get(22).is_none());
+    }
+
+    #[test]
+    fn the_current_entry_is_the_last_destination_above_the_anchor() {
+        let entry = |page: Option<usize>, y: Option<f32>| OutlineEntry {
+            title: String::new(),
+            page,
+            y,
+            depth: 0,
+            parent: None,
+        };
+        let mut entries = vec![
+            entry(None, Some(10.0)),
+            entry(Some(0), Some(20.0)),
+            entry(Some(0), Some(90.0)),
+            entry(Some(0), Some(90.0)),
+        ];
+        let destination = |entry: &OutlineEntry| entry.page.and(entry.y.map(f64::from));
+        assert_eq!(
+            current_entry_for_anchor(&entries, 89.0, destination),
+            Some(1)
+        );
+        // A later entry wins a tie.
+        assert_eq!(
+            current_entry_for_anchor(&entries, 90.0, destination),
+            Some(3)
+        );
+        // Above every entry, the first one with a destination.
+        assert_eq!(
+            current_entry_for_anchor(&entries, 5.0, destination),
+            Some(1)
+        );
+        entries[0].page = Some(0);
+        assert_eq!(
+            current_entry_for_anchor(&entries, 5.0, destination),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_current_entry_follows_the_view() {
+        let mut tab = tab(30);
+        tab.viewport = [800.0, 600.0];
+        let entry = |page: usize| OutlineEntry {
+            title: String::new(),
+            page: Some(page),
+            y: None,
+            depth: 0,
+            parent: None,
+        };
+        tab.outline = vec![entry(0), entry(5), entry(12)];
+        tab.go_to_page(0);
+        assert_eq!(tab.current_outline_entry(), Some(0));
+        tab.go_to_page(7);
+        assert_eq!(tab.current_outline_entry(), Some(1));
+        tab.go_to_page(29);
+        assert_eq!(tab.current_outline_entry(), Some(2));
     }
 }

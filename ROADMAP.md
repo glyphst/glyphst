@@ -50,7 +50,10 @@ and the abandoned Files app in M5). It has:
   translate its text, or ask about it); quick ask (Tab, one question
   without the chat's history, continued in the assistant if wanted);
   half-page scrolling (Shift+Page Down/Up) and working arrow keys; a tab
-  context menu; thumbnails turned with their pages.
+  context menu; thumbnails turned with their pages. As in the GPUI Reader,
+  the sidebar outline follows the section being read (scrolling it away
+  pauses following; the locate button resumes it), its entries collapse
+  and their parents stick at the top, and the thumbnails follow the page.
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or

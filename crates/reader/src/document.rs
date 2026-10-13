@@ -862,7 +862,11 @@ fn page_image(document: &mupdf::Document, page: usize, scale: f32) -> Option<egu
 pub struct OutlineEntry {
     pub title: String,
     pub page: Option<usize>,
+    /// The page-space y the entry brings to the top, when it names one.
+    pub y: Option<f32>,
     pub depth: usize,
+    /// The index of the entry it is nested in.
+    pub parent: Option<usize>,
 }
 
 /// What a tab needs before its first frame, read on the calling thread.
@@ -890,7 +894,7 @@ impl DocumentInfo {
         let mut outline = Vec::new();
         // A broken outline should not stop the document from opening.
         if let Ok(entries) = document.outlines() {
-            flatten_outline(&entries, 0, &mut outline);
+            flatten_outline(&entries, 0, None, &mut outline);
         }
         let title = document
             .metadata(mupdf::MetadataName::Title)
@@ -906,17 +910,28 @@ impl DocumentInfo {
     }
 }
 
-fn flatten_outline(entries: &[mupdf::Outline], depth: usize, out: &mut Vec<OutlineEntry>) {
+fn flatten_outline(
+    entries: &[mupdf::Outline],
+    depth: usize,
+    parent: Option<usize>,
+    out: &mut Vec<OutlineEntry>,
+) {
     for entry in entries {
+        let index = out.len();
         out.push(OutlineEntry {
             title: entry.title.trim().to_string(),
             page: entry
                 .dest
                 .as_ref()
                 .map(|dest| dest.loc.page_number as usize),
+            y: entry
+                .dest
+                .as_ref()
+                .and_then(|dest| glyphst_pdf::text::destination_top(&dest.kind)),
             depth,
+            parent,
         });
-        flatten_outline(&entry.down, depth + 1, out);
+        flatten_outline(&entry.down, depth + 1, Some(index), out);
     }
 }
 
