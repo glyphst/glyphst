@@ -53,6 +53,7 @@ pub enum Command {
     TranslateDocument,
     ShowTranslated,
     Assistant,
+    QuickAsk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +121,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -166,6 +167,7 @@ impl Command {
         Self::TranslateDocument,
         Self::ShowTranslated,
         Self::Assistant,
+        Self::QuickAsk,
     ];
 
     /// The stable id kept in preferences.
@@ -216,6 +218,7 @@ impl Command {
             Self::TranslateDocument => "translation.document",
             Self::ShowTranslated => "translation.show_translated",
             Self::Assistant => "assistant.toggle",
+            Self::QuickAsk => "assistant.quick_ask",
         }
     }
 
@@ -270,6 +273,7 @@ impl Command {
             Self::TranslateDocument => "Translate the document",
             Self::ShowTranslated => "Show translated or original pages",
             Self::Assistant => "Show or hide the assistant",
+            Self::QuickAsk => "Quick ask about this page",
         }
     }
 
@@ -318,6 +322,7 @@ impl Command {
             Self::TranslateSelection | Self::TranslateDocument => "languages",
             Self::ShowTranslated => "globe",
             Self::Assistant => "sparkles",
+            Self::QuickAsk => "message-square",
         }
     }
 
@@ -367,7 +372,7 @@ impl Command {
             Self::TranslateSelection | Self::TranslateDocument | Self::ShowTranslated => {
                 Category::Translation
             }
-            Self::Assistant => Category::Assistant,
+            Self::Assistant | Self::QuickAsk => Category::Assistant,
         }
     }
 
@@ -410,6 +415,7 @@ impl Command {
             Self::Bookmark => &["Ctrl+D"],
             Self::TranslateSelection => &["Ctrl+T"],
             Self::Assistant => &["Ctrl+L"],
+            Self::QuickAsk => &["Tab"],
             Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
@@ -456,6 +462,7 @@ impl Command {
             Self::TranslateSelection
                 | Self::SelectPage
                 | Self::RegionSelect
+                | Self::QuickAsk
                 | Self::NextPage
                 | Self::PreviousPage
                 | Self::NextHalfPage

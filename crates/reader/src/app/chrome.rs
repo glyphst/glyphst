@@ -135,6 +135,7 @@ impl ReaderApp {
         self.chrome.panes = panes.clone();
         self.note_popover(&ctx);
         self.translation_card(&ctx);
+        self.quick_ask_ui(&ctx, layout.reading);
         if presenting || self.zen {
             return (animating, drawn);
         }

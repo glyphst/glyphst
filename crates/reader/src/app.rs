@@ -38,6 +38,7 @@ use crate::{
     panes::{self, Panes},
     pickers::{Pickers, is_document},
     prefs::{LastSession, Prefs, SessionFile},
+    quick_ask::{self, QuickAsk},
     region::{self, Region},
     settings_window::{Section, SettingsContext, SettingsWindow},
     sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
@@ -189,6 +190,7 @@ pub struct ReaderApp {
     region_jobs: Vec<region::Job>,
     /// A region waiting for the save dialog's path.
     region_save: Option<Region>,
+    pub(crate) quick_ask: QuickAsk,
     sidebar_state: SidebarState,
     /// The tab whose view a primary-button drag is in, and what it does.
     drag: Option<(u64, Drag)>,
@@ -324,6 +326,7 @@ impl ReaderApp {
             region: None,
             region_jobs: Vec::new(),
             region_save: None,
+            quick_ask: QuickAsk::default(),
             sidebar_state: SidebarState::default(),
             drag: None,
             note_editor: None,
@@ -1035,7 +1038,7 @@ impl ReaderApp {
 
     /// Asks the assistant about the active document.
     pub(crate) fn ask(&mut self, text: String, ctx: &egui::Context) {
-        let Some(active) = self.active else {
+        let Some(ask) = self.ask_context() else {
             return;
         };
         let Some(settings) = self.user_settings.get().cloned() else {
@@ -1043,9 +1046,14 @@ impl ReaderApp {
                 Some("Your AI settings are still loading; try again in a moment.".into());
             return;
         };
-        let tab = &self.tabs[active];
+        self.assistant.send(text, ask, &settings, ctx);
+    }
+
+    /// What a question knows about the active document.
+    fn ask_context(&self) -> Option<AskContext> {
+        let tab = &self.tabs[self.active?];
         let current_page = tab.current_page();
-        let ask = AskContext {
+        Some(AskContext {
             path: tab.path.clone(),
             title: tab.title.clone(),
             layout: tab.document_layout,
@@ -1053,8 +1061,50 @@ impl ReaderApp {
             current_page,
             page_text: tab.text.get(current_page).map(|text| text.plain_text()),
             selection: tab.selected_text(),
-        };
-        self.assistant.send(text, ask, &settings, ctx);
+        })
+    }
+
+    /// The quick ask card over `stage`, and what it asked for.
+    pub(crate) fn quick_ask_ui(&mut self, ctx: &egui::Context, stage: egui::Rect) {
+        let settings = self
+            .user_settings
+            .get()
+            .map(|settings| settings.ai.quick_ask)
+            .unwrap_or_default();
+        let selection = self
+            .active
+            .and_then(|active| self.tabs[active].selected_text());
+        match self
+            .quick_ask
+            .ui(ctx, stage, &settings, selection.as_deref())
+        {
+            Some(quick_ask::Action::Send(text)) => {
+                let (ask, settings) = (self.ask_context(), self.user_settings.get().cloned());
+                let quick = &mut self.quick_ask.assistant;
+                let (Some(ask), Some(settings)) = (ask, settings) else {
+                    quick.error =
+                        Some("Your AI settings are still loading; try again in a moment.".into());
+                    return;
+                };
+                // One question at a time, with what is on screen.
+                quick.new_session();
+                quick.include_page = true;
+                quick.include_selection = true;
+                quick.send(text, ask, &settings, ctx);
+            }
+            Some(quick_ask::Action::Continue) => {
+                if self.assistant.adopt(&mut self.quick_ask.assistant) {
+                    self.quick_ask.close();
+                    self.assistant.open = true;
+                    self.assistant.refresh_sessions(&self.library);
+                } else {
+                    self.notices
+                        .push("The assistant is answering; try again when it is done.");
+                }
+            }
+            Some(quick_ask::Action::Close) => self.quick_ask.close(),
+            None => {}
+        }
     }
 
     /// Ends a region drag: the region keeps its page's part, and its text
@@ -1207,20 +1257,23 @@ impl ReaderApp {
                 region::Use::Ask(region) => match region::png(&image) {
                     Ok(png) => {
                         let thumbnail = ctx.load_texture(
-                            format!("region-{}-{}", region.tab, self.assistant.attachments.len()),
+                            format!("region-{}-{}", region.tab, self.region_jobs.len()),
                             region::color_image(&image),
                             egui::TextureOptions::LINEAR,
                         );
-                        self.assistant.attachments.push(crate::ai::Attachment {
-                            image: glyphst_ai::ai_chat::ImageContext::new_region(
-                                region.reference(),
-                                "image/png",
-                                png,
-                            ),
-                            thumbnail,
-                            label: format!("Region of page {}", region.page + 1),
-                        });
-                        self.assistant.open = true;
+                        self.quick_ask
+                            .assistant
+                            .attachments
+                            .push(crate::ai::Attachment {
+                                image: glyphst_ai::ai_chat::ImageContext::new_region(
+                                    region.reference(),
+                                    "image/png",
+                                    png,
+                                ),
+                                thumbnail,
+                                label: format!("Region of page {}", region.page + 1),
+                            });
+                        self.quick_ask.show_composer();
                     }
                     Err(error) => self.notices.push(format!("{error:#}")),
                 },
@@ -1522,6 +1575,14 @@ impl ReaderApp {
                             Some(Overview::new(tab.current_page()))
                         }
                     };
+                }
+                None
+            }
+            Command::QuickAsk => {
+                if self.quick_ask.open {
+                    self.quick_ask.close();
+                } else {
+                    self.quick_ask.show_composer();
                 }
                 None
             }
@@ -2558,6 +2619,13 @@ impl ReaderApp {
                 self.translate_selection(at, ctx);
                 ui.close();
             }
+            if ui
+                .add(self.menu_button(ui, "Ask about it…", Command::QuickAsk))
+                .clicked()
+            {
+                self.quick_ask.show_composer();
+                ui.close();
+            }
         }
         if let Some(text) = selected.as_ref().filter(|_| !translated) {
             ui.separator();
@@ -2851,6 +2919,7 @@ impl eframe::App for ReaderApp {
         self.translator.poll();
         self.assistant
             .poll(self.persist.then_some(&mut self.library));
+        self.quick_ask.assistant.poll(None);
         if let Some((tab_id, path)) = self.pickers.take_saved()
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
             && let Some(session) = tab.translation.as_mut()

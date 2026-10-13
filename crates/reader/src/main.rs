@@ -43,6 +43,7 @@ mod palette;
 mod panes;
 mod pickers;
 mod prefs;
+mod quick_ask;
 mod region;
 mod settings_providers;
 mod settings_window;

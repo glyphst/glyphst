@@ -380,6 +380,28 @@ impl Assistant {
         self.show_sessions = false;
     }
 
+    /// The last answer's text, while one is written or once done.
+    pub fn latest_answer(&self) -> Option<String> {
+        self.messages
+            .last()
+            .filter(|message| message.role == Role::Assistant)
+            .map(ChatMessage::display_text)
+    }
+
+    /// Takes `other`'s conversation as a new chat (a quick question
+    /// continued here); false while either is answering.
+    pub fn adopt(&mut self, other: &mut Assistant) -> bool {
+        if self.run.is_some() || other.run.is_some() {
+            return false;
+        }
+        self.new_session();
+        self.messages = std::mem::take(&mut other.messages);
+        self.tools = std::mem::take(&mut other.tools);
+        self.sent_images = std::mem::take(&mut other.sent_images);
+        other.new_session();
+        true
+    }
+
     pub fn load_session(&mut self, id: u64) {
         let Some(session) = self
             .sessions
@@ -798,6 +820,40 @@ mod tests {
 
     use super::*;
     use crate::fake_providers::{FAKE_ANSWER, FAKE_SEARCH, start_ai_server, use_fake_ai};
+
+    #[test]
+    fn quick_questions_start_afresh_and_continue_in_the_assistant() {
+        let ctx = egui::Context::default();
+        // No model is set up, so questions stay without answers.
+        let mut settings = Settings::default();
+        settings
+            .ai
+            .provider_config_mut(AiProvider::OpenAi)
+            .api_key
+            .clear();
+        let ask = || AskContext {
+            path: "doc.pdf".into(),
+            title: "doc.pdf".into(),
+            layout: DocumentLayout::Fixed,
+            page_count: 1,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+        };
+        let mut quick = Assistant::default();
+        quick.send("First?".into(), ask(), &settings, &ctx);
+        quick.new_session();
+        quick.send("Second?".into(), ask(), &settings, &ctx);
+        assert_eq!(quick.messages().len(), 1, "no history");
+        assert_eq!(quick.messages()[0].display_text(), "Second?");
+
+        let mut assistant = Assistant::default();
+        assistant.send("Earlier".into(), ask(), &settings, &ctx);
+        assert!(assistant.adopt(&mut quick));
+        assert_eq!(assistant.messages().len(), 1, "a new chat of the quick one");
+        assert_eq!(assistant.messages()[0].display_text(), "Second?");
+        assert!(quick.messages().is_empty());
+    }
 
     #[test]
     fn attached_region_images_go_with_the_next_message_only() {
