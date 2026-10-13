@@ -1,10 +1,5 @@
 use super::*;
 
-#[cfg(feature = "gpui")]
-pub fn ui_rems(px: f32) -> gpui::Rems {
-    gpui::rems(px / DEFAULT_UI_FONT_SIZE)
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RestoreOnStartup {
     #[default]
@@ -226,18 +221,6 @@ impl FontSettings {
             DEFAULT_UI_FONT_WEIGHT
         };
     }
-
-    #[cfg(feature = "gpui")]
-    pub fn ui_font(&self) -> Font {
-        Font {
-            family: self.ui_font_family.clone().into(),
-            features: Default::default(),
-            fallbacks: (!self.ui_font_fallbacks.is_empty())
-                .then(|| FontFallbacks::from_fonts(self.ui_font_fallbacks.clone())),
-            weight: FontWeight(self.ui_font_weight),
-            style: Default::default(),
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowBackgroundMode {
@@ -262,15 +245,6 @@ impl WindowBackgroundMode {
             "transparent" => Some(Self::Transparent),
             "blurred" | "blur" => Some(Self::Blurred),
             _ => None,
-        }
-    }
-
-    #[cfg(feature = "gpui")]
-    fn into_gpui(self) -> WindowBackgroundAppearance {
-        match self {
-            Self::Opaque => WindowBackgroundAppearance::Opaque,
-            Self::Transparent => WindowBackgroundAppearance::Transparent,
-            Self::Blurred => WindowBackgroundAppearance::Blurred,
         }
     }
 }
@@ -304,15 +278,6 @@ impl WindowSettings {
             self.opacity
         } else {
             MAX_WINDOW_OPACITY
-        }
-    }
-
-    #[cfg(feature = "gpui")]
-    pub fn background_appearance(self, enabled: bool) -> WindowBackgroundAppearance {
-        if enabled && self.transparency_enabled_by_default() {
-            self.background.into_gpui()
-        } else {
-            WindowBackgroundAppearance::Opaque
         }
     }
 }

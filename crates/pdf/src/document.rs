@@ -67,7 +67,7 @@ impl fmt::Debug for DocumentSnapshot {
 }
 
 impl DocumentSnapshot {
-    #[ztracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all)]
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let format = document_format(path)?;
@@ -130,7 +130,7 @@ impl DocumentSnapshot {
     /// Unencrypted snapshots reuse their immutable source bytes. Encrypted
     /// snapshots are authenticated with the in-memory password and rewritten
     /// without an encryption dictionary.
-    #[ztracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all)]
     pub fn unencrypted_pdf_bytes(&self) -> Result<Arc<[u8]>> {
         if self.format != DocumentFormat::Pdf {
             bail!("{} is not a PDF document", self.path.display());
@@ -183,7 +183,7 @@ impl GlyphstDocument {
         snapshot.open()
     }
 
-    #[ztracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all)]
     pub fn from_snapshot(snapshot: &DocumentSnapshot, layout: DocumentLayout) -> Result<Self> {
         configure_context(snapshot.format(), layout)?;
         let mut inner =

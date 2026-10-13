@@ -1,5 +1,5 @@
-// Hosts start the subscription with `ChatGptSubscription::start` (or, in
-// GPUI, `init`); until then requests report it as not initialized.
+// Hosts start the subscription with `ChatGptSubscription::start`; until
+// then requests report it as not initialized.
 
 use std::{
     str::FromStr as _,
@@ -16,8 +16,6 @@ use futures::{
     StreamExt as _,
     channel::{mpsc, oneshot},
 };
-#[cfg(feature = "gpui")]
-use gpui::{App, AppContext as _, Global};
 use rand::Rng as _;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -26,8 +24,6 @@ use sha2::{Digest as _, Sha256};
 use url::{Url, form_urlencoded};
 
 use crate::settings::CredentialStore;
-#[cfg(feature = "gpui")]
-use crate::settings::{AiProvider, SettingsStore};
 
 pub const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
@@ -114,15 +110,7 @@ pub struct ChatGptSubscription {
     changed: Option<Changed>,
 }
 
-#[cfg(feature = "gpui")]
-impl Global for ChatGptSubscription {}
-
 impl ChatGptSubscription {
-    #[cfg(feature = "gpui")]
-    pub fn global(cx: &App) -> Option<Self> {
-        cx.try_global::<Self>().cloned()
-    }
-
     pub fn snapshot(&self) -> AuthSnapshot {
         let state = self.inner.lock_state();
         AuthSnapshot {
@@ -142,7 +130,7 @@ impl ChatGptSubscription {
         self.inner.lock_state().credentials.is_some()
     }
 
-    /// Starts the subscription outside GPUI: the saved credentials load
+    /// Starts the subscription: the saved credentials load
     /// from `store` on a worker thread, which then saves and deletes them
     /// in order. `changed` runs on any thread whenever the state changes.
     pub fn start(
@@ -232,8 +220,7 @@ impl ChatGptSubscription {
         }
     }
 
-    /// Starts signing in to a subscription started with
-    /// [`ChatGptSubscription::start`]: returns the authorization page to
+    /// Starts signing in: returns the authorization page to
     /// open in the browser. Waiting for the browser's callback, the token
     /// exchange and saving the credentials run on a worker thread.
     pub fn begin_sign_in(&self) -> Result<String> {
@@ -286,9 +273,8 @@ impl ChatGptSubscription {
         Ok(authorize.to_string())
     }
 
-    /// Signs out of a subscription started with
-    /// [`ChatGptSubscription::start`], deleting the saved credentials.
-    pub fn forget(&self) {
+    /// Signs out, deleting the saved credentials.
+    pub fn sign_out(&self) {
         {
             let mut state = self.inner.lock_state();
             state.generation = state.generation.wrapping_add(1);
@@ -300,241 +286,6 @@ impl ChatGptSubscription {
         }
         self.notify();
         self.inner.delete_persisted();
-    }
-
-    #[cfg(feature = "gpui")]
-    pub fn sign_in(&self, cx: &mut App) {
-        let generation = {
-            let mut state = self.inner.lock_state();
-            if state.signing_in {
-                return;
-            }
-            state.generation = state.generation.wrapping_add(1);
-            state.signing_in = true;
-            state.last_error = None;
-            state.generation
-        };
-        notify(cx);
-
-        let (redirect_uri, callback_rx) = match start_callback_server() {
-            Ok(callback) => callback,
-            Err(error) => {
-                self.inner
-                    .finish_sign_in_error(generation, format!("{error:#}"));
-                notify(cx);
-                return;
-            }
-        };
-        let (verifier, challenge, oauth_state) = oauth_secrets();
-        let authorize_url = match authorize_url(&redirect_uri, &challenge, &oauth_state) {
-            Ok(url) => url,
-            Err(error) => {
-                self.inner
-                    .finish_sign_in_error(generation, format!("{error:#}"));
-                notify(cx);
-                return;
-            }
-        };
-
-        cx.open_url(authorize_url.as_str());
-        let inner = self.inner.clone();
-        cx.spawn(async move |cx| {
-            let result = async {
-                let callback = callback_rx
-                    .await
-                    .map_err(|_| anyhow!("OAuth callback was cancelled"))??;
-                if callback.state != oauth_state {
-                    return Err(anyhow!("OAuth state mismatch"));
-                }
-                cx.background_spawn(async move {
-                    exchange_code(&callback.code, &verifier, &redirect_uri)
-                })
-                .await
-            }
-            .await;
-
-            match result {
-                Ok(credentials) => {
-                    let json = match serde_json::to_vec(&credentials) {
-                        Ok(json) => json,
-                        Err(error) => {
-                            inner.finish_sign_in_error(
-                                generation,
-                                format!("failed to encode credentials: {error}"),
-                            );
-                            cx.update(notify);
-                            return;
-                        }
-                    };
-                    let write_result = inner.persist_and_wait(generation, json).await;
-                    let write_result = match write_result {
-                        Ok(result) => result,
-                        Err(_) => Err("credential persistence worker stopped".to_string()),
-                    };
-                    if let Err(error) = write_result {
-                        inner.finish_sign_in_error(generation, error);
-                        cx.update(notify);
-                        return;
-                    }
-
-                    if inner.finish_sign_in(generation, credentials) {
-                        cx.update(|cx| {
-                            enable_provider(cx);
-                            notify(cx);
-                        });
-                    }
-                }
-                Err(error) => {
-                    inner.finish_sign_in_error(generation, format!("{error:#}"));
-                    cx.update(notify);
-                }
-            }
-        })
-        .detach();
-    }
-
-    #[cfg(feature = "gpui")]
-    pub fn sign_out(&self, cx: &mut App) {
-        {
-            let mut state = self.inner.lock_state();
-            state.generation = state.generation.wrapping_add(1);
-            state.credentials = None;
-            state.signing_in = false;
-            state.refreshing = false;
-            state.last_error = None;
-            self.inner.changed.notify_all();
-        }
-        notify(cx);
-        self.inner.delete_persisted();
-    }
-}
-
-#[cfg(feature = "gpui")]
-pub fn init(cx: &mut App) {
-    if cx.has_global::<ChatGptSubscription>() {
-        return;
-    }
-
-    let (persistence_tx, persistence_rx) = mpsc::unbounded();
-    let inner = Arc::new(AuthInner {
-        state: Mutex::new(AuthState {
-            credentials: None,
-            loading: true,
-            signing_in: false,
-            refreshing: false,
-            generation: 0,
-            last_error: None,
-        }),
-        changed: Condvar::new(),
-        persistence_tx,
-    });
-    *ACTIVE_AUTH
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::downgrade(&inner);
-    cx.set_global(ChatGptSubscription {
-        inner: inner.clone(),
-        changed: None,
-    });
-
-    spawn_persistence_worker(persistence_rx, inner.clone(), cx);
-    let load_generation = inner.lock_state().generation;
-    let read_task = cx.read_credentials(CREDENTIALS_KEY);
-    cx.spawn(async move |cx| {
-        match read_task.await {
-            Ok(Some((_, bytes))) => match serde_json::from_slice::<CodexCredentials>(&bytes) {
-                Ok(credentials) => inner.finish_load(load_generation, Some(credentials), None),
-                Err(error) => inner.finish_load(
-                    load_generation,
-                    None,
-                    Some(format!("saved ChatGPT credentials are invalid: {error}")),
-                ),
-            },
-            Ok(None) => inner.finish_load(load_generation, None, None),
-            Err(error) => inner.finish_load(
-                load_generation,
-                None,
-                Some(format!("failed to read ChatGPT credentials: {error:#}")),
-            ),
-        }
-        cx.update(notify);
-    })
-    .detach();
-}
-
-#[cfg(feature = "gpui")]
-fn spawn_persistence_worker(
-    mut receiver: mpsc::UnboundedReceiver<PersistenceCommand>,
-    inner: Arc<AuthInner>,
-    cx: &mut App,
-) {
-    cx.spawn(async move |cx| {
-        while let Some(command) = receiver.next().await {
-            let (task, completion) = match command {
-                PersistenceCommand::Write {
-                    generation,
-                    bytes,
-                    completion,
-                } => {
-                    if inner.lock_state().generation != generation {
-                        if let Some(completion) = completion {
-                            let _ = completion
-                                .send(Err("ChatGPT sign-in changed before credentials were saved"
-                                    .to_string()));
-                        }
-                        continue;
-                    }
-                    (
-                        cx.update(move |cx| {
-                            cx.write_credentials(CREDENTIALS_KEY, "Bearer", &bytes)
-                        }),
-                        completion,
-                    )
-                }
-                PersistenceCommand::Delete => {
-                    (cx.update(|cx| cx.delete_credentials(CREDENTIALS_KEY)), None)
-                }
-            };
-            let result = task.await.map_err(|error| format!("{error:#}"));
-            if let Err(error) = &result {
-                eprintln!("failed to update ChatGPT credentials in the keychain: {error}");
-            }
-            if let Some(completion) = completion {
-                let _ = completion.send(result);
-            }
-            cx.update(notify);
-        }
-    })
-    .detach();
-}
-
-#[cfg(feature = "gpui")]
-fn notify(cx: &mut App) {
-    if cx.has_global::<ChatGptSubscription>() {
-        let _ = cx.global_mut::<ChatGptSubscription>();
-    }
-    cx.refresh_windows();
-}
-
-#[cfg(feature = "gpui")]
-fn enable_provider(cx: &mut App) {
-    if !cx.has_global::<SettingsStore>() {
-        return;
-    }
-    let mut settings = cx.global::<SettingsStore>().settings.clone();
-    let config = settings
-        .ai
-        .provider_config_mut(AiProvider::ChatGptSubscription);
-    if config.enabled {
-        return;
-    }
-    config.enabled = true;
-    if let Err(error) = cx
-        .global_mut::<SettingsStore>()
-        .set_settings(settings.clone())
-    {
-        cx.global_mut::<SettingsStore>()
-            .set_settings_in_memory(settings);
-        eprintln!("failed to enable the ChatGPT Subscription provider: {error:#}");
     }
 }
 
@@ -1494,7 +1245,7 @@ mod tests {
         assert!(changes.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(acquire_request_access().is_ok());
 
-        subscription.forget();
+        subscription.sign_out();
         assert!(!subscription.is_authenticated());
         wait_until(|| store.read_item(CREDENTIALS_KEY).unwrap().is_none());
     }

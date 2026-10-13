@@ -4,23 +4,19 @@
 
 | Owner | Responsibility |
 | --- | --- |
-| `reader`, `files` | Application entry points |
-| `workspace` | Panes and tabs (on the GPUI Kit dock), side docks, home/library browsing, window commands |
-| `document-ui` | Document views, interaction, and UI task lifetimes |
-| `ui`, `actions`, `keymap` | Shared widgets and application input |
-| `settings`, `settings-ui` | Settings data and its editor |
+| `reader` | The Reader (egui): tabs and split panes, home, GPU document view, text selection, find, links, annotations, EPUB reflow, translation, assistant, commands and settings |
+| `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
-| `ai`, `ai-ui` | AI services and chat presentation |
-| Translation crates | Translation domain, PDF production, service orchestration, UI |
+| `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
+| Translation crates | Translation domain, PDF production, service orchestration |
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
 | `effects` | Shader effects (transitions, backgrounds, overlays) defined as data; wgpu only |
-| `reader-egui` | The egui Reader (in progress, alongside the GPUI `reader`): tabs, home, GPU document view, text selection, find, links, annotations, EPUB reflow, translation, assistant, commands and settings |
+| `mermaid-render` | Mermaid diagrams to SVG (not used yet; for the assistant) |
 
 Private modules split implementation without introducing additional state
-owners. New-tab and workspace entities own their task handles; document views
-own their render requests, text indexing, and cancellation. See
-[workspace](crates/workspace/src) and [document views](crates/document-ui/src/document_view).
+owners. Each document tab owns its loader and indexer workers, their
+requests and their cancellation (see [the document tab](crates/reader/src/document_tab.rs)).
 
 MuPDF context clones share stylesheet settings across threads.
 [Document opening](crates/pdf/src/document.rs) serializes configuration. PDF
@@ -28,17 +24,6 @@ opens preserve the user CSS allocation and enable document styles for rich-text
 appearances, avoiding repeated writes when already enabled. EPUB stylesheet
 and publisher-style settings still have process-wide ownership; concurrent
 documents cannot rely on independent EPUB style policies.
-
-## Presentation and task lifetime
-
-PDF and EPUB pages are rasterized by MuPDF off the UI thread and presented as
-`RenderImage`s. Render keys identify the document, page, source revision,
-rotation, color transform, and physical size. The process-wide render cache
-bounds raster bytes and display lists; keys for the current viewport are
-protected from eviction while they are displayed or pending. Visible pages are
-requested first and adjacent pages are prefetched within a pixel limit. Until
-the exact raster is ready, the closest cached raster for the page remains
-visible.
 
 ## GPU vector rendering
 
@@ -50,17 +35,15 @@ stroke clips stay ranges of display-list operations that MuPDF rasterizes as
 ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
 tessellates each page once per level of detail and draws it with a camera
 uniform (pan, zoom and quarter turns); dense pages also get a mipmapped overview rendered from their own
-vectors and drawn while it is at least as sharp as the screen. The Reader
-does not use it; GPUI 0.3.8 cannot composite a wgpu texture on Linux. The
-[egui Reader](crates/reader-egui) does (see [next work](ROADMAP.md)).
-`pdf-gpu` uses wgpu 30, egui's version; GPUI keeps its own wgpu 29.
+vectors and drawn while it is at least as sharp as the screen. `pdf-gpu`
+uses wgpu 30, egui's version.
 
-Images and image masks become textures at their own resolution. In the egui
-Reader, an `egui_wgpu` paint callback draws a view in three steps (following
+Images and image masks become textures at their own resolution. In the
+[Reader](crates/reader), `egui_wgpu` paint callbacks draw a document (following
 photocraft's `gpu_canvas`): `prepare` renders paper and resident pages into a
-multisampled `OffscreenTarget`; a background effect fills the view; a
-content effect composites the pages, or a transition from a snapshot of the
-previous view (another tab, the page before a turn). Raster layers are
+multisampled `OffscreenTarget`, and a content effect composites the pages,
+or a transition from a snapshot of the previous view (another tab, the page
+before a turn), over the background effect. Raster layers are
 re-rasterized for the view once it is still. Each page is scissored to its
 page box, as MuPDF clips to its pixmap. Pages load on a worker thread per
 document (which also builds image mip chains) and stay within a GPU byte
@@ -70,38 +53,32 @@ written to the GPU at most 4 MiB per frame through one reused
 frame. The device uses 8-32 MiB memory blocks instead of wgpu's 128-256 MiB:
 the first submission into a new block waits while the driver prepares it.
 
-## egui Reader boundaries
+## Reader boundaries
 
-The egui Reader follows the patterns of artcraft's egui apps (pdfcraft's
-home, pickers, last session and theme; craft-ui tabs; filmcraft's
-data-defined effects) rather than reproducing the GPUI Reader. It reuses
-`pdf`, `pdf-gpu`, `effects`, `library` and the translation domain crates;
-`library`, `settings` and `ai` build without GPUI, and their `gpui` features
-add what the GPUI crates need (the app globals, the settings store with its
-credential worker, gpui-component themes, GPUI's ChatGPT Subscription
-sign-in).
-The egui Reader shares the GPUI Reader's settings file and, with the
-`settings` crate's `keychain` feature, the provider keys it keeps in the
-system credential store (items written as GPUI writes them). Its settings
+The Reader follows the patterns of artcraft's egui apps (pdfcraft's home,
+pickers, last session and theme; craft-ui tabs and docking; filmcraft's
+data-defined effects). It replaced a GPUI Reader in October 2026 and keeps
+that Reader's data: the settings file, the provider keys in the system
+credential store (items in the form GPUI wrote, through the `settings`
+crate's `keychain` feature), and the redb library, which one process holds
+at a time (a second Reader opens documents without history). Its settings
 window edits only the provider sections (AI, translation, OCR): a save
-re-reads the file and replaces just those, keys the file held stay in it and
-other keys go to the keychain. A GPUI Reader running at the same time keeps
-its own copy and overwrites those sections on its next save. Scripted runs
-and fake providers keep settings and keys in memory. Both readers
-share the redb library, which one process holds at a time: while the GPUI
-Reader runs, the egui Reader opens documents without history. Its own
+re-reads the file and replaces just those, so the file's other sections
+survive; keys the file held stay in it and other keys go to the keychain.
+Scripted runs and fake providers keep settings and keys in memory. Its own
 preferences (theme, transition, background, keyboard shortcuts, last
-session) live in eframe
-storage under the config directory; scripted runs (`--bench`,
-`--screenshot…`) save nothing and leave the library unwritten. User effects
-are WGSL files with `// @effect` manifests in `<config>/glyphst/effects`.
+session with its panes) live in eframe storage under the config directory
+(`glyphst/reader-egui/app.ron`, the path from before the switch); scripted
+runs (`--bench`, `--screenshot…`) save nothing and leave the library
+unwritten. User effects are WGSL files with `// @effect` manifests in
+`<config>/glyphst/effects`.
 
 Its components take pdfcraft's style: the design tokens (`theme.rs`, light
 and dark, white pages in both), Inter and JetBrains Mono embedded ahead of
 egui's faces and a system CJK fallback, Lucide SVG icons through craft-ui's
 icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
 pills, search box, section titles, segmented choices, cards, toasts). The
-fonts and icons ship in `crates/reader-egui/assets` with their licences.
+fonts and icons ship in `crates/reader/assets` with their licences.
 The layout is its own: below the top bar (tabs, the palette's search box,
 theme, settings) a document's stage draws the background effect over the
 whole stage in one GPU callback and then the pages of each pane in its own,
@@ -128,7 +105,7 @@ Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette
 (Ctrl+K), menus and buttons all run commands through one dispatcher. The
 user's shortcuts replace a command's default keys and are kept by command
-id in the egui Reader's preferences; the GPUI Reader's keymap is separate.
+id in the Reader's preferences.
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs
@@ -142,19 +119,18 @@ use the translated text; hovering a translated block shows the original.
 The assistant runs the `ai` crate's agent on a worker thread with the main
 model from the settings, the current page and selection as optional context,
 and document tools (`search_document`, `read_document`,
-`render_document_pages`) with the GPUI Reader's names and schemas,
-implemented over MuPDF and `pdf::text`. Conversations are the library's AI
-sessions, so both readers list them; image results are not stored.
-ChatGPT Subscription sign-in runs without GPUI: the browser's callback,
-the token exchange and saving the credentials (the keychain item GPUI
-wrote, so a sign-in carries over) run on worker threads, and the app
-repaints when the state changes. Connection tests (AI, OCR) run on
+`render_document_pages`), implemented over MuPDF and `pdf::text`.
+Conversations are the library's AI sessions; image results are not stored.
+ChatGPT Subscription sign-in waits for the browser's callback, exchanges
+the code and saves the credentials (in the keychain item the GPUI Reader
+used, so its sign-in carries over) on worker threads, and the app repaints
+when the state changes. Connection tests (AI, OCR) run on
 threads, and a result for settings that changed meanwhile shows as stale.
 
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
-with whitespace kept and ligatures expanded, as the GPUI Reader indexes it, so
-glyph offsets in reflowed positions and highlight anchors resolve in both
-readers. Text follows each loaded page; a second worker per document reads
+with whitespace kept and ligatures expanded, so glyph offsets in reflowed
+positions and highlight anchors saved by the GPUI Reader still resolve.
+Text follows each loaded page; a second worker per document reads
 the remaining pages' text for search and reflowed documents, and sidebar
 thumbnails. Selections, search matches and highlights are egui shapes over
 the GPU view. Positions store pages from 1, as the library does. Fixed-layout
@@ -178,23 +154,12 @@ preserve data for. When redb reports a file from an older file format
 
 ## Dependency maintenance
 
-[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin GPUI to an exact
-crates.io `gpui-pre` snapshot and GPUI Kit to a published fork revision. Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml).
-Sibling checkouts are optional; local overrides are described in
-[README](README.md#working-on-maintained-dependencies).
-
-For the maintained GPUI Kit fork, `main` is a fast-forward-only mirror of
-`upstream/main`; `glyphst/main` is upstream plus a short, explained delta listed
-in the fork's `AGENTS.md`. Prefer GPUI Kit components and upstream APIs; keep
-composable widgets, styling workarounds, and application keybindings here, and
-patch Kit only when it lacks a capability Glyphst needs. Preserve the
-`gpui_component`, `gpui_component_assets`, `gpui_base` and `gpui_fps` aliases;
-`gpui_component_assets` resolves to `gpui-kit-assets`.
-
-The app's `gpui-pre` pin must equal the snapshot GPUI Kit requires; bump both
-together. Publish Kit, then update Glyphst's pins. Exact renderer/compiler/math pins and major library
-upgrades require compatibility work. Do not commit override-generated lockfile
-changes.
+[Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin crates.io
+versions and Git revisions (craft-libs for craft-ui, merman for Mermaid).
+Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml). egui, eframe,
+egui_extras and craft-ui move together (craft-ui follows egui's releases),
+and `pdf-gpu` uses egui's wgpu. Exact renderer/compiler/math pins and major
+library upgrades require compatibility work.
 
 `references/` contains shallow upstream reference submodules, including Zed;
 these are not maintained forks or build inputs. To refresh an intended reference,
@@ -211,5 +176,5 @@ project/package access but does not generally bound XML CPU or allocation work.
 
 A configured audit pass does not mean the dependency graph is warning-free.
 Exception removal and remaining warning paths are tracked in
-[ROADMAP](ROADMAP.md#3-dependency-audit-follow-up); refresh the advisory database
+[ROADMAP](ROADMAP.md#2-dependency-audit-follow-up); refresh the advisory database
 before treating old results as current security evidence.

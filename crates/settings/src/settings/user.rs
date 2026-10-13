@@ -1,12 +1,10 @@
-//! The user's settings for hosts other than the GPUI apps: the config file
-//! the GPUI apps write and, for provider secrets kept in the system
-//! credential store, the same keychain items, read and written the way
-//! GPUI does so both apps see the same keys.
+//! The user's settings: the config file and, for provider secrets kept in
+//! the system credential store, keychain items in the form the former GPUI
+//! apps wrote, so keys saved by them are still found.
 //!
-//! Such a host edits only the provider sections (`ai`, `translation`,
-//! `ocr`); saving re-reads the file and replaces just those, so what the
-//! GPUI apps wrote elsewhere survives. A GPUI app running at the same time
-//! keeps its own copy and writes it back on its next save.
+//! The Reader edits only the provider sections (`ai`, `translation`,
+//! `ocr`); saving re-reads the file and replaces just those, so the other
+//! sections the file has (written by the GPUI apps) survive.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

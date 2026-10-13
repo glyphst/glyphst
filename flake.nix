@@ -1,5 +1,5 @@
 {
-  description = "A GPUI-based PDF and EPUB reader";
+  description = "A PDF and EPUB reader with GPU vector rendering";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

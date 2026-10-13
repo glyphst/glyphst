@@ -1,6 +1,7 @@
 # Glyphst
 
-Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
+Glyphst Reader, a Rust PDF and EPUB reader on egui and wgpu (GPU vector
+pages through `pdf-gpu`), with artcraft's craft-ui components.
 
 ## Working agreements
 
@@ -14,27 +15,27 @@ Rust desktop applications using GPUI and GPUI Kit's `gpui-component` facade.
 
 ## Project constraints
 
-- `reader` and `files` are entry points; shared UI, service, and domain owners
-  are described in [ARCHITECTURE.md](ARCHITECTURE.md).
+- `reader` is the entry point; service and domain owners are described in
+  [ARCHITECTURE.md](ARCHITECTURE.md). The egui apps in `../../artcraft` are
+  the reference for UI patterns.
 - MuPDF renders every document page; keep its integration in `crates/pdf`.
 - Preserve task ownership, cancellation, paint order, and render-cache limits
   when changing page rendering.
 - The library's production current-format opener also serves tests through
   `LibraryStore::open_for_test`. Do not add migrators; a format change must keep
   the old file (see the library persistence notes in ARCHITECTURE.md).
-- Normal builds use published pins: GPUI from the exact `gpui-pre` snapshot GPUI
-  Kit requires, GPUI Kit from its fork. Preserve the GPUI Kit Rust aliases; follow the [dependency policy](ARCHITECTURE.md#dependency-maintenance)
-  when working on maintained forks. `references/` contains read-only reference
-  submodules, distinct from maintained sibling checkouts.
+- Normal builds use the published revisions in `Cargo.toml` and `Cargo.lock`
+  (see the [dependency policy](ARCHITECTURE.md#dependency-maintenance)).
+  `references/` contains read-only reference submodules.
 - Do not build Nix derivations unless explicitly requested. Do not use cua-driver
   on this Niri development environment.
 
 ## Verification and documentation
 
 Workspace-wide rules (single active session, check tiers, disk) are in
-`../AGENTS.md`. Run `script/check.sh quick` for code changes and
-`script/check.sh gate` before a PR or GPUI pin bump; add `--local` to build
-against sibling checkouts. Documentation-only edits need link/content checks.
+`../AGENTS.md`. Run `script/check.sh quick` for code changes,
+`script/check.sh corpus` for page rendering changes and `script/check.sh
+gate` before a PR. Documentation-only edits need link/content checks.
 
 Keep docs about current contracts and next actions; put run summaries in the
 commit message or PR, not in the source tree.

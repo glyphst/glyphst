@@ -1897,8 +1897,6 @@ pub struct HistoryEntryPersistenceSnapshot {
 }
 
 /// The GPUI Reader keeps the store as an app global.
-#[cfg(feature = "gpui")]
-impl gpui::Global for LibraryStore {}
 
 #[derive(Clone, Debug, PartialEq)]
 enum DocumentEdit {

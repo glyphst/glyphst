@@ -1,27 +1,17 @@
 [workspace]
 members = [
-    "crates/actions",
     "crates/ai",
-    "crates/ai-ui",
     "crates/core",
-    "crates/keymap",
+    "crates/effects",
     "crates/library",
     "crates/mermaid-render",
     "crates/pdf",
     "crates/pdf-gpu",
     "crates/pdf-translation",
     "crates/pdf-translation-service",
-    "crates/document-ui",
-    "crates/effects",
-    "crates/files",
     "crates/reader",
-    "crates/reader-egui",
     "crates/settings",
-    "crates/settings-ui",
     "crates/translation",
-    "crates/translation-ui",
-    "crates/ui",
-    "crates/workspace",
 ]
 resolver = "3"
 
@@ -34,10 +24,8 @@ unsafe_code = "deny"
 
 [workspace.dependencies]
 anyhow = "1"
-arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.23"
 bytemuck = { version = "1", features = ["derive"] }
-chrono = "0.4"
 # Shared egui controls of the Craft apps (tabs, docking, theme helpers); MIT OR Apache-2.0.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675", features = ["serde"] }
 dirs = "7"
@@ -49,48 +37,24 @@ egui_commonmark = { version = "0.25", default-features = false, features = ["pul
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 futures = "0.3"
 gilrs = "0.11"
-gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = [
-    "wayland",
-    "x11",
-] }
-gpui_component = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-component" }
-gpui_component_assets = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-kit-assets" }
-gpui_base = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-base" }
-gpui_fps = { git = "https://github.com/glyphst/gpui-kit", rev = "31bbf56ac1cfd42a73f4034a545501bf3e2ba23a", package = "gpui-fps" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", default-features = false, features = [
-    "font-kit",
-    "wayland",
-    "x11",
-] }
-glyphst-mermaid-render = { path = "crates/mermaid-render" }
 httpdate = "1"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"
 kdl = "6"
 lyon_tessellation = "1"
-lsp-types = { version = "0.97", features = ["proposed"] }
-markdown = "1.0"
 mupdf = "0.8"
 redb = "4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }
 pollster = "0.4"
-# The Secret Service keyring, built as gpui-pre-linux builds it (async-io).
+# The Secret Service keyring (async-io), reading the items GPUI wrote.
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 rand = "0.10"
-ratex-layout = "=0.1.14"
-ratex-parser = "=0.1.14"
-ratex-svg = { version = "=0.1.14", features = ["embed-fonts"] }
-ratex-types = "=0.1.14"
-regex = "1"
 rfd = "0.17"
 rust-embed = { version = "8", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-smallvec = "1"
-tikv-jemalloc-sys = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
-tikv-jemallocator = { version = "0.7", features = ["override_allocator_on_supported_platforms"] }
 tiny_http = "0.12"
 tracing = "0.1"
 typst = "=0.15.1"
@@ -106,11 +70,6 @@ url = "2"
 wgpu = "30"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
-zstd = "0.14"
-ztracing = { package = "gpui-pre-ztracing", version = "=0.3.8" }
-
-[profile.dev.package.tikv-jemalloc-sys]
-opt-level = 2
 
 [profile.release]
 debug = "limited"

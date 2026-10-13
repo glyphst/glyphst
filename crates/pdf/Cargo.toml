@@ -16,7 +16,6 @@ glyphst-core = { path = "../core" }
 mupdf.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
-ztracing.workspace = true
 
 [dev-dependencies]
 base64.workspace = true

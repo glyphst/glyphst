@@ -1,18 +1,6 @@
 use std::path::PathBuf;
-#[cfg(feature = "gpui")]
-use std::{collections::HashSet, fs, path::Path, rc::Rc};
 
-#[cfg(feature = "gpui")]
-use anyhow::{Context as _, Result};
 use glyphst_core::{DocumentColors, HighlightColor};
-#[cfg(feature = "gpui")]
-use gpui::{App, Hsla, rgb, rgba};
-#[cfg(feature = "gpui")]
-use gpui_component::{
-    Colorize as _, Theme as ComponentTheme, ThemeConfig as ComponentThemeConfig,
-    ThemeMode as ComponentThemeMode, ThemeRegistry as ComponentThemeRegistry,
-    ThemeSet as ComponentThemeSet,
-};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 pub const DEFAULT_LIGHT_THEME_ID: &str = "Default Light";
@@ -20,44 +8,8 @@ pub const DEFAULT_DARK_THEME_ID: &str = "Default Dark";
 pub const DEFAULT_PAGE_GAP: f32 = 4.0;
 pub const SYNCHRONIZED_GROUP_COLOR_COUNT: usize = 8;
 
-#[cfg(feature = "gpui")]
-const DEFAULT_COMPONENT_RADIUS: usize = 6;
-#[cfg(feature = "gpui")]
-const DEFAULT_COMPONENT_RADIUS_LG: usize = 12;
-#[cfg(feature = "gpui")]
-const DEFAULT_COMPONENT_SHADOW: bool = true;
-#[cfg(feature = "gpui")]
-const DEFAULT_INACTIVE_TAB_OPACITY: f32 = 0.45;
-
 const MIN_PAGE_GAP: f32 = 0.0;
 const MAX_PAGE_GAP: f32 = 240.0;
-
-#[cfg(feature = "gpui")]
-const BUNDLED_THEME_SOURCES: [&str; 23] = [
-    include_str!("../themes/gpui-component/default-theme.json"),
-    include_str!("../themes/gpui-component/adventure.json"),
-    include_str!("../themes/gpui-component/alduin.json"),
-    include_str!("../themes/gpui-component/asciinema.json"),
-    include_str!("../themes/gpui-component/aurora.json"),
-    include_str!("../themes/gpui-component/ayu.json"),
-    include_str!("../themes/gpui-component/catppuccin.json"),
-    include_str!("../themes/gpui-component/everforest.json"),
-    include_str!("../themes/gpui-component/fahrenheit.json"),
-    include_str!("../themes/gpui-component/flexoki.json"),
-    include_str!("../themes/gpui-component/gruvbox.json"),
-    include_str!("../themes/gpui-component/harper.json"),
-    include_str!("../themes/gpui-component/hybrid.json"),
-    include_str!("../themes/gpui-component/jellybeans.json"),
-    include_str!("../themes/gpui-component/kibble.json"),
-    include_str!("../themes/gpui-component/macos-classic.json"),
-    include_str!("../themes/gpui-component/matrix.json"),
-    include_str!("../themes/gpui-component/mellifluous.json"),
-    include_str!("../themes/gpui-component/molokai.json"),
-    include_str!("../themes/gpui-component/solarized.json"),
-    include_str!("../themes/gpui-component/spaceduck.json"),
-    include_str!("../themes/gpui-component/tokyonight.json"),
-    include_str!("../themes/gpui-component/twilight.json"),
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeAppearance {
@@ -70,15 +22,6 @@ impl ThemeAppearance {
         match self {
             Self::Dark => "dark",
             Self::Light => "light",
-        }
-    }
-
-    #[cfg(feature = "gpui")]
-    fn from_component(mode: ComponentThemeMode) -> Self {
-        if mode.is_dark() {
-            Self::Dark
-        } else {
-            Self::Light
         }
     }
 }
@@ -255,39 +198,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    #[cfg(feature = "gpui")]
-    /// Resolve Glyphst's document/workspace semantics from the component
-    /// theme. This is the only color translation layer retained by Glyphst.
-    pub fn from_component(theme: &ComponentTheme) -> Self {
-        Self {
-            background: hsla_to_rgb(theme.background),
-            page: hsla_to_rgb(theme.popover),
-            page_foreground: hsla_to_rgb(theme.foreground),
-            page_link: hsla_to_rgb(theme.primary),
-            selection_highlight: hsla_to_rgba(theme.selection),
-            highlight_yellow: hsla_to_rgba_with_alpha(theme.yellow, 0x66),
-            highlight_green: hsla_to_rgba_with_alpha(theme.green, 0x66),
-            highlight_blue: hsla_to_rgba_with_alpha(theme.blue, 0x66),
-            highlight_pink: hsla_to_rgba_with_alpha(theme.magenta, 0x66),
-            highlight_orange: hsla_to_rgba_with_alpha(theme.warning, 0x66),
-            match_highlight: hsla_to_rgb(theme.warning),
-            synchronized_group_colors: [
-                // Follow the alternating hue cadence used by rainbow-bracket
-                // palettes so groups created next to each other are easy to
-                // distinguish.
-                hsla_to_rgb(theme.blue),
-                hsla_to_rgb(theme.red.mix_oklab(theme.yellow, 0.5)),
-                hsla_to_rgb(theme.magenta),
-                hsla_to_rgb(theme.green),
-                hsla_to_rgb(theme.blue.mix_oklab(theme.magenta, 0.5)),
-                hsla_to_rgb(theme.yellow),
-                hsla_to_rgb(theme.cyan),
-                hsla_to_rgb(theme.red),
-            ],
-            page_gap: DEFAULT_PAGE_GAP,
-        }
-    }
-
     pub fn apply(mut self, partial: PartialTheme) -> Self {
         macro_rules! apply {
             ($field:ident) => {
@@ -375,22 +285,6 @@ impl Theme {
 
     pub fn synchronized_group_color(self, color_slot: usize) -> u32 {
         self.synchronized_group_colors[color_slot % SYNCHRONIZED_GROUP_COLOR_COUNT]
-    }
-}
-
-#[cfg(feature = "gpui")]
-impl Default for Theme {
-    fn default() -> Self {
-        let set = serde_json::from_str::<ComponentThemeSet>(BUNDLED_THEME_SOURCES[0])
-            .expect("bundled gpui-component default theme is invalid");
-        let config = set
-            .themes
-            .into_iter()
-            .find(|config| config.name == DEFAULT_LIGHT_THEME_ID)
-            .expect("bundled gpui-component default light theme is missing");
-        let mut theme = ComponentTheme::default();
-        theme.apply_config(&Rc::new(config));
-        Self::from_component(&theme)
     }
 }
 
@@ -641,246 +535,6 @@ pub struct ThemeMetadata {
     pub origin: ThemeOrigin,
 }
 
-#[derive(Clone, Debug)]
-#[cfg(feature = "gpui")]
-pub struct ThemeCatalog {
-    themes: Vec<ThemeEntry>,
-}
-
-#[derive(Clone, Debug)]
-#[cfg(feature = "gpui")]
-struct ThemeEntry {
-    id: String,
-    config: Rc<ComponentThemeConfig>,
-    origin: ThemeOrigin,
-}
-
-#[cfg(feature = "gpui")]
-impl ThemeCatalog {
-    pub fn load(user_themes_dir: &Path) -> Self {
-        let mut catalog = Self::bundled();
-        catalog.load_user_themes(user_themes_dir);
-        catalog
-    }
-
-    pub fn resolve(&self, theme_id: &str, overrides: PartialTheme) -> Theme {
-        let Some(mut theme) = self.component_theme(theme_id) else {
-            return Theme::default().apply(overrides);
-        };
-        apply_component_overrides(&mut theme, overrides);
-        Theme::from_component(&theme).apply(overrides)
-    }
-
-    pub fn contains(&self, theme_id: &str) -> bool {
-        self.config(theme_id).is_some()
-    }
-
-    pub fn contains_for_appearance(&self, theme_id: &str, appearance: ThemeAppearance) -> bool {
-        self.config(theme_id)
-            .is_some_and(|config| ThemeAppearance::from_component(config.mode) == appearance)
-    }
-
-    pub fn appearance(&self, theme_id: &str) -> ThemeAppearance {
-        self.config(theme_id)
-            .map(|config| ThemeAppearance::from_component(config.mode))
-            .unwrap_or(ThemeAppearance::Light)
-    }
-
-    pub fn metadata(&self) -> Vec<ThemeMetadata> {
-        let mut themes = self
-            .themes
-            .iter()
-            .map(|theme| ThemeMetadata {
-                id: theme.id.clone(),
-                name: theme.config.name.to_string(),
-                appearance: ThemeAppearance::from_component(theme.config.mode),
-                origin: theme.origin.clone(),
-            })
-            .collect::<Vec<_>>();
-        themes.sort_by(|a, b| {
-            let a_default = a.id == DEFAULT_LIGHT_THEME_ID || a.id == DEFAULT_DARK_THEME_ID;
-            let b_default = b.id == DEFAULT_LIGHT_THEME_ID || b.id == DEFAULT_DARK_THEME_ID;
-            b_default
-                .cmp(&a_default)
-                .then_with(|| {
-                    appearance_sort_key(a.appearance).cmp(&appearance_sort_key(b.appearance))
-                })
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        themes
-    }
-
-    pub fn config(&self, theme_id: &str) -> Option<Rc<ComponentThemeConfig>> {
-        self.themes
-            .iter()
-            .find(|entry| entry.id == theme_id)
-            .map(|entry| Rc::clone(&entry.config))
-    }
-
-    pub fn install_into_component_registry(&self, cx: &mut App) -> Result<()> {
-        let set = ComponentThemeSet {
-            name: "Glyphst theme catalog".into(),
-            themes: self
-                .themes
-                .iter()
-                .map(|entry| (*entry.config).clone())
-                .collect(),
-            ..ComponentThemeSet::default()
-        };
-        let source = serde_json::to_string(&set)?;
-        ComponentThemeRegistry::global_mut(cx).load_themes_from_str(&source)
-    }
-
-    pub(crate) fn bundled() -> Self {
-        let mut catalog = Self { themes: Vec::new() };
-
-        for source in BUNDLED_THEME_SOURCES {
-            if let Err(error) = catalog.load_source(source, ThemeOrigin::Bundled) {
-                eprintln!("failed to parse bundled gpui-component theme: {error:#}");
-            }
-        }
-
-        if !catalog.contains(DEFAULT_LIGHT_THEME_ID) || !catalog.contains(DEFAULT_DARK_THEME_ID) {
-            panic!("bundled gpui-component default themes are missing");
-        }
-
-        catalog
-    }
-
-    fn load_user_themes(&mut self, directory: &Path) {
-        let Ok(entries) = fs::read_dir(directory) else {
-            return;
-        };
-
-        let mut paths = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect::<Vec<PathBuf>>();
-        paths.sort();
-
-        for path in paths {
-            match fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))
-                .and_then(|source| self.load_source(&source, ThemeOrigin::User(path.clone())))
-            {
-                Ok(()) => {}
-                Err(error) => eprintln!("failed to load theme {}: {error:#}", path.display()),
-            }
-        }
-    }
-
-    fn load_source(&mut self, source: &str, origin: ThemeOrigin) -> Result<()> {
-        let set = serde_json::from_str::<ComponentThemeSet>(source)?;
-        let mut known = self
-            .themes
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect::<HashSet<_>>();
-
-        for mut config in set.themes {
-            config.radius.get_or_insert(DEFAULT_COMPONENT_RADIUS);
-            config.radius_lg.get_or_insert(DEFAULT_COMPONENT_RADIUS_LG);
-            config.shadow.get_or_insert(DEFAULT_COMPONENT_SHADOW);
-            let id = config.name.trim().to_string();
-            if id.is_empty() || !known.insert(id.clone()) {
-                continue;
-            }
-            self.themes.push(ThemeEntry {
-                id,
-                config: Rc::new(config),
-                origin: origin.clone(),
-            });
-        }
-
-        Ok(())
-    }
-
-    fn component_theme(&self, id: &str) -> Option<ComponentTheme> {
-        let config = self
-            .config(id)
-            .or_else(|| self.config(DEFAULT_LIGHT_THEME_ID))?;
-        let mut theme = ComponentTheme::default();
-        theme.apply_config(&config);
-        Some(theme)
-    }
-}
-
-#[cfg(feature = "gpui")]
-fn appearance_sort_key(appearance: ThemeAppearance) -> u8 {
-    match appearance {
-        ThemeAppearance::Light => 0,
-        ThemeAppearance::Dark => 1,
-    }
-}
-
-#[cfg(feature = "gpui")]
-/// Apply the subset of Glyphst's domain overrides that has a component-theme
-/// equivalent. Document-only colors are applied later by [`Theme::apply`].
-pub fn apply_component_overrides(theme: &mut ComponentTheme, overrides: PartialTheme) {
-    macro_rules! apply_rgb {
-        ($source:ident => $($target:ident),+ $(,)?) => {
-            if let Some(value) = overrides.$source {
-                let color: Hsla = rgb(value).into();
-                $(
-                    theme.colors.$target = color;
-                    theme.tokens.$target = color.into();
-                )+
-            }
-        };
-    }
-
-    macro_rules! apply_rgba {
-        ($source:ident => $($target:ident),+ $(,)?) => {
-            if let Some(value) = overrides.$source {
-                let color: Hsla = rgba(value).into();
-                $(
-                    theme.colors.$target = color;
-                    theme.tokens.$target = color.into();
-                )+
-            }
-        };
-    }
-
-    apply_rgb!(background => background);
-    apply_rgba!(overlay => overlay);
-    apply_rgb!(footer_background => status_bar);
-    apply_rgb!(footer_border => status_bar_border);
-    apply_rgb!(panel_background => sidebar);
-    apply_rgb!(panel_border => sidebar_border);
-    apply_rgb!(surface_background => popover);
-    apply_rgb!(border => border);
-    apply_rgb!(border_variant => input);
-    apply_rgb!(border_focused => ring);
-    apply_rgb!(tab_bar_background => tab_bar);
-    apply_rgb!(tab_active_background => tab_active);
-    if theme.colors.tab.a <= f32::EPSILON {
-        let tab = theme
-            .colors
-            .tab_active
-            .opacity(DEFAULT_INACTIVE_TAB_OPACITY);
-        theme.colors.tab = tab;
-        theme.tokens.tab = tab.into();
-    }
-    apply_rgb!(tab_inactive_background => tab);
-    apply_rgb!(element_hover => list_hover);
-    apply_rgb!(element_selected => list_active);
-    apply_rgb!(text => foreground, popover_foreground, sidebar_foreground);
-    apply_rgb!(text_muted => muted_foreground);
-    apply_rgba!(placeholder_text => muted_foreground);
-    apply_rgb!(accent => primary, ring, link, caret, sidebar_primary);
-    apply_rgb!(match_highlight => warning, yellow);
-    apply_rgba!(selected_row => list_active, table_active);
-    apply_rgb!(control_background => button);
-    apply_rgb!(control_border => input);
-    apply_rgb!(control_hover => button_hover);
-    apply_rgb!(success => success);
-    apply_rgb!(error => danger);
-}
-
 pub fn parse_hex_color(value: &str, allow_alpha: bool) -> Option<u32> {
     let value = value.strip_prefix('#').unwrap_or(value);
     let valid_len = value.len() == 6 || (allow_alpha && value.len() == 8);
@@ -913,30 +567,6 @@ pub fn push_value_node(document: &mut KdlDocument, name: &str, value: impl Into<
     document.nodes_mut().push(node);
 }
 
-#[cfg(feature = "gpui")]
-fn hsla_to_rgb(color: Hsla) -> u32 {
-    hsla_to_rgba(color) >> 8
-}
-
-#[cfg(feature = "gpui")]
-fn hsla_to_rgba(color: Hsla) -> u32 {
-    let rgb = color.to_rgb();
-    (channel_to_u8(rgb.r) << 24)
-        | (channel_to_u8(rgb.g) << 16)
-        | (channel_to_u8(rgb.b) << 8)
-        | channel_to_u8(color.a)
-}
-
-#[cfg(feature = "gpui")]
-fn hsla_to_rgba_with_alpha(color: Hsla, alpha: u32) -> u32 {
-    (hsla_to_rgb(color) << 8) | (alpha & 0xff)
-}
-
-#[cfg(feature = "gpui")]
-fn channel_to_u8(channel: f32) -> u32 {
-    (channel.clamp(0.0, 1.0) * 255.0).round() as u32
-}
-
 fn mask_rgb(value: &mut u32) {
     *value &= 0x00ff_ffff;
 }
@@ -952,40 +582,5 @@ fn mask_rgb_option(value: &mut Option<u32>) {
 fn mask_rgba_option(value: &mut Option<u32>) {
     if let Some(value) = value.as_mut() {
         mask_rgba(value);
-    }
-}
-
-#[cfg(all(test, feature = "gpui"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transparent_inactive_tabs_receive_a_subtle_surface() {
-        let mut theme = ComponentTheme::default();
-        let active: Hsla = rgb(0x336699).into();
-        theme.colors.tab.a = 0.0;
-        theme.colors.tab_active = active;
-
-        apply_component_overrides(&mut theme, PartialTheme::default());
-
-        assert_eq!(
-            theme.colors.tab,
-            active.opacity(DEFAULT_INACTIVE_TAB_OPACITY)
-        );
-    }
-
-    #[test]
-    fn explicit_inactive_tab_surface_overrides_the_fallback() {
-        let mut theme = ComponentTheme::default();
-        theme.colors.tab.a = 0.0;
-        let overrides = PartialTheme {
-            tab_inactive_background: Some(0x123456),
-            ..PartialTheme::default()
-        };
-
-        apply_component_overrides(&mut theme, overrides);
-
-        let expected: Hsla = rgb(0x123456).into();
-        assert_eq!(theme.colors.tab, expected);
     }
 }

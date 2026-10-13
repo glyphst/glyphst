@@ -23,8 +23,8 @@
 //! `<foreignObject>` and CSS/attribute forms that rasterizers do not handle.
 //! Since merman 0.6, that generic cleanup is exposed as merman's raster-safe SVG
 //! pipeline. Zed opts into that pipeline during rendering, then keeps
-//! editor-specific theme and accent color rules in this crate. The [`gpui`]
-//! dependency is only needed for the [`Hsla`] and [`Rgba`] color types.
+//! editor-specific theme and accent color rules in this crate. Its colors are
+//! the small [`color`] module's [`Hsla`] and [`Rgba`] (once GPUI's).
 //!
 //! The [`render_to_svg`] function operates in two stages:
 //! - [`render`] the mermaid text to raster-safe SVG using [`merman`].
@@ -63,11 +63,12 @@
 //! 3. `postprocess::inject_css` injects CSS rules for the classes applied by
 //!    `accent_colors`
 
+pub mod color;
 mod postprocess;
 mod render;
 
+use crate::color::{Hsla, Rgba};
 use anyhow::Result;
-use gpui::{Hsla, Rgba};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AccentColor {
@@ -109,7 +110,7 @@ pub struct MermaidTheme {
 #[cfg(any(test, feature = "test-support"))]
 impl Default for MermaidTheme {
     fn default() -> Self {
-        use gpui::{hsla, rgb};
+        use crate::color::{hsla, rgb};
         let git_branch_colors: [Hsla; 8] = [
             hsla(240.0 / 360.0, 1.0, 0.462_745_1, 1.0),
             hsla(60.0 / 360.0, 1.0, 0.435_294_12, 1.0),
@@ -175,7 +176,7 @@ pub(crate) fn css_color(color: Hsla) -> String {
 pub use postprocess::util::text_color_for_background;
 
 /// See the [module-level docs][crate] for more info.
-#[ztracing::instrument(skip_all)]
+#[tracing::instrument(skip_all)]
 pub fn render_to_svg(source: &str, theme: &MermaidTheme) -> Result<String> {
     let svg = render::render_mermaid(source, theme)?;
     let svg = postprocess::postprocess(&svg, theme)?;

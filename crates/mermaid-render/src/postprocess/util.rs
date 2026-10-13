@@ -1,4 +1,4 @@
-use gpui::{Hsla, Rgba};
+use crate::color::{Hsla, Rgba};
 
 /// Produces a readable text color for a given background, subtly tinted by the
 /// background's own hue using the OKLCH color space.
@@ -139,7 +139,7 @@ mod tests {
         for hue in 0..36 {
             for saturation in 0..=10 {
                 for lightness in 0..=20 {
-                    let bg = gpui::hsla(
+                    let bg = crate::color::hsla(
                         hue as f32 / 36.0,
                         saturation as f32 / 10.0,
                         lightness as f32 / 20.0,

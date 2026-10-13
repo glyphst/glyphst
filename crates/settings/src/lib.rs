@@ -24,5 +24,3 @@ pub use settings::{
     CredentialStore, MemoryCredentials, SystemKeychain, config_owned_secret_ids,
     save_user_settings, save_user_settings_to,
 };
-#[cfg(feature = "gpui")]
-pub use settings::{SettingsStore, setup_ui_font, sync_component_theme, ui_rems};

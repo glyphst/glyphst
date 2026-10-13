@@ -45,7 +45,7 @@
     includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
   };
   # crane vendors every Cargo.lock source in its own directory and fetches Git
-  # dependencies (the Zed and GPUI Kit forks) with builtins.fetchGit.
+  # dependencies (craft-libs, merman) with builtins.fetchGit.
   commonArgs = {
     pname = "glyphst-reader";
     version = workspaceCargo.workspace.package.version;

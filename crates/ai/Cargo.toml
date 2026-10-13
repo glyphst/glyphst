@@ -6,15 +6,10 @@ edition.workspace = true
 [lints]
 workspace = true
 
-[features]
-# ChatGPT Subscription sign-in and credential storage through GPUI.
-gpui = ["dep:gpui", "glyphst-settings/gpui"]
-
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
 futures.workspace = true
-gpui = { workspace = true, optional = true }
 glyphst-core = { path = "../core" }
 glyphst-settings = { path = "../settings" }
 httpdate.workspace = true

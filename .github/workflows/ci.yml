@@ -52,15 +52,11 @@ jobs:
             clang \
             lld \
             pkg-config \
-            libasound2-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
-            libglib2.0-dev \
+            libudev-dev \
             libglvnd-dev \
-            libdrm-dev \
-            libgbm-dev \
             libgl1-mesa-dev \
-            libva-dev \
             libvulkan-dev \
             libwayland-dev \
             libx11-dev \
@@ -68,9 +64,7 @@ jobs:
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
-            libxcomposite-dev \
             libxcursor-dev \
-            libxdamage-dev \
             libxext-dev \
             libxfixes-dev \
             libxi-dev \
