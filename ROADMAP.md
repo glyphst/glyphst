@@ -43,7 +43,15 @@ and the abandoned Files app in M5). It has:
   user effects reload when their files change; the Effects drawer gives a
   book its own background, transition and tint; page tints Sepia, Night
   and Paper grain.
-- **After M6:** selections run across pages (a drag follows the pointer
+- **M7:** dense pages show their coarsest level while the rest uploads
+  (Lower Level after 49 ms rather than 1.6 s); the page overview (Ctrl+G,
+  a zoomable grid with sharp renders of large cells); zen mode (Z);
+  region selection (S: copy or save a page area as an image, copy or
+  translate its text, or ask about it); quick ask (Tab, one question
+  without the chat's history, continued in the assistant if wanted);
+  half-page scrolling (Shift+Page Down/Up) and working arrow keys; a tab
+  context menu; thumbnails turned with their pages.
+- **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
   Japanese in the command palette no longer resets the input method's
@@ -72,12 +80,15 @@ Known gaps:
 - Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
-- The assistant has no image or region mentions and no Mermaid diagrams
-  (`mermaid-render` is kept for them).
+- The assistant takes page regions as images but no other image
+  mentions, and has no Mermaid diagrams (`mermaid-render` is kept for
+  them). A region is one page's; the overview selects no pages for it.
 - Dropped with the GPUI Reader: multiple windows and tearing tabs off,
-  synchronized panes, zen mode, the page grid overview, region selection,
-  quick ask, half-page scrolling, the publisher-styles toggle, the tab
-  context menu, and translated (i18n) interface text.
+  synchronized panes, the publisher-styles toggle, and translated (i18n)
+  interface text.
+- M7's pointer work (dragging regions, the overview's clicks and
+  Ctrl+wheel, the tab menu, typing into quick ask with an input method)
+  is checked by screenshots and unit tests, not yet by hand.
 - No automated run writes the real keychain or signs in to ChatGPT: the
   user's checks that a key set in the Reader is found again after a
   restart, and of a ChatGPT Subscription sign-in, are pending. Editing an
@@ -87,9 +98,9 @@ Known gaps:
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates from the gaps
-above: showing dense pages a level at a time while they upload, restoring
-translation sessions from the cache, and Mermaid diagrams in the
-assistant.
+above: restoring translation sessions from the cache, Mermaid diagrams in
+the assistant, and loading very dense pages sooner (MuPDF's display list
+dominates).
 
 **Done when:** the chosen milestone works with tests, `check.sh quick`
 passes, and the bench still shows no frames over 25 ms.

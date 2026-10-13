@@ -4,7 +4,7 @@
 
 | Owner | Responsibility |
 | --- | --- |
-| `reader` | The Reader (egui): tabs and split panes, home, GPU document view, text selection, find, links, annotations, EPUB reflow, translation, assistant, commands and settings |
+| `reader` | The Reader (egui): tabs and split panes, home, GPU document view, page overview, text and region selection, find, links, annotations, EPUB reflow, translation, assistant and quick ask, commands and settings |
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
@@ -49,8 +49,10 @@ page box, as MuPDF clips to its pixmap. Pages load on a worker thread per
 document (which also builds image mip chains) and stay within a GPU byte
 budget. A loaded page, and a raster layer re-rasterized for the view, is
 written to the GPU at most 4 MiB per frame through one reused
-`StagingBelt` and drawn once complete; overviews are built one tile per
-frame. The device uses 8-32 MiB memory blocks instead of wgpu's 128-256 MiB:
+`StagingBelt`: the coarsest level, the images and the raster layers come
+first, so a page draws coarse once they are written and sharpens as finer
+levels arrive (an older version of it stays drawn until the new one is
+complete); overviews are built one tile per frame. The device uses 8-32 MiB memory blocks instead of wgpu's 128-256 MiB:
 the first submission into a new block waits while the driver prepares it.
 
 ## Reader boundaries
