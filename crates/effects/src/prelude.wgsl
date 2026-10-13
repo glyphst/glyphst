@@ -59,6 +59,41 @@ fn fx_smoothstep01(t: f32) -> f32 {
     return x * x * (3.0 - 2.0 * x);
 }
 
+// Backgrounds with `image: true`: the wallpaper (premultiplied, mipmapped)
+// is `fx_from`; without one it is a single transparent pixel.
+fn fx_image_size() -> vec2<f32> {
+    return vec2<f32>(textureDimensions(fx_from));
+}
+
+// `uv` in the target to `uv` in the wallpaper, cropped to fill the target
+// (as CSS `background-size: cover`).
+fn fx_cover_uv(uv: vec2<f32>) -> vec2<f32> {
+    let image = max(fx_image_size(), vec2<f32>(1.0));
+    let target_aspect = fx.resolution.x / max(fx.resolution.y, 1.0);
+    let image_aspect = image.x / image.y;
+    var scale = vec2<f32>(1.0);
+    if image_aspect > target_aspect {
+        scale.x = target_aspect / image_aspect;
+    } else {
+        scale.y = image_aspect / target_aspect;
+    }
+    return vec2<f32>(0.5) + (uv - vec2<f32>(0.5)) * scale;
+}
+
+// The wallpaper at target `uv`, blurred by sampling mip level `lod`.
+fn fx_sample_image(uv: vec2<f32>, lod: f32) -> vec4<f32> {
+    return textureSampleLevel(fx_from, fx_sampler, clamp(fx_cover_uv(uv), vec2<f32>(0.0), vec2<f32>(1.0)), lod);
+}
+
+// Overlays: the colour of premultiplied `color` before premultiplying.
+fn fx_unpremultiply(color: vec4<f32>) -> vec3<f32> {
+    return select(vec3<f32>(0.0), color.rgb / color.a, color.a > 0.0);
+}
+
+fn fx_luminance(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
 @fragment
 fn fx_fragment(in: FxVertex) -> @location(0) vec4<f32> {
     return effect(in.uv, in.position.xy);

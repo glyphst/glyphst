@@ -14,15 +14,20 @@
 //! // @effect kind: background        (transition, background or overlay)
 //! // @effect animated: true          (repaints continuously)
 //! // @effect duration: 300           (transitions, milliseconds)
+//! // @effect image: true              (backgrounds drawing the wallpaper)
+//! // @effect hidden: true             (not offered to choose)
 //! // @effect param: speed float 0 3 0.4 Speed
 //! ```
 //!
-//! A user effect that fails to parse or compile is reported and skipped;
-//! the app keeps using its built-in choice.
+//! User effects form their own layer over the built-ins: one may replace a
+//! built-in by id, and [`EffectRegistry::reload_user`] swaps the whole layer
+//! when the user's files change. A user effect that fails to parse or
+//! compile is reported and skipped; the app keeps using its built-in choice.
 
 use std::{
     fmt,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -34,18 +39,36 @@ pub const SLIDE_OVER: &str = "slide-over";
 pub const CROSSFADE: &str = "crossfade";
 pub const SOLID: &str = "solid";
 pub const AURORA: &str = "aurora";
+pub const IMAGE: &str = "image";
+pub const IMAGE_SOFT: &str = "image-soft";
+pub const IMAGE_PARALLAX: &str = "image-parallax";
+pub const SEPIA: &str = "sepia";
+pub const NIGHT: &str = "night";
+pub const PAPER: &str = "paper";
 
 /// Effects may declare at most this many parameters (one `vec4`).
 pub const MAX_PARAMS: usize = 4;
 
 const PRELUDE: &str = include_str!("prelude.wgsl");
-const BUILTIN: [(&str, &str); 5] = [
+const BUILTIN: [(&str, &str); 11] = [
     ("present.wgsl", include_str!("builtin/present.wgsl")),
     ("crossfade.wgsl", include_str!("builtin/crossfade.wgsl")),
     ("slide_over.wgsl", include_str!("builtin/slide_over.wgsl")),
     ("solid.wgsl", include_str!("builtin/solid.wgsl")),
     ("aurora.wgsl", include_str!("builtin/aurora.wgsl")),
+    ("image.wgsl", include_str!("builtin/image.wgsl")),
+    ("image_soft.wgsl", include_str!("builtin/image_soft.wgsl")),
+    (
+        "image_parallax.wgsl",
+        include_str!("builtin/image_parallax.wgsl"),
+    ),
+    ("sepia.wgsl", include_str!("builtin/sepia.wgsl")),
+    ("night.wgsl", include_str!("builtin/night.wgsl")),
+    ("paper.wgsl", include_str!("builtin/paper.wgsl")),
 ];
+
+/// A starting point for a user effect: a commented background.
+pub const TEMPLATE: &str = include_str!("template.wgsl");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
@@ -83,9 +106,15 @@ pub struct EffectDef {
     pub animated: bool,
     /// Transition length in milliseconds.
     pub duration_ms: u32,
+    /// A background that draws the wallpaper image.
+    pub image: bool,
+    /// Used by the app itself, not offered as a choice.
+    pub hidden: bool,
     pub params: Vec<ParamDef>,
     /// Where the effect came from: a built-in file name or a user path.
     pub source: String,
+    /// A user effect (from the effects folder), not a built-in.
+    pub user: bool,
 }
 
 impl EffectDef {
@@ -96,6 +125,29 @@ impl EffectDef {
             *value = param.default;
         }
         values
+    }
+
+    /// `values` limited to each parameter's range (toggles to 0 or 1);
+    /// values past the declared parameters become 0.
+    pub fn sanitize_params(&self, values: [f32; MAX_PARAMS]) -> [f32; MAX_PARAMS] {
+        let mut clean = self.default_params();
+        for (index, param) in self.params.iter().enumerate() {
+            let value = values[index];
+            if !value.is_finite() {
+                continue;
+            }
+            clean[index] = match param.kind {
+                ParamKind::Float { min, max } => value.clamp(min, max),
+                ParamKind::Toggle => {
+                    if value >= 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+        }
+        clean
     }
 }
 
@@ -117,6 +169,8 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
     let mut name = None;
     let mut kind = None;
     let mut animated = false;
+    let mut image = false;
+    let mut hidden = false;
     let mut duration_ms = 300;
     let mut params = Vec::new();
     for line in text.lines() {
@@ -139,6 +193,8 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
                 })
             }
             "animated" => animated = value == "true",
+            "image" => image = value == "true",
+            "hidden" => hidden = value == "true",
             "duration" => {
                 duration_ms = value
                     .parse()
@@ -157,8 +213,11 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
         kind: kind.ok_or("missing kind")?,
         animated,
         duration_ms,
+        image,
+        hidden,
         params,
         source: source_name.to_string(),
+        user: false,
     })
 }
 
@@ -225,6 +284,7 @@ struct CompiledEffect {
 
 /// An effect ready to draw in a render pass this frame.
 pub struct PreparedEffect {
+    user: bool,
     index: usize,
     bind_group: wgpu::BindGroup,
 }
@@ -234,8 +294,29 @@ pub struct EffectRegistry {
     layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     sampler: wgpu::Sampler,
-    effects: Vec<CompiledEffect>,
+    builtin: Vec<CompiledEffect>,
+    user: Vec<CompiledEffect>,
     errors: Vec<EffectError>,
+}
+
+/// What the effects folder holds, to notice changes: each `*.wgsl` file in
+/// name order with its modification time and size.
+pub fn user_stamp(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut stamp: Vec<_> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "wgsl"))
+        .map(|path| {
+            let metadata = std::fs::metadata(&path).ok();
+            let modified = metadata.as_ref().and_then(|m| m.modified().ok());
+            let len = metadata.map_or(0, |m| m.len());
+            (path, modified, len)
+        })
+        .collect();
+    stamp.sort_by(|a, b| a.0.cmp(&b.0));
+    stamp
 }
 
 impl EffectRegistry {
@@ -284,6 +365,8 @@ impl EffectRegistry {
             label: Some("effects"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Effects blur a mipmapped wallpaper by sampling coarser levels.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         let mut registry = Self {
@@ -291,28 +374,26 @@ impl EffectRegistry {
             layout,
             pipeline_layout,
             sampler,
-            effects: Vec::new(),
+            builtin: Vec::new(),
+            user: Vec::new(),
             errors: Vec::new(),
         };
         for (name, text) in BUILTIN {
-            registry.add(device, name, text);
+            match registry.compile_effect(device, name, text) {
+                Ok(effect) => registry.builtin.push(effect),
+                Err(error) => registry.errors.push(error),
+            }
         }
         registry
     }
 
-    /// Adds every `*.wgsl` effect in `dir`, in name order. Effects that fail
-    /// are recorded in [`EffectRegistry::errors`]; one whose id is already
-    /// registered replaces the earlier one.
-    pub fn load_dir(&mut self, device: &wgpu::Device, dir: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "wgsl"))
-            .collect();
-        paths.sort();
-        for path in paths {
+    /// Replaces the user effects with every `*.wgsl` effect in `dir`, in
+    /// name order, and their errors with this load's. A later file with an
+    /// id already loaded replaces the earlier one.
+    pub fn reload_user(&mut self, device: &wgpu::Device, dir: &Path) {
+        self.user.clear();
+        self.errors.clear();
+        for (path, _, _) in user_stamp(dir) {
             let name = path.display().to_string();
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
@@ -326,27 +407,46 @@ impl EffectRegistry {
         }
     }
 
-    /// Parses and compiles one effect; returns whether it was added.
+    /// Parses and compiles one user effect; returns whether it was added.
     pub fn add(&mut self, device: &wgpu::Device, source_name: &str, text: &str) -> bool {
-        let result = parse_manifest(source_name, text).and_then(|def| {
-            let pipeline = self.compile(device, &def, text)?;
-            Ok(CompiledEffect { def, pipeline })
-        });
-        match result {
-            Ok(effect) => {
-                self.effects
+        match self.compile_effect(device, source_name, text) {
+            Ok(mut effect) => {
+                effect.def.user = true;
+                self.user
                     .retain(|existing| existing.def.id != effect.def.id);
-                self.effects.push(effect);
+                self.user.push(effect);
                 true
             }
-            Err(message) => {
-                self.errors.push(EffectError {
-                    source: source_name.to_string(),
-                    message,
-                });
+            Err(error) => {
+                self.errors.push(error);
                 false
             }
         }
+    }
+
+    fn compile_effect(
+        &self,
+        device: &wgpu::Device,
+        source_name: &str,
+        text: &str,
+    ) -> Result<CompiledEffect, EffectError> {
+        parse_manifest(source_name, text)
+            .and_then(|def| {
+                let pipeline = self.compile(device, &def, text)?;
+                Ok(CompiledEffect { def, pipeline })
+            })
+            .map_err(|message| EffectError {
+                source: source_name.to_string(),
+                message,
+            })
+    }
+
+    /// The effect with `id`: a user one first, then a built-in.
+    fn locate(&self, id: &str) -> Option<(bool, usize)> {
+        let position = |effects: &[CompiledEffect]| effects.iter().position(|e| e.def.id == id);
+        position(&self.user)
+            .map(|index| (true, index))
+            .or_else(|| position(&self.builtin).map(|index| (false, index)))
     }
 
     fn compile(
@@ -391,12 +491,30 @@ impl EffectRegistry {
         }
     }
 
+    /// Every effect in use: the built-ins in their order (a user effect with
+    /// a built-in's id in its place), then the other user effects.
     pub fn defs(&self) -> impl Iterator<Item = &EffectDef> {
-        self.effects.iter().map(|effect| &effect.def)
+        let replaced = |id: &str| self.user.iter().find(|user| user.def.id == id);
+        let builtin = self
+            .builtin
+            .iter()
+            .map(move |effect| &replaced(&effect.def.id).unwrap_or(effect).def);
+        let added = self.user.iter().filter(|user| {
+            !self
+                .builtin
+                .iter()
+                .any(|builtin| builtin.def.id == user.def.id)
+        });
+        builtin.chain(added.map(|effect| &effect.def))
     }
 
     pub fn find(&self, id: &str) -> Option<&EffectDef> {
-        self.defs().find(|def| def.id == id)
+        let (user, index) = self.locate(id)?;
+        Some(if user {
+            &self.user[index].def
+        } else {
+            &self.builtin[index].def
+        })
     }
 
     /// Effects that failed to load, for display.
@@ -412,7 +530,7 @@ impl EffectRegistry {
         id: &str,
         inputs: &EffectInputs<'_>,
     ) -> Option<PreparedEffect> {
-        let index = self.effects.iter().position(|effect| effect.def.id == id)?;
+        let (user, index) = self.locate(id)?;
         let uniforms = Uniforms {
             resolution: inputs.resolution,
             pointer: inputs.pointer.unwrap_or([-1.0, -1.0]),
@@ -449,12 +567,25 @@ impl EffectRegistry {
                 },
             ],
         });
-        Some(PreparedEffect { index, bind_group })
+        Some(PreparedEffect {
+            user,
+            index,
+            bind_group,
+        })
     }
 
-    /// Draws a prepared effect over the pass's current viewport.
+    /// Draws a prepared effect over the pass's current viewport. Prepare and
+    /// draw in the same frame: a reload in between may move effects.
     pub fn draw(&self, prepared: &PreparedEffect, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_pipeline(&self.effects[prepared.index].pipeline);
+        let layer = if prepared.user {
+            &self.user
+        } else {
+            &self.builtin
+        };
+        let Some(effect) = layer.get(prepared.index) else {
+            return;
+        };
+        pass.set_pipeline(&effect.pipeline);
         pass.set_bind_group(0, &prepared.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }

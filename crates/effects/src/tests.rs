@@ -22,11 +22,22 @@ macro_rules! require_device {
 }
 
 fn solid_texture(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::Texture {
+    let pixels: Vec<u8> = rgba.repeat((SIZE * SIZE) as usize);
+    texture_from(device, queue, &pixels, [SIZE, SIZE])
+}
+
+/// A texture of RGBA8 `pixels`, `size` wide and high.
+fn texture_from(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixels: &[u8],
+    size: [u32; 2],
+) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
+            width: size[0],
+            height: size[1],
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -39,18 +50,17 @@ fn solid_texture(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> w
             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let pixels: Vec<u8> = rgba.repeat((SIZE * SIZE) as usize);
     queue.write_texture(
         texture.as_image_copy(),
-        &pixels,
+        pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(SIZE * 4),
-            rows_per_image: Some(SIZE),
+            bytes_per_row: Some(size[0] * 4),
+            rows_per_image: Some(size[1]),
         },
         wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
+            width: size[0],
+            height: size[1],
             depth_or_array_layers: 1,
         },
     );
@@ -242,8 +252,154 @@ fn user_effects_load_from_a_directory_and_can_replace_builtins() {
     .unwrap();
     std::fs::write(dir.join("notes.txt"), "not an effect").unwrap();
     let mut registry = EffectRegistry::new(&device, FORMAT);
-    registry.load_dir(&device, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
+    registry.reload_user(&device, &dir);
     assert!(registry.errors().is_empty(), "{:?}", registry.errors());
     assert_eq!(registry.find(SOLID).unwrap().name, "Tinted solid");
+    assert!(registry.find(SOLID).unwrap().user);
+    let solids = registry.defs().filter(|def| def.id == SOLID).count();
+    assert_eq!(solids, 1, "the user effect takes the built-in's place");
+
+    // Taking the file away brings the built-in back.
+    std::fs::remove_file(dir.join("tint.wgsl")).unwrap();
+    registry.reload_user(&device, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(registry.find(SOLID).unwrap().name, "Solid colour");
+    assert!(!registry.find(SOLID).unwrap().user);
+}
+
+#[test]
+fn reloading_keeps_good_effects_reports_broken_ones_and_notices_edits() {
+    let (device, _queue) = require_device!();
+    let dir = std::env::temp_dir().join(format!("glyphst-effects-reload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = "// @effect id: wave\n// @effect name: Wave\n// @effect kind: background\n\
+                fn effect(uv: vec2<f32>, pixel: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0.0, 1.0); }";
+    std::fs::write(dir.join("a-wave.wgsl"), good).unwrap();
+    std::fs::write(
+        dir.join("b-broken.wgsl"),
+        "// @effect id: b\nfn effect() {}",
+    )
+    .unwrap();
+    let mut registry = EffectRegistry::new(&device, FORMAT);
+    let before = user_stamp(&dir);
+    registry.reload_user(&device, &dir);
+    assert!(registry.find("wave").is_some());
+    assert_eq!(registry.errors().len(), 1);
+    assert!(registry.errors()[0].source.ends_with("b-broken.wgsl"));
+
+    // An edit changes the stamp; a reload replaces the layer and its errors.
+    std::fs::write(dir.join("b-broken.wgsl"), good.replace("wave", "fixed")).unwrap();
+    let after = user_stamp(&dir);
+    assert_ne!(before, after);
+    registry.reload_user(&device, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+    assert!(registry.find("fixed").is_some() && registry.find("wave").is_some());
+    let ids: Vec<&str> = registry.defs().map(|def| def.id.as_str()).collect();
+    assert_eq!(
+        &ids[ids.len() - 2..],
+        ["wave", "fixed"],
+        "user effects after the built-ins"
+    );
+}
+
+#[test]
+fn the_template_and_every_builtin_compile() {
+    let (device, _queue) = require_device!();
+    let mut registry = EffectRegistry::new(&device, FORMAT);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+    for id in [IMAGE, IMAGE_SOFT, IMAGE_PARALLAX, SEPIA, NIGHT, PAPER] {
+        assert!(registry.find(id).is_some(), "{id} missing");
+    }
+    assert!(registry.find(IMAGE).unwrap().image);
+    assert!(registry.find(PRESENT).unwrap().hidden);
+    assert!(
+        registry.add(&device, "template.wgsl", TEMPLATE),
+        "{:?}",
+        registry.errors()
+    );
+}
+
+#[test]
+fn parameters_are_kept_within_their_ranges() {
+    let def = parse_manifest(
+        "x",
+        "// @effect id: a\n// @effect name: A\n// @effect kind: overlay\n\
+         // @effect param: s float 0 1 0.5 S\n// @effect param: t toggle 0",
+    )
+    .unwrap();
+    assert_eq!(
+        def.sanitize_params([2.0, 0.7, 9.0, 9.0]),
+        [1.0, 1.0, 0.0, 0.0]
+    );
+    assert_eq!(
+        def.sanitize_params([f32::NAN, 0.2, 0.0, 0.0]),
+        [0.5, 0.0, 0.0, 0.0]
+    );
+}
+
+/// Draws `id` over a `size` target from one input and returns its pixels.
+fn render_from(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    registry: &EffectRegistry,
+    id: &str,
+    input: &wgpu::Texture,
+) -> Vec<u8> {
+    render(device, queue, registry, id, input, input, 0.0)
+}
+
+#[test]
+fn wallpapers_fill_the_background_cropped_to_cover() {
+    let (device, queue) = require_device!();
+    let registry = EffectRegistry::new(&device, FORMAT);
+    // A wallpaper twice as wide as high: left half red, right half blue,
+    // with a green column at each edge that the crop cuts away.
+    let (width, height) = (32u32, 16u32);
+    let pixels: Vec<u8> = (0..height)
+        .flat_map(|_| {
+            (0..width).flat_map(|x| match x {
+                0..=3 | 28..=31 => [0, 255, 0, 255],
+                x if x < width / 2 => [255, 0, 0, 255],
+                _ => [0, 0, 255, 255],
+            })
+        })
+        .collect();
+    let image = texture_from(&device, &queue, &pixels, [width, height]);
+    let out = render_from(&device, &queue, &registry, IMAGE, &image);
+    let pixel = |x: u32, y: u32| {
+        let i = ((y * SIZE + x) * 4) as usize;
+        [out[i], out[i + 1], out[i + 2], out[i + 3]]
+    };
+    assert_eq!(pixel(0, 0), [255, 0, 0, 255], "the green edge is cropped");
+    assert_eq!(pixel(SIZE - 1, SIZE - 1), [0, 0, 255, 255]);
+
+    // Without a wallpaper (one transparent pixel) the background is black.
+    let none = solid_texture(&device, &queue, [0, 0, 0, 0]);
+    let out = render_from(&device, &queue, &registry, IMAGE, &none);
+    assert!(out.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+}
+
+#[test]
+fn night_darkens_white_pages_and_keeps_their_edges() {
+    let (device, queue) = require_device!();
+    let registry = EffectRegistry::new(&device, FORMAT);
+    let white = solid_texture(&device, &queue, [255, 255, 255, 255]);
+    let out = render_from(&device, &queue, &registry, NIGHT, &white);
+    assert!(
+        out.chunks_exact(4).all(|p| p[0] < 40 && p[3] == 255),
+        "{:?}",
+        &out[..4]
+    );
+    let black = solid_texture(&device, &queue, [0, 0, 0, 255]);
+    let out = render_from(&device, &queue, &registry, NIGHT, &black);
+    assert!(out.chunks_exact(4).all(|p| p[0] > 180), "{:?}", &out[..4]);
+    let around = solid_texture(&device, &queue, [0, 0, 0, 0]);
+    for id in [NIGHT, SEPIA, PAPER] {
+        let out = render_from(&device, &queue, &registry, id, &around);
+        assert!(
+            out.chunks_exact(4).all(|p| p == [0, 0, 0, 0]),
+            "{id} outside pages"
+        );
+    }
 }

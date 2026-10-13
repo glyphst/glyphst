@@ -229,7 +229,7 @@ impl ReaderGpu {
         });
         let mut effects = EffectRegistry::new(device, format);
         if let Some(dir) = user_effects {
-            effects.load_dir(device, dir);
+            effects.reload_user(device, dir);
         }
         let blank = device
             .create_texture(&wgpu::TextureDescriptor {
