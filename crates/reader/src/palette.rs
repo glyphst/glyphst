@@ -255,7 +255,13 @@ impl Palette {
                         {
                             chosen = Some(hit.item.clone());
                         }
-                        field.request_focus();
+                        // Focus once, not on every frame: egui's
+                        // request_focus also interrupts an input method's
+                        // composition, which made Chinese and Japanese
+                        // typing flicker and reset.
+                        if !field.has_focus() && !field.lost_focus() {
+                            field.request_focus();
+                        }
                         let line = ui.available_rect_before_wrap();
                         ui.painter().hline(
                             line.x_range(),
@@ -448,5 +454,49 @@ mod tests {
                 &Item::Command(Command::Present)
             ]
         );
+    }
+
+    /// One frame of the palette with `events`; returns the IME output.
+    fn ime_frame(
+        ctx: &egui::Context,
+        palette: &mut Palette,
+        events: Vec<egui::Event>,
+    ) -> Option<egui::output::IMEOutput> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 700.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            palette.show(ui.ctx(), &[]);
+        });
+        output.textures_delta.clear();
+        output.platform_output.ime
+    }
+
+    #[test]
+    fn typing_with_an_input_method_is_not_interrupted() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut palette = Palette::default();
+        palette.toggle();
+        // The first frames focus the field.
+        for _ in 0..2 {
+            ime_frame(&ctx, &mut palette, Vec::new());
+        }
+        for _ in 0..3 {
+            let ime = ime_frame(&ctx, &mut palette, Vec::new()).expect("the field owns the IME");
+            assert!(!ime.should_interrupt_composition, "composition interrupted");
+        }
+        let preedit = egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "かんじ".into(),
+            active_range_chars: None,
+        });
+        let ime = ime_frame(&ctx, &mut palette, vec![preedit]).unwrap();
+        assert!(!ime.should_interrupt_composition);
+        let commit = egui::Event::Ime(egui::ImeEvent::Commit("漢字".into()));
+        let ime = ime_frame(&ctx, &mut palette, vec![commit]).unwrap();
+        assert!(!ime.should_interrupt_composition);
+        assert_eq!(palette.query, "漢字");
     }
 }

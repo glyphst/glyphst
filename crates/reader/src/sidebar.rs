@@ -102,6 +102,9 @@ pub struct TranslationInfo<'a> {
 #[derive(Default)]
 pub struct SidebarState {
     bookmark: Option<(u64, String)>,
+    /// The rename field takes the focus once, when renaming starts: asking
+    /// on every frame would interrupt an input method's composition.
+    focus_rename: bool,
     note: Option<(AnnotationId, String)>,
 }
 
@@ -457,7 +460,9 @@ fn bookmarks(
                         && *id == bookmark.id
                     {
                         let response = ui.text_edit_singleline(name);
-                        response.request_focus();
+                        if std::mem::take(&mut state.focus_rename) {
+                            response.request_focus();
+                        }
                         if response.lost_focus() {
                             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 actions.push(SidebarAction::RenameBookmark(*id, name.clone()));
@@ -478,6 +483,7 @@ fn bookmarks(
                         }
                         if icons::button(ui, "pen-line", 24.0, false, "Rename").clicked() {
                             state.bookmark = Some((bookmark.id, title.clone()));
+                            state.focus_rename = true;
                         }
                         muted(ui, &page.to_string());
                     });
