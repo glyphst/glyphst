@@ -43,8 +43,12 @@ pub struct StageLayout {
     pub rail: Option<Rect>,
     pub drawer: Option<Rect>,
     pub assistant: Option<Rect>,
-    /// Where pages are laid out.
+    /// Where pages are laid out: under the closed rail, beside an open
+    /// drawer.
     pub reading: Rect,
+    /// Where pages are drawn: `reading`, reaching under an open drawer that
+    /// pushes them aside, so the drawer floats over them too.
+    pub pages: Rect,
     /// Drawers float over the pages (a narrow window).
     pub overlay: bool,
     /// The progress line along the stage's bottom.
@@ -62,6 +66,7 @@ impl StageLayout {
                 drawer: None,
                 assistant: None,
                 reading: stage,
+                pages: stage,
                 overlay: false,
                 progress: None,
                 dock_anchor: None,
@@ -70,17 +75,19 @@ impl StageLayout {
         let overlay = stage.width() < NARROW;
         let top = stage.top() + GAP;
         let bottom = (stage.bottom() - GAP).max(top);
-        let rail_height = (input.rail_buttons as f32 * RAIL_STEP + 8.0).min(bottom - top);
+        // A closed drawer leaves the rail a card of its buttons; an open one
+        // makes it the full-height strip along the drawer's left edge.
+        let rail_height = match input.drawer {
+            Some(_) => bottom - top,
+            None => (input.rail_buttons as f32 * RAIL_STEP + 8.0).min(bottom - top),
+        };
         let rail =
             Rect::from_min_size(pos2(stage.left() + GAP, top), vec2(RAIL_WIDTH, rail_height));
         // Neither drawer takes more than 45 % of the stage.
         let widest = (stage.width() * 0.45).max(DRAWER_MIN);
         let drawer = input.drawer.map(|width| {
             let width = width.clamp(DRAWER_MIN, widest.max(DRAWER_MIN));
-            Rect::from_min_max(
-                pos2(rail.right() + 8.0, top),
-                pos2(rail.right() + 8.0 + width, bottom),
-            )
+            Rect::from_min_max(pos2(rail.right(), top), pos2(rail.right() + width, bottom))
         });
         let assistant = input.assistant.map(|width| {
             let width = width.clamp(ASSISTANT_MIN, widest.max(ASSISTANT_MIN));
@@ -89,9 +96,10 @@ impl StageLayout {
                 pos2(stage.right() - GAP, bottom),
             )
         });
+        // The closed rail, like the dock, floats over the pages.
         let left = match drawer {
             Some(drawer) if !overlay => drawer.right() + GAP / 2.0,
-            _ => rail.right() + GAP / 2.0,
+            _ => stage.left(),
         };
         let right = match assistant {
             Some(assistant) if !overlay => assistant.left() - GAP / 2.0,
@@ -110,10 +118,16 @@ impl StageLayout {
             drawer,
             assistant,
             reading,
+            pages: reading.with_min_x(stage.left().min(reading.left())),
             overlay,
             progress: Some(progress),
             dock_anchor: Some(pos2(reading.center().x, stage.bottom() - DOCK_LIFT)),
         }
+    }
+
+    /// The card of the open drawer and its rail.
+    pub fn panel(&self) -> Option<Rect> {
+        Some(self.rail?.union(self.drawer?))
     }
 }
 
@@ -198,7 +212,11 @@ mod tests {
     #[test]
     fn open_drawers_push_the_pages_aside() {
         let closed = StageLayout::compute(input(1400.0));
-        assert!(closed.reading.left() > closed.rail.unwrap().right());
+        assert_eq!(closed.reading.left(), 0.0);
+        assert!(
+            closed.reading.contains_rect(closed.rail.unwrap()),
+            "the closed rail floats over the pages"
+        );
         assert_eq!(closed.reading.right(), 1400.0);
 
         let open = StageLayout::compute(StageInput {
@@ -210,10 +228,32 @@ mod tests {
         assert!(!open.overlay);
         assert!(open.reading.left() > drawer.right());
         assert!(open.reading.right() < assistant.left());
+        // The pages are drawn under the drawer, and laid out beside it.
+        assert_eq!(open.pages.left(), 0.0);
+        assert_eq!(open.pages.right(), open.reading.right());
+        assert!(open.pages.contains_rect(drawer));
+        assert_eq!(closed.pages, closed.reading);
         assert_eq!(drawer.width(), 300.0);
         assert_eq!(assistant.width(), 380.0);
         // The dock stays centred on the pages.
         assert_eq!(open.dock_anchor.unwrap().x, open.reading.center().x);
+    }
+
+    #[test]
+    fn an_open_drawer_joins_the_rail() {
+        let closed = StageLayout::compute(input(1400.0));
+        let rail = closed.rail.unwrap();
+        assert_eq!(rail.height(), 6.0 * RAIL_STEP + 8.0);
+        assert_eq!(closed.panel(), None);
+
+        let open = StageLayout::compute(StageInput {
+            drawer: Some(300.0),
+            ..input(1400.0)
+        });
+        let (rail, drawer) = (open.rail.unwrap(), open.drawer.unwrap());
+        assert_eq!(rail.right(), drawer.left());
+        assert_eq!(rail.y_range(), drawer.y_range());
+        assert_eq!(open.panel(), Some(rail.union(drawer)));
     }
 
     #[test]
@@ -225,6 +265,7 @@ mod tests {
         assert!(layout.overlay);
         assert!(layout.reading.left() < layout.drawer.unwrap().right());
         assert!(layout.drawer.unwrap().width() >= DRAWER_MIN);
+        assert_eq!(layout.pages, layout.reading);
     }
 
     #[test]

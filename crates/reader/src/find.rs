@@ -368,11 +368,7 @@ pub fn find_bar(
 /// Returns the index of a match to go to.
 pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<usize> {
     let tokens = Tokens::get(ui.ctx());
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut find.query)
-            .hint_text("Search the document")
-            .desired_width(f32::INFINITY),
-    );
+    let response = widgets::filter_field(ui, &mut find.query, "Search the document");
     if response.changed() {
         find.edited(now);
     }

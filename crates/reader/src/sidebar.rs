@@ -2,7 +2,7 @@
 //! `ui-egui/src/panels.rs`, `comments_panel.rs`, `search_ui.rs`): outline,
 //! page thumbnails, bookmarks, highlights and notes, and search results.
 
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use glyphst_library::HighlightColor;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::{
     widgets,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SidebarTab {
     #[default]
     Outline,
@@ -106,6 +106,10 @@ pub struct SidebarState {
     /// on every frame would interrupt an input method's composition.
     focus_rename: bool,
     note: Option<(AnnotationId, String)>,
+    /// The note opened under its row, with its colours and actions.
+    open_note: Option<AnnotationId>,
+    /// Each section's filter text.
+    filters: HashMap<SidebarTab, String>,
 }
 
 const QUOTE_CHARS: usize = 240;
@@ -119,11 +123,29 @@ pub fn show(
     now: Instant,
 ) -> Vec<SidebarAction> {
     let mut actions = Vec::new();
+    // Lists with entries can be filtered.
+    let hint = match which {
+        SidebarTab::Outline if !tab.outline.is_empty() => Some("Filter the outline"),
+        SidebarTab::Bookmarks if !tab.annotations.bookmarks.is_empty() => Some("Filter bookmarks"),
+        SidebarTab::Notes if !tab.annotations.items.is_empty() => {
+            Some("Filter highlights and notes")
+        }
+        _ => None,
+    };
+    let filter = match hint {
+        Some(hint) => {
+            let text = state.filters.entry(*which).or_default();
+            widgets::filter_field(ui, text, hint);
+            ui.add_space(6.0);
+            text.trim().to_lowercase()
+        }
+        None => String::new(),
+    };
     match which {
-        SidebarTab::Outline => outline(ui, tab, &mut actions),
+        SidebarTab::Outline => outline(ui, tab, &filter, &mut actions),
         SidebarTab::Pages => pages(ui, tab, &mut actions),
-        SidebarTab::Bookmarks => bookmarks(ui, tab, state, &mut actions),
-        SidebarTab::Notes => notes(ui, tab, state, &mut actions),
+        SidebarTab::Bookmarks => bookmarks(ui, tab, state, &filter, &mut actions),
+        SidebarTab::Notes => notes(ui, tab, state, &filter, &mut actions),
         // Choosing a match makes it current; the view brings it in.
         SidebarTab::Search => {
             find::search_panel(&mut tab.find, ui, now);
@@ -287,20 +309,121 @@ fn muted(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).color(tokens.text_muted));
 }
 
-/// A list row with `title` indented by `depth` and an optional detail
-/// (a page number) at the right.
-fn list_entry(
-    ui: &mut egui::Ui,
-    title: &str,
+/// The number shown beside a section's title.
+pub fn count(tab: &DocumentTab, which: SidebarTab) -> Option<usize> {
+    match which {
+        SidebarTab::Outline => Some(tab.outline.len()),
+        SidebarTab::Pages => Some(tab.layout.len()),
+        SidebarTab::Bookmarks => Some(tab.annotations.bookmarks.len()),
+        SidebarTab::Notes => Some(tab.annotations.items.len()),
+        SidebarTab::Search => (!tab.find.query.is_empty()).then_some(tab.find.matches.len()),
+        SidebarTab::Translation | SidebarTab::Effects => None,
+    }
+}
+
+/// The count on a rail button: what the reader made or found.
+pub fn badge(tab: &DocumentTab, which: SidebarTab) -> Option<usize> {
+    match which {
+        SidebarTab::Bookmarks | SidebarTab::Notes | SidebarTab::Search => {
+            count(tab, which).filter(|&count| count > 0)
+        }
+        _ => None,
+    }
+}
+
+/// A count as a badge shows it.
+pub fn badge_label(count: usize) -> String {
+    if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    }
+}
+
+/// The open section's title, its count and its actions.
+pub fn header(ui: &mut egui::Ui, tab: &DocumentTab, which: SidebarTab) -> Vec<SidebarAction> {
+    let tokens = Tokens::get(ui.ctx());
+    let mut actions = Vec::new();
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(egui::RichText::new(which.label()).font(theme::semibold(15.0)));
+        if let Some(count) = count(tab, which).filter(|&count| count > 0) {
+            count_pill(ui, &tokens, count);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if which == SidebarTab::Bookmarks
+                && icons::button(ui, "plus", 26.0, false, "Add a bookmark here").clicked()
+            {
+                actions.push(SidebarAction::AddBookmark);
+            }
+        });
+    });
+    ui.add_space(6.0);
+    actions
+}
+
+fn count_pill(ui: &mut egui::Ui, tokens: &Tokens, count: usize) {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(count.to_string(), theme::medium(11.5), tokens.text_muted);
+    let size = egui::vec2((galley.size().x + 12.0).max(20.0), 18.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, 9.0, tokens.hover);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        tokens.text_muted,
+    );
+}
+
+/// Whether `text` holds `filter` (already lower-cased; empty holds all).
+fn matches(filter: &str, text: &str) -> bool {
+    filter.is_empty() || text.to_lowercase().contains(filter)
+}
+
+/// A list row of the sidebar.
+struct Row<'a> {
+    title: &'a str,
+    /// Faint, at the right: a page number.
     detail: Option<String>,
     depth: usize,
+    /// A colour dot before the title.
+    dot: Option<egui::Color32>,
     selected: bool,
     enabled: bool,
-) -> egui::Response {
+    /// Icon buttons (icon, tooltip) shown over the detail while hovered.
+    actions: &'a [(&'a str, &'a str)],
+}
+
+/// Draws `row`; returns its response and the action button clicked.
+fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     let tokens = Tokens::get(ui.ctx());
-    let (rect, response) = widgets::list_row(ui, 28.0, selected);
+    let (rect, response) = widgets::list_row(ui, 28.0, row.selected);
+    let hovered = response.contains_pointer() && !row.actions.is_empty();
     let mut right = rect.right() - 8.0;
-    if let Some(detail) = detail {
+    let mut clicked = None;
+    if hovered {
+        let width = row.actions.len() as f32 * 26.0;
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - 2.0 - width, rect.top()),
+            egui::pos2(rect.right() - 2.0, rect.bottom()),
+        );
+        right = strip.left() - 4.0;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, (icon, tip)) in row.actions.iter().enumerate() {
+                    if icons::button(ui, icon, 26.0, false, tip).clicked() {
+                        clicked = Some(index);
+                    }
+                }
+            },
+        );
+    } else if let Some(detail) = row.detail {
         let galley = ui
             .painter()
             .layout_no_wrap(detail, theme::regular(11.5), tokens.text_faint);
@@ -311,15 +434,20 @@ fn list_entry(
             tokens.text_faint,
         );
     }
-    let left = rect.left() + 8.0 + depth as f32 * 14.0;
-    let color = if !enabled {
+    let mut left = rect.left() + 8.0 + row.depth as f32 * 14.0;
+    if let Some(dot) = row.dot {
+        ui.painter()
+            .circle_filled(egui::pos2(left + 4.0, rect.center().y), 4.0, dot);
+        left += 16.0;
+    }
+    let color = if !row.enabled {
         tokens.text_faint
-    } else if selected {
+    } else if row.selected {
         tokens.accent_text
     } else {
         tokens.text
     };
-    let font = if depth == 0 {
+    let font = if row.depth == 0 {
         theme::medium(13.0)
     } else {
         theme::regular(13.0)
@@ -327,15 +455,15 @@ fn list_entry(
     widgets::row_text(
         ui,
         egui::pos2(left, rect.center().y),
-        title,
+        row.title,
         font,
         color,
         right - left - 8.0,
     );
-    response.on_hover_text(title)
+    (response.on_hover_text(row.title), clicked)
 }
 
-fn outline(ui: &mut egui::Ui, tab: &DocumentTab, actions: &mut Vec<SidebarAction>) {
+fn outline(ui: &mut egui::Ui, tab: &DocumentTab, filter: &str, actions: &mut Vec<SidebarAction>) {
     if tab.outline.is_empty() {
         muted(ui, "This document has no outline.");
         return;
@@ -346,18 +474,33 @@ fn outline(ui: &mut egui::Ui, tab: &DocumentTab, actions: &mut Vec<SidebarAction
         .outline
         .iter()
         .rposition(|entry| entry.page.is_some_and(|page| page <= current));
+    if !tab
+        .outline
+        .iter()
+        .any(|entry| matches(filter, &entry.title))
+    {
+        muted(ui, "No matches.");
+        return;
+    }
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (index, entry) in tab.outline.iter().enumerate() {
-                let response = list_entry(
+                if !matches(filter, &entry.title) {
+                    continue;
+                }
+                let (response, _) = row(
                     ui,
-                    &entry.title,
-                    entry.page.map(|page| (page + 1).to_string()),
-                    entry.depth,
-                    reading == Some(index),
-                    entry.page.is_some(),
+                    Row {
+                        title: &entry.title,
+                        detail: entry.page.map(|page| (page + 1).to_string()),
+                        depth: entry.depth,
+                        dot: None,
+                        selected: reading == Some(index),
+                        enabled: entry.page.is_some(),
+                        actions: &[],
+                    },
                 );
                 if response.clicked()
                     && let Some(page) = entry.page
@@ -436,58 +579,81 @@ fn bookmarks(
     ui: &mut egui::Ui,
     tab: &DocumentTab,
     state: &mut SidebarState,
+    filter: &str,
     actions: &mut Vec<SidebarAction>,
 ) {
-    if ui.button("＋ Add bookmark").clicked() {
-        actions.push(SidebarAction::AddBookmark);
-    }
-    ui.separator();
     if tab.annotations.bookmarks.is_empty() {
-        muted(ui, "No bookmarks yet.");
+        muted(ui, "No bookmarks yet. Add one with + or Ctrl+D.");
+        return;
+    }
+    let title = |bookmark: &glyphst_library::Bookmark| {
+        bookmark
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Page {}", bookmark.position.page.max(1)))
+    };
+    if !tab
+        .annotations
+        .bookmarks
+        .iter()
+        .any(|bookmark| matches(filter, &title(bookmark)))
+    {
+        muted(ui, "No matches.");
         return;
     }
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for bookmark in &tab.annotations.bookmarks {
-                let page = bookmark.position.page.max(1);
-                let title = bookmark
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| format!("Page {page}"));
-                ui.horizontal(|ui| {
-                    if let Some((id, name)) = &mut state.bookmark
-                        && *id == bookmark.id
-                    {
-                        let response = ui.text_edit_singleline(name);
-                        if std::mem::take(&mut state.focus_rename) {
-                            response.request_focus();
-                        }
-                        if response.lost_focus() {
-                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                actions.push(SidebarAction::RenameBookmark(*id, name.clone()));
-                            }
-                            state.bookmark = None;
-                        }
-                        return;
+                let name = title(bookmark);
+                if !matches(filter, &name) {
+                    continue;
+                }
+                if let Some((id, text)) = &mut state.bookmark
+                    && *id == bookmark.id
+                {
+                    let response =
+                        ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
+                    if std::mem::take(&mut state.focus_rename) {
+                        response.request_focus();
                     }
-                    let response = ui
-                        .add(egui::Button::new(&title).frame(false))
-                        .on_hover_text(format!("Page {page}"));
-                    if response.clicked() {
+                    if response.lost_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            actions.push(SidebarAction::RenameBookmark(*id, text.clone()));
+                        }
+                        state.bookmark = None;
+                    }
+                    continue;
+                }
+                let page = bookmark.position.page.max(1);
+                let (response, clicked) = ui
+                    .push_id(bookmark.id, |ui| {
+                        row(
+                            ui,
+                            Row {
+                                title: &name,
+                                detail: Some(page.to_string()),
+                                depth: 0,
+                                dot: None,
+                                selected: false,
+                                enabled: true,
+                                actions: &[("pen-line", "Rename"), ("trash-2", "Delete")],
+                            },
+                        )
+                    })
+                    .inner;
+                match clicked {
+                    Some(0) => {
+                        state.bookmark = Some((bookmark.id, name.clone()));
+                        state.focus_rename = true;
+                    }
+                    Some(_) => actions.push(SidebarAction::RemoveBookmark(bookmark.id)),
+                    None if response.clicked() => {
                         actions.push(SidebarAction::GoToBookmark(bookmark.id));
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::button(ui, "trash-2", 24.0, false, "Delete").clicked() {
-                            actions.push(SidebarAction::RemoveBookmark(bookmark.id));
-                        }
-                        if icons::button(ui, "pen-line", 24.0, false, "Rename").clicked() {
-                            state.bookmark = Some((bookmark.id, title.clone()));
-                            state.focus_rename = true;
-                        }
-                        muted(ui, &page.to_string());
-                    });
-                });
+                    None => {}
+                }
             }
         });
 }
@@ -496,6 +662,7 @@ fn notes(
     ui: &mut egui::Ui,
     tab: &DocumentTab,
     state: &mut SidebarState,
+    filter: &str,
     actions: &mut Vec<SidebarAction>,
 ) {
     let tokens = Tokens::get(ui.ctx());
@@ -506,127 +673,170 @@ fn notes(
         );
         return;
     }
+    let shown =
+        |item: &annotations::Item| matches(filter, &item.text) || matches(filter, &item.body);
+    if !tab.annotations.items.iter().any(shown) {
+        muted(ui, "No matches.");
+        return;
+    }
     let reflowed = tab.is_reflowed();
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            for item in &tab.annotations.items {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for item in tab.annotations.items.iter().filter(|item| shown(item)) {
                 let place = tab.annotations.page_of(item, reflowed);
-                egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(egui::Stroke::new(1.0, tokens.border))
-                    .corner_radius(6)
-                    .inner_margin(8)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            let (dot, _) = ui
-                                .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                            ui.painter().circle_filled(
-                                dot.center(),
-                                5.0,
-                                annotations::color(item.color),
-                            );
-                            let kind = match item.id {
-                                AnnotationId::Highlight(_) => "Highlight",
-                                AnnotationId::Note(_) => "Note",
-                            };
-                            let label = match place {
-                                Some((page, _)) => format!("{kind} · p. {}", page + 1),
-                                None => format!("{kind} · not found in this layout"),
-                            };
-                            muted(ui, &label);
-                        });
-                        if !item.text.is_empty() {
-                            let quote: String = item.text.chars().take(QUOTE_CHARS).collect();
-                            let ellipsis = if item.text.chars().count() > QUOTE_CHARS {
-                                "…"
-                            } else {
-                                ""
-                            };
-                            let response = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("“{quote}{ellipsis}”")).italics(),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-                            if response.clicked()
-                                && let Some((page, y)) = place
-                            {
-                                actions.push(SidebarAction::View(ViewAction::GoTo {
-                                    page,
-                                    y: Some(y),
-                                }));
-                            }
-                        }
-                        match &mut state.note {
-                            Some((id, body)) if *id == item.id => {
-                                ui.add(
-                                    egui::TextEdit::multiline(body)
-                                        .desired_rows(3)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Note"),
-                                );
-                                let (save, cancel) = ui
-                                    .horizontal(|ui| {
-                                        (ui.button("Save").clicked(), ui.button("Cancel").clicked())
-                                    })
-                                    .inner;
-                                if save {
-                                    actions.push(SidebarAction::SetBody(*id, body.clone()));
-                                }
-                                if save || cancel {
-                                    state.note = None;
-                                }
-                            }
-                            _ => {
-                                if !item.body.is_empty() {
-                                    ui.label(&item.body);
-                                }
-                            }
-                        }
-                        ui.horizontal(|ui| {
-                            for color in HighlightColor::ALL {
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(16.0, 16.0),
-                                    egui::Sense::click(),
-                                );
-                                let radius = if color == item.color { 7.0 } else { 5.0 };
-                                ui.painter().circle_filled(
-                                    rect.center(),
-                                    radius,
-                                    annotations::color(color),
-                                );
-                                if response
-                                    .on_hover_text(annotations::color_name(color))
-                                    .clicked()
-                                {
-                                    actions.push(SidebarAction::SetColor(item.id, color));
-                                }
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.small_button("Delete").clicked() {
-                                        actions.push(SidebarAction::Remove(item.id));
-                                    }
-                                    if matches!(item.id, AnnotationId::Note(_))
-                                        && ui.small_button("Edit note").clicked()
-                                    {
-                                        state.note = Some((item.id, item.body.clone()));
-                                    }
-                                },
-                            );
-                        });
-                    });
-                ui.add_space(6.0);
+                let open = state.open_note == Some(item.id);
+                let title = if item.text.is_empty() {
+                    item.body.as_str()
+                } else {
+                    item.text.as_str()
+                };
+                let title = title.lines().next().unwrap_or_default();
+                let (response, _) = ui
+                    .push_id(item.id, |ui| {
+                        row(
+                            ui,
+                            Row {
+                                title,
+                                detail: Some(match place {
+                                    Some((page, _)) => (page + 1).to_string(),
+                                    None => "–".to_owned(),
+                                }),
+                                depth: 0,
+                                dot: Some(annotations::color(item.color)),
+                                selected: open,
+                                enabled: true,
+                                actions: &[],
+                            },
+                        )
+                    })
+                    .inner;
+                if response.clicked() {
+                    state.open_note = (!open).then_some(item.id);
+                    if let Some((page, y)) = place {
+                        actions.push(SidebarAction::View(ViewAction::GoTo { page, y: Some(y) }));
+                    }
+                }
+                if open {
+                    note_details(ui, &tokens, item, place.is_some(), state, actions);
+                }
             }
+        });
+}
+
+/// An open note under its row: the whole quote, the note, its colours and
+/// its actions.
+fn note_details(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    item: &annotations::Item,
+    placed: bool,
+    state: &mut SidebarState,
+    actions: &mut Vec<SidebarAction>,
+) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 24,
+            right: 8,
+            top: 4,
+            bottom: 10,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if !placed {
+                muted(ui, "Not found in this layout.");
+            }
+            if !item.text.is_empty() {
+                let quote: String = item.text.chars().take(QUOTE_CHARS).collect();
+                let ellipsis = if item.text.chars().count() > QUOTE_CHARS {
+                    "…"
+                } else {
+                    ""
+                };
+                ui.label(
+                    egui::RichText::new(format!("“{quote}{ellipsis}”"))
+                        .italics()
+                        .color(tokens.text_muted),
+                );
+            }
+            match &mut state.note {
+                Some((id, body)) if *id == item.id => {
+                    ui.add(
+                        egui::TextEdit::multiline(body)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Note"),
+                    );
+                    let (save, cancel) = ui
+                        .horizontal(|ui| {
+                            (
+                                widgets::pill_button(ui, None, "Save", true).clicked(),
+                                widgets::pill_button(ui, None, "Cancel", false).clicked(),
+                            )
+                        })
+                        .inner;
+                    if save {
+                        actions.push(SidebarAction::SetBody(*id, body.clone()));
+                    }
+                    if save || cancel {
+                        state.note = None;
+                    }
+                }
+                _ => {
+                    if !item.body.is_empty() {
+                        ui.label(&item.body);
+                    }
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for color in HighlightColor::ALL {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                    let radius = if color == item.color { 7.0 } else { 5.0 };
+                    ui.painter()
+                        .circle_filled(rect.center(), radius, annotations::color(color));
+                    if response
+                        .on_hover_text(annotations::color_name(color))
+                        .clicked()
+                    {
+                        actions.push(SidebarAction::SetColor(item.id, color));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if icons::button(ui, "trash-2", 26.0, false, "Delete").clicked() {
+                        actions.push(SidebarAction::Remove(item.id));
+                    }
+                    if matches!(item.id, AnnotationId::Note(_))
+                        && icons::button(ui, "pen-line", 26.0, false, "Edit the note").clicked()
+                    {
+                        state.note = Some((item.id, item.body.clone()));
+                    }
+                });
+            });
         });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_match_ignoring_case() {
+        assert!(matches("", "Anything"));
+        assert!(matches("intro", "1.1 Introduction"));
+        assert!(!matches("intro", "Chapter 2"));
+    }
+
+    #[test]
+    fn badges_cap_at_99() {
+        assert_eq!(badge_label(7), "7");
+        assert_eq!(badge_label(99), "99");
+        assert_eq!(badge_label(100), "99+");
+    }
 
     #[test]
     fn sidebar_tabs_parse_by_name() {

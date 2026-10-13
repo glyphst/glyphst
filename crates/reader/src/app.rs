@@ -125,7 +125,11 @@ pub struct Launch {
 
 /// One pane's frame of the document view.
 struct PaneView<'a> {
+    /// Where the pages are laid out.
     rect: egui::Rect,
+    /// Where they are drawn: `rect`, or reaching left under a floating
+    /// drawer.
+    draw: egui::Rect,
     /// The tab shown, an index into `tabs`.
     index: usize,
     focused: bool,
@@ -2157,8 +2161,10 @@ impl ReaderApp {
         view: PaneView<'_>,
         keep: &mut Vec<PageKey>,
     ) -> (bool, bool) {
+        // `rect` is where pages are drawn; they are laid out in `content`.
         let PaneView {
-            rect,
+            rect: content,
+            draw: rect,
             index: active,
             focused,
             actions,
@@ -2175,6 +2181,7 @@ impl ReaderApp {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let size = pixel_size(rect, ppp);
+        self.tabs[active].inset = f64::from((content.left() - rect.left()) * ppp);
         let pointer = response.hover_pos().map(|pos| {
             [
                 f64::from((pos.x - rect.min.x) * ppp),
@@ -2217,7 +2224,8 @@ impl ReaderApp {
                     }
                     + autoscroll * ppp64,
             ],
-            pointer,
+            // The view zooms about points of the laid-out area.
+            pointer: pointer.map(|[x, y]| [x - self.tabs[active].inset, y]),
             actions,
             gamepad: pad,
             seconds,
@@ -2339,7 +2347,7 @@ impl ReaderApp {
             }
         }
         if self.tabs[active].is_reflowed() {
-            self.reflow_to_view(active, rect.width(), now, &ctx);
+            self.reflow_to_view(active, content.width(), now, &ctx);
         }
         (
             frame.animating || autoscroll != 0.0,

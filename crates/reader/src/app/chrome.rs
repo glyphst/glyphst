@@ -94,8 +94,18 @@ impl ReaderApp {
                 continue;
             };
             let focused = index == active;
+            // A pane at the left of the reading area is drawn on under an
+            // open drawer, which floats over it.
+            let draw = if layout.pages.left() < layout.reading.left()
+                && (pane.left() - layout.reading.left()).abs() < 0.5
+            {
+                rect.with_min_x(layout.pages.left())
+            } else {
+                rect
+            };
             let mut view = PaneView {
                 rect,
+                draw,
                 index,
                 focused,
                 actions: if focused {
@@ -140,13 +150,18 @@ impl ReaderApp {
             return (animating, drawn);
         }
         if panes.len() > 1 {
-            self.pane_chrome(ui, &panes, &dividers);
+            self.pane_chrome(ui, &panes, &dividers, layout.rail);
         }
         self.tab_drop(&ctx);
         let active = self.active.unwrap_or(active);
         let visible = self.controls_visible(&ctx, active);
         let opacity = ctx.animate_bool_with_time(Id::new("stage-controls"), visible, 0.25);
-        self.rail(&ctx, &layout, opacity);
+        // An open drawer draws the rail as its own left strip.
+        if layout.drawer.is_none() {
+            self.rail(&ctx, &layout, active, opacity);
+        } else {
+            self.chrome.rail = None;
+        }
         self.drawers(&ctx, &layout, active, now);
         self.progress_line(&ctx, &layout, active);
         self.dock(&ctx, &layout, active, opacity);
@@ -155,7 +170,13 @@ impl ReaderApp {
 
     /// With two or more panes: each pane's title chip (with a button that
     /// closes the pane), the focused pane's outline, and the dividers.
-    fn pane_chrome(&mut self, ui: &mut egui::Ui, panes: &[(u64, Rect)], dividers: &[Divider]) {
+    fn pane_chrome(
+        &mut self,
+        ui: &mut egui::Ui,
+        panes: &[(u64, Rect)],
+        dividers: &[Divider],
+        rail: Option<Rect>,
+    ) {
         let ctx = ui.ctx().clone();
         let tokens = Tokens::get(&ctx);
         let focused = self.active.map(|active| self.tabs[active].id);
@@ -180,9 +201,17 @@ impl ReaderApp {
                 "file-text"
             };
             let title = truncate(&tab.title, 40);
+            // The chip steps aside for the rail floating over the pane.
+            let mut chip = rect.min + vec2(4.0, 5.0);
+            if let Some(rail) = rail
+                && rect.left() < rail.right()
+                && rail.y_range().intersects((chip.y..=chip.y + 30.0).into())
+            {
+                chip.x = rail.right() + stage::GAP / 2.0;
+            }
             egui::Area::new(Id::new(("pane-chip", id)))
                 .order(Order::Middle)
-                .fixed_pos(rect.min + vec2(4.0, 5.0))
+                .fixed_pos(chip)
                 .show(&ctx, |ui| {
                     let frame = egui::Frame::new()
                         .fill(if is_focused {
@@ -380,8 +409,8 @@ impl ReaderApp {
         visible
     }
 
-    /// The floating rail of drawer buttons.
-    fn rail(&mut self, ctx: &egui::Context, layout: &StageLayout, opacity: f32) {
+    /// The floating rail of drawer buttons, while no drawer is open.
+    fn rail(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize, opacity: f32) {
         let Some(rect) = layout.rail else {
             return;
         };
@@ -394,18 +423,17 @@ impl ReaderApp {
             .show(ctx, |ui| {
                 ui.multiply_opacity(opacity);
                 floating_frame(&tokens, 12)
-                    .inner_margin(egui::Margin::same(4))
+                    .inner_margin(egui::Margin::same(RAIL_MARGIN as i8))
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = stage::RAIL_STEP - 32.0;
-                        for tab in SidebarTab::ALL {
-                            let open = self.prefs.show_sidebar && self.prefs.sidebar == tab;
-                            if icons::button(ui, tab.icon(), 32.0, open, tab.label()).clicked() {
-                                toggled = Some((tab, open));
-                            }
-                        }
+                        toggled = rail_buttons(ui, &tokens, &self.tabs[active], None);
                     });
             });
         self.chrome.rail = Some(area.response.rect);
+        self.toggle_drawer(toggled);
+    }
+
+    /// Opens the drawer of a rail button, or closes it when it is open.
+    fn toggle_drawer(&mut self, toggled: Option<(SidebarTab, bool)>) {
         match toggled {
             Some((_, true)) => self.prefs.show_sidebar = false,
             Some((tab, false)) => {
@@ -451,51 +479,87 @@ impl ReaderApp {
             let mut book_changed = false;
             let title = self.tabs[active].title.clone();
             let time = self.started.elapsed().as_secs_f32();
+            // One card: the rail's strip, a hairline, then the drawer.
+            let panel = layout.panel().unwrap_or(rect);
+            let strip = layout
+                .rail
+                .unwrap_or(Rect::NOTHING)
+                .shrink(1.0 + RAIL_MARGIN);
+            // The header's 28-point row centres on the first rail button.
+            let content = Rect::from_min_max(
+                pos2(rect.left() + 12.0, strip.top() + 2.0),
+                rect.max - vec2(13.0, 13.0),
+            );
+            let mut toggled = None;
             egui::Area::new(Id::new("stage-drawer"))
                 .order(Order::Middle)
-                .fixed_pos(rect.min)
+                .fixed_pos(panel.min)
                 .show(ctx, |ui| {
-                    floating_frame(&tokens, 12).show(ui, |ui| {
-                        let inner = rect.size() - vec2(26.0, 26.0);
-                        ui.set_min_size(inner);
-                        ui.set_max_size(inner);
-                        close = drawer_header(
-                            ui,
-                            &tokens,
-                            self.prefs.sidebar.icon(),
-                            self.prefs.sidebar.label(),
-                        );
-                        if showing_effects {
-                            // The previews are animated.
-                            ui.ctx().request_repaint();
-                            let find = |id: Option<&str>| {
-                                id.and_then(|id| effects.iter().find(|def| def.id == id))
-                            };
-                            book_changed = crate::effects_page::book_page(
-                                ui,
-                                crate::effects_page::BookPage {
-                                    title: &title,
-                                    book: &mut book,
-                                    default_background: find(Some(&self.prefs.background)),
-                                    default_transition: find(self.prefs.transition.as_deref()),
-                                    default_overlay: find(self.prefs.overlay.as_deref()),
-                                    effects: &effects,
-                                    params: &self.prefs.effect_params,
-                                    has_wallpaper: self.prefs.wallpaper.is_some(),
-                                    time,
-                                },
+                    floating_frame(&tokens, 12)
+                        .inner_margin(egui::Margin::ZERO)
+                        .show(ui, |ui| {
+                            let inner = panel.size() - vec2(2.0, 2.0);
+                            ui.set_min_size(inner);
+                            ui.set_max_size(inner);
+                            ui.painter().vline(
+                                rect.left(),
+                                (panel.top() + 1.0)..=(panel.bottom() - 1.0),
+                                Stroke::new(1.0, tokens.divider),
                             );
-                        } else {
-                            requests = sidebar::show(
-                                ui,
-                                &mut self.tabs[active],
-                                &mut self.prefs.sidebar,
-                                &mut self.sidebar_state,
-                                &info,
-                                now,
+                            let current = Some(self.prefs.sidebar);
+                            let mut rail = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(strip)
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
                             );
-                        }
-                    });
+                            toggled = rail_buttons(&mut rail, &tokens, &self.tabs[active], current);
+                            let mut foot = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(strip)
+                                    .layout(egui::Layout::bottom_up(egui::Align::Center)),
+                            );
+                            let tip = self.keymap.tip("Hide the sidebar", Command::ToggleSidebar);
+                            if icons::button(&mut foot, "panel-left", 32.0, false, &tip).clicked() {
+                                close = true;
+                            }
+                            let ui = &mut ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(content)
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            ui.set_min_size(content.size());
+                            requests = sidebar::header(ui, &self.tabs[active], self.prefs.sidebar);
+                            if showing_effects {
+                                // The previews are animated.
+                                ui.ctx().request_repaint();
+                                let find = |id: Option<&str>| {
+                                    id.and_then(|id| effects.iter().find(|def| def.id == id))
+                                };
+                                book_changed = crate::effects_page::book_page(
+                                    ui,
+                                    crate::effects_page::BookPage {
+                                        title: &title,
+                                        book: &mut book,
+                                        default_background: find(Some(&self.prefs.background)),
+                                        default_transition: find(self.prefs.transition.as_deref()),
+                                        default_overlay: find(self.prefs.overlay.as_deref()),
+                                        effects: &effects,
+                                        params: &self.prefs.effect_params,
+                                        has_wallpaper: self.prefs.wallpaper.is_some(),
+                                        time,
+                                    },
+                                );
+                            } else {
+                                requests.extend(sidebar::show(
+                                    ui,
+                                    &mut self.tabs[active],
+                                    &mut self.prefs.sidebar,
+                                    &mut self.sidebar_state,
+                                    &info,
+                                    now,
+                                ));
+                            }
+                        });
                     resize = resize_handle(
                         ui,
                         &tokens,
@@ -505,6 +569,7 @@ impl ReaderApp {
                         self.prefs.drawer_width,
                     );
                 });
+            self.toggle_drawer(toggled);
             if close {
                 self.prefs.show_sidebar = false;
             }
@@ -938,18 +1003,50 @@ fn floating_frame(tokens: &Tokens, radius: u8) -> egui::Frame {
         .inner_margin(egui::Margin::same(12))
 }
 
-/// A drawer's icon, title and close button; returns whether it was closed.
-fn drawer_header(ui: &mut egui::Ui, tokens: &Tokens, icon: &str, title: &str) -> bool {
-    let mut close = false;
-    ui.horizontal(|ui| {
-        ui.add(icons::image(icon, 16.0, tokens.accent));
-        ui.label(egui::RichText::new(title).font(theme::semibold(15.0)));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            close = icons::button(ui, "x", 26.0, false, "Close").clicked();
-        });
-    });
-    ui.add_space(4.0);
-    close
+/// The space between the rail's card and its buttons.
+const RAIL_MARGIN: f32 = 4.0;
+
+/// The rail's buttons, each with its count; returns the one clicked and
+/// whether its drawer was the `open` one.
+fn rail_buttons(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    tab: &DocumentTab,
+    open: Option<SidebarTab>,
+) -> Option<(SidebarTab, bool)> {
+    let mut toggled = None;
+    ui.spacing_mut().item_spacing.y = stage::RAIL_STEP - 32.0;
+    for which in SidebarTab::ALL {
+        let selected = open == Some(which);
+        let response = icons::button(ui, which.icon(), 32.0, selected, which.label());
+        if let Some(count) = sidebar::badge(tab, which) {
+            paint_badge(ui, tokens, response.rect, count);
+        }
+        if response.clicked() {
+            toggled = Some((which, selected));
+        }
+    }
+    toggled
+}
+
+/// A count at the top right of a rail button.
+fn paint_badge(ui: &egui::Ui, tokens: &Tokens, button: Rect, count: usize) {
+    let galley = ui.painter().layout_no_wrap(
+        sidebar::badge_label(count),
+        theme::semibold(9.5),
+        tokens.card,
+    );
+    let size = vec2((galley.size().x + 8.0).max(15.0), 15.0);
+    let badge = Align2::RIGHT_TOP.anchor_size(pos2(button.right() + 3.0, button.top() - 1.0), size);
+    ui.painter().rect(
+        badge,
+        CornerRadius::same(8),
+        tokens.text,
+        Stroke::new(1.5, tokens.card),
+        egui::StrokeKind::Outside,
+    );
+    ui.painter()
+        .galley(badge.center() - galley.size() / 2.0, galley, tokens.card);
 }
 
 /// A thin upright line between groups of dock buttons.

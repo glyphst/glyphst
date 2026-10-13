@@ -153,10 +153,15 @@ pub struct DocumentTab {
     pub document_layout: DocumentLayout,
     pub layout: Layout,
     pub view: View,
-    /// View size in device pixels from the last frame.
+    /// View size in device pixels from the last frame: where pages are
+    /// laid out, right of `inset`.
     pub viewport: [f64; 2],
     /// Device pixels per egui point, set by the app each frame.
     pub pixels_per_point: f64,
+    /// Device pixels at the left of the drawn area that a floating panel
+    /// covers: pages are drawn there but laid out beside it. Set by the app
+    /// each frame.
+    pub inset: f64,
     fitted: bool,
     restore: Option<DocumentPosition>,
     /// The file's modification time when it was opened, to reload it when
@@ -241,6 +246,7 @@ impl DocumentTab {
             view: View::new(1.0),
             viewport: [1.0, 1.0],
             pixels_per_point: 1.0,
+            inset: 0.0,
             fitted: false,
             restore,
             modified,
@@ -1178,7 +1184,7 @@ impl DocumentTab {
         let at_fit = self.fitted
             && self.view.target_scale == self.view.scale
             && (self.view.scale / self.fit_scale() - 1.0).abs() < 1e-3;
-        let width = f64::from(viewport[0]);
+        let width = (f64::from(viewport[0]) - self.inset).max(1.0);
         let resized = width != self.viewport[0];
         self.viewport = [width, f64::from(viewport[1])];
         if at_fit && resized {
@@ -1237,8 +1243,8 @@ impl DocumentTab {
         }
     }
 
-    /// The pages the view shows, and the pages to keep loaded in priority
-    /// order.
+    /// The pages the view shows in a drawn area of `viewport` pixels, and
+    /// the pages to keep loaded in priority order.
     fn draws_and_wanted(&self, viewport: [u32; 2]) -> (Vec<PageDraw>, Vec<usize>) {
         match self.present {
             Some(page) => {
@@ -1250,9 +1256,12 @@ impl DocumentTab {
             None => {
                 let y1 = self.view.origin[1] + self.viewport[1] / self.view.scale;
                 let visible = self.layout.visible(self.view.origin[1], y1);
+                // Drawing starts `inset` left of the laid-out view.
+                let mut view = self.view;
+                view.origin[0] -= self.inset / view.scale;
                 let draws = visible
                     .clone()
-                    .map(|page| self.page_draw(page, &self.view, viewport))
+                    .map(|page| self.page_draw(page, &view, viewport))
                     .collect();
                 let mut wanted: Vec<usize> = visible.clone().collect();
                 for distance in 1..=PREFETCH_PAGES {
@@ -1350,6 +1359,7 @@ mod tests {
             view: View::new(1.0),
             viewport: [1.0, 1.0],
             pixels_per_point: 1.0,
+            inset: 0.0,
             fitted: false,
             restore: None,
             modified: None,
@@ -1407,6 +1417,33 @@ mod tests {
             );
         }
         frame
+    }
+
+    #[test]
+    fn an_inset_draws_pages_under_a_panel_but_lays_them_out_beside_it() {
+        let mut beside = tab(5);
+        let mut under = tab(5);
+        under.inset = 200.0;
+        let input = || ViewInput {
+            zoom: 1.0,
+            seconds: 1.0,
+            ..Default::default()
+        };
+        let mut frames = None;
+        for _ in 0..50 {
+            frames = Some((
+                beside.frame([1048, 900], input(), false),
+                under.frame([1248, 900], input(), false),
+            ));
+        }
+        assert_eq!(under.viewport, beside.viewport);
+        assert_eq!(under.fit_scale(), beside.fit_scale());
+        let (beside, under) = frames.unwrap();
+        assert!(!under.draws.is_empty());
+        for (a, b) in beside.draws.iter().zip(&under.draws) {
+            assert_eq!(b.paper[0], a.paper[0] + 200.0);
+            assert_eq!(b.paper[1], a.paper[1]);
+        }
     }
 
     #[test]

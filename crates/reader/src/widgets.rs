@@ -247,6 +247,29 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f
     response.on_hover_cursor(egui::CursorIcon::Text)
 }
 
+/// A rounded field with a search icon, after the library's filter.
+pub fn filter_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> Response {
+    let tokens = Tokens::get(ui.ctx());
+    egui::Frame::new()
+        .fill(tokens.field)
+        .stroke(Stroke::new(1.0, tokens.border))
+        .corner_radius(15)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(icons::image("search", 14.0, tokens.text_muted));
+                ui.add(
+                    egui::TextEdit::singleline(text)
+                        .hint_text(hint)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY),
+                )
+            })
+            .inner
+        })
+        .inner
+}
+
 /// A small upper-case title over a group of controls or rows.
 pub fn section_title(ui: &mut egui::Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
@@ -392,7 +415,8 @@ pub fn card_frame(ctx: &egui::Context) -> egui::Frame {
 }
 
 /// A row that fills the width, highlighted on hover (and when `selected`),
-/// for lists in panels. Returns its rect and response.
+/// for lists in panels. Returns its rect and response. The highlight stays
+/// while the pointer is on buttons drawn over the row.
 pub fn list_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (Rect, Response) {
     let t = Tokens::get(ui.ctx());
     let (rect, response) =
@@ -400,7 +424,7 @@ pub fn list_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (Rect, Respon
     if selected {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(t.radius), t.accent_soft);
-    } else if response.hovered() {
+    } else if response.contains_pointer() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(t.radius), t.hover);
     }
