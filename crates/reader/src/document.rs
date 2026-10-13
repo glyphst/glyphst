@@ -334,6 +334,12 @@ pub enum Loaded {
         page: usize,
         text: Arc<PageText>,
     },
+    /// A page rendered at `scale` pixels per point for the page overview.
+    PageImage {
+        page: usize,
+        scale: f32,
+        image: egui::ColorImage,
+    },
     /// The indexer skipped a thumbnail: the document is too dense.
     ThumbnailSkipped {
         page: usize,
@@ -678,6 +684,8 @@ fn rasterize_cached(
 struct IndexWork {
     /// Sidebar thumbnails, in priority order.
     thumbnails: Vec<usize>,
+    /// Sharp renders for the page overview, and their pixels per point.
+    images: Vec<(usize, f32)>,
     /// Pages whose text to read, in order, and where from.
     texts: VecDeque<(usize, PageSource)>,
 }
@@ -712,19 +720,36 @@ impl Indexer {
                     sent
                 };
                 while !worker_stop.load(Ordering::Relaxed) {
-                    let (thumbnail, text) = {
+                    let (thumbnail, image, text) = {
                         let Ok(mut work) = worker_work.lock() else {
                             return;
                         };
                         let thumbnail =
                             (!work.thumbnails.is_empty()).then(|| work.thumbnails.remove(0));
-                        let text = match thumbnail {
-                            None => work.texts.pop_front(),
-                            Some(_) => None,
+                        // Too slow on dense documents: the overview keeps
+                        // their thumbnails, or says they are dense.
+                        if heavy {
+                            work.images.clear();
+                        }
+                        let image = match thumbnail {
+                            None if !work.images.is_empty() => Some(work.images.remove(0)),
+                            _ => None,
                         };
-                        (thumbnail, text)
+                        let text = match (thumbnail, image) {
+                            (None, None) => work.texts.pop_front(),
+                            _ => None,
+                        };
+                        (thumbnail, image, text)
                     };
-                    let sent = if let Some(page) = thumbnail {
+                    let sent = if let Some((page, scale)) = image {
+                        let started = Instant::now();
+                        let rendered = page_image(document, page, scale);
+                        heavy |= started.elapsed() > HEAVY_THUMBNAIL;
+                        match rendered {
+                            Some(image) => send(Loaded::PageImage { page, scale, image }),
+                            None => true,
+                        }
+                    } else if let Some(page) = thumbnail {
                         if heavy {
                             send(Loaded::ThumbnailSkipped { page })
                         } else {
@@ -774,6 +799,17 @@ impl Indexer {
         }
     }
 
+    /// Replaces the overview's sharp renders wanted, in priority order,
+    /// with the pixels per point of each.
+    pub fn want_images(&self, pages: Vec<(usize, f32)>) {
+        if let Ok(mut work) = self.work.lock()
+            && work.images != pages
+        {
+            work.images = pages;
+            self.worker.unpark();
+        }
+    }
+
     /// Adds pages whose text to read.
     pub fn request_text(&self, pages: Vec<(usize, PageSource)>) {
         if let Ok(mut work) = self.work.lock() {
@@ -802,11 +838,16 @@ impl Drop for Indexer {
 }
 
 fn page_thumbnail(document: &mupdf::Document, page: usize) -> Option<egui::ColorImage> {
+    page_image(document, page, THUMBNAIL_SCALE)
+}
+
+/// Page `page` rendered upright at `scale` pixels per point.
+fn page_image(document: &mupdf::Document, page: usize, scale: f32) -> Option<egui::ColorImage> {
     let pixmap = document
         .load_page(i32::try_from(page).ok()?)
         .ok()?
         .to_pixmap(
-            &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
+            &Matrix::new_scale(scale, scale),
             &Colorspace::device_rgb(),
             false,
             true,

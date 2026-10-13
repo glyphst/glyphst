@@ -9,6 +9,7 @@ use super::*;
 use crate::{
     book_effects::{Defaults, Resolved, resolve},
     gpu::BackdropCallback,
+    overview,
     panes::{self, Divider},
     stage::{self, ChromeFade, StageInput, StageLayout},
 };
@@ -93,7 +94,7 @@ impl ReaderApp {
                 continue;
             };
             let focused = index == active;
-            let view = PaneView {
+            let mut view = PaneView {
                 rect,
                 index,
                 focused,
@@ -106,6 +107,20 @@ impl ReaderApp {
                 seconds,
                 now,
             };
+            // The page overview stands in for the pages.
+            if self.tabs[index].overview.is_some() {
+                let tab = &mut self.tabs[index];
+                for action in std::mem::take(&mut view.actions) {
+                    tab.apply(action, false);
+                }
+                if tab.overview.is_some() {
+                    if let Some(page) = overview::show(ui, rect, tab) {
+                        tab.overview = None;
+                        tab.apply(ViewAction::GoToPage(page), false);
+                    }
+                    continue;
+                }
+            }
             let (pane_animating, pane_drawn) = self.document_view(ui, view, &mut keep);
             animating |= pane_animating;
             drawn &= pane_drawn;

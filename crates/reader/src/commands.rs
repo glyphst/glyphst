@@ -36,6 +36,7 @@ pub enum Command {
     Reload,
     Present,
     Zen,
+    PageOverview,
     SplitRight,
     SplitDown,
     FocusNextPane,
@@ -118,7 +119,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -147,6 +148,7 @@ impl Command {
         Self::Reload,
         Self::Present,
         Self::Zen,
+        Self::PageOverview,
         Self::SplitRight,
         Self::SplitDown,
         Self::FocusNextPane,
@@ -195,6 +197,7 @@ impl Command {
             Self::Reload => "view.reload",
             Self::Present => "view.present",
             Self::Zen => "view.zen",
+            Self::PageOverview => "view.page_overview",
             Self::SplitRight => "view.split_right",
             Self::SplitDown => "view.split_down",
             Self::FocusNextPane => "view.focus_next_pane",
@@ -247,6 +250,7 @@ impl Command {
             Self::Reload => "Reload the document",
             Self::Present => "Present",
             Self::Zen => "Zen mode: hide everything but the pages",
+            Self::PageOverview => "Page overview",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
             Self::FocusNextPane => "Focus the next pane",
@@ -296,6 +300,7 @@ impl Command {
             Self::Reload => "refresh-cw",
             Self::Present => "presentation",
             Self::Zen => "eye-off",
+            Self::PageOverview => "layout-grid",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
             Self::FocusNextPane => "panels-top-left",
@@ -341,6 +346,7 @@ impl Command {
             | Self::Reload
             | Self::Present
             | Self::Zen
+            | Self::PageOverview
             | Self::SplitRight
             | Self::SplitDown
             | Self::FocusNextPane
@@ -387,6 +393,7 @@ impl Command {
             Self::Reload => &["F5", "Ctrl+R"],
             Self::Present => &["P"],
             Self::Zen => &["Z"],
+            Self::PageOverview => &["Ctrl+G"],
             Self::SplitRight => &["Ctrl+Backslash"],
             Self::FocusNextPane => &["F6"],
             Self::Find => &["Ctrl+F"],

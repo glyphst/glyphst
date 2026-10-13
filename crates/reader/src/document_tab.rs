@@ -29,6 +29,7 @@ use crate::{
     find::Find,
     gamepad::GamepadInput,
     gpu::PageDraw,
+    overview::Overview,
     text_overlay::Selection,
     translation::DocSession,
 };
@@ -57,6 +58,8 @@ const TARGET_MARGIN: f64 = 24.0;
 /// Sidebar thumbnails kept as textures; the farthest from the current page
 /// go first.
 const MAX_THUMBNAILS: usize = 400;
+/// Sharp overview renders kept before those out of view go.
+const MAX_GRID_IMAGES: usize = 48;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewAction {
@@ -162,6 +165,12 @@ pub struct DocumentTab {
     loader: Loader,
     indexer: Indexer,
     thumbnails: HashMap<usize, egui::TextureHandle>,
+    /// Sharp renders for the page overview, with their pixels per point.
+    grid_images: HashMap<usize, (f32, egui::TextureHandle)>,
+    /// The page overview, when it shows in place of the pages.
+    pub overview: Option<Overview>,
+    /// Its cells' zoom, kept while the tab is open.
+    pub overview_zoom: f32,
     /// Pages the indexer will not make sidebar thumbnails for.
     pub dense_pages: HashSet<usize>,
     pub failed: HashMap<usize, String>,
@@ -238,6 +247,9 @@ impl DocumentTab {
             loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
             indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
             thumbnails: HashMap::new(),
+            grid_images: HashMap::new(),
+            overview: None,
+            overview_zoom: 1.0,
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
@@ -400,6 +412,14 @@ impl DocumentTab {
                 }
                 Loaded::OriginalText { page, text } => {
                     self.original_text.insert(page, text);
+                }
+                Loaded::PageImage { page, scale, image } => {
+                    let texture = ctx.load_texture(
+                        format!("overview-{}-{page}", self.id),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.grid_images.insert(page, (scale, texture));
                 }
                 Loaded::ThumbnailSkipped { page } => {
                     self.dense_pages.insert(page);
@@ -659,6 +679,24 @@ impl DocumentTab {
                 self.thumbnails.remove(&page);
             }
         }
+    }
+
+    /// Asks for the page overview's sharp renders, `(page, pixels per
+    /// point)` for the cells in view, dropping renders of pages out of view
+    /// when there are many.
+    pub fn want_grid_images(&mut self, pages: Vec<(usize, f32)>) {
+        if self.grid_images.len() > MAX_GRID_IMAGES {
+            let keep: HashSet<usize> = pages.iter().map(|(page, _)| *page).collect();
+            self.grid_images.retain(|page, _| keep.contains(page));
+        }
+        self.indexer.want_images(pages);
+    }
+
+    /// A page's sharp render for the overview and its pixels per point.
+    pub fn grid_image(&self, page: usize) -> Option<(f32, &egui::TextureHandle)> {
+        self.grid_images
+            .get(&page)
+            .map(|(scale, texture)| (*scale, texture))
     }
 
     pub fn thumbnail(&self, page: usize) -> Option<&egui::TextureHandle> {
@@ -1043,7 +1081,12 @@ impl DocumentTab {
     }
 
     /// Applies an action; returns the direction of a presentation page turn.
+    /// While the page overview shows, its keys move the overview instead.
     pub fn apply(&mut self, action: ViewAction, turning: bool) -> Option<f32> {
+        if let Some(overview) = &mut self.overview {
+            overview.apply(action, self.layout.len(), &mut self.overview_zoom)?;
+            self.overview = None;
+        }
         let center = [self.viewport[0] / 2.0, self.viewport[1] / 2.0];
         let (min, max) = self.zoom_limits();
         let last = self.layout.len() - 1;
@@ -1313,6 +1356,9 @@ mod tests {
             loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
             indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
             thumbnails: HashMap::new(),
+            grid_images: HashMap::new(),
+            overview: None,
+            overview_zoom: 1.0,
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),

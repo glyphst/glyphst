@@ -38,6 +38,7 @@ mod home;
 mod icon_data;
 mod icons;
 mod keys;
+mod overview;
 mod palette;
 mod panes;
 mod pickers;

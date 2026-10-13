@@ -69,8 +69,7 @@ Known gaps:
   capture 1.9 s, preparing levels 1.4 s). Once uploading it shows its
   coarsest level after 49 ms and sharpens over 1.6 s of 4 MiB frames.
 - 4x MSAA gives small text coarser edges than MuPDF.
-- A turned page's loading placeholder (its thumbnail) shows upright, and
-  presenting a spread shows one page at a time.
+- Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
 - The assistant has no image or region mentions and no Mermaid diagrams

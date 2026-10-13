@@ -165,6 +165,46 @@ pub fn ghost_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
 
 /// A search-field lookalike that opens the command palette, with its key at
 /// the right. The placeholder is cut with "…" before it reaches the key.
+/// The image coordinates shown at a rect's corners, clockwise from its top
+/// left, when the image is turned `quarter_turns` clockwise: each corner
+/// shows the image corner `quarter_turns` before it.
+fn turned_uvs(quarter_turns: u8) -> [egui::Pos2; 4] {
+    let uvs = [
+        egui::pos2(0.0, 0.0),
+        egui::pos2(1.0, 0.0),
+        egui::pos2(1.0, 1.0),
+        egui::pos2(0.0, 1.0),
+    ];
+    let turns = usize::from(quarter_turns % 4);
+    std::array::from_fn(|corner| uvs[(corner + 4 - turns) % 4])
+}
+
+/// Paints `texture` (an upright page image) into `rect` turned
+/// `quarter_turns` clockwise, as the page is laid out.
+pub fn paint_turned_image(
+    painter: &egui::Painter,
+    texture: egui::TextureId,
+    rect: Rect,
+    quarter_turns: u8,
+) {
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for (corner, uv) in corners.into_iter().zip(turned_uvs(quarter_turns)) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: corner,
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(mesh);
+}
+
 pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
@@ -441,6 +481,17 @@ impl Toasts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quarter_turn_shows_the_images_bottom_left_at_the_top_left() {
+        use egui::pos2;
+        assert_eq!(turned_uvs(0)[0], pos2(0.0, 0.0));
+        let turned = turned_uvs(1);
+        assert_eq!(turned[0], pos2(0.0, 1.0));
+        assert_eq!(turned[1], pos2(0.0, 0.0));
+        assert_eq!(turned_uvs(2)[0], pos2(1.0, 1.0));
+        assert_eq!(turned_uvs(5), turned);
+    }
 
     fn run(ctx: &egui::Context, time: f64, toasts: &mut Toasts) {
         let input = egui::RawInput {

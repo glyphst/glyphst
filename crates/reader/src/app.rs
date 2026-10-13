@@ -33,6 +33,7 @@ use crate::{
     home::{Home, HomeAction},
     icons,
     keys::Keymap,
+    overview::Overview,
     palette::{self, Item, Palette},
     panes::{self, Panes},
     pickers::{Pickers, is_document},
@@ -1224,10 +1225,21 @@ impl ReaderApp {
                 self.copy_selection(ctx);
             }
             actions.extend(arrow_actions(ctx, self.tabs[active].present.is_some()));
+            // Enter opens the overview's page.
+            let tab = &mut self.tabs[active];
+            if let Some(overview) = &tab.overview
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            {
+                let page = overview.cursor;
+                tab.overview = None;
+                actions.push(ViewAction::GoToPage(page));
+            }
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 let tab = &mut self.tabs[active];
                 if self.note_editor.is_some() {
                     self.note_editor = None;
+                } else if tab.overview.is_some() {
+                    tab.overview = None;
                 } else if tab.selection.is_some() {
                     tab.selection = None;
                 } else if tab.find.open {
@@ -1304,6 +1316,21 @@ impl ReaderApp {
             }
             Command::ToggleStats => {
                 self.show_stats = !self.show_stats;
+                None
+            }
+            Command::PageOverview => {
+                if let Some(active) = self.active {
+                    let tab = &mut self.tabs[active];
+                    tab.overview = match tab.overview {
+                        Some(_) => None,
+                        None => {
+                            if tab.present.is_some() {
+                                tab.apply(ViewAction::TogglePresent, false);
+                            }
+                            Some(Overview::new(tab.current_page()))
+                        }
+                    };
+                }
                 None
             }
             Command::Zen => {
@@ -2025,18 +2052,14 @@ impl ReaderApp {
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
         self.paint_text_overlays(&painter, &maps, active, &tokens);
+        let turns = self.tabs[active].layout.arrangement.rotation;
         for (paper, thumbnail) in &frame.placeholders {
             let paper = egui::Rect::from_min_max(
                 rect.min + egui::vec2(paper[0], paper[1]) / ppp,
                 rect.min + egui::vec2(paper[2], paper[3]) / ppp,
             );
             if let Some(texture) = thumbnail {
-                painter.image(
-                    *texture,
-                    paper,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
+                widgets::paint_turned_image(&painter, *texture, paper, turns);
             }
         }
         let focused = self.active == Some(active);

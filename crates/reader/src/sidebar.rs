@@ -394,11 +394,11 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                     let painter = ui.painter();
                     painter.rect_filled(paper, 2.0, tokens.page);
                     if let Some(texture) = tab.thumbnail(page) {
-                        painter.image(
+                        widgets::paint_turned_image(
+                            painter,
                             texture.id(),
                             paper,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
+                            tab.layout.arrangement.rotation,
                         );
                     } else if tab.dense_pages.contains(&page) {
                         painter.text(
