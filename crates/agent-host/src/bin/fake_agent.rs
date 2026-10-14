@@ -139,9 +139,18 @@ fn codex() {
                     json!({"jsonrpc": "2.0", "id": 99, "method": "item/commandExecution/requestApproval", "params": {}}),
                 );
                 let prompt = params["input"][0]["text"].as_str().unwrap_or_default();
-                say(
-                    json!({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"delta": format!("tools={tools} prompt={}", prompt.lines().next().unwrap_or_default())}}),
+                let answer = format!(
+                    "tools={tools} prompt={}",
+                    prompt.lines().next().unwrap_or_default()
                 );
+                for text in ["Looking.", answer.as_str()] {
+                    say(
+                        json!({"jsonrpc": "2.0", "method": "item/started", "params": {"item": {"type": "agentMessage", "id": "message", "text": ""}}}),
+                    );
+                    say(
+                        json!({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"delta": text}}),
+                    );
+                }
             }
             "" if id == json!(99) => {
                 // The approval's answer: finish the turn.

@@ -30,6 +30,8 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 struct Rpc {
     process: AgentProcess,
     next_id: u64,
+    /// Whether an agent message was written, so the next starts a paragraph.
+    wrote_message: bool,
 }
 
 impl Rpc {
@@ -127,6 +129,12 @@ impl Rpc {
             "item/reasoning/summaryTextDelta" => {
                 events(ExternalEvent::Reasoning(text(&params["delta"])));
             }
+            "item/started" if params["item"]["type"] == "agentMessage" => {
+                // Separate messages are separate paragraphs.
+                if std::mem::replace(&mut self.wrote_message, true) {
+                    events(ExternalEvent::Text("\n\n".into()));
+                }
+            }
             "item/started" => {
                 if let Some(title) = item_title(&params["item"]) {
                     events(ExternalEvent::ToolStarted {
@@ -166,6 +174,7 @@ pub fn run_turn(
     let mut rpc = Rpc {
         process,
         next_id: 0,
+        wrote_message: false,
     };
     rpc.request(
         "initialize",

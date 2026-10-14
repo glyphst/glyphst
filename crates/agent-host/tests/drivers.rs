@@ -120,7 +120,7 @@ fn codex_turns_use_the_mcp_server_and_resume_or_start_threads() {
     turn.resume = Some("gone".into());
     let events = run(AgentKind::Codex, &turn);
     assert!(events.contains(&ExternalEvent::Session("fake-thread".into())));
-    assert_eq!(text(&events), "tools=1 prompt=Summarize page 2");
+    assert_eq!(text(&events), "Looking.\n\ntools=1 prompt=Summarize page 2");
     assert!(events.contains(&ExternalEvent::ToolStarted {
         id: "item-1".into(),
         title: "Edited notes.md".into()
