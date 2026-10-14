@@ -641,12 +641,15 @@ impl ReaderApp {
             match request {
                 Some(PanelAction::Send(text)) => self.ask(text, ctx),
                 Some(PanelAction::NewSession) => self.assistant.new_session(),
-                Some(PanelAction::LoadSession(id)) => self.assistant.load_session(id),
+                Some(PanelAction::LoadSession(id)) => {
+                    self.assistant.load_session(id, &self.library);
+                }
                 Some(PanelAction::SetModel(model)) => {
                     self.user_settings
                         .edit(|settings| settings.ai.main_model = Some(model));
                 }
                 Some(PanelAction::Change(action)) => self.apply_change_action(action, ctx),
+                Some(PanelAction::Restore(index)) => self.restore_assistant(index),
                 None => {}
             }
         }

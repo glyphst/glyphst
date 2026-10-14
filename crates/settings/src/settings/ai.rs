@@ -16,6 +16,10 @@ impl AiApiStyle {
         }
     }
 
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::from_str(value)
+    }
+
     pub(super) fn from_str(value: &str) -> Option<Self> {
         match value {
             "openai" | "openai-compatible" | "open_ai_compatible" => Some(Self::OpenAi),

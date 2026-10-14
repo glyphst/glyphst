@@ -335,6 +335,7 @@ fn persists_history_bookmarks_and_highlights() {
                 queued_messages: Vec::new(),
                 created: 100,
                 updated: 101,
+                summary: None,
             })
             .unwrap();
     }
@@ -920,6 +921,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
                 queued_messages: Vec::new(),
                 created: 20,
                 updated: 21,
+                summary: None,
             })
             .unwrap();
     }
@@ -980,6 +982,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
                 queued_messages: Vec::new(),
                 created: 30,
                 updated: 31,
+                summary: None,
             })
             .unwrap();
     }
@@ -1034,6 +1037,7 @@ fn round_trips_v6_selected_page_snapshots() {
                 queued_messages: Vec::new(),
                 created: 35,
                 updated: 36,
+                summary: None,
             })
             .unwrap();
         session_id
@@ -1131,6 +1135,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                 }],
                 created: 50,
                 updated: 51,
+                summary: None,
             })
             .unwrap();
     }
@@ -1172,6 +1177,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                 queued_messages: Vec::new(),
                 created: 50,
                 updated: 52,
+                summary: None,
             })
             .unwrap();
     }
@@ -1231,6 +1237,7 @@ fn round_trips_v3_region_occurrence_geometry() {
                 queued_messages: Vec::new(),
                 created: 40,
                 updated: 41,
+                summary: None,
             })
             .unwrap();
     }
@@ -2155,6 +2162,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
                 queued_messages: Vec::new(),
                 created: 1,
                 updated: 1,
+                summary: None,
             })
             .unwrap();
     }
@@ -2749,4 +2757,21 @@ fn an_older_redb_format_is_kept_aside_and_replaced() {
     let _ = fs::remove_file(&path);
     let _ = fs::remove_file(&aside);
     let _ = fs::remove_dir_all(path.with_extension("managed-library"));
+}
+
+#[test]
+fn ai_sessions_saved_before_summaries_still_decode() {
+    let stored = r#"{"version":6,"id":3,"title":"Old chat","messages":[{"role":"User","content":"Hi","request_content":null,"references":[],"occurrences":[],"images":[],"agent_parts":[],"document_path":null,"document_label":null}],"queued_messages":[],"created":1,"updated":2}"#;
+    let session = decode::<StoredAiSessionV6>(stored.as_bytes())
+        .unwrap()
+        .into_domain()
+        .unwrap();
+    assert_eq!(session.title, "Old chat");
+    assert_eq!(session.summary, None);
+    let reasoning: AiSessionAgentPart =
+        serde_json::from_str(r#"{"Reasoning":"Looked at page 2."}"#).unwrap();
+    assert_eq!(
+        reasoning,
+        AiSessionAgentPart::Reasoning("Looked at page 2.".into())
+    );
 }

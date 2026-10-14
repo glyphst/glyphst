@@ -220,6 +220,7 @@ fn sanitize_ai_session_message(message: &mut AiSessionMessage) -> bool {
             *value = value.trim().to_string();
             !api_style.is_empty() && !value.is_empty()
         }
+        AiSessionAgentPart::Reasoning(text) => !text.trim().is_empty(),
     });
     !message.content.is_empty() || !message.images.is_empty() || !message.agent_parts.is_empty()
 }

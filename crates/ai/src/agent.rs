@@ -1522,13 +1522,13 @@ fn process_anthropic_event(
 ) -> Result<bool> {
     match value["type"].as_str() {
         Some("message_start") => {
-            builder.usage.input_tokens = value["message"]["usage"]["input_tokens"]
-                .as_u64()
-                .unwrap_or(0);
-            builder.usage.cached_input_tokens =
-                value["message"]["usage"]["cache_read_input_tokens"]
-                    .as_u64()
-                    .unwrap_or(0);
+            // Input counts everything read, cached or not, as OpenAI's does.
+            let usage = &value["message"]["usage"];
+            let read = |key: &str| usage[key].as_u64().unwrap_or(0);
+            builder.usage.cached_input_tokens = read("cache_read_input_tokens");
+            builder.usage.input_tokens = read("input_tokens")
+                + read("cache_read_input_tokens")
+                + read("cache_creation_input_tokens");
         }
         Some("content_block_start") => {
             let index = value["index"].as_u64().unwrap_or(0) as usize;

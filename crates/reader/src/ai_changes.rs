@@ -18,6 +18,10 @@ pub enum ChangeState {
 pub struct Change {
     pub id: u64,
     pub origin: ToolOrigin,
+    /// The conversation it was made in.
+    pub thread: Option<u64>,
+    /// The user message it answered, by index in the conversation.
+    pub turn: usize,
     pub edit: LibraryEdit,
     pub state: ChangeState,
 }
@@ -56,6 +60,8 @@ impl ChangeLog {
             self.changes.push(Change {
                 id: self.next_id,
                 origin: context.origin.clone(),
+                thread: context.thread,
+                turn: context.turn,
                 edit,
                 state: ChangeState::Applied,
             });
@@ -245,9 +251,13 @@ mod tests {
             y1: 1.0,
         };
         let mut log = ChangeLog::default();
-        let context = ToolContext::default();
+        let mut context = ToolContext {
+            thread: Some(7),
+            ..ToolContext::default()
+        };
         let mut ids = Vec::new();
         for quote in ["one", "two", "three"] {
+            context.turn += 2;
             let (highlight, edits) = library.record_edits(|library| {
                 library
                     .add_highlight(document, HighlightColor::Yellow, vec![rect], quote, "")
@@ -263,6 +273,15 @@ mod tests {
         assert_eq!(library.highlights_for(document).len(), 2);
         log.redo(first, &mut library).unwrap();
         assert_eq!(library.highlights_for(document).len(), 3);
+
+        // Restoring to the second question undoes what came after it.
+        let failures = log.undo_where(&mut library, |change| {
+            change.thread == Some(7) && change.turn >= 6
+        });
+        assert!(failures.is_empty());
+        assert_eq!(library.highlights_for(document).len(), 2);
+        let last = log.changes()[2].id;
+        log.redo(last, &mut library).unwrap();
 
         // The user recolors "two" before undoing everything.
         library

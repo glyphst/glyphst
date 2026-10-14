@@ -140,6 +140,28 @@ impl ReaderApp {
         }
     }
 
+    /// Rewinds the assistant's chat to the user message at `index`, undoes
+    /// what the agent changed from then on, and puts the message back in
+    /// the composer.
+    pub(crate) fn restore_assistant(&mut self, index: usize) {
+        let chat = self.assistant.chat_id();
+        let failures = self.agent_changes.undo_where(&mut self.library, |change| {
+            change.thread == Some(chat) && change.turn >= index
+        });
+        if let Some(text) = self.assistant.rewind(index) {
+            self.assistant.composer = text;
+        }
+        if self.persist {
+            self.assistant.save(&mut self.library);
+        }
+        for failure in failures {
+            self.notices.push(format!("Could not undo: {failure}"));
+        }
+        for index in 0..self.tabs.len() {
+            self.reload_annotations(index);
+        }
+    }
+
     /// The tab a call names with `document_id`, or the active one.
     fn agent_tab(&self, arguments: &Value) -> Result<usize, String> {
         match arguments["document_id"]

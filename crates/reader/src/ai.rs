@@ -1,10 +1,12 @@
 //! The assistant: a chat about the open document in a right-side panel.
 //!
-//! Turns run the `ai` crate's agent on a worker thread with the document
-//! tools of [`OpenDocument`]; the current page and selection can be
-//! attached as context, and each message ends with what the reader showed. Sessions are the library's AI sessions, shared with
-//! the GPUI Reader's AI panel. The panel follows pdfcraft's side panels;
-//! answers are Markdown.
+//! Turns run the `ai` crate's agent on a worker thread with the app's tools;
+//! the current page and selection can be attached as context, and each
+//! message ends with what the reader showed. Sessions are the library's AI
+//! sessions, saved with their whole trace (reasoning, tool calls and
+//! results, images), so a reopened chat continues where it was. Long chats
+//! are summarized before the context fills up, and a model names each new
+//! chat. The panel follows pdfcraft's side panels; answers are Markdown.
 
 use std::{
     path::PathBuf,
@@ -17,19 +19,24 @@ use std::{
 
 use glyphst_ai::{
     agent::{
-        AgentCancellationToken, AgentContentPart, AgentEvent, AgentLimits, AgentMessage, AgentRun,
-        AgentStopReason, AgentToolResultPart, run_agent,
+        AgentCancellationToken, AgentContentPart, AgentEvent, AgentImage, AgentLimits,
+        AgentMessage, AgentRole, AgentRun, AgentStopReason, AgentToolCall, AgentToolResult,
+        AgentToolResultPart, run_agent,
     },
     ai_chat::{ChatMessage, ContextBlock, DocumentContextScope, ImageContext, MentionKind, Role},
+    compaction,
     prompt::{DocumentFacts, ReaderState},
     tools::{ToolContext, ToolRegistry},
 };
 use glyphst_core::DocumentLayout;
 use glyphst_library::{
-    AiSession, AiSessionAgentPart, AiSessionMessage, AiSessionRole, AiSessionToolResultPart,
-    AiSessionToolStatus, LibraryStore, current_timestamp,
+    AiSession, AiSessionAgentPart, AiSessionImage, AiSessionMessage, AiSessionRole,
+    AiSessionSummary, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
+    current_timestamp,
 };
-use glyphst_settings::{AiProvider, ModelRef, Settings};
+use glyphst_settings::{
+    AiApiStyle, AiProvider, AiThinkingLevel, ModelRef, ResolvedAiConfig, Settings,
+};
 
 use crate::{
     ai_changes::{ChangeAction, ChangeLog},
@@ -82,6 +89,8 @@ impl ToolRow {
 
 enum RunEvent {
     Agent(AgentEvent),
+    /// The conversation before the new message was summarized.
+    Compacted(String),
     Finished(Vec<AgentMessage>),
     Error(String),
 }
@@ -118,6 +127,21 @@ pub struct Assistant {
     status: Option<String>,
     /// Names the conversation to the provider's prompt cache.
     cache_key: Option<String>,
+    /// What stands for the start of a long conversation.
+    summary: Option<AiSessionSummary>,
+    /// Input tokens of the latest turn, and its model.
+    context_tokens: (u64, String),
+    /// The next turn summarizes the conversation first.
+    compact_next: bool,
+    /// The chat's title, once a model named it.
+    title: Option<String>,
+    /// A title being written, and the model writing it.
+    title_job: Option<Receiver<String>>,
+    title_config: Option<ResolvedAiConfig>,
+    /// Names this conversation in the change log.
+    chat_id: u64,
+    /// The user message whose "Restore to here" waits for confirmation.
+    confirm_restore: Option<usize>,
 }
 
 /// An image attached to the next message.
@@ -146,6 +170,14 @@ impl Default for Assistant {
             reasoning: Default::default(),
             status: None,
             cache_key: None,
+            summary: None,
+            context_tokens: (0, String::new()),
+            compact_next: false,
+            title: None,
+            title_job: None,
+            title_config: None,
+            chat_id: 0,
+            confirm_restore: None,
             show_sessions: false,
             sessions: Vec::new(),
         }
@@ -162,6 +194,9 @@ pub enum PanelAction {
     SetModel(ModelRef),
     /// Review or undo what agents changed.
     Change(ChangeAction),
+    /// Rewind the chat to the user message at this index and undo what the
+    /// agent changed since.
+    Restore(usize),
 }
 
 impl Assistant {
@@ -268,21 +303,51 @@ impl Assistant {
             });
             return;
         }
-        let history: Vec<AgentMessage> = self
-            .messages
-            .iter()
-            .flat_map(ChatMessage::into_agent_messages)
-            .collect();
+        let question = self.messages.len() - 1;
+        let prior = self.history(question);
+        let new = self.messages[question].into_agent_messages();
+        let compact = std::mem::take(&mut self.compact_next) && !prior.is_empty();
+        if compact {
+            self.status = Some("Summarizing the conversation so far…".into());
+        }
+        if self.title.is_none() && question == 0 {
+            self.title_config = Some(settings.ai.resolved_title().unwrap_or_else(|| {
+                let mut config = config.clone();
+                config.thinking_level = AiThinkingLevel::Off;
+                config
+            }));
+        }
         self.messages.push(ChatMessage::assistant(String::new()));
         self.tools.push(Vec::new());
         let cache_key = self
             .cache_key
             .get_or_insert_with(|| format!("glyphst-chat-{}", unique_suffix()))
             .clone();
+        self.context_tokens.1 = config.model.clone();
+        if self.chat_id == 0 {
+            self.chat_id = next_chat_id();
+        }
+        let tool_context = ToolContext {
+            thread: Some(self.chat_id),
+            turn: question,
+            ..ToolContext::default()
+        };
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
         let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
         thread::spawn(move || {
+            let mut history = prior;
+            if compact {
+                // A failed summary leaves the conversation as it was.
+                if let Ok(summary) =
+                    compaction::summarize(config.clone(), history.clone(), worker_cancel.clone())
+                {
+                    history = vec![compaction::summary_message(&summary)];
+                    let _ = events_tx.send(RunEvent::Compacted(summary));
+                    ctx.request_repaint();
+                }
+            }
+            history.extend(new);
             let mut send = |event| {
                 ctx.request_repaint();
                 events_tx
@@ -296,7 +361,7 @@ impl Assistant {
                     tools: Some(Arc::new(tools)),
                     context: ToolContext {
                         cancel: worker_cancel,
-                        ..ToolContext::default()
+                        ..tool_context
                     },
                     limits: AgentLimits::default(),
                     cache_key: Some(cache_key),
@@ -316,8 +381,37 @@ impl Assistant {
         });
     }
 
+    /// The messages before `end` as the model reads them: the summary of
+    /// the conversation's start, then the rest.
+    fn history(&self, end: usize) -> Vec<AgentMessage> {
+        let start = self
+            .summary
+            .as_ref()
+            .map_or(0, |summary| summary.until.min(end));
+        let mut history = self
+            .summary
+            .iter()
+            .map(|summary| compaction::summary_message(&summary.text))
+            .collect::<Vec<_>>();
+        history.extend(
+            self.messages[start..end]
+                .iter()
+                .flat_map(ChatMessage::into_agent_messages),
+        );
+        history
+    }
+
     /// Applies the running turn's progress; saves the session when it ends.
-    pub fn poll(&mut self, library: Option<&mut LibraryStore>) {
+    pub fn poll(&mut self, mut library: Option<&mut LibraryStore>) {
+        if let Some(job) = &self.title_job
+            && let Ok(title) = job.try_recv()
+        {
+            self.title = Some(title);
+            self.title_job = None;
+            if let Some(library) = library.as_deref_mut() {
+                self.save(library);
+            }
+        }
         let Some(run) = &self.run else {
             return;
         };
@@ -327,6 +421,13 @@ impl Assistant {
         for event in events {
             match event {
                 RunEvent::Agent(event) => self.apply(answer, event),
+                RunEvent::Compacted(text) => {
+                    self.summary = Some(AiSessionSummary {
+                        text,
+                        until: answer - 1,
+                    });
+                    self.status = None;
+                }
                 RunEvent::Finished(trace) => {
                     self.messages[answer].set_agent_trace(trace);
                     finished = true;
@@ -347,10 +448,38 @@ impl Assistant {
                     row.state = ToolState::Failed;
                 }
             }
+            let (tokens, model) = &self.context_tokens;
+            self.compact_next = compaction::needs_compaction(model, *tokens);
             if let Some(library) = library {
+                // Only saved chats get a title.
+                self.start_title(answer);
                 self.save(library);
             }
         }
+    }
+
+    /// Asks a model for the chat's title after its first answer.
+    fn start_title(&mut self, answer: usize) {
+        let Some(config) = self.title_config.take() else {
+            return;
+        };
+        let question = self.messages[0].display_text();
+        let answer = self.messages[answer].display_text();
+        if answer.trim().is_empty() {
+            return;
+        }
+        let (titles, job) = mpsc::channel();
+        thread::spawn(move || {
+            if let Ok(title) = compaction::generate_title(
+                config,
+                &question,
+                &answer,
+                AgentCancellationToken::default(),
+            ) {
+                let _ = titles.send(title);
+            }
+        });
+        self.title_job = Some(job);
     }
 
     fn apply(&mut self, answer: usize, event: AgentEvent) {
@@ -370,10 +499,12 @@ impl Assistant {
                 ));
             }
             AgentEvent::TurnCompleted {
-                stop_reason: AgentStopReason::Refusal,
-                ..
+                stop_reason, usage, ..
             } => {
-                self.error = Some("The model declined this request.".into());
+                self.context_tokens.0 = usage.input_tokens + usage.output_tokens;
+                if stop_reason == AgentStopReason::Refusal {
+                    self.error = Some("The model declined this request.".into());
+                }
             }
             AgentEvent::ToolCallStarted { id, name } => rows.push(ToolRow {
                 id,
@@ -406,7 +537,6 @@ impl Assistant {
             }
             AgentEvent::TurnStarted { .. }
             | AgentEvent::ToolExecutionStarted { .. }
-            | AgentEvent::TurnCompleted { .. }
             | AgentEvent::Done => {}
         }
     }
@@ -428,8 +558,49 @@ impl Assistant {
         self.reasoning.clear();
         self.status = None;
         self.cache_key = None;
+        self.summary = None;
+        self.context_tokens = (0, String::new());
+        self.compact_next = false;
+        self.title = None;
+        self.title_job = None;
+        self.title_config = None;
+        self.chat_id = 0;
+        self.confirm_restore = None;
         self.error = None;
         self.show_sessions = false;
+    }
+
+    /// Names this conversation in the change log.
+    pub fn chat_id(&self) -> u64 {
+        self.chat_id
+    }
+
+    /// Rewinds the chat to before the user message at `index`; returns the
+    /// message's text for the composer.
+    pub fn rewind(&mut self, index: usize) -> Option<String> {
+        let message = self.messages.get(index)?;
+        if message.role != Role::User {
+            return None;
+        }
+        let text = message.display_text();
+        self.stop();
+        self.run = None;
+        self.status = None;
+        self.error = None;
+        self.confirm_restore = None;
+        self.compact_next = false;
+        self.messages.truncate(index);
+        self.tools.truncate(index);
+        self.reasoning.retain(|&answer, _| answer < index);
+        self.sent_images.retain(|&message, _| message < index);
+        if self
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.until > index)
+        {
+            self.summary = None;
+        }
+        Some(text)
     }
 
     /// The last answer's text, while one is written or once done.
@@ -452,11 +623,16 @@ impl Assistant {
         self.sent_images = std::mem::take(&mut other.sent_images);
         self.reasoning = std::mem::take(&mut other.reasoning);
         self.cache_key = other.cache_key.take();
+        self.summary = other.summary.take();
+        self.context_tokens = std::mem::take(&mut other.context_tokens);
+        self.compact_next = other.compact_next;
+        self.chat_id = other.chat_id;
         other.new_session();
         true
     }
 
-    pub fn load_session(&mut self, id: u64) {
+    /// Opens a saved chat to continue it.
+    pub fn load_session(&mut self, id: u64, library: &LibraryStore) {
         let Some(session) = self
             .sessions
             .iter()
@@ -468,9 +644,24 @@ impl Assistant {
         self.new_session();
         self.session_id = session.id;
         self.created = session.created;
+        self.title = Some(session.title);
+        self.summary = session.summary;
         for message in session.messages {
+            let index = self.messages.len();
             self.tools.push(tool_rows(&message.agent_parts));
-            self.messages.push(chat_message(message));
+            let reasoning = message
+                .agent_parts
+                .iter()
+                .filter_map(|part| match part {
+                    AiSessionAgentPart::Reasoning(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !reasoning.is_empty() {
+                self.reasoning.insert(index, reasoning);
+            }
+            self.messages.push(chat_message(message, library));
         }
     }
 
@@ -484,27 +675,34 @@ impl Assistant {
             self.session_id = library.next_ai_session_id();
             self.created = now;
         }
-        let title = self
+        let title = self.title.clone().unwrap_or_else(|| {
+            self.messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .map(|message| {
+                    let text = message.display_text();
+                    let short: String = text.chars().take(TITLE_CHARS).collect();
+                    if text.chars().count() > TITLE_CHARS {
+                        format!("{short}…")
+                    } else {
+                        short
+                    }
+                })
+                .unwrap_or_else(|| "Chat".into())
+        });
+        let messages = self
             .messages
             .iter()
-            .find(|message| message.role == Role::User)
-            .map(|message| {
-                let text = message.display_text();
-                let short: String = text.chars().take(TITLE_CHARS).collect();
-                if text.chars().count() > TITLE_CHARS {
-                    format!("{short}…")
-                } else {
-                    short
-                }
-            })
-            .unwrap_or_else(|| "Chat".into());
+            .map(|message| session_message(message, library))
+            .collect();
         let session = AiSession {
             id: self.session_id,
             title,
-            messages: self.messages.iter().map(session_message).collect(),
+            messages,
             queued_messages: Vec::new(),
             created: self.created,
             updated: now,
+            summary: self.summary.clone(),
         };
         if let Err(error) = library.save_ai_session(session) {
             self.error = Some(format!("Could not save the chat: {error:#}"));
@@ -615,7 +813,7 @@ impl Assistant {
                                     })
                                     .inner_margin(egui::Margin::symmetric(12, 8))
                                     .show(ui, |ui| {
-                                        ui.set_max_width(width * 0.85);
+                                        ui.set_max_width(width * 0.8);
                                         ui.vertical(|ui| {
                                             for thumbnail in
                                                 self.sent_images.get(&index).into_iter().flatten()
@@ -629,7 +827,36 @@ impl Assistant {
                                             ui.add(egui::Label::new(message.display_text()).wrap());
                                         });
                                     });
+                                if self.run.is_none()
+                                    && crate::icons::button(
+                                        ui,
+                                        "rotate-ccw",
+                                        22.0,
+                                        false,
+                                        "Restore to here: rewind the chat to this message and undo what the agent changed since",
+                                    )
+                                    .clicked()
+                                {
+                                    self.confirm_restore = Some(index);
+                                }
                             });
+                            if self.confirm_restore == Some(index) {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Rewind to this message and undo the agent's changes since?",
+                                        )
+                                        .small()
+                                        .color(tokens.text_muted),
+                                    );
+                                    if ui.small_button("Restore").clicked() {
+                                        action = Some(PanelAction::Restore(index));
+                                    }
+                                    if ui.small_button("Cancel").clicked() {
+                                        self.confirm_restore = None;
+                                    }
+                                });
+                            }
                         }
                         Role::Assistant => {
                             if let Some(reasoning) = self.reasoning.get(&index) {
@@ -780,11 +1007,34 @@ pub fn attachment_chips(ui: &mut egui::Ui, attachments: &mut Vec<Attachment>, to
     }
 }
 
-/// A chat message as the library stores it: its text, what was sent, and
-/// the tool calls and text results of an answer (images are left out).
-fn session_message(message: &ChatMessage) -> AiSessionMessage {
+/// A chat message as the library stores it: its text, what was sent with
+/// its images, and an answer's whole trace (reasoning, tool calls and
+/// results with their images, and the provider's reasoning state).
+fn session_message(message: &ChatMessage, library: &mut LibraryStore) -> AiSessionMessage {
     let content = message.display_text();
     let request = message.request_text();
+    let mut install = |image: &AgentImage| -> Option<AiSessionImage> {
+        let (width, height) = image_size(image)?;
+        library
+            .install_ai_image(
+                image.name.as_deref(),
+                &image.media_type,
+                width,
+                height,
+                &image.bytes,
+            )
+            .ok()
+    };
+    let images = message
+        .into_agent_messages()
+        .iter()
+        .filter(|_| message.role == Role::User)
+        .flat_map(|trace| &trace.content)
+        .filter_map(|part| match part {
+            AgentContentPart::Image(image) => install(image),
+            _ => None,
+        })
+        .collect();
     let results: std::collections::HashMap<&str, bool> = message
         .agent_trace()
         .iter()
@@ -802,11 +1052,10 @@ fn session_message(message: &ChatMessage) -> AiSessionMessage {
         .iter()
         .flat_map(|trace| &trace.content)
     {
-        match part {
-            AgentContentPart::Text(text) => {
-                agent_parts.push(AiSessionAgentPart::AssistantText(text.clone()))
-            }
-            AgentContentPart::ToolCall(call) => agent_parts.push(AiSessionAgentPart::ToolCall {
+        agent_parts.push(match part {
+            AgentContentPart::Text(text) => AiSessionAgentPart::AssistantText(text.clone()),
+            AgentContentPart::Reasoning(text) => AiSessionAgentPart::Reasoning(text.clone()),
+            AgentContentPart::ToolCall(call) => AiSessionAgentPart::ToolCall {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
@@ -815,28 +1064,32 @@ fn session_message(message: &ChatMessage) -> AiSessionMessage {
                     Some(false) => AiSessionToolStatus::Completed,
                     None => AiSessionToolStatus::Pending,
                 },
-            }),
-            AgentContentPart::ToolResult(result) => {
-                agent_parts.push(AiSessionAgentPart::ToolResult {
-                    call_id: result.call_id.clone(),
-                    tool_name: result.tool_name.clone(),
-                    content: result
-                        .content
-                        .iter()
-                        .filter_map(|part| match part {
-                            AgentToolResultPart::Text(text) => {
-                                Some(AiSessionToolResultPart::Text(text.clone()))
-                            }
-                            AgentToolResultPart::Image(_) => None,
-                        })
-                        .collect(),
-                    is_error: result.is_error,
-                })
+            },
+            AgentContentPart::ToolResult(result) => AiSessionAgentPart::ToolResult {
+                call_id: result.call_id.clone(),
+                tool_name: result.tool_name.clone(),
+                content: result
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        AgentToolResultPart::Text(text) => {
+                            Some(AiSessionToolResultPart::Text(text.clone()))
+                        }
+                        AgentToolResultPart::Image(image) => {
+                            install(image).map(AiSessionToolResultPart::Image)
+                        }
+                    })
+                    .collect(),
+                is_error: result.is_error,
+            },
+            AgentContentPart::OpaqueReasoning { api_style, value } => {
+                AiSessionAgentPart::OpaqueReasoning {
+                    api_style: api_style.as_str().to_string(),
+                    value: value.to_string(),
+                }
             }
-            AgentContentPart::Reasoning(_)
-            | AgentContentPart::OpaqueReasoning { .. }
-            | AgentContentPart::Image(_) => {}
-        }
+            AgentContentPart::Image(_) => continue,
+        });
     }
     AiSessionMessage {
         role: match message.role {
@@ -847,11 +1100,17 @@ fn session_message(message: &ChatMessage) -> AiSessionMessage {
         request_content: (request != content).then_some(request),
         references: Vec::new(),
         occurrences: Vec::new(),
-        images: Vec::new(),
+        images,
         agent_parts,
         document_path: message.document_scope().map(|scope| scope.path.clone()),
         document_label: message.document_scope().map(|scope| scope.label.clone()),
     }
+}
+
+/// An id for a new conversation, unique while the app runs.
+fn next_chat_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A suffix that differs between conversations, for cache keys.
@@ -862,7 +1121,20 @@ fn unique_suffix() -> String {
     format!("{nanos:x}")
 }
 
-fn chat_message(message: AiSessionMessage) -> ChatMessage {
+/// An image's width and height, read from its header.
+fn image_size(image: &AgentImage) -> Option<(u32, u32)> {
+    if image.width > 0 && image.height > 0 {
+        return Some((image.width, image.height));
+    }
+    image::ImageReader::new(std::io::Cursor::new(image.bytes.as_ref()))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// A saved message as the chat shows and continues it.
+fn chat_message(message: AiSessionMessage, library: &LibraryStore) -> ChatMessage {
     let role = match message.role {
         AiSessionRole::User => Role::User,
         AiSessionRole::Assistant => Role::Assistant,
@@ -871,8 +1143,87 @@ fn chat_message(message: AiSessionMessage) -> ChatMessage {
         path,
         label: message.document_label.unwrap_or_else(|| "Document".into()),
     });
-    ChatMessage::from_persisted(role, message.content, message.request_content)
-        .with_document_scope(scope)
+    let load = |image: &AiSessionImage| {
+        library.load_ai_image(image).ok().map(|bytes| {
+            AgentImage::new(image.media_type.clone(), image.width, image.height, bytes)
+                .with_optional_name(image.name.clone())
+        })
+    };
+    let mut chat = ChatMessage::from_persisted(role, message.content, message.request_content)
+        .with_document_scope(scope);
+    for image in message.images.iter().filter_map(load) {
+        chat.attach_user_image(image);
+    }
+    let trace = agent_trace(&message.agent_parts, load);
+    if !trace.is_empty() {
+        chat.set_agent_trace(trace);
+    }
+    chat
+}
+
+/// The agent messages an answer's saved parts came from: assistant turns,
+/// each followed by its tool results.
+fn agent_trace(
+    parts: &[AiSessionAgentPart],
+    load: impl Fn(&AiSessionImage) -> Option<AgentImage>,
+) -> Vec<AgentMessage> {
+    let mut trace: Vec<AgentMessage> = Vec::new();
+    for part in parts {
+        let content = match part {
+            AiSessionAgentPart::ToolResult {
+                call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                trace.push(AgentMessage::tool_result(AgentToolResult {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    content: content
+                        .iter()
+                        .filter_map(|part| match part {
+                            AiSessionToolResultPart::Text(text) => {
+                                Some(AgentToolResultPart::Text(text.clone()))
+                            }
+                            AiSessionToolResultPart::Image(image) => {
+                                load(image).map(AgentToolResultPart::Image)
+                            }
+                        })
+                        .collect(),
+                    is_error: *is_error,
+                }));
+                continue;
+            }
+            AiSessionAgentPart::AssistantText(text) => AgentContentPart::Text(text.clone()),
+            AiSessionAgentPart::Reasoning(text) => AgentContentPart::Reasoning(text.clone()),
+            AiSessionAgentPart::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => AgentContentPart::ToolCall(AgentToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
+            AiSessionAgentPart::OpaqueReasoning { api_style, value } => {
+                let (Some(api_style), Ok(value)) =
+                    (AiApiStyle::parse(api_style), serde_json::from_str(value))
+                else {
+                    continue;
+                };
+                AgentContentPart::OpaqueReasoning { api_style, value }
+            }
+        };
+        match trace.last_mut() {
+            Some(message) if message.role == AgentRole::Assistant => message.content.push(content),
+            _ => trace.push(AgentMessage {
+                role: AgentRole::Assistant,
+                content: vec![content],
+            }),
+        }
+    }
+    trace
 }
 
 fn tool_rows(parts: &[AiSessionAgentPart]) -> Vec<ToolRow> {
@@ -903,7 +1254,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::fake_providers::{FAKE_ANSWER, FAKE_SEARCH, start_ai_server, use_fake_ai};
+    use crate::fake_providers::{
+        FAKE_ANSWER, FAKE_SEARCH, FAKE_SUMMARY, FAKE_TITLE, start_ai_server, use_fake_ai,
+    };
 
     #[test]
     fn quick_questions_start_afresh_and_continue_in_the_assistant() {
@@ -949,6 +1302,10 @@ mod tests {
             &settings,
             &ctx,
         );
+        assistant.send("Later".into(), ask(), ToolRegistry::new(), &settings, &ctx);
+        assert_eq!(assistant.messages().len(), 2);
+        assert_eq!(assistant.rewind(1).as_deref(), Some("Later"));
+        assert_eq!(assistant.messages().len(), 1);
         assert!(assistant.adopt(&mut quick));
         assert_eq!(assistant.messages().len(), 1, "a new chat of the quick one");
         assert_eq!(assistant.messages()[0].display_text(), "Second?");
@@ -1084,7 +1441,7 @@ mod tests {
         assert_eq!(assistant.error, None);
         assert_eq!(assistant.messages().len(), 2);
         assert_eq!(assistant.messages()[1].display_text(), FAKE_ANSWER);
-        let rows = assistant.tools(1);
+        let rows = assistant.tools(1).to_vec();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label(), format!("Searched for “{FAKE_SEARCH}”"));
         assert_eq!(rows[0].state, ToolState::Done);
@@ -1095,15 +1452,74 @@ mod tests {
             "the page goes with the question"
         );
 
-        // The session is in the library and opens again.
+        // A model names the chat once it is answered.
+        let started = Instant::now();
+        while assistant.title.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(30), "no title");
+            assistant.poll(Some(&mut library));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(assistant.title.as_deref(), Some(FAKE_TITLE));
+
+        // The session is in the library and opens again with its trace.
         let mut reopened = Assistant::default();
         reopened.refresh_sessions(&library);
         assert_eq!(reopened.sessions.len(), 1);
-        assert_eq!(reopened.sessions[0].title, "Where does the story end?");
+        assert_eq!(reopened.sessions[0].title, FAKE_TITLE);
         let id = reopened.sessions[0].id;
-        reopened.load_session(id);
+        reopened.load_session(id, &library);
         assert_eq!(reopened.messages()[1].display_text(), FAKE_ANSWER);
         assert_eq!(reopened.tools(1)[0].label(), rows[0].label());
+        assert_eq!(
+            reopened.history(2),
+            assistant.history(2),
+            "a reopened chat continues with the same messages"
+        );
+        let trace = reopened.messages()[1].agent_trace();
+        assert_eq!(trace.len(), 3, "the tool call, its result and the answer");
+        assert_eq!(trace[1].role, AgentRole::Tool);
+
+        // A chat near the end of the context is summarized first.
+        reopened.compact_next = true;
+        let ask = AskContext {
+            path: path.clone(),
+            id: "doc_1".into(),
+            title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
+            layout: DocumentLayout::Fixed,
+            page_count: 1,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+        };
+        reopened.send(
+            "And then?".into(),
+            ask,
+            ToolRegistry::new(),
+            &settings,
+            &ctx,
+        );
+        let started = Instant::now();
+        while reopened.is_running() {
+            assert!(started.elapsed() < Duration::from_secs(30), "timed out");
+            reopened.poll(Some(&mut library));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reopened.error, None);
+        let summary = reopened.summary.clone().expect("a summary");
+        assert_eq!(summary.text, FAKE_SUMMARY);
+        assert_eq!(summary.until, 2);
+        let history = reopened.history(4);
+        assert!(history[0].text().contains(FAKE_SUMMARY));
+        assert!(history[1].text().starts_with("And then?"));
+        assert!(
+            history[2..]
+                .iter()
+                .all(|message| message.role != AgentRole::User),
+            "then the answer's trace, and nothing from before the summary"
+        );
 
         // Without a usable model the question stays and an error explains.
         let mut unconfigured = Assistant::default();

@@ -171,8 +171,15 @@ hidden). Mutating tools record their library edits as before/after snapshots
 ([`LibraryStore::record_edits`](crates/library/src/library/agent_edits.rs)) in
 a [change log](crates/reader/src/ai_changes.rs): changes apply at once, and the
 user reviews them, undoes or redoes each, or undoes all; an edit the user
-changed since is left and reported. Conversations are the library's AI
-sessions; image results are not stored.
+changed since is left and reported. "Restore to here" on a user message
+rewinds the chat to it and undoes that conversation's changes from then on.
+Conversations are the library's AI sessions, saved with their whole trace
+(reasoning, tool calls and results, images in the library's AI image store,
+and providers' reasoning state), so a reopened chat continues as it was.
+When a turn used 80% of the model's context window, the next one first
+replaces the conversation with the model's summary (`AiSession.summary`), so
+no earlier reasoning is replayed; a model names each chat after its first
+answer.
 ChatGPT Subscription sign-in waits for the browser's callback, exchanges
 the code and saves the credentials (in the keychain item the GPUI Reader
 used, so its sign-in carries over) on worker threads, and the app repaints

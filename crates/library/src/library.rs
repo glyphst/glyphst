@@ -156,6 +156,9 @@ struct StoredAiSessionV6 {
     queued_messages: Vec<StoredAiSessionMessageV6>,
     created: u64,
     updated: u64,
+    /// Added after the first v6 sessions, which have none.
+    #[serde(default)]
+    summary: Option<AiSessionSummary>,
 }
 
 impl From<&AiSession> for StoredAiSessionV6 {
@@ -176,6 +179,7 @@ impl From<&AiSession> for StoredAiSessionV6 {
                 .collect(),
             created: session.created,
             updated: session.updated,
+            summary: session.summary.clone(),
         }
     }
 }
@@ -198,6 +202,7 @@ impl StoredAiSessionV6 {
                 .collect::<Result<_>>()?,
             created: self.created,
             updated: self.updated,
+            summary: self.summary,
         })
     }
 }
@@ -1524,6 +1529,16 @@ pub enum AiSessionAgentPart {
         api_style: String,
         value: String,
     },
+    /// A readable summary of the model's reasoning, shown and never sent.
+    Reasoning(String),
+}
+
+/// What replaced the start of a long conversation for the model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiSessionSummary {
+    pub text: String,
+    /// The messages before this index are summarized and no longer sent.
+    pub until: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1534,6 +1549,7 @@ pub struct AiSession {
     pub queued_messages: Vec<AiSessionMessage>,
     pub created: u64,
     pub updated: u64,
+    pub summary: Option<AiSessionSummary>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

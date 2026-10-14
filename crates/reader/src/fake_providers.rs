@@ -81,6 +81,10 @@ pub fn use_fake_translation(settings: &mut Settings, port: u16) {
 
 /// The search the fake assistant asks for.
 pub const FAKE_SEARCH: &str = "the";
+/// The fake model's title for any chat.
+pub const FAKE_TITLE: &str = "Where the story ends";
+/// The fake model's summary of any conversation.
+pub const FAKE_SUMMARY: &str = "We discussed where the story ends.";
 /// The fake assistant's answer.
 pub const FAKE_ANSWER: &str = "## In short\n\nThe document **mentions** this in two places:\n\n\
 1. on the first page\n2. near the end\n\nSee `search_document` above.";
@@ -118,7 +122,25 @@ pub fn start_ai_server() -> Result<u16> {
                 let answered = query["messages"]
                     .as_array()
                     .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
-                let events: Vec<Value> = if answered {
+                let last = query["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .map(|message| message["content"].to_string())
+                    .unwrap_or_default();
+                // Titles and summaries are answered at once.
+                let reply = if last.contains("Generate a concise") {
+                    Some(FAKE_TITLE)
+                } else if last.contains("Summarize this conversation") {
+                    Some(FAKE_SUMMARY)
+                } else {
+                    None
+                };
+                let events: Vec<Value> = if let Some(reply) = reply {
+                    vec![
+                        json!({"choices": [{"delta": {"content": reply}}]}),
+                        json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+                    ]
+                } else if answered {
                     let mut events: Vec<Value> = FAKE_ANSWER
                         .split_inclusive(' ')
                         .map(|chunk| json!({"choices": [{"delta": {"content": chunk}}]}))
