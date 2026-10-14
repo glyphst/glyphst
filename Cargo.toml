@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agent-host",
     "crates/ai",
     "crates/core",
     "crates/effects",

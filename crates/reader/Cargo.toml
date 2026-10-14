@@ -24,6 +24,7 @@ egui.workspace = true
 egui_commonmark.workspace = true
 egui_extras.workspace = true
 gilrs.workspace = true
+glyphst-agent-host = { path = "../agent-host" }
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-effects = { path = "../effects" }

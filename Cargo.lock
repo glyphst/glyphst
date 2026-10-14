@@ -2899,6 +2899,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-agent-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "glyphst-ai",
+ "reqwest",
+ "serde_json",
+ "tiny_http",
+ "uuid",
+]
+
+[[package]]
 name = "glyphst-ai"
 version = "0.1.0"
 dependencies = [
@@ -3033,6 +3046,7 @@ dependencies = [
  "egui_commonmark",
  "egui_extras",
  "gilrs",
+ "glyphst-agent-host",
  "glyphst-ai",
  "glyphst-core",
  "glyphst-effects",

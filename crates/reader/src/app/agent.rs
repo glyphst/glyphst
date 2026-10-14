@@ -35,6 +35,40 @@ impl ReaderApp {
         registry
     }
 
+    /// The MCP server, started on first use.
+    pub(crate) fn mcp_server(&mut self) -> anyhow::Result<&glyphst_agent_host::mcp::McpServer> {
+        if self.mcp.is_none() {
+            let sessions = glyphst_agent_host::mcp::McpSessions::default();
+            self.mcp = Some(glyphst_agent_host::mcp::McpServer::start(sessions)?);
+        }
+        Ok(self.mcp.as_ref().expect("started above"))
+    }
+
+    /// An MCP server config (JSON, as Claude Code, Codex and Pi read it)
+    /// for an agent the user starts by hand; its changes show in the
+    /// assistant's change log.
+    pub(crate) fn mcp_config(&mut self) -> anyhow::Result<String> {
+        let tools = std::sync::Arc::new(self.agent_tools());
+        let server = self.mcp_server()?;
+        let token = server.sessions.open(glyphst_agent_host::mcp::McpSession {
+            tools,
+            context: glyphst_ai::tools::ToolContext {
+                origin: glyphst_ai::tools::ToolOrigin::External("MCP client".into()),
+                ..Default::default()
+            },
+        });
+        let config = serde_json::json!({
+            "mcpServers": {
+                "glyphst": {
+                    "type": "http",
+                    "url": server.url,
+                    "headers": {"Authorization": format!("Bearer {token}")},
+                }
+            }
+        });
+        Ok(serde_json::to_string_pretty(&config)?)
+    }
+
     /// Keeps the reading tools' document list current.
     pub(crate) fn update_agent_documents(&self) {
         let documents = self

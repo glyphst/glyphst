@@ -65,6 +65,8 @@ pub enum Command {
     ShowTranslated,
     Assistant,
     QuickAsk,
+    /// Copies the MCP server's config for a coding agent started by hand.
+    McpConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +134,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 55] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
@@ -187,6 +189,7 @@ impl Command {
         Self::ShowTranslated,
         Self::Assistant,
         Self::QuickAsk,
+        Self::McpConfig,
     ];
 
     /// The stable id kept in preferences.
@@ -246,6 +249,7 @@ impl Command {
             Self::ShowTranslated => "translation.show_translated",
             Self::Assistant => "assistant.toggle",
             Self::QuickAsk => "assistant.quick_ask",
+            Self::McpConfig => "assistant.mcp_config",
         }
     }
 
@@ -309,6 +313,7 @@ impl Command {
             Self::ShowTranslated => "Show translated or original pages",
             Self::Assistant => "Show or hide the assistant",
             Self::QuickAsk => "Quick ask about this page",
+            Self::McpConfig => "Copy the MCP server config for coding agents",
         }
     }
 
@@ -365,6 +370,7 @@ impl Command {
             Self::ShowTranslated => "globe",
             Self::Assistant => "sparkles",
             Self::QuickAsk => "message-square",
+            Self::McpConfig => "copy",
         }
     }
 
@@ -422,7 +428,7 @@ impl Command {
             Self::TranslateSelection | Self::TranslateDocument | Self::ShowTranslated => {
                 Category::Translation
             }
-            Self::Assistant | Self::QuickAsk => Category::Assistant,
+            Self::Assistant | Self::QuickAsk | Self::McpConfig => Category::Assistant,
         }
     }
 
@@ -490,7 +496,8 @@ impl Command {
             | Self::ShowTranslated
             | Self::SplitDown
             | Self::ClosePane
-            | Self::ToggleSpread => &[],
+            | Self::ToggleSpread
+            | Self::McpConfig => &[],
         }
     }
 
@@ -564,7 +571,8 @@ impl Command {
             | Self::ThemeDark
             | Self::ToggleTransparency
             | Self::KeysStandard
-            | Self::KeysVim => Needs::Nothing,
+            | Self::KeysVim
+            | Self::McpConfig => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
             Self::ShowTranslated => Needs::Translation,

@@ -8,6 +8,7 @@
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
+| `agent-host` | External agents: the MCP server that serves the Reader's tools (and its stdio relay) |
 | Translation crates | Translation domain, PDF production, service orchestration |
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
@@ -185,7 +186,14 @@ images, the selection, documents, outline sections, annotations and library
 books as chips; what can change in the reader is copied when mentioned, and
 pages are read on the worker when the message is sent, into a `<context>`
 block. `/` runs chat commands; pasted (`wl-paste`/`xclip`) and dropped
-pictures are attached as images.
+pictures are attached as images. External agents reach the same tools through an
+[MCP server](crates/agent-host/src/mcp.rs) (streamable HTTP on 127.0.0.1,
+plain JSON responses), started when first needed. Each agent session has its
+own bearer token, which selects its tools and the origin and conversation its
+changes are logged under; requests with a non-local `Origin` are refused.
+`glyphst-reader --mcp-stdio` relays stdio JSON-RPC lines to it for agents
+that only start MCP servers as commands. The `assistant.mcp_config` command
+copies a config for an agent the user starts by hand.
 ChatGPT Subscription sign-in waits for the browser's callback, exchanges
 the code and saves the credentials (in the keychain item the GPUI Reader
 used, so its sign-in carries over) on worker threads, and the app repaints

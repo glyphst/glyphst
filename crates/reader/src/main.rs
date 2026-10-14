@@ -272,6 +272,11 @@ fn main() -> Result<()> {
     if let Some(exit_code) = glyphst_pdf_translation_service::run_typst_worker_if_requested() {
         std::process::exit(exit_code);
     }
+    // Agents that start MCP servers only as commands run this executable
+    // as a relay to the running Reader's server.
+    if std::env::args().nth(1).as_deref() == Some("--mcp-stdio") {
+        return glyphst_agent_host::mcp_stdio::run();
+    }
     let launch = parse_args()?;
     // Scripted runs keep no preferences, so they cannot change the user's.
     let persistence_path = launch

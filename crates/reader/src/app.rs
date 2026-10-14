@@ -238,6 +238,8 @@ pub struct ReaderApp {
     agent_documents: crate::ai_tools::DocumentDirectory,
     /// What agents changed, for review and undo.
     pub(crate) agent_changes: crate::ai_changes::ChangeLog,
+    /// The MCP server for external agents, started when first needed.
+    mcp: Option<glyphst_agent_host::mcp::McpServer>,
     pub(crate) launch_ask: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
     pub(crate) launch_region: Option<(usize, [f32; 4])>,
@@ -392,6 +394,7 @@ impl ReaderApp {
             agent_calls,
             agent_documents: Default::default(),
             agent_changes: Default::default(),
+            mcp: None,
             launch_ask: launch.ask,
             launch_commands: launch.commands,
             launch_region: launch.select_region,
@@ -1780,6 +1783,20 @@ impl ReaderApp {
                             Some(Overview::new(tab.current_page()))
                         }
                     };
+                }
+                None
+            }
+            Command::McpConfig => {
+                match self.mcp_config() {
+                    Ok(config) => {
+                        ctx.copy_text(config);
+                        self.notices.push(
+                            "Copied an MCP server config for Glyphst; it works while the Reader runs.",
+                        );
+                    }
+                    Err(error) => self
+                        .notices
+                        .push(format!("Could not start the MCP server: {error:#}")),
                 }
                 None
             }
