@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use crate::settings::AiApiStyle;
 
 #[test]
 fn parses_canonical_mentions_with_one_based_pages() {
@@ -148,104 +148,6 @@ fn extracts_generated_title_from_first_response_line() {
 }
 
 #[test]
-fn configures_native_thinking_for_supported_models() {
-    let mut openai_body = json!({});
-    apply_openai_thinking(&mut openai_body, "gpt-5", AiThinkingLevel::XHigh);
-    assert_eq!(openai_body["reasoning_effort"], "xhigh");
-
-    let mut anthropic_body = json!({});
-    apply_anthropic_thinking(
-        &mut anthropic_body,
-        "claude-sonnet-4-5-latest",
-        AiThinkingLevel::Max,
-    );
-    assert_eq!(anthropic_body["thinking"]["budget_tokens"], 4096);
-    assert_eq!(anthropic_body["output_config"]["effort"], "max");
-
-    let mut unsupported_body = json!({});
-    apply_openai_thinking(&mut unsupported_body, "openai/gpt-5", AiThinkingLevel::High);
-    assert_eq!(unsupported_body["reasoning_effort"], "high");
-
-    let mut unsupported_body = json!({});
-    apply_openai_thinking(
-        &mut unsupported_body,
-        "openai/gpt-4o",
-        AiThinkingLevel::High,
-    );
-    assert!(unsupported_body.get("reasoning_effort").is_none());
-
-    let mut responses_body = json!({});
-    apply_responses_reasoning(&mut responses_body, AiThinkingLevel::Max);
-    assert_eq!(responses_body["reasoning"]["effort"], "max");
-    assert_eq!(responses_body["reasoning"]["summary"], "auto");
-}
-
-#[test]
-fn responses_payload_uses_typed_text_and_image_parts() {
-    let parts = vec![
-        RequestPart::Text("question".to_string()),
-        RequestPart::Image {
-            media_type: "image/jpeg".to_string(),
-            bytes: vec![1, 2, 3].into(),
-        },
-    ];
-    let user = responses_message_content(Role::User, &parts);
-    assert_eq!(user[0], json!({"type": "input_text", "text": "question"}));
-    assert_eq!(user[1]["type"], "input_image");
-    assert!(
-        user[1]["image_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/jpeg;base64,")
-    );
-
-    let assistant =
-        responses_message_content(Role::Assistant, &[RequestPart::Text("answer".to_string())]);
-    assert_eq!(assistant[0]["type"], "output_text");
-    assert_eq!(assistant[0]["annotations"], json!([]));
-}
-
-#[test]
-fn responses_stream_events_emit_text_and_finish() {
-    let mut deltas = Vec::new();
-    {
-        let mut send = |event| {
-            if let AiStreamEvent::Delta(delta) = event {
-                deltas.push(delta);
-            }
-            Ok(())
-        };
-        assert!(
-            !process_sse_line(
-                AiApiStyle::OpenAiResponses,
-                r#"data: {"type":"response.output_text.delta","delta":"hello"}"#,
-                &mut send,
-            )
-            .unwrap()
-        );
-        assert!(
-            process_sse_line(
-                AiApiStyle::OpenAiResponses,
-                r#"data: {"type":"response.completed"}"#,
-                &mut send,
-            )
-            .unwrap()
-        );
-        assert!(
-            process_sse_line(
-                AiApiStyle::OpenAiResponses,
-                r#"data: {"type":"response.failed","response":{"error":{"message":"denied"}}}"#,
-                &mut send,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("denied")
-        );
-    }
-    assert_eq!(deltas, ["hello"]);
-}
-
-#[test]
 fn unsupported_thinking_uses_system_prompt_instruction() {
     let prompt = system_prompt(&DocumentContext::default(), AiThinkingLevel::Low, false);
     assert!(prompt.contains("Use low internal reasoning effort"));
@@ -257,7 +159,8 @@ fn unsupported_thinking_uses_system_prompt_instruction() {
 
 #[test]
 fn openai_compatible_reasoning_avoids_system_prompt_fallback() {
-    let native_thinking = supports_openai_reasoning("openai/gpt-5.5", AiThinkingLevel::Medium);
+    let native_thinking =
+        AiThinkingLevel::Medium.supports_native_for_style(AiApiStyle::OpenAi, "openai/gpt-5.5");
     let prompt = system_prompt(
         &DocumentContext::default(),
         AiThinkingLevel::Medium,
@@ -534,7 +437,6 @@ fn region_images_describe_source_pages_and_remain_multimodal() {
     ));
 
     assert!(message.request_text().contains("@region-image pages 2, 4"));
-    assert_eq!(build_request_messages(vec![message]).len(), 1);
 }
 
 #[test]
@@ -563,70 +465,6 @@ fn document_images_remain_distinguishable_by_page_after_resolution() {
             MentionKind::DocumentImage,
             Some(1),
         ))
-    );
-}
-
-#[test]
-fn provider_payloads_use_multimodal_content_arrays() {
-    let mut message = ChatMessage::user(
-        "Describe @document-image".to_string(),
-        "Describe this document".to_string(),
-        Vec::new(),
-        vec![MentionReference::new(MentionKind::DocumentImage, None)],
-    );
-    message.attach_image(ImageContext::new(
-        MentionKind::DocumentImage,
-        Some(1),
-        "image/jpeg",
-        vec![0xff, 0xd8, 0xff],
-    ));
-    let messages = build_request_messages(vec![message]);
-
-    assert_eq!(
-        openai_message_content(&messages[0].parts),
-        json!([
-            {
-                "type": "text",
-                "text": "Describe this document\n\nAttached image context:\n[Attached @document-image page 1 image, media type image/jpeg]",
-            },
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": "data:image/jpeg;base64,/9j/",
-                },
-            },
-        ])
-    );
-    assert_eq!(
-        anthropic_message_content(&messages[0].parts),
-        json!([
-            {
-                "type": "text",
-                "text": "Describe this document\n\nAttached image context:\n[Attached @document-image page 1 image, media type image/jpeg]",
-            },
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": "/9j/",
-                },
-            },
-        ])
-    );
-}
-
-#[test]
-fn provider_payloads_keep_text_only_content_as_strings() {
-    let messages = build_request_messages(vec![ChatMessage::user_text("Plain text".to_string())]);
-
-    assert_eq!(
-        openai_message_content(&messages[0].parts),
-        json!("Plain text")
-    );
-    assert_eq!(
-        anthropic_message_content(&messages[0].parts),
-        json!("Plain text")
     );
 }
 

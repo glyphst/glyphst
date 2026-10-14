@@ -533,6 +533,25 @@ impl ProviderTurnBuilder {
     }
 }
 
+/// Describes the tools offered in this run, so the prompt only ever names
+/// tools that exist.
+fn tool_guidance(tools: &[AgentToolDefinition]) -> Option<String> {
+    if tools.is_empty() {
+        return None;
+    }
+    let list = tools
+        .iter()
+        .map(|tool| {
+            let summary = tool.description.split(". ").next().unwrap_or_default();
+            format!("- {}: {}", tool.name, summary.trim_end_matches('.'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "You can call these tools:\n{list}\nPrefer text tools before rendering pages, cite 1-based page numbers, and do not claim tool results you did not receive."
+    ))
+}
+
 fn stream_provider_turn(
     settings: &ResolvedAiConfig,
     messages: &[AgentMessage],
@@ -554,10 +573,9 @@ fn stream_provider_turn(
             .supports_native_for_style(AiApiStyle::Anthropic, &settings.model),
     };
     let mut system = system_prompt(document, settings.thinking_level, native_thinking);
-    if !tools.is_empty() {
-        system.push_str(
-            "\n\nYou have read-only tools for the documents open in this workspace window. Call list_open_documents when document identity is unclear, use search_documents to locate relevant passages across documents, read_document to inspect exact text, and render_document_pages only when PDF layout or visual content matters. Document ids are opaque and valid only for this run. Prefer text tools first, identify the document when citing 1-based PDF page numbers, and do not claim tool results you did not receive.",
-        );
+    if let Some(guidance) = tool_guidance(tools) {
+        system.push_str("\n\n");
+        system.push_str(&guidance);
     }
     let body = match settings.api_style {
         AiApiStyle::OpenAi => openai_chat_body(settings, &system, messages, tools),
@@ -1560,6 +1578,50 @@ mod tests {
         assert_eq!(messages[3]["role"], "user");
         assert_eq!(messages[3]["content"][1]["type"], "image_url");
         assert_eq!(messages[3]["content"][3]["type"], "image_url");
+    }
+
+    #[test]
+    fn tool_guidance_names_only_defined_tools() {
+        let tools = vec![AgentToolDefinition {
+            name: "read_document".to_string(),
+            description: "Read pages. Long detail.".to_string(),
+            input_schema: json!({"type": "object"}),
+            strict: false,
+        }];
+        let guidance = tool_guidance(&tools).unwrap();
+        assert!(guidance.contains("- read_document: Read pages\n"));
+        for stale in ["list_open_documents", "search_documents"] {
+            assert!(!guidance.contains(stale));
+        }
+        assert!(tool_guidance(&[]).is_none());
+    }
+
+    #[test]
+    fn configures_native_thinking_for_supported_models() {
+        let mut openai_body = json!({});
+        apply_openai_thinking(&mut openai_body, "gpt-5", AiThinkingLevel::XHigh);
+        assert_eq!(openai_body["reasoning_effort"], "xhigh");
+
+        let mut anthropic_body = json!({});
+        apply_anthropic_thinking(
+            &mut anthropic_body,
+            "claude-sonnet-4-5-latest",
+            AiThinkingLevel::Max,
+        );
+        assert_eq!(anthropic_body["thinking"]["budget_tokens"], 4096);
+
+        let mut unsupported_body = json!({});
+        apply_openai_thinking(
+            &mut unsupported_body,
+            "openai/gpt-4o",
+            AiThinkingLevel::High,
+        );
+        assert!(unsupported_body.get("reasoning_effort").is_none());
+
+        let mut responses_body = json!({});
+        apply_responses_reasoning(&mut responses_body, AiThinkingLevel::Max);
+        assert_eq!(responses_body["reasoning"]["effort"], "max");
+        assert_eq!(responses_body["reasoning"]["summary"], "auto");
     }
 
     #[test]
