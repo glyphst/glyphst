@@ -57,13 +57,18 @@ impl Assistant {
         }
         self.editor.track_input_method(ui);
 
-        // The menu takes its keys before the editor sees them.
+        // The menu takes its keys before the editor sees them, and acts on
+        // the text it was found in: the editor may change it this frame.
         let (query, entries) = self.menu.entries(&ctx, &self.editor, sources);
         let menu_open = !entries.is_empty() || (self.menu.forced && query.is_none());
-        let mut accepted = None;
         if menu_open && !self.editor.composing {
             let (chosen, close) = self.menu.keys(ui, entries.len());
-            accepted = chosen;
+            if let Some(index) = chosen
+                && let Some(entry) = entries.into_iter().nth(index)
+                && let Some(chosen) = self.accept(&ctx, query.clone(), entry)
+            {
+                action = Some(chosen);
+            }
             if close {
                 self.menu.forced = false;
                 if let Some(range) = &query {
@@ -221,23 +226,25 @@ impl Assistant {
             });
         let card_rect = card.response.rect;
 
+        // The menu for the text as edited this frame.
+        let (query, entries) = self.menu.entries(&ctx, &self.editor, sources);
+        let menu_open = !entries.is_empty() || (self.menu.forced && query.is_none());
         if menu_open && !self.editor.composing {
             let typed = query
                 .as_ref()
-                .map(|range| self.editor.text()[range.start + 1..range.end].to_string())
-                .unwrap_or_default();
+                .and_then(|range| self.editor.text().get(range.start + 1..range.end))
+                .unwrap_or_default()
+                .to_string();
             if let Some(clicked) =
                 self.menu
                     .show(ui, card_rect, &entries, &typed, &mut self.previews)
+                && let Some(entry) = entries.into_iter().nth(clicked)
+                && let Some(chosen) = self.accept(&ctx, query, entry)
             {
-                accepted = Some(clicked);
+                action = Some(chosen);
             }
-        }
-        if let Some(index) = accepted
-            && let Some(entry) = entries.into_iter().nth(index)
-            && let Some(chosen) = self.accept(&ctx, query, entry)
-        {
-            action = Some(chosen);
+        } else {
+            self.menu.selected = 0;
         }
         if send && !self.editor.is_empty() {
             action = Some(PanelAction::Send(self.editor.take()));

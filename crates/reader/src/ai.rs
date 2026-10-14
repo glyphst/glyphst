@@ -1889,6 +1889,43 @@ mod tests {
     }
 
     #[test]
+    fn backspacing_a_mention_query_never_panics() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut assistant = Assistant::default();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("assistant-input")));
+        panel_frame(&ctx, &mut assistant, Vec::new());
+        let text = |text: &str| egui::Event::Text(text.into());
+        for typed in ["@", "p", "a", "g", "e"] {
+            panel_frame(&ctx, &mut assistant, vec![text(typed)]);
+        }
+        assert_eq!(assistant.editor.text(), "@page");
+        // Typing and deleting in one frame, then Backspace with Enter.
+        panel_frame(
+            &ctx,
+            &mut assistant,
+            vec![text("x"), key(egui::Key::Backspace)],
+        );
+        panel_frame(
+            &ctx,
+            &mut assistant,
+            vec![key(egui::Key::Backspace), key(egui::Key::Enter)],
+        );
+        for _ in 0..8 {
+            panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Backspace)]);
+        }
+        assert_eq!(assistant.editor.text(), "");
+        assert!(assistant.messages.is_empty(), "Enter sent nothing");
+
+        // A query after other text.
+        panel_frame(&ctx, &mut assistant, vec![text("ask @pa")]);
+        for _ in 0..4 {
+            panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Backspace)]);
+        }
+        assert_eq!(assistant.editor.text(), "ask");
+    }
+
+    #[test]
     fn external_agents_answer_in_the_panel_and_their_files_can_be_undone() {
         use std::os::unix::fs::PermissionsExt as _;
 

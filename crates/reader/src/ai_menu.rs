@@ -10,7 +10,7 @@ use egui::{Align2, CornerRadius, Rect, Sense, Stroke, text::LayoutJob, vec2};
 use crate::{
     ai_editor::{ChipKind, MentionEditor},
     ai_mentions::{self, Candidate, Group, Sources},
-    ai_preview::Previews,
+    ai_preview::{CARD_WIDTH, Previews, TEXT_HEIGHT},
     theme::{self, Tokens},
 };
 
@@ -18,7 +18,6 @@ const ROW: f32 = 30.0;
 const HEADER: f32 = 24.0;
 /// Rows the menu shows before it scrolls.
 const VISIBLE_ROWS: f32 = 11.0;
-const ASIDE_WIDTH: f32 = 300.0;
 
 /// The composer's slash commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,7 +454,7 @@ fn aside(
     tokens: &Tokens,
 ) {
     let screen = ctx.content_rect();
-    let width = ASIDE_WIDTH.min(screen.width() - 16.0);
+    let width = CARD_WIDTH.min(screen.width() - 16.0);
     let (pivot, at) = if menu.left() - screen.left() >= width + 14.0 {
         (Align2::RIGHT_BOTTOM, menu.left_bottom() + vec2(-6.0, 0.0))
     } else if screen.right() - menu.right() >= width + 14.0 {
@@ -463,11 +462,11 @@ fn aside(
     } else {
         (Align2::LEFT_BOTTOM, menu.left_top() + vec2(0.0, -6.0))
     };
-    let max_height = (menu.height() - 40.0).clamp(120.0, 274.0);
     egui::Area::new(egui::Id::new("assistant-menu-aside"))
         .order(egui::Order::Foreground)
         .pivot(pivot)
         .fixed_pos(at)
+        .constrain(true)
         .interactable(false)
         .show(ctx, |ui| match entry {
             MenuEntry::Mention(candidate) => {
@@ -475,7 +474,7 @@ fn aside(
                     ui,
                     &ChipKind::Mention(candidate.mention.clone()),
                     width,
-                    max_height,
+                    TEXT_HEIGHT,
                 );
             }
             other => {

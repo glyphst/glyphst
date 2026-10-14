@@ -23,8 +23,9 @@ use crate::{
 
 /// Text previews stop here; the whole text still goes with the message.
 pub const PREVIEW_CHARS: usize = 4_000;
-const CARD_WIDTH: f32 = 320.0;
-const TEXT_HEIGHT: f32 = 274.0;
+/// The card's width and its text's height, beside the menu as on hover.
+pub(crate) const CARD_WIDTH: f32 = 320.0;
+pub(crate) const TEXT_HEIGHT: f32 = 274.0;
 /// The gap between a chip and its card the pointer may cross.
 const BRIDGE: f32 = 6.0;
 /// How long a card stays after the pointer leaves the chip and the card.
@@ -275,6 +276,9 @@ impl Previews {
     /// The preview card of `kind`, `width` wide; for the menu's aside.
     pub fn card_ui(&mut self, ui: &mut egui::Ui, kind: &ChipKind, width: f32, max_height: f32) {
         let tokens = Tokens::get(ui.ctx());
+        // An area offers last frame's size; a card that was loading would
+        // stay that small without room to grow into.
+        ui.set_max_height(max_height + 160.0);
         egui::Frame::new()
             .fill(tokens.card)
             .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
