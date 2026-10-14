@@ -791,6 +791,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
+        edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
     };
@@ -1634,6 +1635,7 @@ fn history_save_fails_when_database_is_unavailable() {
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
+        edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
     };
@@ -1668,6 +1670,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         document_edit_histories: HashMap::new(),
         next_document_edit_sequence: 0,
         bookmarks_revision: 0,
+        edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
     };

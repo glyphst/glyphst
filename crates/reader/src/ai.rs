@@ -32,7 +32,8 @@ use glyphst_library::{
 use glyphst_settings::{AiProvider, ModelRef, Settings};
 
 use crate::{
-    ai_tools::{OpenDocument, describe_call},
+    ai_changes::{ChangeAction, ChangeLog},
+    ai_tools::describe_call,
     theme::Tokens,
 };
 
@@ -41,7 +42,14 @@ const TITLE_CHARS: usize = 60;
 /// What a turn knows about the open document.
 pub struct AskContext {
     pub path: PathBuf,
+    /// The id tools take for the document.
+    pub id: String,
     pub title: String,
+    pub authors: Option<String>,
+    /// The outline entry of the current page.
+    pub section: Option<String>,
+    /// The other open documents.
+    pub others: Vec<DocumentFacts>,
     pub layout: DocumentLayout,
     pub page_count: usize,
     /// The page shown, from 0.
@@ -152,6 +160,8 @@ pub enum PanelAction {
     LoadSession(u64),
     /// The user chose the assistant's model.
     SetModel(ModelRef),
+    /// Review or undo what agents changed.
+    Change(ChangeAction),
 }
 
 impl Assistant {
@@ -181,6 +191,7 @@ impl Assistant {
         &mut self,
         text: String,
         ask: AskContext,
+        tools: ToolRegistry,
         settings: &Settings,
         ctx: &egui::Context,
     ) {
@@ -215,18 +226,20 @@ impl Assistant {
         };
         let state = ReaderState {
             document: Some(DocumentFacts {
-                id: None,
+                id: Some(ask.id.clone()),
                 title: ask.title.clone(),
                 format: match ask.layout {
                     DocumentLayout::Fixed => "PDF",
                     DocumentLayout::Reflow(_) => "EPUB",
                 }
                 .into(),
-                authors: None,
+                authors: ask.authors.clone(),
                 page_count: ask.page_count,
             }),
             current_page: Some(page),
+            section: ask.section.clone(),
             selection_chars: ask.selection.as_ref().map(|text| text.chars().count()),
+            other_documents: ask.others.clone(),
             ..ReaderState::default()
         };
         let mut message = ChatMessage::user(text.clone(), text, contexts, Vec::new())
@@ -262,14 +275,6 @@ impl Assistant {
             .collect();
         self.messages.push(ChatMessage::assistant(String::new()));
         self.tools.push(Vec::new());
-        let mut tools = ToolRegistry::new();
-        OpenDocument {
-            path: ask.path,
-            layout: ask.layout,
-            page_count: ask.page_count,
-            current_page: ask.current_page,
-        }
-        .register(&mut tools);
         let cache_key = self
             .cache_key
             .get_or_insert_with(|| format!("glyphst-chat-{}", unique_suffix()))
@@ -515,6 +520,7 @@ impl Assistant {
         has_selection: bool,
         models: &[(ModelRef, String)],
         model: Option<ModelRef>,
+        changes: &mut ChangeLog,
     ) -> Option<PanelAction> {
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
@@ -685,6 +691,9 @@ impl Assistant {
                 }
             });
         ui.add_space(4.0);
+        if let Some(change) = changes.ui(ui, &tokens) {
+            action = Some(PanelAction::Change(change));
+        }
         egui::Frame::new()
             .fill(tokens.field)
             .stroke(egui::Stroke::new(1.0, tokens.border))
@@ -908,7 +917,11 @@ mod tests {
             .clear();
         let ask = || AskContext {
             path: "doc.pdf".into(),
+            id: "doc_1".into(),
             title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
             layout: DocumentLayout::Fixed,
             page_count: 1,
             current_page: 0,
@@ -916,14 +929,26 @@ mod tests {
             selection: None,
         };
         let mut quick = Assistant::default();
-        quick.send("First?".into(), ask(), &settings, &ctx);
+        quick.send("First?".into(), ask(), ToolRegistry::new(), &settings, &ctx);
         quick.new_session();
-        quick.send("Second?".into(), ask(), &settings, &ctx);
+        quick.send(
+            "Second?".into(),
+            ask(),
+            ToolRegistry::new(),
+            &settings,
+            &ctx,
+        );
         assert_eq!(quick.messages().len(), 1, "no history");
         assert_eq!(quick.messages()[0].display_text(), "Second?");
 
         let mut assistant = Assistant::default();
-        assistant.send("Earlier".into(), ask(), &settings, &ctx);
+        assistant.send(
+            "Earlier".into(),
+            ask(),
+            ToolRegistry::new(),
+            &settings,
+            &ctx,
+        );
         assert!(assistant.adopt(&mut quick));
         assert_eq!(assistant.messages().len(), 1, "a new chat of the quick one");
         assert_eq!(assistant.messages()[0].display_text(), "Second?");
@@ -960,14 +985,24 @@ mod tests {
             .clear();
         let ask = || AskContext {
             path: "doc.pdf".into(),
+            id: "doc_1".into(),
             title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
             layout: DocumentLayout::Fixed,
             page_count: 1,
             current_page: 0,
             page_text: None,
             selection: None,
         };
-        assistant.send("What is this?".into(), ask(), &settings, &ctx);
+        assistant.send(
+            "What is this?".into(),
+            ask(),
+            ToolRegistry::new(),
+            &settings,
+            &ctx,
+        );
         let images = |message: &ChatMessage| {
             message
                 .into_agent_messages()
@@ -979,7 +1014,13 @@ mod tests {
         assert_eq!(images(&assistant.messages()[0]), 1);
         assert!(assistant.attachments.is_empty());
         assert_eq!(assistant.sent_images.get(&0).map(Vec::len), Some(1));
-        assistant.send("And now?".into(), ask(), &settings, &ctx);
+        assistant.send(
+            "And now?".into(),
+            ask(),
+            ToolRegistry::new(),
+            &settings,
+            &ctx,
+        );
         assert_eq!(images(&assistant.messages()[1]), 0, "sent once");
     }
 
@@ -1002,14 +1043,38 @@ mod tests {
         let mut assistant = Assistant::default();
         let ask = AskContext {
             path: path.clone(),
+            id: "doc_1".into(),
             title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
             layout: DocumentLayout::Fixed,
             page_count: 1,
             current_page: 0,
             page_text: Some("Here the story begins.".into()),
             selection: None,
         };
-        assistant.send("Where does the story end?".into(), ask, &settings, &ctx);
+        let documents = crate::ai_tools::DocumentDirectory::default();
+        documents.update(
+            vec![crate::ai_tools::OpenDocument {
+                id: "doc_1".into(),
+                title: "doc.pdf".into(),
+                path: path.clone(),
+                layout: DocumentLayout::Fixed,
+                page_count: 1,
+                current_page: 0,
+            }],
+            Some("doc_1".into()),
+        );
+        let mut tools = ToolRegistry::new();
+        documents.register(&mut tools);
+        assistant.send(
+            "Where does the story end?".into(),
+            ask,
+            tools,
+            &settings,
+            &ctx,
+        );
         let started = Instant::now();
         while assistant.is_running() {
             assert!(started.elapsed() < Duration::from_secs(30), "timed out");
@@ -1050,14 +1115,18 @@ mod tests {
             .clear();
         let ask = AskContext {
             path,
+            id: "doc_1".into(),
             title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
             layout: DocumentLayout::Fixed,
             page_count: 1,
             current_page: 0,
             page_text: None,
             selection: None,
         };
-        unconfigured.send("Hello?".into(), ask, &missing, &ctx);
+        unconfigured.send("Hello?".into(), ask, ToolRegistry::new(), &missing, &ctx);
         assert!(!unconfigured.is_running());
         assert!(
             unconfigured

@@ -53,6 +53,7 @@ use crate::{
     window_blur::WindowBlur,
 };
 
+mod agent;
 mod chrome;
 
 /// How often the effects folder is looked at for changes.
@@ -230,6 +231,13 @@ pub struct ReaderApp {
     /// The ChatGPT Subscription sign-in, kept with the other keys.
     chatgpt: ChatGptSubscription,
     pub(crate) assistant: Assistant,
+    /// The agents' way to the app: tool calls wait here for a frame.
+    agent_bridge: crate::ai_bridge::UiBridge,
+    agent_calls: std::sync::mpsc::Receiver<crate::ai_bridge::UiCall>,
+    /// The open documents, for the agents' reading tools.
+    agent_documents: crate::ai_tools::DocumentDirectory,
+    /// What agents changed, for review and undo.
+    pub(crate) agent_changes: crate::ai_changes::ChangeLog,
     pub(crate) launch_ask: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
     pub(crate) launch_region: Option<(usize, [f32; 4])>,
@@ -333,6 +341,7 @@ impl ReaderApp {
             let ctx = cc.egui_ctx.clone();
             ChatGptSubscription::start(user_settings.store(), move || ctx.request_repaint())
         };
+        let (agent_bridge, agent_calls) = crate::ai_bridge::UiBridge::new(&cc.egui_ctx);
         let mut app = Self {
             prefs,
             theme_applied: None,
@@ -379,6 +388,10 @@ impl ReaderApp {
             user_settings,
             chatgpt,
             assistant: Assistant::default(),
+            agent_bridge,
+            agent_calls,
+            agent_documents: Default::default(),
+            agent_changes: Default::default(),
             launch_ask: launch.ask,
             launch_commands: launch.commands,
             launch_region: launch.select_region,
@@ -1119,15 +1132,38 @@ impl ReaderApp {
                 Some("Your AI settings are still loading; try again in a moment.".into());
             return;
         };
-        self.assistant.send(text, ask, &settings, ctx);
+        let tools = self.agent_tools();
+        self.assistant.send(text, ask, tools, &settings, ctx);
     }
 
     /// What a question knows about the active document.
     fn ask_context(&self) -> Option<AskContext> {
         let tab = &self.tabs[self.active?];
         let current_page = tab.current_page();
+        let others = self
+            .tabs
+            .iter()
+            .filter(|other| other.id != tab.id)
+            .map(|other| glyphst_ai::prompt::DocumentFacts {
+                id: Some(crate::ai_tools::document_id(other.id)),
+                title: other.title.clone(),
+                format: if other.is_reflowed() { "EPUB" } else { "PDF" }.into(),
+                authors: None,
+                page_count: other.layout.len(),
+            })
+            .collect();
         Some(AskContext {
             path: tab.path.clone(),
+            id: crate::ai_tools::document_id(tab.id),
+            authors: tab
+                .metadata
+                .iter()
+                .find(|(label, _)| *label == "Author")
+                .map(|(_, author)| author.clone()),
+            section: tab
+                .current_outline_entry()
+                .map(|entry| tab.outline[entry].title.clone()),
+            others,
             title: tab.title.clone(),
             layout: tab.document_layout,
             page_count: tab.layout.len(),
@@ -1153,6 +1189,7 @@ impl ReaderApp {
         {
             Some(quick_ask::Action::Send(text)) => {
                 let (ask, settings) = (self.ask_context(), self.user_settings.get().cloned());
+                let tools = self.agent_tools();
                 let quick = &mut self.quick_ask.assistant;
                 let (Some(ask), Some(settings)) = (ask, settings) else {
                     quick.error =
@@ -1163,7 +1200,7 @@ impl ReaderApp {
                 quick.new_session();
                 quick.include_page = true;
                 quick.include_selection = true;
-                quick.send(text, ask, &settings, ctx);
+                quick.send(text, ask, tools, &settings, ctx);
             }
             Some(quick_ask::Action::Continue) => {
                 if self.assistant.adopt(&mut self.quick_ask.assistant) {
@@ -3191,6 +3228,12 @@ impl eframe::App for ReaderApp {
     /// opaque, or as translucent as the window's opacity.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
+    }
+
+    /// Runs before every frame, and also while the window is hidden: the
+    /// agents' tool calls are answered here.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.serve_agent_calls(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

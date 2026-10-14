@@ -157,10 +157,22 @@ is ready, so the original stays visible meanwhile. Selection, copy and search
 use the translated text; hovering a translated block shows the original.
 
 The assistant runs the `ai` crate's agent on a worker thread with the main
-model from the settings, the current page and selection as optional context,
-and document tools (`search_document`, `read_document`,
-`render_document_pages`), implemented over MuPDF and `pdf::text`.
-Conversations are the library's AI sessions; image results are not stored.
+model from the settings. The system prompt stays the same for a whole
+conversation (so providers cache it and accept replayed reasoning); each user
+message ends with a `<reader_state>` block for the document, page, section
+and selection at that time. Tools come from a
+[registry](crates/ai/src/tools.rs) in which each tool reads, navigates or
+mutates; consecutive reads run in parallel. Reading tools
+([`ai_tools`](crates/reader/src/ai_tools.rs)) open documents themselves with
+MuPDF, by opaque ids (`doc_<tab id>`) the app keeps current. Tools that need
+the app ([`ai_bridge`](crates/reader/src/ai_bridge.rs)) send a call that
+`ReaderApp::logic` answers before the next frame (also while the window is
+hidden). Mutating tools record their library edits as before/after snapshots
+([`LibraryStore::record_edits`](crates/library/src/library/agent_edits.rs)) in
+a [change log](crates/reader/src/ai_changes.rs): changes apply at once, and the
+user reviews them, undoes or redoes each, or undoes all; an edit the user
+changed since is left and reported. Conversations are the library's AI
+sessions; image results are not stored.
 ChatGPT Subscription sign-in waits for the browser's callback, exchanges
 the code and saves the credentials (in the keychain item the GPUI Reader
 used, so its sign-in carries over) on worker threads, and the app repaints

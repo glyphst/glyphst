@@ -190,6 +190,8 @@ pub struct DocumentTab {
     /// The view's last origin and scale, and when they last changed.
     last_view: ([f64; 2], f64, Option<Instant>),
     pub outline: Vec<OutlineEntry>,
+    /// The document's metadata (author, subject, …) that is set.
+    pub metadata: Vec<(&'static str, String)>,
     /// The sidebar's outline and thumbnail lists: collapsed entries and
     /// what they follow.
     pub outline_view: OutlineView,
@@ -271,6 +273,7 @@ impl DocumentTab {
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
             outline: info.outline,
+            metadata: info.metadata,
             outline_view: OutlineView::default(),
             present: None,
             load_seconds: Vec::new(),
@@ -324,6 +327,7 @@ impl DocumentTab {
         self.document_layout = info.layout;
         self.layout = Layout::new(info.bounds);
         self.outline = info.outline;
+        self.metadata = info.metadata;
         self.outline_view = OutlineView::default();
         self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
         self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
@@ -1429,6 +1433,7 @@ mod tests {
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
             outline: Vec::new(),
+            metadata: Vec::new(),
             outline_view: OutlineView::default(),
             present: None,
             load_seconds: Vec::new(),

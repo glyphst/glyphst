@@ -35,6 +35,7 @@ impl LibraryStore {
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            edit_recorder: None,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
             catalog_revision: 0,
         }
@@ -91,6 +92,7 @@ impl LibraryStore {
             document_edit_histories: HashMap::new(),
             next_document_edit_sequence: 0,
             bookmarks_revision: 0,
+            edit_recorder: None,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
             catalog_revision: 0,
         };

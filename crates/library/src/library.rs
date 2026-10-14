@@ -1885,6 +1885,8 @@ pub struct LibraryStore {
     document_edit_histories: HashMap<PathBuf, DocumentEditHistory>,
     next_document_edit_sequence: u64,
     bookmarks_revision: u64,
+    /// Collects the edits made inside [`LibraryStore::record_edits`].
+    edit_recorder: Option<Vec<LibraryEdit>>,
     history_entry_revisions: Arc<Mutex<HashMap<PathBuf, u64>>>,
     catalog_revision: u64,
 }
@@ -1898,7 +1900,7 @@ pub struct HistoryEntryPersistenceSnapshot {
 
 /// The GPUI Reader keeps the store as an app global.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum DocumentEdit {
     Bookmark {
         before: Option<Bookmark>,
@@ -2003,6 +2005,7 @@ impl fmt::Display for DocumentEditConflict {
 
 impl Error for DocumentEditConflict {}
 
+mod agent_edits;
 mod ai_sessions;
 mod annotations;
 mod bookmarks;
@@ -2016,6 +2019,7 @@ mod sidebar;
 mod storage;
 mod storage_helpers;
 
+pub use agent_edits::{LibraryEdit, is_edit_conflict};
 pub use catalog::*;
 use storage_helpers::require_storage_version;
 

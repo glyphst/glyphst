@@ -19,6 +19,8 @@
 //! sidebar, F12 statistics. Dragging a tab onto the pages splits them.
 
 mod ai;
+mod ai_bridge;
+mod ai_changes;
 mod ai_tools;
 mod annotations;
 mod app;

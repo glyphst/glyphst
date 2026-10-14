@@ -3,7 +3,10 @@
 //! document itself, so tools never wait for the UI and reads run in
 //! parallel.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use glyphst_ai::{
@@ -26,8 +29,75 @@ const MAX_RENDER_PAGES: usize = 4;
 const RENDER_PIXELS: f32 = 1600.0;
 const SNIPPET_CHARS: usize = 60;
 
-/// The open document, as the assistant's tools see it.
+/// The documents open in the reader, by the ids tools take ("doc_7"); the
+/// app updates it as tabs open, close and turn pages.
+#[derive(Clone, Default)]
+pub struct DocumentDirectory(Arc<RwLock<Directory>>);
+
+#[derive(Default)]
+struct Directory {
+    documents: Vec<OpenDocument>,
+    active: Option<String>,
+}
+
+impl DocumentDirectory {
+    pub fn update(&self, documents: Vec<OpenDocument>, active: Option<String>) {
+        if let Ok(mut directory) = self.0.write() {
+            directory.documents = documents;
+            directory.active = active;
+        }
+    }
+
+    /// The document `id` names, or the active one.
+    fn resolve(&self, id: Option<&str>) -> Result<OpenDocument> {
+        let directory = self
+            .0
+            .read()
+            .map_err(|_| anyhow!("the document list is unavailable"))?;
+        let id = id
+            .or(directory.active.as_deref())
+            .ok_or_else(|| anyhow!("no document is open"))?;
+        directory
+            .documents
+            .iter()
+            .find(|document| document.id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no open document has the id {id}; call list_documents"))
+    }
+
+    /// Adds the document tools to a run's tools.
+    pub fn register(&self, registry: &mut ToolRegistry) {
+        registry.register(SearchDocument(self.clone()));
+        registry.register(ReadDocument(self.clone()));
+        registry.register(RenderPages(self.clone()));
+        registry.register(ListLinks(self.clone()));
+    }
+}
+
+/// The id tools use for the tab `tab_id`.
+pub fn document_id(tab_id: u64) -> String {
+    format!("doc_{tab_id}")
+}
+
+fn document_argument(arguments: &Value) -> Option<&str> {
+    arguments["document_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+}
+
+/// A JSON schema property for the optional document id.
+pub fn document_id_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "The document's id from <reader_state> or list_documents; the active document when omitted"
+    })
+}
+
+/// An open document, as the assistant's tools see it.
+#[derive(Clone, Debug)]
 pub struct OpenDocument {
+    pub id: String,
+    pub title: String,
     pub path: PathBuf,
     pub layout: DocumentLayout,
     pub page_count: usize,
@@ -36,16 +106,6 @@ pub struct OpenDocument {
 }
 
 impl OpenDocument {
-    /// Adds the tools for this document to a run's tools.
-    pub fn register(self, registry: &mut ToolRegistry) {
-        let document = Arc::new(self);
-        registry.register(SearchDocument(document.clone()));
-        registry.register(ReadDocument(document.clone()));
-        if document.renders() {
-            registry.register(RenderPages(document));
-        }
-    }
-
     fn document(&self) -> Result<mupdf::Document> {
         Ok(DocumentSnapshot::read(&self.path)?
             .open_with_layout(self.layout)?
@@ -181,6 +241,41 @@ impl OpenDocument {
     fn renders(&self) -> bool {
         matches!(self.layout, DocumentLayout::Fixed)
     }
+
+    fn links(&self, arguments: &Value) -> Result<String> {
+        let page = arguments["page"]
+            .as_u64()
+            .map_or(self.current_page, |page| (page as usize).saturating_sub(1));
+        if page >= self.page_count {
+            bail!("page {} is not between 1 and {}", page + 1, self.page_count);
+        }
+        let document = self.document()?;
+        let loaded = document.load_page(i32::try_from(page)?)?;
+        let links = glyphst_pdf::text::page_links(&loaded);
+        if links.is_empty() {
+            return Ok(format!("Page {} has no links.", page + 1));
+        }
+        let text = PageText::from_page(&loaded)?;
+        let lines = links
+            .iter()
+            .map(|link| {
+                let label = text.text_of_glyphs(&text.glyphs_in(link.rect));
+                let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+                let target = match &link.target {
+                    glyphst_pdf::text::LinkTarget::Page { page, .. } => {
+                        format!("page {}", page + 1)
+                    }
+                    glyphst_pdf::text::LinkTarget::Uri(uri) => uri.clone(),
+                };
+                if label.is_empty() {
+                    format!("- {target}")
+                } else {
+                    format!("- \"{label}\" → {target}")
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(format!("Links on page {}:\n{}", page + 1, lines.join("\n")))
+    }
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -206,16 +301,17 @@ fn tool_result(
     }
 }
 
-struct SearchDocument(Arc<OpenDocument>);
+struct SearchDocument(DocumentDirectory);
 
 impl Tool for SearchDocument {
     fn definition(&self) -> AgentToolDefinition {
         let mut search = AgentToolDefinition::new(
             "search_document",
-            "Search the open document for text. Returns concise matches with page numbers.",
+            "Search a document for text. Returns concise matches with page numbers.",
             json!({
                 "type": "object",
                 "properties": {
+                    "document_id": document_id_property(),
                     "query": {"type": "string", "description": "Text to search for"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_RESULTS}
                 },
@@ -233,8 +329,9 @@ impl Tool for SearchDocument {
 
     fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
         tool_result(call, |arguments| {
+            let document = self.0.resolve(document_argument(arguments))?;
             Ok(vec![AgentToolResultPart::Text(
-                self.0.search(arguments, &cx.cancel)?,
+                document.search(arguments, &cx.cancel)?,
             )])
         })
     }
@@ -244,16 +341,17 @@ impl Tool for SearchDocument {
     }
 }
 
-struct ReadDocument(Arc<OpenDocument>);
+struct ReadDocument(DocumentDirectory);
 
 impl Tool for ReadDocument {
     fn definition(&self) -> AgentToolDefinition {
         let mut read = AgentToolDefinition::new(
             "read_document",
-            "Read text from the open document by 1-based pages. If no pages are given, reads the current page.",
+            "Read a document's text by 1-based pages. If no pages are given, reads the current page.",
             json!({
                 "type": "object",
                 "properties": {
+                    "document_id": document_id_property(),
                     "pages": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
@@ -276,8 +374,9 @@ impl Tool for ReadDocument {
 
     fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
         tool_result(call, |arguments| {
+            let document = self.0.resolve(document_argument(arguments))?;
             Ok(vec![AgentToolResultPart::Text(
-                self.0.read(arguments, &cx.cancel)?,
+                document.read(arguments, &cx.cancel)?,
             )])
         })
     }
@@ -287,16 +386,17 @@ impl Tool for ReadDocument {
     }
 }
 
-struct RenderPages(Arc<OpenDocument>);
+struct RenderPages(DocumentDirectory);
 
 impl Tool for RenderPages {
     fn definition(&self) -> AgentToolDefinition {
         let mut render = AgentToolDefinition::new(
             "render_document_pages",
-            "Render one or more 1-based PDF pages as images. Use it when layout, figures, tables, or equations matter.",
+            "Render 1-based PDF pages as images. Use it when layout, figures, tables, or equations matter.",
             json!({
                 "type": "object",
                 "properties": {
+                    "document_id": document_id_property(),
                     "pages": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
@@ -317,7 +417,16 @@ impl Tool for RenderPages {
     }
 
     fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
-        tool_result(call, |arguments| self.0.render(arguments, &cx.cancel))
+        tool_result(call, |arguments| {
+            let document = self.0.resolve(document_argument(arguments))?;
+            if !document.renders() {
+                bail!(
+                    "{} is a reflowed book; read its text instead",
+                    document.title
+                );
+            }
+            document.render(arguments, &cx.cancel)
+        })
     }
 
     fn describe(&self, arguments: &Value) -> Option<String> {
@@ -325,6 +434,45 @@ impl Tool for RenderPages {
             "render_document_pages",
             &arguments.to_string(),
         ))
+    }
+}
+
+struct ListLinks(DocumentDirectory);
+
+impl Tool for ListLinks {
+    fn definition(&self) -> AgentToolDefinition {
+        let mut links = AgentToolDefinition::new(
+            "list_links",
+            "List the links on a page: web addresses and the pages internal links go to.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "document_id": document_id_property(),
+                    "page": {"type": "integer", "minimum": 1, "description": "1-based; the current page when omitted"}
+                },
+                "additionalProperties": false
+            }),
+        );
+        links.strict = false;
+        links
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Read
+    }
+
+    fn call(&self, call: &AgentToolCall, _cx: &ToolContext) -> AgentToolResult {
+        tool_result(call, |arguments| {
+            let document = self.0.resolve(document_argument(arguments))?;
+            Ok(vec![AgentToolResultPart::Text(document.links(arguments)?)])
+        })
+    }
+
+    fn describe(&self, arguments: &Value) -> Option<String> {
+        Some(match arguments["page"].as_u64() {
+            Some(page) => format!("Listed the links on page {page}"),
+            None => "Listed the links on the page".into(),
+        })
     }
 }
 
@@ -375,13 +523,19 @@ mod tests {
         )
         .unwrap();
         let mut tools = ToolRegistry::new();
-        OpenDocument {
-            path,
-            layout: DocumentLayout::Fixed,
-            page_count: 1,
-            current_page: 0,
-        }
-        .register(&mut tools);
+        let documents = DocumentDirectory::default();
+        documents.update(
+            vec![OpenDocument {
+                id: "doc_1".into(),
+                title: "Doc".into(),
+                path,
+                layout: DocumentLayout::Fixed,
+                page_count: 1,
+                current_page: 0,
+            }],
+            Some("doc_1".into()),
+        );
+        documents.register(&mut tools);
         (tools, directory)
     }
 
@@ -411,8 +565,25 @@ mod tests {
         let names: Vec<String> = tools.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(
             names,
-            ["search_document", "read_document", "render_document_pages"]
+            [
+                "search_document",
+                "read_document",
+                "render_document_pages",
+                "list_links"
+            ]
         );
+        let elsewhere = tools.execute(
+            &call("read_document", json!({"document_id": "doc_9"})),
+            &cancel,
+        );
+        assert!(text(&elsewhere).contains("no open document has the id doc_9"));
+        let named = tools.execute(
+            &call("read_document", json!({"document_id": "doc_1"})),
+            &cancel,
+        );
+        assert!(!named.is_error);
+        let links = tools.execute(&call("list_links", json!({})), &cancel);
+        assert_eq!(text(&links), "Page 1 has no links.");
 
         let found = tools.execute(&call("search_document", json!({"query": "dog"})), &cancel);
         assert!(!found.is_error);

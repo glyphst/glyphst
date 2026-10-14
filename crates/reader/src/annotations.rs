@@ -284,6 +284,50 @@ pub fn selection_record(
     })
 }
 
+/// The record of the `occurrence`-th (from 1) match of `quote` on `page`,
+/// for annotating quoted text; the error explains why there is none.
+pub fn quote_record(
+    text: &DocText,
+    page: usize,
+    quote: &str,
+    occurrence: usize,
+    reflowed: bool,
+) -> Result<SelectionRecord, String> {
+    let page_text = text
+        .get(page)
+        .ok_or("the page's text is still being read; try again in a moment")?;
+    let found = page_text.find(quote, false, false);
+    let range = found.get(occurrence.max(1) - 1).cloned().ok_or_else(|| {
+        format!(
+            "\"{quote}\" is not on page {} ({} matches); read the page and quote it exactly",
+            page + 1,
+            found.len()
+        )
+    })?;
+    let glyphs = range.clone().collect::<Vec<_>>();
+    let rects = library_rects(page, &page_text.rects_of_glyphs(&glyphs));
+    if rects.is_empty() {
+        return Err("the quote has no visible text".into());
+    }
+    let semantic = if reflowed {
+        let start = text.anchor(page, range.start);
+        let end = text.anchor(page, range.end.saturating_sub(1));
+        Some(
+            start
+                .zip(end)
+                .map(|(start, end)| SemanticTextRange { start, end })
+                .ok_or("the book's text is still being read; try again in a moment")?,
+        )
+    } else {
+        None
+    };
+    Ok(SelectionRecord {
+        rects,
+        quote: page_text.text_of(range),
+        semantic,
+    })
+}
+
 pub fn library_rects(page: usize, rects: &[PageRect]) -> Vec<HighlightRect> {
     rects
         .iter()
@@ -325,6 +369,25 @@ mod tests {
             text.insert(index, page(content, 100.0));
         }
         text
+    }
+
+    #[test]
+    fn quotes_become_records_of_their_text() {
+        let text = document(&["The cat sat on the mat. The cat left."]);
+        let record = quote_record(&text, 0, "the  CAT", 2, false).unwrap();
+        assert_eq!(record.quote, "The cat");
+        assert_eq!(record.rects.len(), 1);
+        assert_eq!(record.rects[0].page_idx, 0);
+        assert_eq!(record.rects[0].x0, 24.0 * 6.0, "the second match");
+        assert!(record.semantic.is_none());
+        let missing = quote_record(&text, 0, "dog", 1, false).unwrap_err();
+        assert!(missing.contains("0 matches"), "{missing}");
+        let third = quote_record(&text, 0, "the cat", 3, false).unwrap_err();
+        assert!(third.contains("2 matches"), "{third}");
+        let pending = quote_record(&DocText::new(2), 1, "cat", 1, false).unwrap_err();
+        assert!(pending.contains("still being read"));
+        let reflowed = quote_record(&text, 0, "mat", 1, true).unwrap();
+        assert!(reflowed.semantic.is_some());
     }
 
     #[test]

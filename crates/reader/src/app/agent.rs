@@ -1,0 +1,767 @@
+//! The app's side of the agents' tools: answering [`UiCall`]s between
+//! frames, and the document list the reading tools resolve ids with.
+
+use std::path::PathBuf;
+
+use glyphst_ai::tools::ToolRegistry;
+use glyphst_core::{DocumentId, DocumentLayout, HighlightColor};
+use glyphst_library::{DocumentPosition, LibraryItem, ReadingStatus};
+use serde_json::Value;
+
+use super::ReaderApp;
+use crate::{
+    ai_bridge::{UiCall, UiOutput, UiReply},
+    ai_changes::ChangeAction,
+    ai_tools::{OpenDocument, document_id},
+    annotations,
+    commands::{Category, Command},
+    document_tab::ViewAction,
+};
+
+const MAX_OUTLINE_ENTRIES: usize = 400;
+const MAX_RECENT: usize = 15;
+
+impl ReaderApp {
+    /// The tools of an assistant run: the reading tools over the open
+    /// documents and the app's tools.
+    pub(crate) fn agent_tools(&self) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        self.agent_documents.register(&mut registry);
+        self.agent_bridge.register(&mut registry);
+        registry
+    }
+
+    /// Keeps the reading tools' document list current.
+    pub(crate) fn update_agent_documents(&self) {
+        let documents = self
+            .tabs
+            .iter()
+            .map(|tab| OpenDocument {
+                id: document_id(tab.id),
+                title: tab.title.clone(),
+                path: tab.path.clone(),
+                layout: tab.document_layout,
+                page_count: tab.layout.len(),
+                current_page: tab.current_page(),
+            })
+            .collect();
+        let active = self.active.map(|active| document_id(self.tabs[active].id));
+        self.agent_documents.update(documents, active);
+    }
+
+    /// Answers the tool calls waiting for the app.
+    pub(crate) fn serve_agent_calls(&mut self, ctx: &egui::Context) {
+        while let Ok(call) = self.agent_calls.try_recv() {
+            let reply = self.agent_call(&call, ctx);
+            if let Ok(output) = &reply
+                && !output.edits.is_empty()
+            {
+                self.agent_changes
+                    .record(&call.context, output.edits.clone());
+            }
+            let _ = call.reply.send(reply);
+        }
+        self.update_agent_documents();
+    }
+
+    fn agent_call(&mut self, call: &UiCall, ctx: &egui::Context) -> UiReply {
+        let a = &call.arguments;
+        let text = |text: String| Ok(UiOutput::from(text));
+        match call.tool.as_str() {
+            "get_app_state" => text(self.agent_app_state()),
+            "list_documents" => text(self.agent_list_documents()),
+            "get_document_info" => text(self.agent_document_info(self.agent_tab(a)?)),
+            "get_outline" => text(self.agent_outline(self.agent_tab(a)?)),
+            "get_selection" => text(self.agent_selection()?),
+            "list_annotations" => text(self.agent_annotations(self.agent_tab(a)?)),
+            "search_library" => text(self.agent_search_library(a)?),
+            "list_commands" => text(self.agent_commands()),
+            "run_command" => text(self.agent_run_command(a, ctx)?),
+            "go_to_page" => {
+                let index = self.agent_tab(a)?;
+                let page = self.agent_page(index, a)?;
+                self.activate(Some(index));
+                self.pending_actions.push(ViewAction::GoToPage(page));
+                ctx.request_repaint();
+                text(format!(
+                    "Showing page {} of {}.",
+                    page + 1,
+                    self.tabs[index].title
+                ))
+            }
+            "open_document" => text(self.agent_open(a, ctx)?),
+            "add_highlight" => self.agent_add_highlight(a),
+            "update_annotation" => self.agent_update_annotation(a),
+            "remove_annotation" => self.agent_remove_annotation(a),
+            "add_bookmark" => self.agent_add_bookmark(a),
+            "set_reading_status" | "set_library_note" => self.agent_edit_item(&call.tool, a),
+            other => Err(format!("unknown tool: {other}")),
+        }
+    }
+
+    /// Undoes, redoes, keeps or shows what agents changed.
+    pub(crate) fn apply_change_action(&mut self, action: ChangeAction, ctx: &egui::Context) {
+        let failures: Vec<String> = match action {
+            ChangeAction::Undo(id) => self
+                .agent_changes
+                .undo(id, &mut self.library)
+                .err()
+                .into_iter()
+                .collect(),
+            ChangeAction::Redo(id) => self
+                .agent_changes
+                .redo(id, &mut self.library)
+                .err()
+                .into_iter()
+                .collect(),
+            ChangeAction::UndoAll => self.agent_changes.undo_where(&mut self.library, |_| true),
+            ChangeAction::Keep => {
+                self.agent_changes.keep();
+                Vec::new()
+            }
+            ChangeAction::GoTo(id) => {
+                if let Some(change) = self.agent_changes.get(id)
+                    && let Some(path) = change.edit.path().map(PathBuf::from)
+                {
+                    let page = change.edit.page();
+                    self.open(&path, ctx, None);
+                    if let Some(page) = page {
+                        self.pending_actions.push(ViewAction::GoToPage(page));
+                    }
+                }
+                Vec::new()
+            }
+        };
+        for failure in failures {
+            self.notices.push(format!("Could not undo: {failure}"));
+        }
+        for index in 0..self.tabs.len() {
+            self.reload_annotations(index);
+        }
+    }
+
+    /// The tab a call names with `document_id`, or the active one.
+    fn agent_tab(&self, arguments: &Value) -> Result<usize, String> {
+        match arguments["document_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        {
+            Some(id) => self
+                .tabs
+                .iter()
+                .position(|tab| document_id(tab.id) == id)
+                .ok_or_else(|| format!("no open document has the id {id}; call list_documents")),
+            None => self.active.ok_or_else(|| "no document is open".to_string()),
+        }
+    }
+
+    /// The 0-based page a call names with its 1-based `page`.
+    fn agent_page(&self, index: usize, arguments: &Value) -> Result<usize, String> {
+        let count = self.tabs[index].layout.len();
+        match arguments["page"].as_u64() {
+            Some(page) if (1..=count as u64).contains(&page) => Ok(page as usize - 1),
+            Some(page) => Err(format!("page {page} is not between 1 and {count}")),
+            None => Err("page is required".into()),
+        }
+    }
+
+    fn agent_app_state(&self) -> String {
+        let mut lines = vec![format!(
+            "Glyphst Reader {} on {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS
+        )];
+        if self.tabs.is_empty() {
+            lines.push("No documents are open; the home page shows the library.".into());
+        }
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut line = format!(
+                "- {} \"{}\" ({}, page {} of {})",
+                document_id(tab.id),
+                tab.title,
+                format_of(tab.document_layout),
+                tab.current_page() + 1,
+                tab.layout.len()
+            );
+            if Some(index) == self.active {
+                line.push_str(", active");
+            }
+            if tab.translation.is_some() {
+                line.push_str(", translated");
+            }
+            if tab.selection.is_some() {
+                line.push_str(", has a selection");
+            }
+            lines.push(line);
+        }
+        lines.push(format!("Panes: {}", self.panes.count()));
+        lines.push(format!("Theme: {:?}", self.prefs.theme));
+        lines.push(format!("Keymap: {:?}", self.prefs.keymap));
+        if self.zen {
+            lines.push("Zen mode is on.".into());
+        }
+        if let Some(settings) = self.user_settings.get() {
+            let model = settings.ai.resolved_main();
+            lines.push(format!(
+                "Assistant model: {} ({})",
+                model.model, model.provider_name
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn agent_list_documents(&self) -> String {
+        let mut lines = vec!["Open documents:".to_string()];
+        for tab in &self.tabs {
+            lines.push(format!(
+                "- {} \"{}\" ({}, {} pages)",
+                document_id(tab.id),
+                tab.title,
+                format_of(tab.document_layout),
+                tab.layout.len()
+            ));
+        }
+        if self.tabs.is_empty() {
+            lines.push("- none".into());
+        }
+        let mut history = self.library.history_entries().to_vec();
+        history.sort_by_key(|entry| std::cmp::Reverse(entry.opened));
+        let recent = history
+            .iter()
+            .filter(|entry| !self.tabs.iter().any(|tab| tab.path == entry.path))
+            .take(MAX_RECENT)
+            .map(
+                |entry| match self.library.library_item_for_path(&entry.path) {
+                    Some(item) => format!("- {}", describe_item(item)),
+                    None => format!(
+                        "- \"{}\" (path {})",
+                        file_name(&entry.path),
+                        entry.path.display()
+                    ),
+                },
+            )
+            .collect::<Vec<_>>();
+        if !recent.is_empty() {
+            lines.push("Recently read:".into());
+            lines.extend(recent);
+        }
+        lines.join("\n")
+    }
+
+    fn agent_document_info(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let page = tab.current_page();
+        let mut lines = vec![
+            format!("Id: {}", document_id(tab.id)),
+            format!("Title: {}", tab.title),
+            format!("File: {}", tab.path.display()),
+            format!(
+                "Format: {}, {} pages",
+                format_of(tab.document_layout),
+                tab.layout.len()
+            ),
+            format!("Current page: {}", page + 1),
+        ];
+        if let Some(entry) = tab.current_outline_entry() {
+            lines.push(format!("Current section: {}", tab.outline[entry].title));
+        }
+        for (label, value) in &tab.metadata {
+            lines.push(format!("{label}: {value}"));
+        }
+        if let Some(item) = self.library.library_item_for_path(&tab.path) {
+            lines.push(format!("Library entry: {}", describe_item(item)));
+            if !item.abstract_text.is_empty() {
+                lines.push(format!("Abstract: {}", item.abstract_text));
+            }
+            if !item.work_note.is_empty() {
+                lines.push(format!("Book note: {}", item.work_note));
+            }
+            let tags = self
+                .library
+                .tags_for_item(item.id)
+                .into_iter()
+                .map(|tag| tag.name.clone())
+                .collect::<Vec<_>>();
+            if !tags.is_empty() {
+                lines.push(format!("Tags: {}", tags.join(", ")));
+            }
+        }
+        lines.push(format!(
+            "Annotations: {} highlights and notes, {} bookmarks",
+            tab.annotations.items.len(),
+            tab.annotations.bookmarks.len()
+        ));
+        lines.join("\n")
+    }
+
+    fn agent_outline(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        if tab.outline.is_empty() {
+            return format!("\"{}\" has no table of contents.", tab.title);
+        }
+        let mut lines = tab
+            .outline
+            .iter()
+            .take(MAX_OUTLINE_ENTRIES)
+            .map(|entry| {
+                let page = entry
+                    .page
+                    .map_or_else(String::new, |page| format!(" (page {})", page + 1));
+                format!("{}- {}{page}", "  ".repeat(entry.depth), entry.title)
+            })
+            .collect::<Vec<_>>();
+        if tab.outline.len() > MAX_OUTLINE_ENTRIES {
+            lines.push(format!(
+                "… {} more entries",
+                tab.outline.len() - MAX_OUTLINE_ENTRIES
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn agent_selection(&self) -> Result<String, String> {
+        let tab = &self.tabs[self.active.ok_or("no document is open")?];
+        let selection = tab.selection.as_ref().ok_or("nothing is selected")?;
+        let text = tab
+            .selected_text()
+            .ok_or("the selection's text is still being read")?;
+        let pages = selection.pages();
+        let pages = if pages.start() == pages.end() {
+            format!("page {}", pages.start() + 1)
+        } else {
+            format!("pages {}-{}", pages.start() + 1, pages.end() + 1)
+        };
+        Ok(format!("Selected on {pages} of \"{}\":\n{text}", tab.title))
+    }
+
+    fn agent_annotations(&self, index: usize) -> String {
+        let path = &self.tabs[index].path;
+        let page_of = |rects: &[glyphst_library::HighlightRect]| {
+            rects
+                .first()
+                .map_or_else(String::new, |rect| format!("page {}, ", rect.page_idx + 1))
+        };
+        let mut lines = Vec::new();
+        for highlight in self.library.highlights_for(path) {
+            lines.push(format!(
+                "- h{} highlight ({}{:?}): \"{}\"",
+                highlight.id,
+                page_of(&highlight.rects),
+                highlight.color,
+                highlight.text
+            ));
+        }
+        for note in self.library.notes_for(path) {
+            lines.push(format!(
+                "- n{} note ({}{:?}) on \"{}\": {}",
+                note.id,
+                page_of(&note.rects),
+                note.color,
+                note.text,
+                note.body
+            ));
+        }
+        for bookmark in self.library.bookmarks_for(path) {
+            lines.push(format!(
+                "- b{} bookmark (page {}){}",
+                bookmark.id,
+                bookmark.position.page,
+                bookmark
+                    .title
+                    .map_or_else(String::new, |title| format!(": {title}"))
+            ));
+        }
+        if lines.is_empty() {
+            "The document has no highlights, notes or bookmarks.".into()
+        } else {
+            lines.join("\n")
+        }
+    }
+
+    fn agent_search_library(&self, arguments: &Value) -> Result<String, String> {
+        let query = arguments["query"]
+            .as_str()
+            .map(|query| query.trim().to_lowercase())
+            .filter(|query| !query.is_empty())
+            .ok_or("query must not be empty")?;
+        let limit = arguments["max_results"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
+        let matches = self
+            .library
+            .library_items()
+            .iter()
+            .filter(|item| item.trashed_at.is_none())
+            .filter(|item| {
+                let creators = item
+                    .creators
+                    .iter()
+                    .map(|creator| creator.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                [
+                    item.title.as_str(),
+                    &creators,
+                    &item.abstract_text,
+                    &item.subject,
+                    &item.work_note,
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(&query))
+            })
+            .take(limit)
+            .map(|item| format!("- {}", describe_item(item)))
+            .collect::<Vec<_>>();
+        Ok(if matches.is_empty() {
+            format!("No books match \"{query}\".")
+        } else {
+            matches.join("\n")
+        })
+    }
+
+    fn agent_commands(&self) -> String {
+        Command::ALL
+            .into_iter()
+            .map(|command| {
+                let mut line = format!(
+                    "- {} ({}): {}",
+                    command.id(),
+                    command.category().label(),
+                    command.label()
+                );
+                if !agent_may_run(command) {
+                    line.push_str(" [not for agents]");
+                } else if let Some(reason) = self.command_blocked(command) {
+                    line.push_str(&format!(" [unavailable: {reason}]"));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn agent_run_command(
+        &mut self,
+        arguments: &Value,
+        ctx: &egui::Context,
+    ) -> Result<String, String> {
+        let id = arguments["id"].as_str().unwrap_or_default();
+        let command = Command::from_id(id)
+            .ok_or_else(|| format!("unknown command {id}; call list_commands"))?;
+        if !agent_may_run(command) {
+            return Err(format!("{id} is not available to agents"));
+        }
+        self.run(command, ctx).map_err(str::to_string)?;
+        ctx.request_repaint();
+        Ok(format!("Ran {} ({}).", command.id(), command.label()))
+    }
+
+    fn agent_open(&mut self, arguments: &Value, ctx: &egui::Context) -> Result<String, String> {
+        let path = match (arguments["library_id"].as_str(), arguments["path"].as_str()) {
+            (Some(id), _) => {
+                let id = parse_library_id(id)?;
+                self.library
+                    .primary_attachment(id)
+                    .map(|attachment| attachment.path.clone())
+                    .ok_or_else(|| "the book has no file".to_string())?
+            }
+            (None, Some(path)) => PathBuf::from(path),
+            (None, None) => return Err("give a library_id or a path".into()),
+        };
+        if !path.exists() {
+            return Err(format!("{} does not exist", path.display()));
+        }
+        self.open(&path, ctx, None);
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.path == path)
+            .ok_or_else(|| format!("could not open {}", path.display()))?;
+        Ok(format!(
+            "Opened \"{}\" as {} ({} pages).",
+            tab.title,
+            document_id(tab.id),
+            tab.layout.len()
+        ))
+    }
+
+    fn agent_add_highlight(&mut self, arguments: &Value) -> UiReply {
+        let index = self.agent_tab(arguments)?;
+        let page = self.agent_page(index, arguments)?;
+        let quote = arguments["quote"]
+            .as_str()
+            .map(str::trim)
+            .filter(|quote| !quote.is_empty())
+            .ok_or("quote must not be empty")?;
+        let occurrence = arguments["occurrence"].as_u64().unwrap_or(1).max(1) as usize;
+        let color = parse_color(&arguments["color"])?.unwrap_or(HighlightColor::Yellow);
+        let note = arguments["note"]
+            .as_str()
+            .map(str::trim)
+            .filter(|note| !note.is_empty());
+        let tab = &self.tabs[index];
+        let annotations::SelectionRecord {
+            rects,
+            quote: quoted,
+            semantic,
+        } = annotations::quote_record(&tab.text, page, quote, occurrence, tab.is_reflowed())?;
+        let path = tab.path.clone();
+        let (created, edits) = self.library.record_edits(|library| match (semantic, note) {
+            (Some(range), None) => library
+                .add_reflow_highlight(&path, color, range, rects, quoted.clone(), "")
+                .map(|highlight| format!("h{}", highlight.id)),
+            (None, None) => library
+                .add_highlight(&path, color, rects, quoted.clone(), "")
+                .map(|highlight| format!("h{}", highlight.id)),
+            (Some(range), Some(note)) => library
+                .add_reflow_note(&path, color, range, rects, quoted.clone(), note)
+                .map(|note| format!("n{}", note.id)),
+            (None, Some(note)) => library
+                .add_note(&path, color, rects, quoted.clone(), note)
+                .map(|note| format!("n{}", note.id)),
+        });
+        let id = created.map_err(|error| format!("could not save: {error:#}"))?;
+        self.reload_annotations(index);
+        Ok(UiOutput {
+            text: format!("Added {id} on page {}: \"{quoted}\".", page + 1),
+            edits,
+        })
+    }
+
+    fn agent_update_annotation(&mut self, arguments: &Value) -> UiReply {
+        let index = self.agent_tab(arguments)?;
+        let (kind, id) = parse_annotation_id(arguments)?;
+        let color = parse_color(&arguments["color"])?;
+        let body = arguments["note"].as_str();
+        let path = self.tabs[index].path.clone();
+        let (result, edits) = self.library.record_edits(|library| match kind {
+            'h' => {
+                let color = color.ok_or_else(|| anyhow::anyhow!("give a color for a highlight"))?;
+                library.set_highlight_color(id, color)
+            }
+            'n' => {
+                let note = library
+                    .notes_for(&path)
+                    .into_iter()
+                    .find(|note| note.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("the document has no note n{id}"))?;
+                library.update_note(
+                    id,
+                    body.map_or(note.body, str::to_string),
+                    color.unwrap_or(note.color),
+                )
+            }
+            _ => Err(anyhow::anyhow!(
+                "bookmarks cannot be changed; remove and add them"
+            )),
+        });
+        self.agent_edit_result(index, result, edits, format!("Changed {kind}{id}."))
+    }
+
+    fn agent_remove_annotation(&mut self, arguments: &Value) -> UiReply {
+        let index = self.agent_tab(arguments)?;
+        let (kind, id) = parse_annotation_id(arguments)?;
+        let (result, edits) = self.library.record_edits(|library| match kind {
+            'h' => library.remove_highlight(id),
+            'n' => library.remove_note(id),
+            _ => library.remove_bookmark(id),
+        });
+        self.agent_edit_result(index, result, edits, format!("Removed {kind}{id}."))
+    }
+
+    fn agent_add_bookmark(&mut self, arguments: &Value) -> UiReply {
+        let index = self.agent_tab(arguments)?;
+        let page = self.agent_page(index, arguments)?;
+        let tab = &self.tabs[index];
+        let position =
+            DocumentPosition::fixed(0.0, tab.layout.offsets[page][1] as f32, 1.0, page + 1);
+        let title = arguments["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
+        let path = tab.path.clone();
+        let (result, edits) = self
+            .library
+            .record_edits(|library| library.add_bookmark(&path, title, position));
+        let id = result.map_err(|error| format!("could not save: {error:#}"))?;
+        self.reload_annotations(index);
+        Ok(UiOutput {
+            text: format!("Added bookmark b{id} on page {}.", page + 1),
+            edits,
+        })
+    }
+
+    fn agent_edit_item(&mut self, tool: &str, arguments: &Value) -> UiReply {
+        let id = match arguments["library_id"].as_str() {
+            Some(id) => parse_library_id(id)?,
+            None => {
+                let index = self.agent_tab(arguments)?;
+                self.library
+                    .library_item_for_path(&self.tabs[index].path)
+                    .map(|item| item.id)
+                    .ok_or("the document is not in the library")?
+            }
+        };
+        let (result, edits) = if tool == "set_reading_status" {
+            let status = match arguments["status"].as_str() {
+                Some("to_read") => ReadingStatus::ToRead,
+                Some("reading") => ReadingStatus::Reading,
+                Some("read") => ReadingStatus::Read,
+                _ => return Err("status must be to_read, reading or read".into()),
+            };
+            self.library
+                .record_edits(|library| library.set_library_item_status(id, status))
+        } else {
+            let note = arguments["note"].as_str().unwrap_or_default().to_string();
+            self.library
+                .record_edits(|library| library.set_library_item_note(id, note))
+        };
+        result.map_err(|error| format!("could not save: {error:#}"))?;
+        let title = self
+            .library
+            .library_item(id)
+            .map(|item| item.title.clone())
+            .unwrap_or_default();
+        Ok(UiOutput {
+            text: format!("Updated \"{title}\"."),
+            edits,
+        })
+    }
+
+    fn agent_edit_result(
+        &mut self,
+        index: usize,
+        result: anyhow::Result<bool>,
+        edits: Vec<glyphst_library::LibraryEdit>,
+        done: String,
+    ) -> UiReply {
+        match result {
+            Ok(true) => {
+                self.reload_annotations(index);
+                Ok(UiOutput { text: done, edits })
+            }
+            Ok(false) => Err("no annotation has that id; call list_annotations".into()),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    }
+}
+
+/// Commands agents may run: moving around and changing the view, never
+/// opening dialogs, closing documents or translating (which costs).
+fn agent_may_run(command: Command) -> bool {
+    match command.category() {
+        Category::Navigation => true,
+        Category::View => !matches!(command, Command::ClosePane | Command::Reload),
+        Category::Text => matches!(
+            command,
+            Command::Find | Command::FindNext | Command::FindPrevious
+        ),
+        Category::App => matches!(
+            command,
+            Command::ThemeSystem
+                | Command::ThemeLight
+                | Command::ThemeDark
+                | Command::ToggleSidebar
+                | Command::NextTab
+                | Command::PreviousTab
+        ),
+        Category::Translation => command == Command::ShowTranslated,
+        Category::Assistant => false,
+    }
+}
+
+fn format_of(layout: DocumentLayout) -> &'static str {
+    match layout {
+        DocumentLayout::Fixed => "PDF",
+        DocumentLayout::Reflow(_) => "EPUB",
+    }
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn describe_item(item: &LibraryItem) -> String {
+    let mut text = format!("lib_{} \"{}\"", item.id.0, item.title);
+    let creators = item
+        .creators
+        .iter()
+        .map(|creator| creator.name.as_str())
+        .collect::<Vec<_>>();
+    if !creators.is_empty() {
+        text.push_str(&format!(" by {}", creators.join(", ")));
+    }
+    if let Some(year) = item.year {
+        text.push_str(&format!(" ({year})"));
+    }
+    text.push_str(match item.status {
+        ReadingStatus::ToRead => ", to read",
+        ReadingStatus::Reading => ", reading",
+        ReadingStatus::Read => ", read",
+    });
+    text
+}
+
+fn parse_library_id(id: &str) -> Result<DocumentId, String> {
+    id.trim_start_matches("lib_")
+        .parse()
+        .map(DocumentId)
+        .map_err(|_| format!("{id} is not a library id like lib_12"))
+}
+
+fn parse_annotation_id(arguments: &Value) -> Result<(char, u64), String> {
+    let id = arguments["annotation_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim();
+    let mut chars = id.chars();
+    let kind = chars.next().filter(|kind| matches!(kind, 'h' | 'n' | 'b'));
+    match (kind, chars.as_str().parse()) {
+        (Some(kind), Ok(number)) => Ok((kind, number)),
+        _ => Err(format!(
+            "{id} is not an annotation id like h3, n5 or b2; call list_annotations"
+        )),
+    }
+}
+
+fn parse_color(value: &Value) -> Result<Option<HighlightColor>, String> {
+    let Some(name) = value.as_str() else {
+        return Ok(None);
+    };
+    Ok(Some(match name {
+        "yellow" => HighlightColor::Yellow,
+        "green" => HighlightColor::Green,
+        "blue" => HighlightColor::Blue,
+        "pink" => HighlightColor::Pink,
+        "orange" => HighlightColor::Orange,
+        other => return Err(format!("{other} is not a highlight color")),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn tool_arguments_parse_and_agents_run_only_safe_commands() {
+        assert_eq!(
+            parse_annotation_id(&json!({"annotation_id": "n12"})),
+            Ok(('n', 12))
+        );
+        assert!(parse_annotation_id(&json!({"annotation_id": "x1"})).is_err());
+        assert_eq!(parse_library_id("lib_7"), Ok(DocumentId(7)));
+        assert!(parse_library_id("doc_7").is_err());
+        assert_eq!(parse_color(&json!("pink")), Ok(Some(HighlightColor::Pink)));
+        assert_eq!(parse_color(&Value::Null), Ok(None));
+        assert!(parse_color(&json!("red")).is_err());
+        assert!(agent_may_run(Command::NextPage));
+        assert!(agent_may_run(Command::ZoomIn));
+        assert!(!agent_may_run(Command::Open));
+        assert!(!agent_may_run(Command::CloseTab));
+        assert!(!agent_may_run(Command::TranslateDocument));
+        assert!(!agent_may_run(Command::QuickAsk));
+    }
+}

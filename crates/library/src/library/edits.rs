@@ -35,6 +35,9 @@ impl LibraryStore {
         self.apply_history_edit(path, DocumentEditDirection::Redo)
     }
     pub(super) fn record_document_edit(&mut self, edit: DocumentEdit) {
+        if let Some(recorder) = &mut self.edit_recorder {
+            recorder.push(LibraryEdit::document(edit.clone()));
+        }
         let path = normalize_path(edit.path());
         let is_bookmark = edit.is_bookmark();
         let sequence = self.next_document_edit_sequence();
@@ -115,7 +118,7 @@ impl LibraryStore {
         Ok(true)
     }
 
-    fn apply_document_edit(
+    pub(super) fn apply_document_edit(
         &mut self,
         edit: &DocumentEdit,
         direction: DocumentEditDirection,

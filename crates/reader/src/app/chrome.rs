@@ -615,9 +615,14 @@ impl ReaderApp {
                         let inner = rect.size() - vec2(26.0, 26.0);
                         ui.set_min_size(inner);
                         ui.set_max_size(inner);
-                        request =
-                            self.assistant
-                                .ui(ui, has_page, has_selection, &models, model.clone());
+                        request = self.assistant.ui(
+                            ui,
+                            has_page,
+                            has_selection,
+                            &models,
+                            model.clone(),
+                            &mut self.agent_changes,
+                        );
                     });
                     // Dragging the left edge left widens it.
                     resize = -resize_handle(
@@ -641,6 +646,7 @@ impl ReaderApp {
                     self.user_settings
                         .edit(|settings| settings.ai.main_model = Some(model));
                 }
+                Some(PanelAction::Change(action)) => self.apply_change_action(action, ctx),
                 None => {}
             }
         }

@@ -1451,13 +1451,41 @@ impl LibraryStore {
         id: DocumentId,
         update: impl FnOnce(&mut LibraryItem),
     ) -> Result<()> {
+        let changed = self.persist_catalog_change(|library| {
+            let item = library
+                .library_items
+                .iter_mut()
+                .find(|item| item.id == id)
+                .ok_or_else(|| anyhow!("library item {} does not exist", id.0))?;
+            let before = item.clone();
+            update(item);
+            item.updated = current_timestamp();
+            Ok((before, item.clone()))
+        })?;
+        if let Some(recorder) = &mut self.edit_recorder {
+            recorder.push(LibraryEdit::item(changed.0, changed.1));
+        }
+        Ok(())
+    }
+
+    /// Sets an item's status, note and favorite without recording an edit
+    /// (reverting a recorded one).
+    pub(super) fn persist_item_fields(
+        &mut self,
+        id: DocumentId,
+        status: ReadingStatus,
+        note: String,
+        favorite: bool,
+    ) -> Result<()> {
         self.persist_catalog_change(|library| {
             let item = library
                 .library_items
                 .iter_mut()
                 .find(|item| item.id == id)
                 .ok_or_else(|| anyhow!("library item {} does not exist", id.0))?;
-            update(item);
+            item.status = status;
+            item.work_note = note;
+            item.favorite = favorite;
             item.updated = current_timestamp();
             Ok(())
         })

@@ -874,6 +874,8 @@ pub struct DocumentInfo {
     pub bounds: Vec<PageRect>,
     pub outline: Vec<OutlineEntry>,
     pub title: Option<String>,
+    /// The document's metadata (author, subject, …) that is set.
+    pub metadata: Vec<(&'static str, String)>,
     /// The layout the document opened with: reflowable documents laid
     /// out as asked, others fixed.
     pub layout: DocumentLayout,
@@ -901,10 +903,27 @@ impl DocumentInfo {
             .ok()
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty());
+        let metadata = [
+            ("Author", mupdf::MetadataName::Author),
+            ("Subject", mupdf::MetadataName::Subject),
+            ("Keywords", mupdf::MetadataName::Keywords),
+            ("Creator", mupdf::MetadataName::Creator),
+            ("Producer", mupdf::MetadataName::Producer),
+            ("Created", mupdf::MetadataName::CreationDate),
+            ("Modified", mupdf::MetadataName::ModDate),
+            ("Format", mupdf::MetadataName::Format),
+        ]
+        .into_iter()
+        .filter_map(|(label, name)| {
+            let value = document.metadata(name).ok()?.trim().to_string();
+            (!value.is_empty()).then_some((label, value))
+        })
+        .collect();
         Ok(Self {
             bounds,
             outline,
             title,
+            metadata,
             layout,
         })
     }
