@@ -60,6 +60,14 @@ impl AiThinkingLevel {
         [Self::Off, Self::Low, Self::Medium, Self::High, Self::XHigh];
     const ANTHROPIC_THINKING: [Self; 5] =
         [Self::Off, Self::Low, Self::Medium, Self::High, Self::Max];
+    const ANTHROPIC_EFFORT: [Self; 6] = [
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -98,6 +106,11 @@ impl AiThinkingLevel {
                 &Self::CHATGPT_56_REASONING
             }
             AiApiStyle::OpenAiResponses => &Self::CHATGPT_55_REASONING,
+            AiApiStyle::Anthropic
+                if claude_version(model).is_some_and(|version| version >= (4, 7)) =>
+            {
+                &Self::ANTHROPIC_EFFORT
+            }
             AiApiStyle::Anthropic if Self::anthropic_supports_native_thinking(model) => {
                 &Self::ANTHROPIC_THINKING
             }
@@ -155,12 +168,7 @@ impl AiThinkingLevel {
     }
 
     fn anthropic_supports_native_thinking(model: &str) -> bool {
-        let model = Self::model_family(model);
-        model.contains("claude-3-7")
-            || model.contains("claude-4")
-            || model.contains("opus-4")
-            || model.contains("sonnet-4")
-            || model.contains("haiku-4")
+        claude_version(model).is_some_and(|version| version >= (3, 7))
     }
 
     fn model_family(model: &str) -> String {
@@ -182,6 +190,102 @@ impl AiThinkingLevel {
             "xhigh" | "x-high" | "x_high" => Some(Self::XHigh),
             "max" | "maximum" => Some(Self::Max),
             _ => None,
+        }
+    }
+}
+
+/// How a Claude model takes thinking settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicThinking {
+    /// `thinking.budget_tokens` (before Claude 4.6).
+    Budget,
+    /// `thinking.type = "adaptive"` with `output_config.effort` (Claude 4.6
+    /// and later, which reject a budget).
+    Adaptive,
+}
+
+impl AnthropicThinking {
+    pub fn for_model(model: &str) -> Option<Self> {
+        let version = claude_version(model)?;
+        if version >= (4, 6) {
+            Some(Self::Adaptive)
+        } else if version >= (3, 7) {
+            Some(Self::Budget)
+        } else {
+            None
+        }
+    }
+}
+
+/// The version of a Claude model id, such as (4, 6) for `claude-opus-4-6`,
+/// `anthropic/claude-sonnet-4.6` or `claude-3-7-sonnet-latest`. Fable and
+/// Mythos count as 5.
+fn claude_version(model: &str) -> Option<(u32, u32)> {
+    let family = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let family = family.strip_prefix("anthropic.").unwrap_or(&family);
+    let rest = family.split("claude-").nth(1)?;
+    let parts = rest.split(['-', '.', '@']).collect::<Vec<_>>();
+    let number = |part: Option<&&str>| {
+        part.filter(|part| (1..=2).contains(&part.len()))
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    match parts.first().copied()? {
+        "fable" | "mythos" => Some((5, number(parts.get(2)).unwrap_or(0))),
+        "opus" | "sonnet" | "haiku" | "instant" => {
+            Some((number(parts.get(1))?, number(parts.get(2)).unwrap_or(0)))
+        }
+        _ => Some((number(parts.first())?, number(parts.get(1)).unwrap_or(0))),
+    }
+}
+
+/// How much a model reads and writes, in tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelLimits {
+    pub context_window: u64,
+    pub max_output: u64,
+}
+
+impl ModelLimits {
+    /// Known limits by model family; unknown models get a conservative guess.
+    pub fn for_model(model: &str) -> Self {
+        let limits = |context_window, max_output| Self {
+            context_window,
+            max_output,
+        };
+        let family = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        if let Some(version) = claude_version(&family) {
+            let haiku = family.contains("haiku");
+            return match version {
+                version if version >= (4, 6) => limits(
+                    if haiku && version < (5, 0) {
+                        200_000
+                    } else {
+                        1_000_000
+                    },
+                    128_000,
+                ),
+                (4, minor) if family.contains("opus") && minor < 5 => limits(200_000, 32_000),
+                version if version >= (3, 7) => limits(200_000, 64_000),
+                _ => limits(200_000, 8_192),
+            };
+        }
+        if family.starts_with("gpt-5") {
+            limits(272_000, 128_000)
+        } else if family.starts_with("gpt-4.1") {
+            limits(1_000_000, 32_768)
+        } else if family.starts_with("o3") || family.starts_with("o4") {
+            limits(200_000, 100_000)
+        } else {
+            // DeepSeek and unknown models.
+            limits(128_000, 8_192)
         }
     }
 }
@@ -337,7 +441,7 @@ impl AiProvider {
         match self {
             Self::OpenAi => "gpt-4o",
             Self::ChatGptSubscription => "gpt-5.5",
-            Self::Anthropic => "claude-3-5-sonnet-latest",
+            Self::Anthropic => "claude-opus-5-5",
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o",
             Self::Fireworks => "accounts/fireworks/models/llama-v3p1-70b-instruct",
@@ -349,7 +453,7 @@ impl AiProvider {
         match self {
             Self::OpenAi => "gpt-4o-mini",
             Self::ChatGptSubscription => "gpt-5.6-luna",
-            Self::Anthropic => "claude-3-5-haiku-latest",
+            Self::Anthropic => "claude-haiku-5-5",
             Self::DeepSeek => "deepseek-chat",
             Self::OpenRouter => "openai/gpt-4o-mini",
             Self::Fireworks => "accounts/fireworks/models/llama-v3p1-8b-instruct",
@@ -401,9 +505,10 @@ impl AiProvider {
                 ("gpt-5.4-mini", "GPT-5.4 Mini", "ChatGPT"),
             ],
             Self::Anthropic => &[
-                ("claude-3-5-sonnet-latest", "Claude 3.5 Sonnet", "Claude"),
-                ("claude-3-5-haiku-latest", "Claude 3.5 Haiku", "Claude"),
-                ("claude-sonnet-4-5-latest", "Claude Sonnet 4.5", "Claude"),
+                ("claude-opus-5-5", "Claude Opus 5.5", "Claude"),
+                ("claude-sonnet-5-5", "Claude Sonnet 5.5", "Claude"),
+                ("claude-haiku-5-5", "Claude Haiku 5.5", "Claude"),
+                ("claude-fable-5-1", "Claude Fable 5.1", "Claude"),
             ],
             Self::DeepSeek => &[
                 ("deepseek-chat", "DeepSeek Chat", "DeepSeek"),
@@ -641,10 +746,7 @@ fn automatic_model_capabilities(provider: AiProvider, model: &str) -> AutomaticM
         || family.starts_with("gpt-5")
         || family.starts_with("o3")
         || family.starts_with("o4");
-    let claude_multimodal = family.starts_with("claude-3")
-        || family.starts_with("claude-sonnet-4")
-        || family.starts_with("claude-opus-4")
-        || family.starts_with("claude-haiku-4");
+    let claude_multimodal = claude_version(&family).is_some();
 
     match provider {
         AiProvider::ChatGptSubscription => AutomaticModelCapabilities::supported(),
@@ -1364,5 +1466,66 @@ impl AiSettings {
             base_url_overridden: false,
             thinking_level: AiThinkingLevel::Off,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_claude_versions_from_model_ids() {
+        assert_eq!(claude_version("claude-opus-5-5"), Some((5, 5)));
+        assert_eq!(claude_version("claude-sonnet-4-5-20250929"), Some((4, 5)));
+        assert_eq!(claude_version("anthropic/claude-sonnet-4.6"), Some((4, 6)));
+        assert_eq!(claude_version("claude-3-7-sonnet-latest"), Some((3, 7)));
+        assert_eq!(claude_version("claude-3-opus-20240229"), Some((3, 0)));
+        assert_eq!(claude_version("claude-fable-5-1"), Some((5, 1)));
+        assert_eq!(claude_version("claude-opus-4-20250514"), Some((4, 0)));
+        assert_eq!(claude_version("gpt-5.5"), None);
+    }
+
+    #[test]
+    fn current_claude_models_take_adaptive_thinking() {
+        assert_eq!(
+            AnthropicThinking::for_model("claude-opus-5-5"),
+            Some(AnthropicThinking::Adaptive)
+        );
+        assert_eq!(
+            AnthropicThinking::for_model("claude-haiku-4-5"),
+            Some(AnthropicThinking::Budget)
+        );
+        assert_eq!(
+            AnthropicThinking::for_model("claude-3-5-haiku-latest"),
+            None
+        );
+        assert_eq!(
+            AiThinkingLevel::XHigh.clamp_for_style(AiApiStyle::Anthropic, "claude-opus-5-5"),
+            AiThinkingLevel::XHigh
+        );
+        assert_eq!(
+            AiThinkingLevel::XHigh.clamp_for_style(AiApiStyle::Anthropic, "claude-opus-4-6"),
+            AiThinkingLevel::Max
+        );
+    }
+
+    #[test]
+    fn knows_model_limits() {
+        assert_eq!(
+            ModelLimits::for_model("claude-sonnet-5-5"),
+            ModelLimits {
+                context_window: 1_000_000,
+                max_output: 128_000
+            }
+        );
+        assert_eq!(
+            ModelLimits::for_model("claude-haiku-4-5").context_window,
+            200_000
+        );
+        assert_eq!(
+            ModelLimits::for_model("claude-3-5-haiku-latest").max_output,
+            8_192
+        );
+        assert_eq!(ModelLimits::for_model("gpt-5.5").context_window, 272_000);
     }
 }

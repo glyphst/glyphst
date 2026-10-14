@@ -62,8 +62,9 @@ mod user;
 
 pub use ai::{
     AiApiStyle, AiCapabilityOverride, AiCapabilitySupport, AiModel, AiModelCapabilities,
-    AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, ModelRef, PageImageQuality,
-    PageTextFormat, QuickAskPosition, QuickAskSettings, ResolvedAiConfig,
+    AiProvider, AiProviderConfig, AiSettings, AiThinkingLevel, AnthropicThinking, ModelLimits,
+    ModelRef, PageImageQuality, PageTextFormat, QuickAskPosition, QuickAskSettings,
+    ResolvedAiConfig,
 };
 pub use general::{
     AppLanguage, BehaviorSettings, CopyFormat, DocumentProgressDisplay, DocumentThemeSettings,

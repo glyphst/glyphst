@@ -1,14 +1,17 @@
 //! Document tools for the assistant: search the document, read pages, and
-//! render pages as images. The names and schemas are the GPUI Reader's
-//! (`document-ui/src/document_view/ai_context.rs`), so models see the same
-//! tools in both readers; the work is done here with MuPDF and `pdf::text`.
+//! render pages as images, over MuPDF and `pdf::text`. Each tool opens the
+//! document itself, so tools never wait for the UI and reads run in
+//! parallel.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use glyphst_ai::agent::{
-    AgentCancellationToken, AgentImage, AgentToolCall, AgentToolDefinition, AgentToolExecutor,
-    AgentToolResult, AgentToolResultPart,
+use glyphst_ai::{
+    agent::{
+        AgentCancellationToken, AgentImage, AgentToolCall, AgentToolDefinition, AgentToolResult,
+        AgentToolResultPart,
+    },
+    tools::{Tool, ToolContext, ToolEffect, ToolRegistry},
 };
 use glyphst_core::DocumentLayout;
 use glyphst_pdf::{DocumentSnapshot, text::PageText};
@@ -24,7 +27,7 @@ const RENDER_PIXELS: f32 = 1600.0;
 const SNIPPET_CHARS: usize = 60;
 
 /// The open document, as the assistant's tools see it.
-pub struct ReaderAgentTools {
+pub struct OpenDocument {
     pub path: PathBuf,
     pub layout: DocumentLayout,
     pub page_count: usize,
@@ -32,7 +35,17 @@ pub struct ReaderAgentTools {
     pub current_page: usize,
 }
 
-impl ReaderAgentTools {
+impl OpenDocument {
+    /// Adds the tools for this document to a run's tools.
+    pub fn register(self, registry: &mut ToolRegistry) {
+        let document = Arc::new(self);
+        registry.register(SearchDocument(document.clone()));
+        registry.register(ReadDocument(document.clone()));
+        if document.renders() {
+            registry.register(RenderPages(document));
+        }
+    }
+
     fn document(&self) -> Result<mupdf::Document> {
         Ok(DocumentSnapshot::read(&self.path)?
             .open_with_layout(self.layout)?
@@ -178,8 +191,25 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
-impl AgentToolExecutor for ReaderAgentTools {
-    fn definitions(&self) -> Vec<AgentToolDefinition> {
+fn tool_result(
+    call: &AgentToolCall,
+    run: impl FnOnce(&Value) -> Result<Vec<AgentToolResultPart>>,
+) -> AgentToolResult {
+    match call.arguments_json().and_then(|arguments| run(&arguments)) {
+        Ok(content) => AgentToolResult {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            content,
+            is_error: false,
+        },
+        Err(error) => AgentToolResult::error(&call.id, &call.name, format!("{error:#}")),
+    }
+}
+
+struct SearchDocument(Arc<OpenDocument>);
+
+impl Tool for SearchDocument {
+    fn definition(&self) -> AgentToolDefinition {
         let mut search = AgentToolDefinition::new(
             "search_document",
             "Search the open document for text. Returns concise matches with page numbers.",
@@ -194,6 +224,30 @@ impl AgentToolExecutor for ReaderAgentTools {
             }),
         );
         search.strict = false;
+        search
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Read
+    }
+
+    fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
+        tool_result(call, |arguments| {
+            Ok(vec![AgentToolResultPart::Text(
+                self.0.search(arguments, &cx.cancel)?,
+            )])
+        })
+    }
+
+    fn describe(&self, arguments: &Value) -> Option<String> {
+        Some(describe_call("search_document", &arguments.to_string()))
+    }
+}
+
+struct ReadDocument(Arc<OpenDocument>);
+
+impl Tool for ReadDocument {
+    fn definition(&self) -> AgentToolDefinition {
         let mut read = AgentToolDefinition::new(
             "read_document",
             "Read text from the open document by 1-based pages. If no pages are given, reads the current page.",
@@ -213,54 +267,64 @@ impl AgentToolExecutor for ReaderAgentTools {
             }),
         );
         read.strict = false;
-        let mut definitions = vec![search, read];
-        if self.renders() {
-            let mut render = AgentToolDefinition::new(
-                "render_document_pages",
-                "Render one or more 1-based PDF pages as images.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "pages": {
-                            "type": "array",
-                            "items": {"type": "integer", "minimum": 1},
-                            "minItems": 1
-                        }
-                    },
-                    "required": ["pages"],
-                    "additionalProperties": false
-                }),
-            );
-            render.strict = false;
-            definitions.push(render);
-        }
-        definitions
+        read
     }
 
-    fn execute(&self, call: &AgentToolCall, cancel: &AgentCancellationToken) -> AgentToolResult {
-        let result = call
-            .arguments_json()
-            .and_then(|arguments| match call.name.as_str() {
-                "search_document" => self
-                    .search(&arguments, cancel)
-                    .map(|text| vec![AgentToolResultPart::Text(text)]),
-                "read_document" => self
-                    .read(&arguments, cancel)
-                    .map(|text| vec![AgentToolResultPart::Text(text)]),
-                "render_document_pages" if self.renders() => self.render(&arguments, cancel),
-                _ => Err(anyhow!("unknown document tool: {}", call.name)),
-            });
-        match result {
-            Ok(content) => AgentToolResult {
-                call_id: call.id.clone(),
-                tool_name: call.name.clone(),
-                content,
-                is_error: false,
-            },
-            Err(error) => {
-                AgentToolResult::error(call.id.clone(), call.name.clone(), format!("{error:#}"))
-            }
-        }
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Read
+    }
+
+    fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
+        tool_result(call, |arguments| {
+            Ok(vec![AgentToolResultPart::Text(
+                self.0.read(arguments, &cx.cancel)?,
+            )])
+        })
+    }
+
+    fn describe(&self, arguments: &Value) -> Option<String> {
+        Some(describe_call("read_document", &arguments.to_string()))
+    }
+}
+
+struct RenderPages(Arc<OpenDocument>);
+
+impl Tool for RenderPages {
+    fn definition(&self) -> AgentToolDefinition {
+        let mut render = AgentToolDefinition::new(
+            "render_document_pages",
+            "Render one or more 1-based PDF pages as images. Use it when layout, figures, tables, or equations matter.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pages": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "minItems": 1,
+                        "maxItems": MAX_RENDER_PAGES
+                    }
+                },
+                "required": ["pages"],
+                "additionalProperties": false
+            }),
+        );
+        render.strict = false;
+        render
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Read
+    }
+
+    fn call(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {
+        tool_result(call, |arguments| self.0.render(arguments, &cx.cancel))
+    }
+
+    fn describe(&self, arguments: &Value) -> Option<String> {
+        Some(describe_call(
+            "render_document_pages",
+            &arguments.to_string(),
+        ))
     }
 }
 
@@ -300,7 +364,7 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
 mod tests {
     use super::*;
 
-    fn tools() -> (ReaderAgentTools, PathBuf) {
+    fn tools() -> (ToolRegistry, PathBuf) {
         let directory =
             std::env::temp_dir().join(format!("glyphst-reader-ai-tools-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -310,12 +374,14 @@ mod tests {
             glyphst_pdf::test_pdf::text_pdf(&["The cat sat on the mat.", "A dog barked."]),
         )
         .unwrap();
-        let tools = ReaderAgentTools {
+        let mut tools = ToolRegistry::new();
+        OpenDocument {
             path,
             layout: DocumentLayout::Fixed,
             page_count: 1,
             current_page: 0,
-        };
+        }
+        .register(&mut tools);
         (tools, directory)
     }
 
@@ -341,7 +407,7 @@ mod tests {
     #[test]
     fn tools_search_read_and_render_the_document() {
         let (tools, directory) = tools();
-        let cancel = AgentCancellationToken::default();
+        let cancel = ToolContext::default();
         let names: Vec<String> = tools.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(
             names,

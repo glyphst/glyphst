@@ -1,5 +1,4 @@
 use super::*;
-use crate::settings::AiApiStyle;
 
 #[test]
 fn parses_canonical_mentions_with_one_based_pages() {
@@ -145,30 +144,6 @@ fn extracts_generated_title_from_first_response_line() {
         Some("Fourier Transform Basics".to_string())
     );
     assert_eq!(title_from_response("   \n"), None);
-}
-
-#[test]
-fn unsupported_thinking_uses_system_prompt_instruction() {
-    let prompt = system_prompt(&DocumentContext::default(), AiThinkingLevel::Low, false);
-    assert!(prompt.contains("Use low internal reasoning effort"));
-    assert!(prompt.contains("Do not reveal hidden chain-of-thought"));
-
-    let native_prompt = system_prompt(&DocumentContext::default(), AiThinkingLevel::Low, true);
-    assert!(!native_prompt.contains("Use low internal reasoning effort"));
-}
-
-#[test]
-fn openai_compatible_reasoning_avoids_system_prompt_fallback() {
-    let native_thinking =
-        AiThinkingLevel::Medium.supports_native_for_style(AiApiStyle::OpenAi, "openai/gpt-5.5");
-    let prompt = system_prompt(
-        &DocumentContext::default(),
-        AiThinkingLevel::Medium,
-        native_thinking,
-    );
-
-    assert!(native_thinking);
-    assert!(!prompt.contains("internal reasoning effort"));
 }
 
 #[test]
@@ -535,21 +510,21 @@ fn persisted_projection_accepts_rehydrated_page_context() {
 }
 
 #[test]
-fn document_aware_system_prompt_includes_document_details() {
-    let document = DocumentContext {
-        file_name: Some("paper.pdf".to_string()),
-        format: Some("PDF".to_string()),
-        location_label: None,
-        page_count: 42,
-        current_page: 9,
-        has_selection: true,
-    };
-    let prompt = system_prompt(&document, AiThinkingLevel::Off, false);
-
-    assert!(prompt.contains("paper.pdf"));
-    assert!(prompt.contains("Pages: 42"));
-    assert!(prompt.contains("Current page: 9"));
-    assert!(prompt.contains("Selected text: available"));
-    assert!(prompt.contains("@document-image"));
-    assert!(!prompt.contains("@document text"));
+fn reader_state_ends_the_request_text() {
+    let message = ChatMessage::user(
+        "What is this?".to_string(),
+        "What is this?".to_string(),
+        vec![ContextBlock::new(
+            MentionKind::Selection,
+            Some(2),
+            "selected".to_string(),
+        )],
+        Vec::new(),
+    )
+    .with_reader_state("<reader_state>\nCurrent page: 2\n</reader_state>".to_string());
+    let request = message.request_text();
+    assert!(request.starts_with("What is this?"));
+    assert!(request.ends_with("<reader_state>\nCurrent page: 2\n</reader_state>"));
+    assert!(request.contains("<selection page=\"2\">"), "{request}");
+    assert_eq!(message.display_text(), "What is this?");
 }

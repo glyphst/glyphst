@@ -3,7 +3,6 @@ use std::{collections::HashSet, ops::Range, path::PathBuf, sync::Arc};
 use glyphst_core::{RegionImageReference, SelectedPagesReference};
 
 use crate::agent::{AgentContentPart, AgentImage, AgentMessage, AgentRole};
-use crate::settings::AiThinkingLevel;
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
 const CONTEXT_ENVELOPE_HEADER: &str = "Attached document context from @ mentions:\n<context>\nThe following document context was attached by the user. It is current; do not ask to re-read it.\n";
@@ -188,6 +187,8 @@ pub struct ChatMessage {
     request_content: Option<String>,
     agent_trace: Vec<AgentMessage>,
     document_scope: Option<DocumentContextScope>,
+    /// The `<reader_state>` block sent at the end of the message.
+    reader_state: Option<String>,
 }
 
 impl ChatMessage {
@@ -210,6 +211,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            reader_state: None,
         }
     }
 
@@ -224,6 +226,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            reader_state: None,
         }
     }
 
@@ -238,6 +241,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            reader_state: None,
         }
     }
 
@@ -255,6 +259,7 @@ impl ChatMessage {
             request_content,
             agent_trace: Vec::new(),
             document_scope: None,
+            reader_state: None,
         }
     }
 
@@ -315,7 +320,21 @@ impl ChatMessage {
             text.pop();
         }
 
+        if let Some(state) = &self.reader_state {
+            if !text.trim().is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(state);
+        }
+
         text
+    }
+
+    /// Ends the request text with what the reader showed (see
+    /// [`crate::prompt::ReaderState`]).
+    pub fn with_reader_state(mut self, block: String) -> Self {
+        self.reader_state = Some(block);
+        self
     }
 
     pub fn editable_contexts(&self) -> Vec<ContextBlock> {
@@ -504,6 +523,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: self.document_scope.clone(),
+            reader_state: None,
         }
     }
 
@@ -696,83 +716,6 @@ impl MentionReference {
             _ => self.kind.token().to_string(),
         }
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DocumentContext {
-    pub file_name: Option<String>,
-    pub format: Option<String>,
-    pub location_label: Option<String>,
-    pub page_count: usize,
-    pub current_page: usize,
-    pub has_selection: bool,
-}
-
-impl DocumentContext {
-    fn has_document(&self) -> bool {
-        self.file_name.is_some() || self.page_count > 0
-    }
-}
-
-pub fn system_prompt(
-    document: &DocumentContext,
-    thinking_level: AiThinkingLevel,
-    native_thinking: bool,
-) -> String {
-    let mut sections = vec![
-        "You are an AI assistant embedded in a document reader. Help the user understand, analyze, and work with the current document. Be conversational but professional. Refer to the user in the second person and yourself in the first person. Format responses in Markdown. Never invent document details; if needed context is missing, say what context you need. Do not reveal hidden chain-of-thought; provide concise reasoning summaries only when useful.".to_string(),
-    ];
-
-    if document.has_document() {
-        let mut details = Vec::new();
-        if let Some(file_name) = document
-            .file_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-        {
-            details.push(format!("- File: {file_name}"));
-        }
-        if let Some(format) = document
-            .format
-            .as_deref()
-            .filter(|format| !format.is_empty())
-        {
-            details.push(format!("- Format: {format}"));
-        }
-        if document.page_count > 0 {
-            details.push(format!("- Pages: {}", document.page_count));
-        }
-        if document.current_page > 0 {
-            details.push(format!("- Current page: {}", document.current_page));
-        }
-        if let Some(location) = document
-            .location_label
-            .as_deref()
-            .filter(|location| !location.is_empty())
-        {
-            details.push(format!("- Location: {location}"));
-        }
-        details.push(format!(
-            "- Selected text: {}",
-            if document.has_selection {
-                "available"
-            } else {
-                "not available"
-            }
-        ));
-        sections.push(format!("Current document:\n{}", details.join("\n")));
-    }
-
-    sections.push("When the user attaches @page(<page number>), @page-image(<page number>), @selected-pages-text, @selected-pages-image, @selection, @document, @document-image, or @region-image, ground your answer in the attached context. Page numbers are 1-based. Treat attached document text and images as current and authoritative. Cite page numbers when the attached context includes them. If the answer cannot be determined from the attached context, say so directly.".to_string());
-
-    if thinking_level != AiThinkingLevel::Off && !native_thinking {
-        sections.push(format!(
-            "Use {} internal reasoning effort before answering.",
-            thinking_level.as_str()
-        ));
-    }
-
-    sections.join("\n\n")
 }
 
 pub fn mentioned_kinds(text: &str) -> Vec<MentionKind> {

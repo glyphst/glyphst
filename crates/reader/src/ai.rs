@@ -1,8 +1,8 @@
 //! The assistant: a chat about the open document in a right-side panel.
 //!
 //! Turns run the `ai` crate's agent on a worker thread with the document
-//! tools of [`ReaderAgentTools`]; the current page and selection can be
-//! attached as context. Sessions are the library's AI sessions, shared with
+//! tools of [`OpenDocument`]; the current page and selection can be
+//! attached as context, and each message ends with what the reader showed. Sessions are the library's AI sessions, shared with
 //! the GPUI Reader's AI panel. The panel follows pdfcraft's side panels;
 //! answers are Markdown.
 
@@ -17,13 +17,12 @@ use std::{
 
 use glyphst_ai::{
     agent::{
-        AgentCancellationToken, AgentContentPart, AgentEvent, AgentLimits, AgentMessage,
-        AgentToolResultPart, run_agent,
+        AgentCancellationToken, AgentContentPart, AgentEvent, AgentLimits, AgentMessage, AgentRun,
+        AgentStopReason, AgentToolResultPart, run_agent,
     },
-    ai_chat::{
-        ChatMessage, ContextBlock, DocumentContext, DocumentContextScope, ImageContext,
-        MentionKind, Role,
-    },
+    ai_chat::{ChatMessage, ContextBlock, DocumentContextScope, ImageContext, MentionKind, Role},
+    prompt::{DocumentFacts, ReaderState},
+    tools::{ToolContext, ToolRegistry},
 };
 use glyphst_core::DocumentLayout;
 use glyphst_library::{
@@ -33,7 +32,7 @@ use glyphst_library::{
 use glyphst_settings::{AiProvider, ModelRef, Settings};
 
 use crate::{
-    ai_tools::{ReaderAgentTools, describe_call},
+    ai_tools::{OpenDocument, describe_call},
     theme::Tokens,
 };
 
@@ -105,6 +104,12 @@ pub struct Assistant {
     pub attachments: Vec<Attachment>,
     /// Thumbnails of the images sent with each message, by index.
     sent_images: std::collections::HashMap<usize, Vec<egui::TextureHandle>>,
+    /// The model's reasoning summary for each answer, by index.
+    reasoning: std::collections::HashMap<usize, String>,
+    /// What the running turn waits for, such as a retry.
+    status: Option<String>,
+    /// Names the conversation to the provider's prompt cache.
+    cache_key: Option<String>,
 }
 
 /// An image attached to the next message.
@@ -130,6 +135,9 @@ impl Default for Assistant {
             markdown: egui_commonmark::CommonMarkCache::default(),
             attachments: Vec::new(),
             sent_images: Default::default(),
+            reasoning: Default::default(),
+            status: None,
+            cache_key: None,
             show_sessions: false,
             sessions: Vec::new(),
         }
@@ -205,8 +213,25 @@ impl Assistant {
             path: ask.path.clone(),
             label: ask.title.clone(),
         };
+        let state = ReaderState {
+            document: Some(DocumentFacts {
+                id: None,
+                title: ask.title.clone(),
+                format: match ask.layout {
+                    DocumentLayout::Fixed => "PDF",
+                    DocumentLayout::Reflow(_) => "EPUB",
+                }
+                .into(),
+                authors: None,
+                page_count: ask.page_count,
+            }),
+            current_page: Some(page),
+            selection_chars: ask.selection.as_ref().map(|text| text.chars().count()),
+            ..ReaderState::default()
+        };
         let mut message = ChatMessage::user(text.clone(), text, contexts, Vec::new())
-            .with_document_scope(Some(scope));
+            .with_document_scope(Some(scope))
+            .with_reader_state(state.block());
         let mut thumbnails = Vec::new();
         for attachment in std::mem::take(&mut self.attachments) {
             message.attach_image(attachment.image);
@@ -237,26 +262,18 @@ impl Assistant {
             .collect();
         self.messages.push(ChatMessage::assistant(String::new()));
         self.tools.push(Vec::new());
-        let document = DocumentContext {
-            file_name: Some(ask.title.clone()),
-            format: Some(
-                match ask.layout {
-                    DocumentLayout::Fixed => "PDF",
-                    DocumentLayout::Reflow(_) => "EPUB",
-                }
-                .into(),
-            ),
-            location_label: Some(format!("page {page} of {}", ask.page_count)),
-            page_count: ask.page_count,
-            current_page: page,
-            has_selection: ask.selection.is_some(),
-        };
-        let tools = Arc::new(ReaderAgentTools {
+        let mut tools = ToolRegistry::new();
+        OpenDocument {
             path: ask.path,
             layout: ask.layout,
             page_count: ask.page_count,
             current_page: ask.current_page,
-        });
+        }
+        .register(&mut tools);
+        let cache_key = self
+            .cache_key
+            .get_or_insert_with(|| format!("glyphst-chat-{}", unique_suffix()))
+            .clone();
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
         let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
@@ -268,12 +285,17 @@ impl Assistant {
                     .map_err(|_| anyhow::anyhow!("closed"))
             };
             let result = run_agent(
-                config,
-                history,
-                document,
-                Some(tools),
-                worker_cancel,
-                AgentLimits::default(),
+                AgentRun {
+                    settings: config,
+                    messages: history,
+                    tools: Some(Arc::new(tools)),
+                    context: ToolContext {
+                        cancel: worker_cancel,
+                        ..ToolContext::default()
+                    },
+                    limits: AgentLimits::default(),
+                    cache_key: Some(cache_key),
+                },
                 &mut send,
             );
             let _ = events_tx.send(match result {
@@ -314,6 +336,7 @@ impl Assistant {
         }
         if finished {
             self.run = None;
+            self.status = None;
             for row in &mut self.tools[answer] {
                 if row.state == ToolState::Running {
                     row.state = ToolState::Failed;
@@ -327,8 +350,26 @@ impl Assistant {
 
     fn apply(&mut self, answer: usize, event: AgentEvent) {
         let rows = &mut self.tools[answer];
+        if !matches!(event, AgentEvent::Retrying { .. }) {
+            self.status = None;
+        }
         match event {
             AgentEvent::TextDelta(delta) => self.messages[answer].push_text(&delta),
+            AgentEvent::ReasoningDelta(delta) => {
+                self.reasoning.entry(answer).or_default().push_str(&delta);
+            }
+            AgentEvent::Retrying { attempt, delay, .. } => {
+                self.status = Some(format!(
+                    "The provider is busy; trying again in {:.0} s (attempt {attempt})…",
+                    delay.as_secs_f32().ceil()
+                ));
+            }
+            AgentEvent::TurnCompleted {
+                stop_reason: AgentStopReason::Refusal,
+                ..
+            } => {
+                self.error = Some("The model declined this request.".into());
+            }
             AgentEvent::ToolCallStarted { id, name } => rows.push(ToolRow {
                 id,
                 name,
@@ -354,10 +395,13 @@ impl Assistant {
                     };
                 }
             }
+            AgentEvent::LimitReached => {
+                self.error =
+                    Some("The assistant stopped after many tool calls; ask it to continue.".into());
+            }
             AgentEvent::TurnStarted { .. }
             | AgentEvent::ToolExecutionStarted { .. }
             | AgentEvent::TurnCompleted { .. }
-            | AgentEvent::LimitReached
             | AgentEvent::Done => {}
         }
     }
@@ -376,6 +420,9 @@ impl Assistant {
         self.messages.clear();
         self.tools.clear();
         self.sent_images.clear();
+        self.reasoning.clear();
+        self.status = None;
+        self.cache_key = None;
         self.error = None;
         self.show_sessions = false;
     }
@@ -398,6 +445,8 @@ impl Assistant {
         self.messages = std::mem::take(&mut other.messages);
         self.tools = std::mem::take(&mut other.tools);
         self.sent_images = std::mem::take(&mut other.sent_images);
+        self.reasoning = std::mem::take(&mut other.reasoning);
+        self.cache_key = other.cache_key.take();
         other.new_session();
         true
     }
@@ -577,6 +626,19 @@ impl Assistant {
                             });
                         }
                         Role::Assistant => {
+                            if let Some(reasoning) = self.reasoning.get(&index) {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new("Thoughts").small().color(tokens.text_faint),
+                                )
+                                .id_salt(("assistant-reasoning", index))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(reasoning.trim())
+                                            .small()
+                                            .color(tokens.text_muted),
+                                    );
+                                });
+                            }
                             for row in self.tools.get(index).into_iter().flatten() {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -614,6 +676,9 @@ impl Assistant {
                         }
                     }
                     ui.add_space(8.0);
+                }
+                if let Some(status) = &self.status {
+                    ui.label(egui::RichText::new(status).color(tokens.text_muted));
                 }
                 if let Some(error) = &self.error {
                     ui.label(egui::RichText::new(error).color(tokens.danger));
@@ -759,7 +824,9 @@ fn session_message(message: &ChatMessage) -> AiSessionMessage {
                     is_error: result.is_error,
                 })
             }
-            AgentContentPart::OpaqueReasoning { .. } | AgentContentPart::Image(_) => {}
+            AgentContentPart::Reasoning(_)
+            | AgentContentPart::OpaqueReasoning { .. }
+            | AgentContentPart::Image(_) => {}
         }
     }
     AiSessionMessage {
@@ -776,6 +843,14 @@ fn session_message(message: &ChatMessage) -> AiSessionMessage {
         document_path: message.document_scope().map(|scope| scope.path.clone()),
         document_label: message.document_scope().map(|scope| scope.label.clone()),
     }
+}
+
+/// A suffix that differs between conversations, for cache keys.
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos());
+    format!("{nanos:x}")
 }
 
 fn chat_message(message: AiSessionMessage) -> ChatMessage {

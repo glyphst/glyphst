@@ -14,14 +14,20 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::{Value, json};
 
 use crate::{
-    ai_chat::{DocumentContext, system_prompt},
     chatgpt_subscription::{
         acquire_request_access, invalidate_credentials, response_error, responses_url,
     },
-    settings::{AiApiStyle, AiThinkingLevel, ResolvedAiConfig},
+    prompt::system_prompt,
+    settings::{AiApiStyle, AiThinkingLevel, AnthropicThinking, ModelLimits, ResolvedAiConfig},
+    tools::{ToolContext, ToolEffect, ToolRegistry},
 };
 
-pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 8;
+pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 40;
+/// Reading tools a turn runs at once.
+const MAX_PARALLEL_TOOLS: usize = 4;
+/// Output tokens asked of a model when its limit is higher; answers stream,
+/// so a large limit costs nothing until it is used.
+const MAX_REQUESTED_OUTPUT: u64 = 64_000;
 pub const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 12_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +161,9 @@ pub enum AgentContentPart {
     Image(AgentImage),
     ToolCall(AgentToolCall),
     ToolResult(AgentToolResult),
+    /// A readable summary of the model's reasoning. It is shown, and never
+    /// sent back to the provider.
+    Reasoning(String),
     /// Provider-owned state required to continue a reasoning/tool turn. It is
     /// replayed only to the provider style that produced it and is never
     /// exposed as assistant text.
@@ -246,23 +255,13 @@ impl AgentCancellationToken {
         self.0.load(Ordering::Acquire)
     }
 
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         if self.is_canceled() {
             Err(anyhow!("agent run canceled"))
         } else {
             Ok(())
         }
     }
-}
-
-pub trait AgentToolExecutor: Send + Sync + 'static {
-    fn definitions(&self) -> Vec<AgentToolDefinition>;
-
-    fn execute(
-        &self,
-        call: &AgentToolCall,
-        cancellation: &AgentCancellationToken,
-    ) -> AgentToolResult;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -288,6 +287,8 @@ pub enum AgentStopReason {
     Stop,
     ToolUse,
     Length,
+    /// The model or its safety classifiers declined.
+    Refusal,
     Canceled,
     Error,
 }
@@ -298,6 +299,13 @@ pub enum AgentEvent {
         round: usize,
     },
     TextDelta(String),
+    ReasoningDelta(String),
+    /// A request failed before any output and is tried again.
+    Retrying {
+        attempt: usize,
+        delay: Duration,
+        error: String,
+    },
     ToolCallStarted {
         id: String,
         name: String,
@@ -333,7 +341,7 @@ impl Default for AgentLimits {
         Self {
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
             max_tool_result_chars: DEFAULT_MAX_TOOL_RESULT_CHARS,
-            max_retries_before_output: 2,
+            max_retries_before_output: 3,
         }
     }
 }
@@ -346,23 +354,53 @@ pub struct AgentRunResult {
     pub limit_reached: bool,
 }
 
+/// One run of the agent: the conversation so far and what it may use.
+pub struct AgentRun {
+    pub settings: ResolvedAiConfig,
+    pub messages: Vec<AgentMessage>,
+    pub tools: Option<Arc<ToolRegistry>>,
+    /// Cancellation, and who the run's tool calls belong to.
+    pub context: ToolContext,
+    pub limits: AgentLimits,
+    /// Identifies the conversation to the provider's prompt cache.
+    pub cache_key: Option<String>,
+}
+
 pub fn run_agent(
-    settings: ResolvedAiConfig,
-    mut messages: Vec<AgentMessage>,
-    document: DocumentContext,
-    tools: Option<Arc<dyn AgentToolExecutor>>,
-    cancellation: AgentCancellationToken,
-    limits: AgentLimits,
+    run: AgentRun,
     send_event: &mut impl FnMut(AgentEvent) -> Result<()>,
 ) -> Result<AgentRunResult> {
+    let AgentRun {
+        settings,
+        mut messages,
+        tools,
+        context,
+        limits,
+        cache_key,
+    } = run;
     if !settings.can_request() {
         return Err(anyhow!(settings.missing_credentials_message()));
     }
-
-    let definitions = tools
-        .as_ref()
-        .map(|tools| tools.definitions())
-        .unwrap_or_default();
+    let cancellation = context.cancel.clone();
+    let tools = tools.unwrap_or_default();
+    let definitions = tools.definitions();
+    let native_thinking = match settings.api_style {
+        AiApiStyle::OpenAiResponses => true,
+        style => settings
+            .thinking_level
+            .supports_native_for_style(style, &settings.model),
+    };
+    let system = system_prompt(&definitions, settings.thinking_level, native_thinking);
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .context("failed to create HTTP client")?;
+    let request = ProviderRequest {
+        client: &client,
+        settings: &settings,
+        system: &system,
+        tools: &definitions,
+        cache_key: cache_key.as_deref(),
+    };
     let initial_len = messages.len();
     let mut total_usage = AgentUsage::default();
     let mut tool_rounds = 0usize;
@@ -373,27 +411,31 @@ pub fn run_agent(
         send_event(AgentEvent::TurnStarted { round })?;
 
         let mut retry = 0usize;
+        let mut stripped_reasoning = false;
         let turn = loop {
             let mut emitted_output = false;
-            let result = stream_provider_turn(
-                &settings,
-                &messages,
-                &document,
-                &definitions,
-                &cancellation,
-                &mut |event| {
-                    emitted_output |= matches!(
-                        event,
-                        AgentEvent::TextDelta(_)
-                            | AgentEvent::ToolCallStarted { .. }
-                            | AgentEvent::ToolCallArgumentsDelta { .. }
-                            | AgentEvent::ToolCallCompleted(_)
-                    );
-                    send_event(event)
-                },
-            );
+            let result = stream_provider_turn(&request, &messages, &cancellation, &mut |event| {
+                emitted_output |= matches!(
+                    event,
+                    AgentEvent::TextDelta(_)
+                        | AgentEvent::ReasoningDelta(_)
+                        | AgentEvent::ToolCallStarted { .. }
+                        | AgentEvent::ToolCallArgumentsDelta { .. }
+                        | AgentEvent::ToolCallCompleted(_)
+                );
+                send_event(event)
+            });
             match result {
                 Ok(turn) => break turn,
+                // Thinking blocks are bound to the conversation that produced
+                // them; when the provider no longer accepts them, the turn
+                // goes on without them once.
+                Err(error)
+                    if !emitted_output && !stripped_reasoning && invalid_reasoning(&error) =>
+                {
+                    stripped_reasoning = true;
+                    strip_reasoning(&mut messages, AiApiStyle::Anthropic);
+                }
                 Err(error)
                     if !emitted_output
                         && retry < limits.max_retries_before_output
@@ -401,7 +443,13 @@ pub fn run_agent(
                         && !cancellation.is_canceled() =>
                 {
                     retry += 1;
-                    thread::sleep(Duration::from_millis(250 * (1_u64 << (retry - 1))));
+                    let delay = retry_delay(&error, retry);
+                    send_event(AgentEvent::Retrying {
+                        attempt: retry,
+                        delay,
+                        error: format!("{error:#}"),
+                    })?;
+                    sleep_unless_canceled(delay, &cancellation)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -416,7 +464,7 @@ pub fn run_agent(
         let tool_calls = turn.message.tool_calls().cloned().collect::<Vec<_>>();
         messages.push(turn.message);
 
-        if tool_calls.is_empty() {
+        if tool_calls.is_empty() || turn.stop_reason == AgentStopReason::Refusal {
             send_event(AgentEvent::Done)?;
             return Ok(AgentRunResult {
                 appended_messages: messages.split_off(initial_len),
@@ -427,24 +475,14 @@ pub fn run_agent(
         }
 
         tool_rounds += 1;
-        for call in tool_calls {
-            cancellation.check()?;
-            send_event(AgentEvent::ToolExecutionStarted {
-                id: call.id.clone(),
-                name: call.name.clone(),
-            })?;
-            let result = match &tools {
-                Some(executor) => executor.execute(&call, &cancellation),
-                None => AgentToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    format!("unknown tool: {}", call.name),
-                ),
-            }
-            .bounded(limits.max_tool_result_chars);
-            send_event(AgentEvent::ToolExecutionCompleted(result.clone()))?;
-            messages.push(AgentMessage::tool_result(result));
-        }
+        let results = execute_tool_calls(
+            &tools,
+            &tool_calls,
+            &context,
+            limits.max_tool_result_chars,
+            send_event,
+        )?;
+        messages.extend(results.into_iter().map(AgentMessage::tool_result));
 
         if tool_rounds >= limits.max_tool_rounds {
             send_event(AgentEvent::LimitReached)?;
@@ -458,23 +496,136 @@ pub fn run_agent(
     }
 }
 
+/// Runs a turn's tool calls: consecutive reads together (a few at a time),
+/// everything else alone and in order.
+fn execute_tool_calls(
+    tools: &ToolRegistry,
+    calls: &[AgentToolCall],
+    context: &ToolContext,
+    max_chars: usize,
+    send_event: &mut impl FnMut(AgentEvent) -> Result<()>,
+) -> Result<Vec<AgentToolResult>> {
+    let mut results = Vec::with_capacity(calls.len());
+    let mut rest = calls;
+    while !rest.is_empty() {
+        context.cancel.check()?;
+        let reads = rest
+            .iter()
+            .take(MAX_PARALLEL_TOOLS)
+            .take_while(|call| tools.effect(&call.name) == ToolEffect::Read)
+            .count();
+        let (batch, next) = rest.split_at(reads.max(1));
+        rest = next;
+        for call in batch {
+            send_event(AgentEvent::ToolExecutionStarted {
+                id: call.id.clone(),
+                name: call.name.clone(),
+            })?;
+        }
+        let batch_results = if let [call] = batch {
+            vec![tools.execute(call, context)]
+        } else {
+            thread::scope(|scope| {
+                let handles = batch
+                    .iter()
+                    .map(|call| scope.spawn(|| tools.execute(call, context)))
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .zip(batch)
+                    .map(|(handle, call)| {
+                        handle.join().unwrap_or_else(|_| {
+                            AgentToolResult::error(&call.id, &call.name, "the tool failed")
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        for result in batch_results {
+            let result = result.bounded(max_chars);
+            send_event(AgentEvent::ToolExecutionCompleted(result.clone()))?;
+            results.push(result);
+        }
+    }
+    Ok(results)
+}
+
+/// A provider's answer with an error status.
+#[derive(Debug)]
+struct ProviderStatusError {
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    body: String,
+}
+
+impl std::fmt::Display for ProviderStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AI request failed with status {}: {}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for ProviderStatusError {}
+
 fn retryable_agent_error(error: &anyhow::Error) -> bool {
+    if let Some(error) = error.downcast_ref::<ProviderStatusError>() {
+        let status = error.status.as_u16();
+        return matches!(status, 408 | 409 | 429 | 529) || (500..600).contains(&status);
+    }
     let error = format!("{error:#}").to_ascii_lowercase();
     [
-        "status 429",
-        "status 500",
-        "status 502",
-        "status 503",
-        "status 504",
         "timed out",
         "timeout",
         "connection reset",
         "connection closed",
         "temporarily unavailable",
         "failed to send",
+        "failed to read ai stream",
     ]
     .iter()
     .any(|needle| error.contains(needle))
+}
+
+/// The provider's `Retry-After` (at most 30 seconds), or exponential backoff.
+fn retry_delay(error: &anyhow::Error, attempt: usize) -> Duration {
+    error
+        .downcast_ref::<ProviderStatusError>()
+        .and_then(|error| error.retry_after)
+        .map(|delay| delay.min(Duration::from_secs(30)))
+        .unwrap_or_else(|| Duration::from_millis(500 * (1_u64 << (attempt - 1).min(6))))
+}
+
+fn sleep_unless_canceled(delay: Duration, cancellation: &AgentCancellationToken) -> Result<()> {
+    let step = Duration::from_millis(50);
+    let mut waited = Duration::ZERO;
+    while waited < delay {
+        cancellation.check()?;
+        thread::sleep(step.min(delay - waited));
+        waited += step;
+    }
+    cancellation.check()
+}
+
+/// Whether the provider rejected replayed thinking blocks.
+fn invalid_reasoning(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ProviderStatusError>()
+        .is_some_and(|error| {
+            error.status == reqwest::StatusCode::BAD_REQUEST
+                && error.body.contains("signature")
+                && error.body.contains("thinking")
+        })
+}
+
+fn strip_reasoning(messages: &mut [AgentMessage], style: AiApiStyle) {
+    for message in messages {
+        message.content.retain(|part| {
+            !matches!(part, AgentContentPart::OpaqueReasoning { api_style, .. } if *api_style == style)
+        });
+    }
 }
 
 struct ProviderTurn {
@@ -494,6 +645,7 @@ struct PartialToolCall {
 #[derive(Default)]
 struct ProviderTurnBuilder {
     text: String,
+    reasoning: String,
     tool_calls: BTreeMap<usize, PartialToolCall>,
     opaque_reasoning: Vec<Value>,
     usage: AgentUsage,
@@ -503,6 +655,9 @@ struct ProviderTurnBuilder {
 impl ProviderTurnBuilder {
     fn finish(self, api_style: AiApiStyle) -> ProviderTurn {
         let mut content = Vec::new();
+        if !self.reasoning.is_empty() {
+            content.push(AgentContentPart::Reasoning(self.reasoning));
+        }
         content.extend(
             self.opaque_reasoning
                 .into_iter()
@@ -533,54 +688,32 @@ impl ProviderTurnBuilder {
     }
 }
 
-/// Describes the tools offered in this run, so the prompt only ever names
-/// tools that exist.
-fn tool_guidance(tools: &[AgentToolDefinition]) -> Option<String> {
-    if tools.is_empty() {
-        return None;
-    }
-    let list = tools
-        .iter()
-        .map(|tool| {
-            let summary = tool.description.split(". ").next().unwrap_or_default();
-            format!("- {}: {}", tool.name, summary.trim_end_matches('.'))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(format!(
-        "You can call these tools:\n{list}\nPrefer text tools before rendering pages, cite 1-based page numbers, and do not claim tool results you did not receive."
-    ))
+/// What every turn of a run sends.
+struct ProviderRequest<'a> {
+    client: &'a reqwest::blocking::Client,
+    settings: &'a ResolvedAiConfig,
+    system: &'a str,
+    tools: &'a [AgentToolDefinition],
+    cache_key: Option<&'a str>,
 }
 
 fn stream_provider_turn(
-    settings: &ResolvedAiConfig,
+    request: &ProviderRequest<'_>,
     messages: &[AgentMessage],
-    document: &DocumentContext,
-    tools: &[AgentToolDefinition],
     cancellation: &AgentCancellationToken,
     send_event: &mut impl FnMut(AgentEvent) -> Result<()>,
 ) -> Result<ProviderTurn> {
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .context("failed to create HTTP client")?;
-    let native_thinking = match settings.api_style {
-        AiApiStyle::OpenAi => settings
-            .thinking_level
-            .supports_native_for_style(AiApiStyle::OpenAi, &settings.model),
-        AiApiStyle::OpenAiResponses => true,
-        AiApiStyle::Anthropic => settings
-            .thinking_level
-            .supports_native_for_style(AiApiStyle::Anthropic, &settings.model),
-    };
-    let mut system = system_prompt(document, settings.thinking_level, native_thinking);
-    if let Some(guidance) = tool_guidance(tools) {
-        system.push_str("\n\n");
-        system.push_str(&guidance);
-    }
+    let ProviderRequest {
+        client,
+        settings,
+        system,
+        tools,
+        cache_key,
+    } = *request;
     let body = match settings.api_style {
-        AiApiStyle::OpenAi => openai_chat_body(settings, &system, messages, tools),
-        AiApiStyle::OpenAiResponses => responses_body(settings, &system, messages, tools),
-        AiApiStyle::Anthropic => anthropic_body(settings, &system, messages, tools),
+        AiApiStyle::OpenAi => openai_chat_body(settings, system, messages, tools),
+        AiApiStyle::OpenAiResponses => responses_body(settings, system, messages, tools, cache_key),
+        AiApiStyle::Anthropic => anthropic_body(settings, system, messages, tools),
     };
 
     let mut request = match settings.api_style {
@@ -589,10 +722,16 @@ fn stream_provider_turn(
             let access = acquire_request_access()?;
             access.authorize(client.post(responses_url(&settings.base_url)).json(&body))
         }
-        AiApiStyle::Anthropic => client
-            .post(anthropic_messages_url(&settings.base_url))
-            .header("anthropic-version", "2023-06-01")
-            .json(&body),
+        AiApiStyle::Anthropic => {
+            let mut request = client
+                .post(anthropic_messages_url(&settings.base_url))
+                .header("anthropic-version", "2023-06-01")
+                .json(&body);
+            if anthropic_fallbacks(settings) {
+                request = request.header("anthropic-beta", ANTHROPIC_FALLBACK_BETA);
+            }
+            request
+        }
     };
     match settings.api_style {
         AiApiStyle::OpenAi if !settings.api_key.is_empty() => {
@@ -778,6 +917,7 @@ fn responses_body(
     system: &str,
     messages: &[AgentMessage],
     tools: &[AgentToolDefinition],
+    cache_key: Option<&str>,
 ) -> Value {
     let mut input = Vec::new();
     for message in messages {
@@ -825,6 +965,9 @@ fn responses_body(
         body["tool_choice"] = json!("auto");
     }
     apply_responses_reasoning(&mut body, settings.thinking_level);
+    if let Some(cache_key) = cache_key {
+        body["prompt_cache_key"] = json!(cache_key);
+    }
     body
 }
 
@@ -919,6 +1062,26 @@ fn flush_responses_content(out: &mut Vec<Value>, role: &str, content: &mut Vec<V
     }));
 }
 
+const ANTHROPIC_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+const CACHE_CONTROL: &str = "cache_control";
+
+/// Whether to ask Anthropic to retry a declined request on another model:
+/// only on the Claude API itself, for the models whose safety classifiers
+/// can decline.
+fn anthropic_fallbacks(settings: &ResolvedAiConfig) -> bool {
+    settings
+        .base_url
+        .trim_end_matches('/')
+        .ends_with("api.anthropic.com")
+        && [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+        ]
+        .contains(&settings.model.as_str())
+}
+
 fn anthropic_body(
     settings: &ResolvedAiConfig,
     system: &str,
@@ -929,29 +1092,46 @@ fn anthropic_body(
     for message in messages {
         append_anthropic_message(&mut request_messages, message);
     }
+    // Cache the stable prefix (tools, then the system prompt) and the
+    // conversation up to the newest message: three of four breakpoints.
+    if let Some(block) = request_messages
+        .last_mut()
+        .and_then(|message| message["content"].as_array_mut())
+        .and_then(|content| content.last_mut())
+    {
+        block[CACHE_CONTROL] = json!({"type": "ephemeral"});
+    }
+    let max_tokens = ModelLimits::for_model(&settings.model)
+        .max_output
+        .min(MAX_REQUESTED_OUTPUT);
     let mut body = json!({
         "model": settings.model,
-        "system": system,
+        "system": [{"type": "text", "text": system, CACHE_CONTROL: {"type": "ephemeral"}}],
         "messages": request_messages,
         "stream": true,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens,
     });
     if !tools.is_empty() {
-        body["tools"] = Value::Array(
-            tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.input_schema,
-                    })
+        let mut definitions = tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
                 })
-                .collect(),
-        );
+            })
+            .collect::<Vec<_>>();
+        if let Some(last) = definitions.last_mut() {
+            last[CACHE_CONTROL] = json!({"type": "ephemeral"});
+        }
+        body["tools"] = Value::Array(definitions);
         body["tool_choice"] = json!({"type": "auto"});
     }
     apply_anthropic_thinking(&mut body, &settings.model, settings.thinking_level);
+    if anthropic_fallbacks(settings) {
+        body["fallbacks"] = json!("default");
+    }
     body
 }
 
@@ -1072,11 +1252,23 @@ fn read_provider_sse(
 ) -> Result<ProviderTurn> {
     if !response.status().is_success() {
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .map(Duration::from_secs_f64);
         let mut body = String::new();
         if let Err(error) = response.read_to_string(&mut body) {
             body = format!("failed to read error body: {error:#}");
         }
-        return Err(anyhow!("AI request failed with status {status}: {body}"));
+        return Err(ProviderStatusError {
+            status,
+            retry_after,
+            body,
+        }
+        .into());
     }
 
     let mut builder = ProviderTurnBuilder::default();
@@ -1156,6 +1348,15 @@ fn process_openai_event(
         };
     }
     let choice = &value["choices"][0];
+    // DeepSeek and OpenRouter stream readable reasoning beside the answer.
+    if let Some(reasoning) = choice["delta"]["reasoning_content"]
+        .as_str()
+        .or_else(|| choice["delta"]["reasoning"].as_str())
+        && !reasoning.is_empty()
+    {
+        builder.reasoning.push_str(reasoning);
+        send_event(AgentEvent::ReasoningDelta(reasoning.to_string()))?;
+    }
     if let Some(delta) = choice["delta"]["content"].as_str()
         && !delta.is_empty()
     {
@@ -1214,6 +1415,18 @@ fn process_responses_event(
                 builder.text.push_str(delta);
                 send_event(AgentEvent::TextDelta(delta.to_string()))?;
             }
+        }
+        Some("response.reasoning_summary_text.delta") => {
+            if let Some(delta) = value["delta"].as_str()
+                && !delta.is_empty()
+            {
+                builder.reasoning.push_str(delta);
+                send_event(AgentEvent::ReasoningDelta(delta.to_string()))?;
+            }
+        }
+        Some("response.reasoning_summary_part.added") if !builder.reasoning.is_empty() => {
+            builder.reasoning.push_str("\n\n");
+            send_event(AgentEvent::ReasoningDelta("\n\n".to_string()))?;
         }
         Some("response.output_item.added") => {
             let item = &value["item"];
@@ -1320,7 +1533,12 @@ fn process_anthropic_event(
         Some("content_block_start") => {
             let index = value["index"].as_u64().unwrap_or(0) as usize;
             let block = &value["content_block"];
-            if block["type"] == "tool_use" {
+            if block["type"] == "fallback" {
+                // Another model took over: what the declined model began
+                // besides text is not sent back.
+                builder.tool_calls.clear();
+                builder.opaque_reasoning.clear();
+            } else if block["type"] == "tool_use" {
                 let partial = builder.tool_calls.entry(index).or_default();
                 partial.id = block["id"].as_str().unwrap_or_default().to_string();
                 partial.name = block["name"].as_str().unwrap_or_default().to_string();
@@ -1360,6 +1578,12 @@ fn process_anthropic_event(
                     }
                 }
                 Some("thinking_delta") | Some("signature_delta") => {
+                    if let Some(thinking) = delta["thinking"].as_str()
+                        && !thinking.is_empty()
+                    {
+                        builder.reasoning.push_str(thinking);
+                        send_event(AgentEvent::ReasoningDelta(thinking.to_string()))?;
+                    }
                     if let Some(block) = builder.opaque_reasoning.last_mut()
                         && let Some(object) = block.as_object_mut()
                     {
@@ -1396,6 +1620,7 @@ fn process_anthropic_event(
             builder.stop_reason = match value["delta"]["stop_reason"].as_str() {
                 Some("tool_use") => AgentStopReason::ToolUse,
                 Some("max_tokens") => AgentStopReason::Length,
+                Some("refusal") => AgentStopReason::Refusal,
                 _ => AgentStopReason::Stop,
             };
         }
@@ -1499,20 +1724,38 @@ fn apply_openai_thinking(body: &mut Value, model: &str, level: AiThinkingLevel) 
 }
 
 fn apply_anthropic_thinking(body: &mut Value, model: &str, level: AiThinkingLevel) {
-    if !level.supports_native_for_style(AiApiStyle::Anthropic, model) {
-        return;
-    }
     let level = level.clamp_for_style(AiApiStyle::Anthropic, model);
-    body["thinking"] = json!({
-        "type": "enabled",
-        "budget_tokens": match level {
-            AiThinkingLevel::Off => return,
-            AiThinkingLevel::Minimal | AiThinkingLevel::Low => 1024,
-            AiThinkingLevel::Medium => 2048,
-            AiThinkingLevel::High => 3072,
-            AiThinkingLevel::XHigh | AiThinkingLevel::Max => 4096,
-        },
-    });
+    match AnthropicThinking::for_model(model) {
+        // Current models think adaptively and take an effort instead of a
+        // budget; "off" asks for the least effort, since several of them
+        // cannot turn thinking off.
+        Some(AnthropicThinking::Adaptive) => {
+            if level != AiThinkingLevel::Off {
+                body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
+            }
+            body["output_config"] = json!({
+                "effort": match level {
+                    AiThinkingLevel::Off | AiThinkingLevel::Minimal | AiThinkingLevel::Low => "low",
+                    AiThinkingLevel::Medium => "medium",
+                    AiThinkingLevel::High => "high",
+                    AiThinkingLevel::XHigh => "xhigh",
+                    AiThinkingLevel::Max => "max",
+                },
+            });
+        }
+        Some(AnthropicThinking::Budget) if level != AiThinkingLevel::Off => {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": match level {
+                    AiThinkingLevel::Off | AiThinkingLevel::Minimal | AiThinkingLevel::Low => 1024,
+                    AiThinkingLevel::Medium => 2048,
+                    AiThinkingLevel::High => 4096,
+                    AiThinkingLevel::XHigh | AiThinkingLevel::Max => 8192,
+                },
+            });
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1581,22 +1824,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_guidance_names_only_defined_tools() {
-        let tools = vec![AgentToolDefinition {
-            name: "read_document".to_string(),
-            description: "Read pages. Long detail.".to_string(),
-            input_schema: json!({"type": "object"}),
-            strict: false,
-        }];
-        let guidance = tool_guidance(&tools).unwrap();
-        assert!(guidance.contains("- read_document: Read pages\n"));
-        for stale in ["list_open_documents", "search_documents"] {
-            assert!(!guidance.contains(stale));
-        }
-        assert!(tool_guidance(&[]).is_none());
-    }
-
-    #[test]
     fn configures_native_thinking_for_supported_models() {
         let mut openai_body = json!({});
         apply_openai_thinking(&mut openai_body, "gpt-5", AiThinkingLevel::XHigh);
@@ -1608,7 +1835,24 @@ mod tests {
             "claude-sonnet-4-5-latest",
             AiThinkingLevel::Max,
         );
-        assert_eq!(anthropic_body["thinking"]["budget_tokens"], 4096);
+        assert_eq!(anthropic_body["thinking"]["budget_tokens"], 8192);
+
+        let mut adaptive_body = json!({});
+        apply_anthropic_thinking(
+            &mut adaptive_body,
+            "claude-opus-5-5",
+            AiThinkingLevel::XHigh,
+        );
+        assert_eq!(
+            adaptive_body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
+        assert_eq!(adaptive_body["output_config"]["effort"], "xhigh");
+
+        let mut off_body = json!({});
+        apply_anthropic_thinking(&mut off_body, "claude-sonnet-5-5", AiThinkingLevel::Off);
+        assert!(off_body.get("thinking").is_none());
+        assert_eq!(off_body["output_config"]["effort"], "low");
 
         let mut unsupported_body = json!({});
         apply_openai_thinking(
@@ -1644,6 +1888,7 @@ mod tests {
             "system",
             &[AgentMessage::tool_result(result)],
             &[tool()],
+            None,
         );
 
         assert_eq!(body["input"][0]["type"], "function_call_output");
@@ -1659,6 +1904,7 @@ mod tests {
             "system",
             &[AgentMessage::user_text("hello")],
             &[],
+            None,
         );
 
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -1687,6 +1933,7 @@ mod tests {
             "system",
             &[message],
             &[],
+            None,
         );
 
         assert_eq!(body["input"][0]["type"], "reasoning");
@@ -1788,5 +2035,235 @@ mod tests {
         assert!(
             matches!(&result.content[0], AgentToolResultPart::Text(value) if value.starts_with("abcd"))
         );
+    }
+
+    #[test]
+    fn anthropic_caches_the_prefix_and_thinks_adaptively() {
+        let mut settings = settings(AiApiStyle::Anthropic);
+        settings.model = "claude-opus-5-5".to_string();
+        settings.base_url = "https://api.anthropic.com".to_string();
+        settings.thinking_level = AiThinkingLevel::High;
+        let body = anthropic_body(
+            &settings,
+            "system",
+            &[AgentMessage::user_text("question")],
+            &[tool(), tool()],
+        );
+
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["max_tokens"], 64_000);
+        assert_eq!(body["fallbacks"], "default");
+        assert!(anthropic_fallbacks(&settings));
+
+        settings.base_url = "https://proxy.example".to_string();
+        assert!(
+            anthropic_body(&settings, "system", &[], &[])
+                .get("fallbacks")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn responses_pass_the_cache_key() {
+        let body = responses_body(
+            &settings(AiApiStyle::OpenAiResponses),
+            "system",
+            &[],
+            &[],
+            Some("thread-7"),
+        );
+        assert_eq!(body["prompt_cache_key"], "thread-7");
+    }
+
+    #[test]
+    fn reasoning_streams_from_every_provider() {
+        let mut events = Vec::new();
+        let mut send = |event| {
+            events.push(event);
+            Ok(())
+        };
+        let mut anthropic = ProviderTurnBuilder::default();
+        for value in [
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Look at page 3."}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 1}}),
+        ] {
+            process_anthropic_event(&value, &mut anthropic, &mut send).unwrap();
+        }
+        let turn = anthropic.finish(AiApiStyle::Anthropic);
+        assert_eq!(turn.stop_reason, AgentStopReason::Refusal);
+        assert_eq!(
+            turn.message.content[0],
+            AgentContentPart::Reasoning("Look at page 3.".to_string())
+        );
+        assert!(matches!(
+            &turn.message.content[1],
+            AgentContentPart::OpaqueReasoning { value, .. }
+                if value["thinking"] == "Look at page 3." && value["signature"] == "sig"
+        ));
+
+        let mut responses = ProviderTurnBuilder::default();
+        process_responses_event(
+            &json!({"type": "response.reasoning_summary_text.delta", "delta": "Summary"}),
+            &mut responses,
+            &mut send,
+        )
+        .unwrap();
+        let mut openai = ProviderTurnBuilder::default();
+        process_openai_event(
+            &json!({"choices": [{"delta": {"reasoning_content": "Hmm"}}]}),
+            &mut openai,
+            &mut send,
+        )
+        .unwrap();
+        assert_eq!(responses.reasoning, "Summary");
+        assert_eq!(openai.reasoning, "Hmm");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ReasoningDelta(_)))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_fallback_drops_what_the_declined_model_began() {
+        let mut builder = ProviderTurnBuilder::default();
+        let mut send = |_| Ok(());
+        for value in [
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t1", "name": "search_document"}}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "fallback"}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "Answer"}}),
+        ] {
+            process_anthropic_event(&value, &mut builder, &mut send).unwrap();
+        }
+        let turn = builder.finish(AiApiStyle::Anthropic);
+        assert_eq!(turn.message.tool_calls().count(), 0);
+        assert_eq!(turn.message.text(), "Answer");
+    }
+
+    #[test]
+    fn retries_follow_retry_after_and_reasoning_errors_are_recognized() {
+        let error = anyhow::Error::from(ProviderStatusError {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            retry_after: Some(Duration::from_secs(2)),
+            body: String::new(),
+        });
+        assert!(retryable_agent_error(&error));
+        assert_eq!(retry_delay(&error, 1), Duration::from_secs(2));
+        let bad = anyhow::Error::from(ProviderStatusError {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            retry_after: None,
+            body: "messages.5.content.0: Invalid `signature` in `thinking` block.".to_string(),
+        });
+        assert!(!retryable_agent_error(&bad));
+        assert!(invalid_reasoning(&bad));
+        assert_eq!(retry_delay(&bad, 2), Duration::from_millis(1000));
+
+        let mut messages = vec![AgentMessage {
+            role: AgentRole::Assistant,
+            content: vec![
+                AgentContentPart::OpaqueReasoning {
+                    api_style: AiApiStyle::Anthropic,
+                    value: json!({}),
+                },
+                AgentContentPart::Text("kept".to_string()),
+            ],
+        }];
+        strip_reasoning(&mut messages, AiApiStyle::Anthropic);
+        assert_eq!(
+            messages[0].content,
+            vec![AgentContentPart::Text("kept".to_string())]
+        );
+    }
+
+    #[test]
+    fn reads_run_together_and_changes_run_alone_in_order() {
+        use std::{sync::Mutex, time::Instant};
+
+        use crate::tools::Tool;
+
+        struct Timed {
+            name: &'static str,
+            effect: ToolEffect,
+            log: Arc<Mutex<Vec<(String, Instant, Instant)>>>,
+        }
+
+        impl Tool for Timed {
+            fn definition(&self) -> AgentToolDefinition {
+                AgentToolDefinition::new(self.name, "Timed.", json!({"type": "object"}))
+            }
+
+            fn effect(&self) -> ToolEffect {
+                self.effect
+            }
+
+            fn call(&self, call: &AgentToolCall, _cx: &ToolContext) -> AgentToolResult {
+                let start = Instant::now();
+                thread::sleep(Duration::from_millis(60));
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push((call.id.clone(), start, Instant::now()));
+                AgentToolResult::text(&call.id, &call.name, call.id.clone())
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let registry = ToolRegistry::new()
+            .with(Timed {
+                name: "read",
+                effect: ToolEffect::Read,
+                log: log.clone(),
+            })
+            .with(Timed {
+                name: "change",
+                effect: ToolEffect::Mutate,
+                log: log.clone(),
+            });
+        let call = |id: &str, name: &str| AgentToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        };
+        let calls = [
+            call("a", "read"),
+            call("b", "read"),
+            call("c", "change"),
+            call("d", "read"),
+        ];
+        let results = execute_tool_calls(
+            &registry,
+            &calls,
+            &ToolContext::default(),
+            1000,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+
+        let ids = results
+            .iter()
+            .map(|result| result.call_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["a", "b", "c", "d"]);
+        let log = log.lock().unwrap();
+        let span = |id: &str| {
+            let (_, start, end) = log.iter().find(|(call, ..)| call == id).unwrap();
+            (*start, *end)
+        };
+        let (a, b, c, d) = (span("a"), span("b"), span("c"), span("d"));
+        assert!(a.0 < b.1 && b.0 < a.1, "the two reads overlap");
+        assert!(c.0 >= a.1.max(b.1), "the change waits for the reads");
+        assert!(d.0 >= c.1, "a read after the change waits for it");
     }
 }
