@@ -616,6 +616,11 @@ impl ReaderApp {
                         ui.set_min_size(inner);
                         ui.set_max_size(inner);
                         let (tabs, active, library) = (&self.tabs, self.active, &self.library);
+                        let agents = self
+                            .agent_programs
+                            .iter()
+                            .map(|(kind, _)| *kind)
+                            .collect::<Vec<_>>();
                         request = self.assistant.ui(
                             ui,
                             crate::ai::Panel {
@@ -627,6 +632,7 @@ impl ReaderApp {
                                 sources: &mut || {
                                     super::agent::mention_sources(tabs, active, library)
                                 },
+                                agents: &agents,
                             },
                         );
                     });
@@ -656,6 +662,10 @@ impl ReaderApp {
                 }
                 Some(PanelAction::Change(action)) => self.apply_change_action(action, ctx),
                 Some(PanelAction::Restore(index)) => self.restore_assistant(index),
+                Some(PanelAction::SetAgent(agent)) => {
+                    self.assistant.new_session();
+                    self.assistant.agent = agent;
+                }
                 None => {}
             }
         }

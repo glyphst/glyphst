@@ -17,6 +17,10 @@ use std::{
     thread,
 };
 
+use glyphst_agent_host::{
+    external::{AgentKind, ExternalEvent, ExternalTurn, McpAccess},
+    scratch::{FileChanges, Scratch},
+};
 use glyphst_ai::{
     agent::{
         AgentCancellationToken, AgentContentPart, AgentEvent, AgentImage, AgentLimits,
@@ -26,11 +30,11 @@ use glyphst_ai::{
     ai_chat::{ChatMessage, ContextBlock, DocumentContextScope, ImageContext, MentionKind, Role},
     compaction,
     prompt::{DocumentFacts, ReaderState},
-    tools::{ToolContext, ToolRegistry},
+    tools::{ToolContext, ToolOrigin, ToolRegistry},
 };
 use glyphst_core::DocumentLayout;
 use glyphst_library::{
-    AiSession, AiSessionAgentPart, AiSessionImage, AiSessionMessage, AiSessionRole,
+    AiSession, AiSessionAgent, AiSessionAgentPart, AiSessionImage, AiSessionMessage, AiSessionRole,
     AiSessionSummary, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
     current_timestamp,
 };
@@ -94,6 +98,10 @@ enum RunEvent {
     Compacted(String),
     /// The new message with its mentions read.
     Prepared(ChatMessage),
+    /// Progress of an external agent's turn.
+    External(ExternalEvent),
+    /// Files an external agent changed in its working folder.
+    Files(Scratch, FileChanges),
     Finished(Vec<AgentMessage>),
     Error(String),
 }
@@ -156,6 +164,23 @@ pub struct Assistant {
     composing: bool,
     /// A picture being read from the clipboard.
     paste_job: Option<Receiver<Vec<u8>>>,
+    /// The external agent the chat runs on; `None` for the built-in one.
+    pub agent: Option<AgentKind>,
+    /// The external agent's own session, to continue.
+    agent_session: Option<String>,
+    /// Files external agents changed, for the app's change log.
+    file_changes: Vec<(ToolContext, Scratch, FileChanges)>,
+    /// The tool context of the running turn.
+    run_context: ToolContext,
+}
+
+/// What an external agent's turn needs from the app.
+pub struct ExternalAccess {
+    pub kind: AgentKind,
+    pub program: PathBuf,
+    pub scratch: Scratch,
+    pub mcp: McpAccess,
+    pub model: Option<String>,
 }
 
 /// An entry of the composer's menu.
@@ -245,6 +270,10 @@ impl Default for Assistant {
             menu_forced: false,
             composing: false,
             paste_job: None,
+            agent: None,
+            agent_session: None,
+            file_changes: Vec::new(),
+            run_context: ToolContext::default(),
             show_sessions: false,
             sessions: Vec::new(),
         }
@@ -261,6 +290,8 @@ pub struct Panel<'a> {
     pub changes: &'a mut ChangeLog,
     /// What the `@` menu offers, gathered when it opens.
     pub sources: &'a mut dyn FnMut() -> Sources,
+    /// The external agents installed.
+    pub agents: &'a [AgentKind],
 }
 
 /// What the panel asks for.
@@ -276,6 +307,8 @@ pub enum PanelAction {
     /// Rewind the chat to the user message at this index and undo what the
     /// agent changed since.
     Restore(usize),
+    /// Run new chats on this external agent, or the built-in assistant.
+    SetAgent(Option<AgentKind>),
 }
 
 impl Assistant {
@@ -306,6 +339,7 @@ impl Assistant {
         text: String,
         ask: AskContext,
         tools: ToolRegistry,
+        external: Option<ExternalAccess>,
         settings: &Settings,
         ctx: &egui::Context,
     ) {
@@ -380,6 +414,10 @@ impl Assistant {
         self.messages.push(message);
         self.tools.push(Vec::new());
 
+        if let Some(external) = external {
+            self.start_external(external, mentions, settings, ctx);
+            return;
+        }
         let config = settings.ai.resolved_main();
         if !config.can_request() {
             self.error = Some(if config.provider == AiProvider::ChatGptSubscription {
@@ -421,6 +459,7 @@ impl Assistant {
             turn: question,
             ..ToolContext::default()
         };
+        self.run_context = tool_context.clone();
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
         let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
@@ -438,17 +477,7 @@ impl Assistant {
             }
             // Mentions are read here, off the UI thread.
             if !mentions.is_empty() {
-                let mut blocks = Vec::new();
-                for mention in &mentions {
-                    let (block, images) = mention.resolve(&worker_cancel);
-                    blocks.push(block);
-                    for image in images {
-                        question_message.attach_user_image(image);
-                    }
-                }
-                if let Some(context) = ai_mentions::context(&blocks) {
-                    question_message = question_message.with_mention_context(context);
-                }
+                question_message = resolve_mentions(question_message, &mentions, &worker_cancel);
                 let _ = events_tx.send(RunEvent::Prepared(question_message.clone()));
             }
             history.extend(question_message.into_agent_messages());
@@ -483,6 +512,115 @@ impl Assistant {
             events,
             answer: self.messages.len() - 1,
         });
+    }
+
+    /// Runs the turn on an external agent: its process reads the message
+    /// (with the reader state and mentions) and reaches the Reader through
+    /// the MCP server; its working folder is checkpointed around the turn.
+    fn start_external(
+        &mut self,
+        external: ExternalAccess,
+        mentions: Vec<Mention>,
+        settings: &Settings,
+        ctx: &egui::Context,
+    ) {
+        let question = self.messages.len() - 1;
+        let question_message = self.messages[question].clone();
+        if self.title.is_none() && question == 0 {
+            let mut config = settings.ai.resolved_main();
+            config.thinking_level = AiThinkingLevel::Off;
+            self.title_config = settings
+                .ai
+                .resolved_title()
+                .or_else(|| config.can_request().then_some(config));
+        }
+        self.messages.push(ChatMessage::assistant(String::new()));
+        self.tools.push(Vec::new());
+        self.run_context = self.tool_context(question, Some(external.kind));
+        let resume = self.agent_session.clone();
+        let cancel = AgentCancellationToken::default();
+        let (events_tx, events) = mpsc::channel();
+        let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
+        thread::spawn(move || {
+            let send = |event: RunEvent| {
+                let _ = events_tx.send(event);
+                ctx.request_repaint();
+            };
+            let mut question_message = question_message;
+            if !mentions.is_empty() {
+                question_message = resolve_mentions(question_message, &mentions, &worker_cancel);
+                send(RunEvent::Prepared(question_message.clone()));
+            }
+            let images = question_message
+                .into_agent_messages()
+                .into_iter()
+                .flat_map(|message| message.content)
+                .filter_map(|part| match part {
+                    AgentContentPart::Image(image) => Some(image),
+                    _ => None,
+                })
+                .collect();
+            let turn = ExternalTurn {
+                program: external.program,
+                scratch: external.scratch.clone(),
+                mcp: external.mcp,
+                resume,
+                model: external.model,
+                prompt: question_message.request_text(),
+                images,
+            };
+            let before = turn.scratch.checkpoint().ok();
+            let mut answer = ExternalAnswer::default();
+            let result = glyphst_agent_host::external::run_turn(
+                external.kind,
+                &turn,
+                &worker_cancel,
+                &mut |event| {
+                    answer.add(&event);
+                    send(RunEvent::External(event));
+                },
+            );
+            if let (Some(before), Ok(after)) = (before, turn.scratch.checkpoint())
+                && let Ok(changes) = turn.scratch.changes(&before, &after)
+                && !changes.files.is_empty()
+            {
+                send(RunEvent::Files(turn.scratch.clone(), changes));
+            }
+            send(match result {
+                Ok(()) => RunEvent::Finished(answer.trace()),
+                Err(error) => RunEvent::Error(format!("{error:#}")),
+            });
+        });
+        self.run = Some(Run {
+            cancel,
+            events,
+            answer: self.messages.len() - 1,
+        });
+    }
+
+    /// The tool context of a turn answering the message at `turn`.
+    pub fn tool_context(&mut self, turn: usize, agent: Option<AgentKind>) -> ToolContext {
+        if self.chat_id == 0 {
+            self.chat_id = next_chat_id();
+        }
+        ToolContext {
+            thread: Some(self.chat_id),
+            turn,
+            origin: agent.map_or(ToolOrigin::Builtin, |agent| {
+                ToolOrigin::External(agent.name().to_string())
+            }),
+            ..ToolContext::default()
+        }
+    }
+
+    /// The index the next user message gets.
+    pub fn next_turn(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Files external agents changed since the last call.
+    pub fn take_file_changes(&mut self) -> Vec<(ToolContext, Scratch, FileChanges)> {
+        std::mem::take(&mut self.file_changes)
     }
 
     /// The messages before `end` as the model reads them: the summary of
@@ -526,6 +664,11 @@ impl Assistant {
             match event {
                 RunEvent::Agent(event) => self.apply(answer, event),
                 RunEvent::Prepared(message) => self.messages[answer - 1] = message,
+                RunEvent::External(event) => self.apply_external(answer, event),
+                RunEvent::Files(scratch, changes) => {
+                    self.file_changes
+                        .push((self.run_context.clone(), scratch, changes));
+                }
                 RunEvent::Compacted(text) => {
                     self.summary = Some(AiSessionSummary {
                         text,
@@ -585,6 +728,38 @@ impl Assistant {
             }
         });
         self.title_job = Some(job);
+    }
+
+    fn apply_external(&mut self, answer: usize, event: ExternalEvent) {
+        let rows = &mut self.tools[answer];
+        match event {
+            ExternalEvent::Session(session) => self.agent_session = Some(session),
+            ExternalEvent::Text(text) => self.messages[answer].push_text(&text),
+            ExternalEvent::Reasoning(text) => {
+                self.reasoning.entry(answer).or_default().push_str(&text);
+            }
+            ExternalEvent::ToolStarted { id, title } => rows.push(ToolRow {
+                id,
+                name: title,
+                arguments: String::new(),
+                state: ToolState::Running,
+            }),
+            ExternalEvent::ToolFinished { id, failed } => {
+                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                    row.state = if failed {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Done
+                    };
+                }
+            }
+            ExternalEvent::Refused(what) => rows.push(ToolRow {
+                id: String::new(),
+                name: format!("Refused {what} (outside its folder)"),
+                arguments: String::new(),
+                state: ToolState::Failed,
+            }),
+        }
     }
 
     fn apply(&mut self, answer: usize, event: AgentEvent) {
@@ -672,6 +847,7 @@ impl Assistant {
         self.chat_id = 0;
         self.confirm_restore = None;
         self.sent_mentions.clear();
+        self.agent_session = None;
         self.error = None;
         self.show_sessions = false;
     }
@@ -754,6 +930,11 @@ impl Assistant {
         self.created = session.created;
         self.title = Some(session.title);
         self.summary = session.summary;
+        self.agent = session
+            .agent
+            .as_ref()
+            .and_then(|agent| AgentKind::from_id(&agent.agent));
+        self.agent_session = session.agent.and_then(|agent| agent.session);
         for message in session.messages {
             let index = self.messages.len();
             self.tools.push(tool_rows(&message.agent_parts));
@@ -811,6 +992,10 @@ impl Assistant {
             created: self.created,
             updated: now,
             summary: self.summary.clone(),
+            agent: self.agent.map(|agent| AiSessionAgent {
+                agent: agent.id().to_string(),
+                session: self.agent_session.clone(),
+            }),
         };
         if let Err(error) = library.save_ai_session(session) {
             self.error = Some(format!("Could not save the chat: {error:#}"));
@@ -947,6 +1132,7 @@ impl Assistant {
             model,
             changes,
             sources,
+            agents,
         } = panel;
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
@@ -967,7 +1153,29 @@ impl Assistant {
                 }
             });
         });
-        if !models.is_empty() {
+        if !agents.is_empty() {
+            let name =
+                |agent: Option<AgentKind>| agent.map_or("Built-in assistant", AgentKind::name);
+            egui::ComboBox::from_id_salt("assistant-agent")
+                .selected_text(name(self.agent))
+                .width(ui.available_width() - 8.0)
+                .show_ui(ui, |ui| {
+                    for choice in std::iter::once(None).chain(agents.iter().copied().map(Some)) {
+                        if ui
+                            .selectable_label(self.agent == choice, name(choice))
+                            .on_hover_text(match choice {
+                                None => "The Reader's own assistant, with the model chosen below",
+                                Some(_) => "A coding agent on this computer, with its own model and sign-in; it works in a folder for this document and reaches the Reader through MCP",
+                            })
+                            .clicked()
+                            && self.agent != choice
+                        {
+                            action = Some(PanelAction::SetAgent(choice));
+                        }
+                    }
+                });
+        }
+        if !models.is_empty() && self.agent.is_none() {
             let mut chosen = model;
             if crate::settings_providers::model_picker(
                 ui,
@@ -1576,6 +1784,81 @@ fn clipboard_picture() -> Option<Vec<u8>> {
     (!bytes.is_empty()).then_some(bytes)
 }
 
+/// `message` with its mentions read: their context block and images.
+fn resolve_mentions(
+    mut message: ChatMessage,
+    mentions: &[Mention],
+    cancel: &AgentCancellationToken,
+) -> ChatMessage {
+    let mut blocks = Vec::new();
+    for mention in mentions {
+        let (block, images) = mention.resolve(cancel);
+        blocks.push(block);
+        for image in images {
+            message.attach_user_image(image);
+        }
+    }
+    if let Some(context) = ai_mentions::context(&blocks) {
+        message = message.with_mention_context(context);
+    }
+    message
+}
+
+/// An external agent's answer as the chat saves it: its reasoning, text
+/// and tool lines.
+#[derive(Default)]
+struct ExternalAnswer {
+    reasoning: String,
+    text: String,
+    tools: Vec<(String, String, Option<bool>)>,
+}
+
+impl ExternalAnswer {
+    fn add(&mut self, event: &ExternalEvent) {
+        match event {
+            ExternalEvent::Text(text) => self.text.push_str(text),
+            ExternalEvent::Reasoning(text) => self.reasoning.push_str(text),
+            ExternalEvent::ToolStarted { id, title } => {
+                self.tools.push((id.clone(), title.clone(), None));
+            }
+            ExternalEvent::ToolFinished { id, failed } => {
+                if let Some(tool) = self.tools.iter_mut().find(|tool| &tool.0 == id) {
+                    tool.2 = Some(*failed);
+                }
+            }
+            ExternalEvent::Session(_) | ExternalEvent::Refused(_) => {}
+        }
+    }
+
+    fn trace(self) -> Vec<AgentMessage> {
+        let mut content = Vec::new();
+        if !self.reasoning.is_empty() {
+            content.push(AgentContentPart::Reasoning(self.reasoning));
+        }
+        content.extend(self.tools.iter().map(|(id, title, _)| {
+            AgentContentPart::ToolCall(AgentToolCall {
+                id: id.clone(),
+                name: title.clone(),
+                arguments: "{}".into(),
+            })
+        }));
+        let mut trace = vec![AgentMessage {
+            role: AgentRole::Assistant,
+            content,
+        }];
+        trace.extend(self.tools.into_iter().map(|(id, title, failed)| {
+            AgentMessage::tool_result(AgentToolResult {
+                call_id: id,
+                tool_name: title,
+                content: Vec::new(),
+                is_error: failed != Some(false),
+            })
+        }));
+        trace.push(AgentMessage::assistant_text(self.text));
+        trace
+    }
+}
+
 /// An id for a new conversation, unique while the app runs.
 fn next_chat_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1751,12 +2034,20 @@ mod tests {
             selection: None,
         };
         let mut quick = Assistant::default();
-        quick.send("First?".into(), ask(), ToolRegistry::new(), &settings, &ctx);
+        quick.send(
+            "First?".into(),
+            ask(),
+            ToolRegistry::new(),
+            None,
+            &settings,
+            &ctx,
+        );
         quick.new_session();
         quick.send(
             "Second?".into(),
             ask(),
             ToolRegistry::new(),
+            None,
             &settings,
             &ctx,
         );
@@ -1768,10 +2059,18 @@ mod tests {
             "Earlier".into(),
             ask(),
             ToolRegistry::new(),
+            None,
             &settings,
             &ctx,
         );
-        assistant.send("Later".into(), ask(), ToolRegistry::new(), &settings, &ctx);
+        assistant.send(
+            "Later".into(),
+            ask(),
+            ToolRegistry::new(),
+            None,
+            &settings,
+            &ctx,
+        );
         assert_eq!(assistant.messages().len(), 2);
         assert_eq!(assistant.rewind(1).as_deref(), Some("Later"));
         assert_eq!(assistant.messages().len(), 1);
@@ -1813,6 +2112,7 @@ mod tests {
                         documents: vec![document.clone()],
                         ..Sources::default()
                     },
+                    agents: &[],
                 },
             );
         });
@@ -1879,6 +2179,106 @@ mod tests {
         panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Enter)]);
         assert!(assistant.compact_next);
         assert_eq!(assistant.composer, "");
+    }
+
+    #[test]
+    fn external_agents_answer_in_the_panel_and_their_files_can_be_undone() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory =
+            std::env::temp_dir().join(format!("glyphst-reader-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        // A stand-in for `claude` speaking its stream-json protocol.
+        let program = directory.join("claude");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+read line
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"notes.md"}}]}}'
+echo hello > notes.md
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}'
+echo '{"type":"stream_event","parent_tool_use_id":null,"event":{"delta":{"type":"text_delta","text":"Done."}}}'
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}'
+cat > /dev/null
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let scratch = Scratch::open(&directory, "doc", "Doc").unwrap();
+        let mut library = LibraryStore::open_for_test(directory.join("library.redb")).unwrap();
+        let ctx = egui::Context::default();
+        let mut assistant = Assistant {
+            agent: Some(AgentKind::ClaudeCode),
+            ..Assistant::default()
+        };
+        let ask = AskContext {
+            path: directory.join("doc.pdf"),
+            id: "doc_1".into(),
+            title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
+            layout: DocumentLayout::Fixed,
+            page_count: 1,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+        };
+        let external = ExternalAccess {
+            kind: AgentKind::ClaudeCode,
+            program,
+            scratch: scratch.clone(),
+            mcp: McpAccess {
+                url: "http://127.0.0.1:9/mcp".into(),
+                token: "token".into(),
+            },
+            model: None,
+        };
+        assistant.send(
+            "Write notes".into(),
+            ask,
+            ToolRegistry::new(),
+            Some(external),
+            &Settings::default(),
+            &ctx,
+        );
+        let started = Instant::now();
+        while assistant.is_running() {
+            assert!(started.elapsed() < Duration::from_secs(30), "timed out");
+            assistant.poll(Some(&mut library));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(assistant.error, None);
+        assert_eq!(assistant.messages()[1].display_text(), "Done.");
+        assert_eq!(assistant.tools(1)[0].label(), "Write notes.md");
+        assert_eq!(assistant.tools(1)[0].state, ToolState::Done);
+        assert_eq!(assistant.agent_session.as_deref(), Some("s1"));
+
+        let changes = assistant.take_file_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].2.files, ["notes.md | +1 -0"]);
+        assert_eq!(
+            changes[0].0.origin,
+            ToolOrigin::External("Claude Code".into())
+        );
+        let mut log = ChangeLog::default();
+        let (context, folder, files) = changes.into_iter().next().unwrap();
+        log.record_files(&context, folder, files);
+        assert_eq!(log.undo_where(&mut library, |_| true), Vec::<String>::new());
+        assert!(!scratch.dir.join("notes.md").exists(), "undone");
+
+        // The chat reopens on the same agent and session.
+        let mut reopened = Assistant::default();
+        reopened.refresh_sessions(&library);
+        let id = reopened.sessions[0].id;
+        reopened.load_session(id, &library);
+        assert_eq!(reopened.agent, Some(AgentKind::ClaudeCode));
+        assert_eq!(reopened.agent_session.as_deref(), Some("s1"));
+        assert_eq!(reopened.tools(1)[0].label(), "Write notes.md");
+        drop(library);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -1958,6 +2358,7 @@ mod tests {
             "What is this?".into(),
             ask(),
             ToolRegistry::new(),
+            None,
             &settings,
             &ctx,
         );
@@ -1976,6 +2377,7 @@ mod tests {
             "And now?".into(),
             ask(),
             ToolRegistry::new(),
+            None,
             &settings,
             &ctx,
         );
@@ -2042,6 +2444,7 @@ mod tests {
             "Where does the story end?".into(),
             ask,
             tools,
+            None,
             &settings,
             &ctx,
         );
@@ -2118,6 +2521,7 @@ mod tests {
             "And then?".into(),
             ask,
             ToolRegistry::new(),
+            None,
             &settings,
             &ctx,
         );
@@ -2162,7 +2566,14 @@ mod tests {
             page_text: None,
             selection: None,
         };
-        unconfigured.send("Hello?".into(), ask, ToolRegistry::new(), &missing, &ctx);
+        unconfigured.send(
+            "Hello?".into(),
+            ask,
+            ToolRegistry::new(),
+            None,
+            &missing,
+            &ctx,
+        );
         assert!(!unconfigured.is_running());
         assert!(
             unconfigured

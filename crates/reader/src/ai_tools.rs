@@ -540,6 +540,8 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         ),
         "read_document" => format!("Read page {}", pages(&arguments)),
         "render_document_pages" => format!("Looked at page {}", pages(&arguments)),
+        // External agents' tool lines are already titles.
+        other if other.contains(' ') => other.to_string(),
         other => format!("Used {other}"),
     }
 }

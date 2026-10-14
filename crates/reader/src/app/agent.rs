@@ -69,6 +69,73 @@ impl ReaderApp {
         Ok(serde_json::to_string_pretty(&config)?)
     }
 
+    /// What an external agent's turn needs: its program, the document's
+    /// working folder, and a new MCP token for the turn (the previous turn's
+    /// token of the conversation stops working).
+    pub(crate) fn external_access(
+        &mut self,
+        kind: glyphst_agent_host::external::AgentKind,
+        ask: &crate::ai::AskContext,
+    ) -> anyhow::Result<crate::ai::ExternalAccess> {
+        let program = self
+            .agent_programs
+            .iter()
+            .find(|(found, _)| *found == kind)
+            .map(|(_, program)| program.clone())
+            .ok_or_else(|| anyhow::anyhow!("{} is not installed", kind.name()))?;
+        let root = dirs::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("the system has no data folder"))?
+            .join("glyphst")
+            .join("agents");
+        let scratch = glyphst_agent_host::scratch::Scratch::open(
+            &root,
+            &glyphst_agent_host::scratch::Scratch::key(&ask.path),
+            &ask.title,
+        )?;
+        let turn = self.assistant.next_turn();
+        let context = self.assistant.tool_context(turn, Some(kind));
+        let chat = context.thread.unwrap_or_default();
+        let tools = std::sync::Arc::new(self.agent_tools());
+        let server = self.mcp_server()?;
+        let token = server
+            .sessions
+            .open(glyphst_agent_host::mcp::McpSession { tools, context });
+        let mcp = glyphst_agent_host::external::McpAccess {
+            url: server.url.clone(),
+            token: token.clone(),
+        };
+        if let Some(previous) = self.mcp_tokens.insert(chat, token)
+            && let Some(server) = &self.mcp
+        {
+            server.sessions.close(&previous);
+        }
+        Ok(crate::ai::ExternalAccess {
+            kind,
+            program,
+            scratch,
+            mcp,
+            model: None,
+        })
+    }
+
+    /// Whether the agents' programs are still being looked for.
+    pub(crate) fn agent_search_pending(&self) -> bool {
+        self.agent_search.is_some()
+    }
+
+    /// Takes the found agents and the files agents changed.
+    pub(crate) fn poll_agents(&mut self) {
+        if let Some(search) = &self.agent_search
+            && let Ok(found) = search.try_recv()
+        {
+            self.agent_programs = found;
+            self.agent_search = None;
+        }
+        for (context, scratch, changes) in self.assistant.take_file_changes() {
+            self.agent_changes.record_files(&context, scratch, changes);
+        }
+    }
+
     /// Keeps the reading tools' document list current.
     pub(crate) fn update_agent_documents(&self) {
         let documents = self
@@ -158,14 +225,23 @@ impl ReaderApp {
                 Vec::new()
             }
             ChangeAction::GoTo(id) => {
-                if let Some(change) = self.agent_changes.get(id)
-                    && let Some(path) = change.edit.path().map(PathBuf::from)
-                {
-                    let page = change.edit.page();
-                    self.open(&path, ctx, None);
-                    if let Some(page) = page {
-                        self.pending_actions.push(ViewAction::GoToPage(page));
+                match self.agent_changes.get(id).map(|change| &change.target) {
+                    Some(crate::ai_changes::ChangeTarget::Library(edit)) => {
+                        if let Some(path) = edit.path().map(PathBuf::from) {
+                            let page = edit.page();
+                            self.open(&path, ctx, None);
+                            if let Some(page) = page {
+                                self.pending_actions.push(ViewAction::GoToPage(page));
+                            }
+                        }
                     }
+                    Some(crate::ai_changes::ChangeTarget::Files { scratch, .. }) => {
+                        ctx.open_url(egui::OpenUrl::new_tab(format!(
+                            "file://{}",
+                            scratch.dir.display()
+                        )));
+                    }
+                    None => {}
                 }
                 Vec::new()
             }
@@ -703,6 +779,34 @@ impl ReaderApp {
             Err(error) => Err(format!("{error:#}")),
         }
     }
+}
+
+/// Looks for the external agents' programs on a worker thread
+/// (`CLAUDE_CODE_EXECUTABLE` and `CODEX_EXECUTABLE` name them explicitly).
+pub(crate) fn find_agents(
+    ctx: &egui::Context,
+) -> std::sync::mpsc::Receiver<Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>> {
+    use glyphst_agent_host::{executable, external::AgentKind};
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let found = AgentKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                let variable = match kind {
+                    AgentKind::ClaudeCode => "CLAUDE_CODE_EXECUTABLE",
+                    AgentKind::Codex => "CODEX_EXECUTABLE",
+                };
+                let configured = std::env::var_os(variable).map(PathBuf::from);
+                executable::find(kind.program(), configured.as_deref())
+                    .map(|program| (kind, program))
+            })
+            .collect();
+        let _ = sender.send(found);
+        ctx.request_repaint();
+    });
+    receiver
 }
 
 /// What the assistant's `@` menu can offer: the open documents (the active

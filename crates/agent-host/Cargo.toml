@@ -12,5 +12,19 @@ base64.workspace = true
 glyphst-ai = { path = "../ai" }
 reqwest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tiny_http.workspace = true
 uuid.workspace = true
+
+[features]
+# The fake agent CLI the driver tests run.
+fixtures = []
+
+[[bin]]
+name = "glyphst-fake-agent"
+path = "src/bin/fake_agent.rs"
+required-features = ["fixtures"]
+
+[[test]]
+name = "drivers"
+required-features = ["fixtures"]

@@ -336,6 +336,7 @@ fn persists_history_bookmarks_and_highlights() {
                 created: 100,
                 updated: 101,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -922,6 +923,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
                 created: 20,
                 updated: 21,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -983,6 +985,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
                 created: 30,
                 updated: 31,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -1038,6 +1041,7 @@ fn round_trips_v6_selected_page_snapshots() {
                 created: 35,
                 updated: 36,
                 summary: None,
+                agent: None,
             })
             .unwrap();
         session_id
@@ -1136,6 +1140,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                 created: 50,
                 updated: 51,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -1178,6 +1183,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                 created: 50,
                 updated: 52,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -1238,6 +1244,7 @@ fn round_trips_v3_region_occurrence_geometry() {
                 created: 40,
                 updated: 41,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }
@@ -2163,6 +2170,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
                 created: 1,
                 updated: 1,
                 summary: None,
+                agent: None,
             })
             .unwrap();
     }

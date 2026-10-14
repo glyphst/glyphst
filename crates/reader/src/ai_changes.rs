@@ -1,7 +1,9 @@
-//! What agents changed in the library: each tool call's edits, kept so the
-//! user can review them and undo them one by one or all together (like
-//! Zed's agent review: changes apply at once and stay undoable).
+//! What agents changed: each tool call's library edits and each external
+//! agent turn's files, kept so the user can review them and undo them one
+//! by one or all together (like Zed's agent review: changes apply at once
+//! and stay undoable).
 
+use glyphst_agent_host::scratch::{FileChanges, Scratch};
 use glyphst_ai::tools::{ToolContext, ToolOrigin};
 use glyphst_library::{LibraryEdit, LibraryStore, is_edit_conflict};
 
@@ -22,15 +24,33 @@ pub struct Change {
     pub thread: Option<u64>,
     /// The user message it answered, by index in the conversation.
     pub turn: usize,
-    pub edit: LibraryEdit,
+    pub target: ChangeTarget,
     pub state: ChangeState,
+}
+
+/// What a change changed.
+#[derive(Clone, Debug)]
+pub enum ChangeTarget {
+    Library(LibraryEdit),
+    /// Files an external agent wrote in a document's working folder.
+    Files {
+        scratch: Scratch,
+        changes: FileChanges,
+    },
 }
 
 impl Change {
     pub fn label(&self) -> String {
+        let what = match &self.target {
+            ChangeTarget::Library(edit) => edit.describe(),
+            ChangeTarget::Files { changes, .. } => match changes.files.as_slice() {
+                [file] => format!("Changed {file}"),
+                files => format!("Changed {} files: {}", files.len(), files.join(", ")),
+            },
+        };
         match &self.origin {
-            ToolOrigin::Builtin => self.edit.describe(),
-            ToolOrigin::External(agent) => format!("{agent}: {}", self.edit.describe()),
+            ToolOrigin::Builtin => what,
+            ToolOrigin::External(agent) => format!("{agent}: {what}"),
         }
     }
 }
@@ -56,16 +76,27 @@ pub struct ChangeLog {
 impl ChangeLog {
     pub fn record(&mut self, context: &ToolContext, edits: Vec<LibraryEdit>) {
         for edit in edits {
-            self.next_id += 1;
-            self.changes.push(Change {
-                id: self.next_id,
-                origin: context.origin.clone(),
-                thread: context.thread,
-                turn: context.turn,
-                edit,
-                state: ChangeState::Applied,
-            });
+            self.push(context, ChangeTarget::Library(edit));
         }
+    }
+
+    /// Records an external agent turn's files.
+    pub fn record_files(&mut self, context: &ToolContext, scratch: Scratch, changes: FileChanges) {
+        if !changes.files.is_empty() {
+            self.push(context, ChangeTarget::Files { scratch, changes });
+        }
+    }
+
+    fn push(&mut self, context: &ToolContext, target: ChangeTarget) {
+        self.next_id += 1;
+        self.changes.push(Change {
+            id: self.next_id,
+            origin: context.origin.clone(),
+            thread: context.thread,
+            turn: context.turn,
+            target,
+            state: ChangeState::Applied,
+        });
     }
 
     #[cfg(test)]
@@ -108,9 +139,25 @@ impl ChangeLog {
         if change.state == state {
             return Ok(());
         }
-        let result = match state {
-            ChangeState::Reverted => library.revert_edit(&change.edit),
-            ChangeState::Applied => library.reapply_edit(&change.edit),
+        let result = match (&change.target, state) {
+            (ChangeTarget::Library(edit), ChangeState::Reverted) => library.revert_edit(edit),
+            (ChangeTarget::Library(edit), ChangeState::Applied) => library.reapply_edit(edit),
+            (ChangeTarget::Files { scratch, changes }, state) => {
+                let (expected, target) = match state {
+                    ChangeState::Reverted => (&changes.after, &changes.before),
+                    ChangeState::Applied => (&changes.before, &changes.after),
+                };
+                match scratch.matches(expected) {
+                    Ok(true) => scratch.restore(target),
+                    Ok(false) => {
+                        return Err(format!(
+                            "“{}”: the files changed since; they were left as they are",
+                            change.label()
+                        ));
+                    }
+                    Err(error) => Err(error),
+                }
+            }
         };
         match result {
             Ok(()) => {
@@ -213,9 +260,7 @@ impl ChangeLog {
                                         } else if ui.small_button("Undo").clicked() {
                                             action = Some(ChangeAction::Undo(change.id));
                                         }
-                                        if change.edit.path().is_some()
-                                            && ui.small_button("Show").clicked()
-                                        {
+                                        if ui.small_button("Show").clicked() {
                                             action = Some(ChangeAction::GoTo(change.id));
                                         }
                                     },

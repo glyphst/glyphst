@@ -2907,6 +2907,7 @@ dependencies = [
  "glyphst-ai",
  "reqwest",
  "serde_json",
+ "sha2 0.11.0",
  "tiny_http",
  "uuid",
 ]

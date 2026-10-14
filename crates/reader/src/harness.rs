@@ -167,10 +167,13 @@ impl ReaderApp {
             let at = ctx.content_rect().center() - egui::vec2(180.0, 120.0);
             self.translate_selection(at, ctx);
         }
-        // A question asked once the page's text is read.
+        // A question asked once the page's text is read (and the agents
+        // are found, for a question to one).
         if self.launch_ask.is_some() {
             let tab = &self.tabs[active];
-            if tab.text.get(tab.current_page()).is_none() {
+            if tab.text.get(tab.current_page()).is_none()
+                || (self.assistant.agent.is_some() && self.agent_search_pending())
+            {
                 return true;
             }
             let question = self.launch_ask.take().unwrap_or_default();

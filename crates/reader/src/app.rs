@@ -121,6 +121,8 @@ pub struct Launch {
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
     pub ask: Option<String>,
+    /// The external agent `ask` goes to (`claude-code`, `codex`).
+    pub agent: Option<String>,
     /// Scripted runs: open the palette with this query, settings at this
     /// section, or the keyboard shortcuts tab.
     pub palette: Option<String>,
@@ -240,6 +242,12 @@ pub struct ReaderApp {
     pub(crate) agent_changes: crate::ai_changes::ChangeLog,
     /// The MCP server for external agents, started when first needed.
     mcp: Option<glyphst_agent_host::mcp::McpServer>,
+    /// The MCP token of each conversation's latest external turn.
+    mcp_tokens: HashMap<u64, String>,
+    /// The external agents found on this machine, with their programs.
+    pub(crate) agent_programs: Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>,
+    agent_search:
+        Option<std::sync::mpsc::Receiver<Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>>>,
     pub(crate) launch_ask: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
     pub(crate) launch_region: Option<(usize, [f32; 4])>,
@@ -395,6 +403,9 @@ impl ReaderApp {
             agent_documents: Default::default(),
             agent_changes: Default::default(),
             mcp: None,
+            mcp_tokens: HashMap::new(),
+            agent_programs: Vec::new(),
+            agent_search: Some(crate::app::agent::find_agents(&cc.egui_ctx)),
             launch_ask: launch.ask,
             launch_commands: launch.commands,
             launch_region: launch.select_region,
@@ -493,6 +504,10 @@ impl ReaderApp {
             }
         }
         app.transition = None;
+        app.assistant.agent = launch
+            .agent
+            .as_deref()
+            .and_then(glyphst_agent_host::external::AgentKind::from_id);
         Ok(app)
     }
 
@@ -1136,7 +1151,18 @@ impl ReaderApp {
             return;
         };
         let tools = self.agent_tools();
-        self.assistant.send(text, ask, tools, &settings, ctx);
+        let external = match self.assistant.agent {
+            Some(kind) => match self.external_access(kind, &ask) {
+                Ok(access) => Some(access),
+                Err(error) => {
+                    self.assistant.error = Some(format!("{error:#}"));
+                    return;
+                }
+            },
+            None => None,
+        };
+        self.assistant
+            .send(text, ask, tools, external, &settings, ctx);
     }
 
     /// What a question knows about the active document.
@@ -1203,7 +1229,7 @@ impl ReaderApp {
                 quick.new_session();
                 quick.include_page = true;
                 quick.include_selection = true;
-                quick.send(text, ask, tools, &settings, ctx);
+                quick.send(text, ask, tools, None, &settings, ctx);
             }
             Some(quick_ask::Action::Continue) => {
                 if self.assistant.adopt(&mut self.quick_ask.assistant) {
@@ -3253,6 +3279,7 @@ impl eframe::App for ReaderApp {
     /// agents' tool calls are answered here.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.serve_agent_calls(ctx);
+        self.poll_agents();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

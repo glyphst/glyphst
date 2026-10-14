@@ -159,6 +159,8 @@ struct StoredAiSessionV6 {
     /// Added after the first v6 sessions, which have none.
     #[serde(default)]
     summary: Option<AiSessionSummary>,
+    #[serde(default)]
+    agent: Option<AiSessionAgent>,
 }
 
 impl From<&AiSession> for StoredAiSessionV6 {
@@ -180,6 +182,7 @@ impl From<&AiSession> for StoredAiSessionV6 {
             created: session.created,
             updated: session.updated,
             summary: session.summary.clone(),
+            agent: session.agent.clone(),
         }
     }
 }
@@ -203,6 +206,7 @@ impl StoredAiSessionV6 {
             created: self.created,
             updated: self.updated,
             summary: self.summary,
+            agent: self.agent,
         })
     }
 }
@@ -1541,6 +1545,15 @@ pub struct AiSessionSummary {
     pub until: usize,
 }
 
+/// The external agent a conversation runs on, and its own session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiSessionAgent {
+    /// The agent's id, such as `claude-code`.
+    pub agent: String,
+    /// The agent's session to resume.
+    pub session: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiSession {
     pub id: u64,
@@ -1550,6 +1563,8 @@ pub struct AiSession {
     pub created: u64,
     pub updated: u64,
     pub summary: Option<AiSessionSummary>,
+    /// `None` for the built-in assistant.
+    pub agent: Option<AiSessionAgent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

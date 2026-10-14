@@ -8,7 +8,7 @@
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
-| `agent-host` | External agents: the MCP server that serves the Reader's tools (and its stdio relay) |
+| `agent-host` | External agents (Claude Code, Codex): their drivers, working folders with git checkpoints, and the MCP server that serves them the Reader's tools |
 | Translation crates | Translation domain, PDF production, service orchestration |
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
@@ -193,7 +193,21 @@ own bearer token, which selects its tools and the origin and conversation its
 changes are logged under; requests with a non-local `Origin` are refused.
 `glyphst-reader --mcp-stdio` relays stdio JSON-RPC lines to it for agents
 that only start MCP servers as commands. The `assistant.mcp_config` command
-copies a config for an agent the user starts by hand.
+copies a config for an agent the user starts by hand. The assistant can also
+run a chat on an external coding agent found on the machine
+([`agent-host`](crates/agent-host/src/external.rs)): each turn starts the
+agent's CLI in the document's working folder (under the data dir, a git
+repository), resumes the agent's own session (saved with the chat), and gives
+it a fresh MCP token for that turn. Claude Code runs over stream-json and
+answers its permission requests itself: everything is allowed except file
+writes outside the working folder. Codex runs over `codex app-server` with a
+`workspace-write` sandbox on that folder and no approvals. The folder is
+checkpointed (a commit object kept by a `refs/glyphst/` ref, built with a
+temporary index) before and after each turn, so the files a turn changed are
+one entry in the change log that "Undo" and "Restore to here" put back.
+Processes run in their own process group and are stopped with SIGTERM, then
+SIGKILL, through `kill`. Shell tools of Claude Code can still write outside
+the folder; only Codex's sandbox enforces it.
 ChatGPT Subscription sign-in waits for the browser's callback, exchanges
 the code and saves the credentials (in the keychain item the GPUI Reader
 used, so its sign-in carries over) on worker threads, and the app repaints

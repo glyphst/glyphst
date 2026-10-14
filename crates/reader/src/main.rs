@@ -4,7 +4,7 @@
 //! glyphst-reader [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
-//!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
+//!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex]
 //!     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
@@ -70,7 +70,7 @@ use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
-                     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
+                     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex] \
                      [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
@@ -98,6 +98,7 @@ fn parse_args() -> Result<Launch> {
         translate_selection: false,
         ai_fake: false,
         ask: None,
+        agent: None,
         palette: None,
         settings: None,
         shortcuts: false,
@@ -168,6 +169,13 @@ fn parse_args() -> Result<Launch> {
             "--translate-selection" => launch.translate_selection = true,
             "--ai-fake" => launch.ai_fake = true,
             "--ask" => launch.ask = Some(value()?),
+            "--agent" => {
+                let id = value()?;
+                if glyphst_agent_host::external::AgentKind::from_id(&id).is_none() {
+                    bail!("unknown agent {id} (claude-code or codex)");
+                }
+                launch.agent = Some(id);
+            }
             "--palette" => launch.palette = Some(value()?),
             "--select-region" => {
                 let usage = "--select-region takes PAGE:X0,Y0,X1,Y1 (page points)";
