@@ -163,6 +163,9 @@ pub struct DocumentTab {
     /// covers: pages are drawn there but laid out beside it. Set by the app
     /// each frame.
     pub inset: f64,
+    /// Device pixels at the right of the drawn area that a floating panel
+    /// (the assistant) covers, likewise.
+    pub inset_right: f64,
     fitted: bool,
     restore: Option<DocumentPosition>,
     /// The file's modification time when it was opened, to reload it when
@@ -251,6 +254,7 @@ impl DocumentTab {
             viewport: [1.0, 1.0],
             pixels_per_point: 1.0,
             inset: 0.0,
+            inset_right: 0.0,
             fitted: false,
             restore,
             modified,
@@ -1210,7 +1214,7 @@ impl DocumentTab {
         let at_fit = self.fitted
             && self.view.target_scale == self.view.scale
             && (self.view.scale / self.fit_scale() - 1.0).abs() < 1e-3;
-        let width = (f64::from(viewport[0]) - self.inset).max(1.0);
+        let width = (f64::from(viewport[0]) - self.inset - self.inset_right).max(1.0);
         let resized = width != self.viewport[0];
         self.viewport = [width, f64::from(viewport[1])];
         if at_fit && resized {
@@ -1408,6 +1412,7 @@ mod tests {
             viewport: [1.0, 1.0],
             pixels_per_point: 1.0,
             inset: 0.0,
+            inset_right: 0.0,
             fitted: false,
             restore: None,
             modified: None,
@@ -1492,6 +1497,33 @@ mod tests {
         for (a, b) in beside.draws.iter().zip(&under.draws) {
             assert_eq!(b.paper[0], a.paper[0] + 200.0);
             assert_eq!(b.paper[1], a.paper[1]);
+        }
+    }
+
+    #[test]
+    fn a_right_inset_draws_pages_under_the_assistant_but_lays_them_out_beside_it() {
+        let mut beside = tab(5);
+        let mut under = tab(5);
+        under.inset_right = 200.0;
+        let input = || ViewInput {
+            zoom: 1.0,
+            seconds: 1.0,
+            ..Default::default()
+        };
+        let mut frames = None;
+        for _ in 0..50 {
+            frames = Some((
+                beside.frame([1048, 900], input(), false),
+                under.frame([1248, 900], input(), false),
+            ));
+        }
+        assert_eq!(under.viewport, beside.viewport);
+        assert_eq!(under.fit_scale(), beside.fit_scale());
+        let (beside, under) = frames.unwrap();
+        assert!(!under.draws.is_empty());
+        // Laid out in the same place, the pages just go on under the panel.
+        for (a, b) in beside.draws.iter().zip(&under.draws) {
+            assert_eq!(b.paper, a.paper);
         }
     }
 

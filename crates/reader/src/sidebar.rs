@@ -660,6 +660,15 @@ fn outline(
                 Disclosure::Open
             }
         };
+        let stuck = if filtering {
+            Vec::new()
+        } else {
+            stuck_rows(entries, &rows, first..last, viewport.min.y)
+        };
+        // Rows scroll under the sticky ones clipped at their bottom, so
+        // nothing shows through them (the drawer may be translucent) and a
+        // covered part takes no clicks.
+        let band_bottom = origin.y + viewport.min.y + stuck.len() as f32 * OUTLINE_ROW;
         let mut draw = |ui: &mut egui::Ui, rect: egui::Rect, index: usize, sticky: bool| {
             let entry = &entries[index];
             let mut child = ui.new_child(
@@ -668,10 +677,9 @@ fn outline(
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
-            if sticky {
-                child
-                    .painter()
-                    .rect_filled(rect, 0.0, Tokens::get(child.ctx()).card);
+            if !sticky {
+                let clip = child.clip_rect();
+                child.set_clip_rect(clip.intersect(below_band(rect, band_bottom)));
             }
             let disclosure = disclosure(index, sticky);
             let (response, _) = row(
@@ -706,23 +714,6 @@ fn outline(
         for (position, &index) in rows.iter().enumerate().take(last).skip(first) {
             draw(ui, row_rect(position as f32 * OUTLINE_ROW), index, false);
         }
-        // The parents of the top row stay at the top, drawn last to be on
-        // top of the rows they cover.
-        if filtering || viewport.min.y <= 0.0 || first >= last {
-            return;
-        }
-        let depths: Vec<usize> = rows[first..last]
-            .iter()
-            .map(|&index| entries[index].depth)
-            .collect();
-        let Some(anchor) = sticky_anchor(&depths, first) else {
-            return;
-        };
-        let mut stuck = ancestors(entries, rows[anchor.index]);
-        if anchor.drifting && drift(anchor.index, stuck.len(), OUTLINE_ROW, viewport.min.y) < 0.0 {
-            // The deepest parent goes as a whole, never half covered.
-            stuck.pop();
-        }
         for (position, &index) in stuck.iter().enumerate() {
             draw(
                 ui,
@@ -732,8 +723,7 @@ fn outline(
             );
         }
         if !stuck.is_empty() {
-            let bottom = origin.y + viewport.min.y + stuck.len() as f32 * OUTLINE_ROW;
-            fade_shadow(ui.painter(), origin.x, origin.x + width, bottom);
+            fade_shadow(ui.painter(), origin.x, origin.x + width, band_bottom);
         }
     });
 
@@ -763,6 +753,40 @@ fn outline(
         view.current = Some(index);
         view.locate();
     }
+}
+
+/// The entries that stick at the top of the outline (Zed's sticky scroll):
+/// the parents of the top row of `shown` (indices into `rows`), scrolled
+/// `scroll` points down.
+fn stuck_rows(
+    entries: &[OutlineEntry],
+    rows: &[usize],
+    shown: std::ops::Range<usize>,
+    scroll: f32,
+) -> Vec<usize> {
+    if scroll <= 0.0 || shown.is_empty() {
+        return Vec::new();
+    }
+    let first = shown.start;
+    let depths: Vec<usize> = rows[shown]
+        .iter()
+        .map(|&index| entries[index].depth)
+        .collect();
+    let Some(anchor) = sticky_anchor(&depths, first) else {
+        return Vec::new();
+    };
+    let mut stuck = ancestors(entries, rows[anchor.index]);
+    if anchor.drifting && drift(anchor.index, stuck.len(), OUTLINE_ROW, scroll) < 0.0 {
+        // The deepest parent goes as a whole, never half covered.
+        stuck.pop();
+    }
+    stuck
+}
+
+/// The part of a scrolling row drawn and clickable: below the sticky rows,
+/// whose band ends at `band_bottom`.
+fn below_band(rect: egui::Rect, band_bottom: f32) -> egui::Rect {
+    rect.with_min_y(rect.top().max(band_bottom).min(rect.bottom()))
 }
 
 /// A soft shadow under the outline's sticky rows.
@@ -1264,6 +1288,36 @@ mod tests {
             entries.push(entry(depth, parent.filter(|_| depth > 0)));
         }
         entries
+    }
+
+    #[test]
+    fn rows_under_the_sticky_parents_show_only_below_them() {
+        // A chapter with a long section: scrolled into the section's
+        // children, the chapter and the section stick.
+        let entries = outline(&[0, 1, 2, 2, 2, 2, 2, 2, 2, 2]);
+        let rows: Vec<usize> = (0..entries.len()).collect();
+        let scroll = 3.5 * OUTLINE_ROW;
+        let first = 3;
+        let stuck = stuck_rows(&entries, &rows, first..rows.len(), scroll);
+        assert_eq!(stuck, [0, 1]);
+        assert!(stuck_rows(&entries, &rows, 0..rows.len(), 0.0).is_empty());
+
+        let band_bottom = scroll + stuck.len() as f32 * OUTLINE_ROW;
+        for row in first..rows.len() {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, row as f32 * OUTLINE_ROW),
+                egui::vec2(200.0, OUTLINE_ROW),
+            );
+            let shown = below_band(rect, band_bottom);
+            assert!(shown.top() >= band_bottom - f32::EPSILON || shown.height() == 0.0);
+            assert!(shown.bottom() == rect.bottom() && shown.height() >= 0.0);
+        }
+        // A row wholly under the band shows nothing; one below it, all.
+        let covered =
+            egui::Rect::from_min_size(egui::pos2(0.0, scroll), egui::vec2(200.0, OUTLINE_ROW));
+        assert_eq!(below_band(covered, band_bottom).height(), 0.0);
+        let free = covered.translate(egui::vec2(0.0, 3.0 * OUTLINE_ROW));
+        assert_eq!(below_band(free, band_bottom), free);
     }
 
     #[test]

@@ -10,7 +10,8 @@ Tabs and split panes, a library home, search, links and history,
 bookmarks, highlights and notes, two-page spreads and rotation, document and
 selection translation, an AI assistant, shader effects for page turns and
 backgrounds, a command palette and configurable shortcuts with a Vim
-keymap (Settings › Keyboard shortcuts, or "Keys: Vim" in the palette).
+keymap (the Keyboard shortcuts tab, or "Keys: Vim" in the palette), and an
+optionally transparent window (Settings › Appearance).
 
 ## Documentation
 
@@ -83,8 +84,9 @@ assistant from a local fake model, and `--ask TEXT` asks it at startup.
 once the documents are open, and `--select-region PAGE:X0,Y0,X1,Y1` draws a
 region (in page points) as the region tool would.
 `--palette QUERY` opens the command palette and `--settings SECTION` the
-settings window (`appearance`, `effects`, `reading`, `shortcuts`,
-`translation`, `ocr`, `ai`). Scripted runs keep settings and keys in memory.
+settings window (`appearance`, `reading`, `effects`, `translation`, `ocr`,
+`ai`), or with `shortcuts` the Keyboard shortcuts tab. Scripted runs keep
+settings and keys in memory.
 
 ### Writing an effect
 

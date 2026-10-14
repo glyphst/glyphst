@@ -64,9 +64,10 @@ that Reader's data: the settings file, the provider keys in the system
 credential store (items in the form GPUI wrote, through the `settings`
 crate's `keychain` feature), and the redb library, which one process holds
 at a time (a second Reader opens documents without history). Its settings
-window edits only the provider sections (AI, translation, OCR): a save
-re-reads the file and replaces just those, so the file's other sections
-survive; keys the file held stay in it and other keys go to the keychain.
+window edits only the provider sections (AI, translation, OCR) and the
+window's transparency: a save re-reads the file and replaces just those, so
+the file's other sections survive; keys the file held stay in it and other
+keys go to the keychain.
 Scripted runs and fake providers keep settings and keys in memory. Its own
 preferences (theme, transition, background, keyboard shortcuts, last
 session with its panes) live in eframe storage under the config directory
@@ -94,15 +95,30 @@ Its components take pdfcraft's style: the design tokens (`theme.rs`, light
 and dark, white pages in both), Inter and JetBrains Mono embedded ahead of
 egui's faces and a system CJK fallback, Lucide SVG icons through craft-ui's
 icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
-pills, search box, section titles, segmented choices, cards, toasts). The
-fonts and icons ship in `crates/reader/assets` with their licences.
+pills, search box, section titles, segmented choices, switches, settings
+groups and rows, cards, toasts). The fonts and icons ship in
+`crates/reader/assets` with their licences. The System theme follows the
+desktop: winit reports no theme on Linux, so `desktop_theme.rs` polls the XDG
+portal's `color-scheme` (after pdfcraft); without an answer System is light.
+The window is always created transparent-capable and drawn opaque until
+transparency is on (off by default). Then only the base layer (the title
+bar, the home page, the stage's background effect around the pages) takes
+the window's opacity. Everything over the pages (the drawers, the assistant,
+the dock, the palette, menus and dialogs) stays opaque, floating over the
+document as it does without transparency: egui draws in one pass and can't
+blur what is beneath it, so a translucent panel would show page text, or a
+hole down to the desktop where no page is drawn. Blur behind the window is the compositor's, asked for through
+`ext-background-effect-v1` on winit's Wayland connection (`window_blur.rs`,
+the workspace's one allowance of `unsafe`, for its two FFI calls).
 The layout is its own: below the top bar (tabs, the palette's search box,
 theme, settings) a document's stage draws the background effect over the
 whole stage in one GPU callback and then the pages of each pane in its own,
 with egui page shadows between them. The rail, the drawers, the
 dock and the progress line are egui Areas above the stage; `stage.rs` lays
-them out (drawers push the pages aside, or float over them in a narrow
-window) and fades the dock and rail after a pause in pointer movement.
+them out (the drawer and the assistant lay the pages out beside them but
+float over them, the pages drawn on underneath; in a narrow window they
+float over the laid-out pages too) and fades the dock and rail after a
+pause in pointer movement.
 Split panes (`panes.rs`) divide the reading rectangle with craft-ui's
 docking model, one document per pane: its tree has tab ids as panels and
 one panel per group, and the last session keeps it. The focused pane's tab
@@ -127,7 +143,9 @@ to three shortcuts (`G G`, `Ctrl+W V`), and no binding may start another, so
 sequences need no timeout. In the Vim preset a count typed first repeats a
 move, or names the page for `G`/`gg`. The user's shortcuts replace a
 command's default keys in either preset and are kept by command id in the
-Reader's preferences.
+Reader's preferences. They are edited in the Keyboard shortcuts tab
+(`keymap_page.rs`), which sits in the tab strip beside the documents like
+the home tab: while it shows, no document is active.
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs

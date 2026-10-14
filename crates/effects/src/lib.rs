@@ -259,7 +259,7 @@ struct Uniforms {
     time: f32,
     progress: f32,
     direction: f32,
-    padding: f32,
+    opacity: f32,
     params: [f32; 4],
 }
 
@@ -275,6 +275,9 @@ pub struct EffectInputs<'a> {
     pub progress: f32,
     pub direction: f32,
     pub params: [f32; MAX_PARAMS],
+    /// How opaque the effect is drawn, 1 for fully: a transparent window's
+    /// background takes its opacity.
+    pub opacity: f32,
 }
 
 struct CompiledEffect {
@@ -537,7 +540,7 @@ impl EffectRegistry {
             time: inputs.time,
             progress: inputs.progress.clamp(0.0, 1.0),
             direction: inputs.direction,
-            padding: 0.0,
+            opacity: inputs.opacity.clamp(0.0, 1.0),
             params: inputs.params,
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

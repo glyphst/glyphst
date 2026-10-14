@@ -253,144 +253,157 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
         actions,
     } = page;
     let find = |id: &str| effects.iter().find(|def| def.id == id);
-
-    widgets::section_title(ui, "Background");
     let has_wallpaper = prefs.wallpaper.is_some();
-    let cards = cards_for(
-        effects,
-        EffectKind::Background,
-        &prefs.effect_params,
-        has_wallpaper,
-        Vec::new(),
-    );
-    let selected = Choice::Effect(prefs.background.clone());
-    if let Some(Choice::Effect(id)) = gallery(
-        ui,
-        "settings-background",
-        EffectKind::Background,
-        &cards,
-        &selected,
-        CARD,
-        time,
-    ) {
-        prefs.background = id;
-    }
-    if let Some(def) = find(&prefs.background) {
-        params_editor(ui, def, &mut prefs.effect_params);
-    }
-    ui.horizontal(|ui| {
-        ui.add(icons::image("image", 16.0, tokens.icon));
+
+    widgets::settings_group(ui, "Background", |group| {
+        group.full(|ui| {
+            let cards = cards_for(
+                effects,
+                EffectKind::Background,
+                &prefs.effect_params,
+                has_wallpaper,
+                Vec::new(),
+            );
+            let selected = Choice::Effect(prefs.background.clone());
+            if let Some(Choice::Effect(id)) = gallery(
+                ui,
+                "settings-background",
+                EffectKind::Background,
+                &cards,
+                &selected,
+                CARD,
+                time,
+            ) {
+                prefs.background = id;
+            }
+            if let Some(def) = find(&prefs.background) {
+                params_editor(ui, def, &mut prefs.effect_params);
+            }
+        });
         let name = prefs
             .wallpaper
             .as_deref()
             .and_then(|path| Path::new(path).file_name())
             .map(|name| name.to_string_lossy().into_owned());
-        ui.label(match &name {
-            Some(name) => format!("Wallpaper: {name}"),
-            None => "No wallpaper".into(),
+        let description = match &name {
+            Some(name) => format!("{name}. Wallpaper backgrounds draw it; others ignore it."),
+            None => "None. Wallpaper backgrounds draw it; others ignore it.".into(),
+        };
+        group.row("Wallpaper", Some(&description), |ui| {
+            if name.is_some() && widgets::ghost_button(ui, "x", "Clear").clicked() {
+                prefs.wallpaper = None;
+            }
+            if widgets::ghost_button(ui, "folder-open", "Choose…").clicked() {
+                actions.push(Action::ChooseWallpaper);
+            }
         });
-        if widgets::ghost_button(ui, "folder-open", "Choose…").clicked() {
-            actions.push(Action::ChooseWallpaper);
-        }
-        if name.is_some() && widgets::ghost_button(ui, "x", "Clear").clicked() {
-            prefs.wallpaper = None;
-        }
-    });
-    ui.label(
-        RichText::new("Wallpaper backgrounds draw it; others ignore it.")
-            .small()
-            .color(tokens.text_faint),
-    );
-    widgets::slider(
-        ui,
-        egui::Slider::new(&mut prefs.background_fps, 1..=120)
-            .text("frames per second for animated backgrounds"),
-    );
-
-    ui.add_space(10.0);
-    widgets::section_title(ui, "Page transition");
-    let cards = cards_for(
-        effects,
-        EffectKind::Transition,
-        &prefs.effect_params,
-        has_wallpaper,
-        vec![off_card()],
-    );
-    let selected = as_choice(prefs.transition.as_deref());
-    match gallery(
-        ui,
-        "settings-transition",
-        EffectKind::Transition,
-        &cards,
-        &selected,
-        CARD,
-        time,
-    ) {
-        Some(Choice::Effect(id)) => prefs.transition = Some(id),
-        Some(_) => prefs.transition = None,
-        None => {}
-    }
-    if let Some(def) = prefs.transition.as_deref().and_then(find) {
-        params_editor(ui, def, &mut prefs.effect_params);
-    }
-
-    ui.add_space(10.0);
-    widgets::section_title(ui, "Page tint");
-    let cards = cards_for(
-        effects,
-        EffectKind::Overlay,
-        &prefs.effect_params,
-        has_wallpaper,
-        vec![off_card()],
-    );
-    let selected = as_choice(prefs.overlay.as_deref());
-    match gallery(
-        ui,
-        "settings-overlay",
-        EffectKind::Overlay,
-        &cards,
-        &selected,
-        CARD,
-        time,
-    ) {
-        Some(Choice::Effect(id)) => prefs.overlay = Some(id),
-        Some(_) => prefs.overlay = None,
-        None => {}
-    }
-    if let Some(def) = prefs.overlay.as_deref().and_then(find) {
-        params_editor(ui, def, &mut prefs.effect_params);
-    }
-
-    ui.add_space(10.0);
-    widgets::section_title(ui, "Your effects");
-    ui.label(
-        RichText::new(
-            "WGSL files in this folder join the galleries, and reload when they change. \
-             A book can have its own choices in the Effects drawer.",
-        )
-        .color(tokens.text_muted),
-    );
-    if let Some(folder) = folder {
-        ui.label(
-            RichText::new(folder.display().to_string())
-                .font(theme::mono(11.5))
-                .color(tokens.text_muted),
+        group.row(
+            "Animation rate",
+            Some("Frames per second for animated backgrounds."),
+            |ui| {
+                widgets::slider(
+                    ui,
+                    egui::Slider::new(&mut prefs.background_fps, 1..=120).suffix(" fps"),
+                );
+            },
         );
-    }
-    ui.horizontal(|ui| {
-        if widgets::ghost_button(ui, "folder-open", "Open folder").clicked() {
-            actions.push(Action::OpenFolder);
+    });
+
+    widgets::settings_group(ui, "Page transition", |group| {
+        group.full(|ui| {
+            let cards = cards_for(
+                effects,
+                EffectKind::Transition,
+                &prefs.effect_params,
+                has_wallpaper,
+                vec![off_card()],
+            );
+            let selected = as_choice(prefs.transition.as_deref());
+            match gallery(
+                ui,
+                "settings-transition",
+                EffectKind::Transition,
+                &cards,
+                &selected,
+                CARD,
+                time,
+            ) {
+                Some(Choice::Effect(id)) => prefs.transition = Some(id),
+                Some(_) => prefs.transition = None,
+                None => {}
+            }
+            if let Some(def) = prefs.transition.as_deref().and_then(find) {
+                params_editor(ui, def, &mut prefs.effect_params);
+            }
+        });
+    });
+
+    widgets::settings_group(ui, "Page tint", |group| {
+        group.full(|ui| {
+            let cards = cards_for(
+                effects,
+                EffectKind::Overlay,
+                &prefs.effect_params,
+                has_wallpaper,
+                vec![off_card()],
+            );
+            let selected = as_choice(prefs.overlay.as_deref());
+            match gallery(
+                ui,
+                "settings-overlay",
+                EffectKind::Overlay,
+                &cards,
+                &selected,
+                CARD,
+                time,
+            ) {
+                Some(Choice::Effect(id)) => prefs.overlay = Some(id),
+                Some(_) => prefs.overlay = None,
+                None => {}
+            }
+            if let Some(def) = prefs.overlay.as_deref().and_then(find) {
+                params_editor(ui, def, &mut prefs.effect_params);
+            }
+        });
+    });
+
+    widgets::settings_group(ui, "Your effects", |group| {
+        let folder_text = folder.map(|folder| folder.display().to_string());
+        group.row(
+            "Effects folder",
+            Some(
+                "WGSL files here join the galleries and reload when they change. \
+                 A book can have its own choices in the Effects drawer.",
+            ),
+            |ui| {
+                if widgets::ghost_button(ui, "file-plus", "New effect").clicked() {
+                    actions.push(Action::NewEffect);
+                }
+                if widgets::ghost_button(ui, "folder-open", "Open folder").clicked() {
+                    actions.push(Action::OpenFolder);
+                }
+            },
+        );
+        if let Some(folder) = folder_text {
+            group.full(|ui| {
+                ui.label(
+                    RichText::new(folder)
+                        .font(theme::mono(11.5))
+                        .color(tokens.text_muted),
+                );
+            });
         }
-        if widgets::ghost_button(ui, "file-plus", "New effect").clicked() {
-            actions.push(Action::NewEffect);
+        if !errors.is_empty() {
+            group.full(|ui| {
+                for error in errors {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(icons::image("triangle-alert", 14.0, tokens.danger));
+                        ui.label(RichText::new(error).small().color(tokens.danger));
+                    });
+                }
+            });
         }
     });
-    for error in errors {
-        ui.horizontal_wrapped(|ui| {
-            ui.add(icons::image("triangle-alert", 14.0, tokens.danger));
-            ui.label(RichText::new(error).small().color(tokens.danger));
-        });
-    }
 }
 
 /// What the Effects drawer needs: one book's choices and the defaults'

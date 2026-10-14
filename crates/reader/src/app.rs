@@ -21,6 +21,7 @@ use crate::{
     ai::{AskContext, Assistant, PanelAction},
     annotations::{self, AnnotationId, Annotations},
     commands::{Command, Needs},
+    desktop_theme::DesktopTheme,
     document::{Arrangement, FrameTimes},
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
@@ -32,6 +33,7 @@ use crate::{
     harness::Harness,
     home::{Home, HomeAction},
     icons,
+    keymap_page::KeymapPage,
     keys::{self, Keymap, KeymapPreset},
     overview::Overview,
     palette::{self, Item, Palette},
@@ -48,6 +50,7 @@ use crate::{
     translation::{CardState, Translator},
     user_settings::UserSettings,
     widgets,
+    window_blur::WindowBlur,
 };
 
 mod chrome;
@@ -61,6 +64,8 @@ const TAB_MAX_LABEL: usize = 32;
 const TAB_OVERFLOW_WIDTH: f32 = 28.0;
 /// Room a tab needs besides its title: icon, padding and close button.
 const TAB_CHROME: f32 = 62.0;
+/// The Keyboard shortcuts tab's label.
+const KEYMAP_TAB_LABEL: &str = "Keyboard shortcuts";
 /// Margin on each side of a reflowed column, in points.
 const REFLOW_MARGIN: f32 = 24.0;
 /// Height of a reflowed page, in points (as the GPUI Reader lays out).
@@ -115,10 +120,11 @@ pub struct Launch {
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
     pub ask: Option<String>,
-    /// Scripted runs: open the palette with this query, or settings at
-    /// this section.
+    /// Scripted runs: open the palette with this query, settings at this
+    /// section, or the keyboard shortcuts tab.
     pub palette: Option<String>,
     pub settings: Option<Section>,
+    pub shortcuts: bool,
     /// Scripted runs: commands run once the documents are open.
     pub commands: Vec<Command>,
     /// Scripted runs: a region drawn on a page (from 1) at startup.
@@ -164,7 +170,18 @@ struct NoteEditor {
 
 pub struct ReaderApp {
     pub(crate) prefs: Prefs,
-    theme_kind: Option<ThemeKind>,
+    /// The theme and window opacity applied to egui.
+    theme_applied: Option<(ThemeKind, f32)>,
+    /// Watches the desktop's light or dark choice for the System theme.
+    desktop_theme: DesktopTheme,
+    /// The desktop's latest answer: dark or light, `None` for no
+    /// preference.
+    desktop_dark: Option<bool>,
+    /// The last theme the desktop (or winit) asked for, which System keeps
+    /// while the desktop says nothing.
+    pub(crate) system_theme: Option<ThemeKind>,
+    /// The compositor's blur behind the transparent window.
+    window_blur: WindowBlur,
     library: LibraryStore,
     pub(crate) tabs: Vec<DocumentTab>,
     /// Index into `tabs` of the focused pane's tab; `None` shows the home
@@ -251,6 +268,13 @@ pub struct ReaderApp {
     pub(crate) pending_keys: keys::Pending,
     pub(crate) palette: Palette,
     pub(crate) settings_window: SettingsWindow,
+    /// The Keyboard shortcuts tab, while it is open.
+    keymap_page: Option<KeymapPage>,
+    /// The Keyboard shortcuts tab is the one shown; `active` is then
+    /// `None`, so everything for documents treats it like the home tab.
+    keymap_focused: bool,
+    /// The document tab to go back to when the shortcuts tab closes.
+    keymap_return: Option<u64>,
 }
 
 impl ReaderApp {
@@ -311,7 +335,14 @@ impl ReaderApp {
         };
         let mut app = Self {
             prefs,
-            theme_kind: None,
+            theme_applied: None,
+            desktop_theme: {
+                let ctx = cc.egui_ctx.clone();
+                DesktopTheme::start(move || ctx.request_repaint())
+            },
+            desktop_dark: None,
+            system_theme: None,
+            window_blur: WindowBlur::default(),
             library: LibraryStore::load(),
             tabs: Vec::new(),
             active: None,
@@ -375,11 +406,17 @@ impl ReaderApp {
             pending_keys: keys::Pending::default(),
             palette: Palette::default(),
             settings_window: SettingsWindow::default(),
+            keymap_page: None,
+            keymap_focused: false,
+            keymap_return: None,
         };
         app.rebuild_keymap();
         if let Some(query) = launch.palette {
             app.palette.toggle();
             app.palette.query = query;
+        }
+        if launch.shortcuts {
+            app.open_keymap_tab();
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
@@ -494,6 +531,7 @@ impl ReaderApp {
     /// pane gets the focus), with the transition effect from the document
     /// it replaces.
     pub(crate) fn activate(&mut self, next: Option<usize>) {
+        self.keymap_focused = false;
         if next == self.active {
             return;
         }
@@ -516,6 +554,27 @@ impl ReaderApp {
             -1.0
         };
         self.begin_transition(effect, from, tab, direction);
+    }
+
+    /// Opens the Keyboard shortcuts tab, or goes to it.
+    pub(crate) fn open_keymap_tab(&mut self) {
+        if !self.keymap_focused {
+            self.keymap_return = self.active.map(|active| self.tabs[active].id);
+        }
+        self.keymap_page.get_or_insert_default();
+        self.activate(None);
+        self.keymap_focused = true;
+    }
+
+    /// Closes the Keyboard shortcuts tab; when it was shown, the document
+    /// shown before it comes back (or the home tab).
+    fn close_keymap_tab(&mut self) {
+        self.keymap_page = None;
+        if std::mem::take(&mut self.keymap_focused)
+            && let Some(id) = self.keymap_return.take()
+        {
+            self.focus_tab(id);
+        }
     }
 
     /// Focuses the pane showing tab `id`, without a transition.
@@ -1436,12 +1495,47 @@ impl ReaderApp {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let fallback = self.theme_kind.unwrap_or_default();
-        let kind = self.prefs.theme.resolve(ctx.system_theme(), fallback);
-        if self.theme_kind != Some(kind) {
-            theme::apply(ctx, kind);
-            self.theme_kind = Some(kind);
+        if let Some(dark) = self.desktop_theme.take_change() {
+            self.desktop_dark = dark;
         }
+        let desktop = self.desktop_dark.map(|dark| {
+            if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            }
+        });
+        let system = ctx.system_theme().or(desktop);
+        if let Some(system) = system {
+            self.system_theme = Some(match system {
+                egui::Theme::Dark => ThemeKind::Dark,
+                egui::Theme::Light => ThemeKind::Light,
+            });
+        }
+        let kind = self.prefs.theme.resolve(system, self.system_theme);
+        let applied = (kind, self.window_opacity());
+        if self.theme_applied != Some(applied) {
+            theme::apply(ctx, applied.0, applied.1);
+            self.theme_applied = Some(applied);
+        }
+    }
+
+    /// How opaque the window's surfaces are: below 1 while transparency is
+    /// on.
+    pub(crate) fn window_opacity(&self) -> f32 {
+        self.user_settings
+            .get()
+            .map_or(1.0, |settings| settings.window.effective_opacity(true))
+    }
+
+    /// Turns the window's transparency on or off, in the settings file.
+    fn toggle_transparency(&mut self) {
+        let on = self
+            .user_settings
+            .get()
+            .is_some_and(|settings| settings.window.transparent());
+        self.user_settings
+            .edit(|settings| settings.window.set_transparent(!on));
     }
 
     fn global_actions(&mut self, ctx: &egui::Context) -> Vec<ViewAction> {
@@ -1462,7 +1556,12 @@ impl ReaderApp {
         }
         // Key presses go to a shortcut being recorded, and the settings
         // window stands in front of the document.
-        if self.settings_window.open {
+        if self.settings_window.open
+            || self
+                .keymap_page
+                .as_ref()
+                .is_some_and(KeymapPage::is_recording)
+        {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
@@ -1574,6 +1673,11 @@ impl ReaderApp {
         command: Command,
         ctx: &egui::Context,
     ) -> Result<(), &'static str> {
+        // Closing a tab closes the shortcuts tab while it is shown.
+        if command == Command::CloseTab && self.keymap_focused {
+            self.close_keymap_tab();
+            return Ok(());
+        }
         if let Some(reason) = self.command_blocked(command) {
             return Err(reason);
         }
@@ -1606,6 +1710,15 @@ impl ReaderApp {
             }
             Command::Settings => {
                 self.settings_window.open = true;
+                None
+            }
+            Command::KeyboardShortcuts => {
+                self.settings_window.open = false;
+                self.open_keymap_tab();
+                None
+            }
+            Command::ToggleTransparency => {
+                self.toggle_transparency();
                 None
             }
             Command::ToggleSidebar => {
@@ -1866,21 +1979,22 @@ impl ReaderApp {
         if self.settings_window.open {
             let effects = self.effect_defs();
             let errors = self.effect_errors();
-            let changed = self.settings_window.show(
+            self.settings_window.show(
                 ctx,
                 SettingsContext {
                     prefs: &mut self.prefs,
-                    keymap: &self.keymap,
                     effects: &effects,
                     effect_errors: &errors,
                     effects_folder: self.effects_dir.as_deref(),
                     time: self.started.elapsed().as_secs_f32(),
                     user: &mut self.user_settings,
                     chatgpt: &self.chatgpt,
+                    system_theme: self.system_theme,
+                    blur_supported: self.window_blur.support().known(),
                 },
             );
-            if changed {
-                self.rebuild_keymap();
+            if std::mem::take(&mut self.settings_window.open_shortcuts) {
+                self.open_keymap_tab();
             }
             let actions = std::mem::take(&mut self.settings_window.effects_actions);
             for action in actions {
@@ -1983,7 +2097,18 @@ impl ReaderApp {
         let search_width = if strip.width() > 900.0 { 280.0 } else { 0.0 };
         // Home and Open on the left; search, theme, settings and the menu
         // on the right.
-        let controls = 2.0 * 32.0 + search_width + 4.0 * 32.0 + 16.0;
+        let keymap_tab = self.keymap_page.is_some().then(|| {
+            ui.painter()
+                .layout_no_wrap(KEYMAP_TAB_LABEL.into(), font.clone(), tokens.text)
+                .size()
+                .x
+                + TAB_CHROME
+        });
+        let controls = 2.0 * 32.0
+            + search_width
+            + 4.0 * 32.0
+            + 16.0
+            + keymap_tab.map_or(0.0, |width| width + 4.0);
         let fit = craft_ui::tabs::fit(
             &natural,
             self.active.unwrap_or(0),
@@ -1995,9 +2120,11 @@ impl ReaderApp {
         let mut close = None;
         let mut run = None;
         let mut tab_menu = None;
+        let (mut open_keymap, mut close_keymap) = (false, false);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if icons::button(ui, "house", 28.0, self.active.is_none(), "Home").clicked() {
+            let home = self.active.is_none() && !self.keymap_focused;
+            if icons::button(ui, "house", 28.0, home, "Home").clicked() {
                 select = Some(None);
             }
             for &(index, width) in &fit.shown {
@@ -2092,6 +2219,13 @@ impl ReaderApp {
                     close = Some(index);
                 }
             }
+            if let Some(width) = keymap_tab {
+                match self.keymap_tab(ui, width, &tokens, &font) {
+                    Some(true) => close_keymap = true,
+                    Some(false) => open_keymap = true,
+                    None => {}
+                }
+            }
             if !fit.overflow.is_empty() {
                 let response =
                     icons::button(ui, "chevron-down", TAB_OVERFLOW_WIDTH, false, "More tabs");
@@ -2161,12 +2295,90 @@ impl ReaderApp {
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
         }
+        if close_keymap {
+            self.close_keymap_tab();
+        } else if open_keymap {
+            self.open_keymap_tab();
+        }
         if let Some((index, action)) = tab_menu {
             self.tab_menu_action(index, action, &ctx);
         } else if let Some(index) = close {
             self.close(index);
         } else if let Some(index) = select {
             self.activate(index);
+        }
+    }
+
+    /// The Keyboard shortcuts tab in the strip, `width` wide: `Some(true)`
+    /// when it is to close, `Some(false)` when it was chosen.
+    fn keymap_tab(
+        &self,
+        ui: &mut egui::Ui,
+        width: f32,
+        tokens: &Tokens,
+        font: &egui::FontId,
+    ) -> Option<bool> {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
+        let id = ui.id().with("keymap-tab");
+        let selected = self.keymap_focused;
+        let response = craft_ui::tabs::Tab::new(id, KEYMAP_TAB_LABEL, selected)
+            .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
+            .show_at(ui, rect, |ui, response| {
+                if selected {
+                    ui.painter().rect(
+                        rect,
+                        8.0,
+                        tokens.chrome,
+                        egui::Stroke::new(1.0, tokens.border),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if response.hovered() {
+                    ui.painter().rect_filled(rect, 8.0, tokens.hover);
+                }
+                icons::paint(
+                    ui,
+                    egui::Rect::from_center_size(
+                        egui::pos2(rect.left() + 16.0, rect.center().y),
+                        egui::vec2(16.0, 16.0),
+                    ),
+                    "keyboard",
+                    15.0,
+                    if selected {
+                        tokens.accent
+                    } else {
+                        tokens.text_muted
+                    },
+                );
+                widgets::row_text(
+                    ui,
+                    egui::pos2(rect.left() + 30.0, rect.center().y),
+                    KEYMAP_TAB_LABEL,
+                    font.clone(),
+                    if selected {
+                        tokens.text
+                    } else {
+                        tokens.text_muted
+                    },
+                    rect.width() - TAB_CHROME,
+                );
+            });
+        let close_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 15.0, rect.center().y),
+            egui::vec2(20.0, 20.0),
+        );
+        let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
+        if close_button.hovered() {
+            ui.painter().rect_filled(close_rect, 4.0, tokens.pressed);
+        }
+        if selected || response.hovered() || close_button.hovered() {
+            icons::paint(ui, close_rect, "x", 13.0, tokens.text_muted);
+        }
+        if close_button.on_hover_text("Close").clicked() || response.middle_clicked() {
+            Some(true)
+        } else if response.clicked() {
+            Some(false)
+        } else {
+            None
         }
     }
 
@@ -2199,7 +2411,12 @@ impl ReaderApp {
     fn menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let mut run = None;
-        for command in [Command::Open, Command::Palette, Command::Settings] {
+        for command in [
+            Command::Open,
+            Command::Palette,
+            Command::Settings,
+            Command::KeyboardShortcuts,
+        ] {
             let enabled = command != Command::Open || !self.pickers.is_showing();
             if ui
                 .add_enabled(enabled, self.menu_button(ui, command.label(), command))
@@ -2259,6 +2476,7 @@ impl ReaderApp {
         let ppp = ctx.pixels_per_point();
         let size = pixel_size(rect, ppp);
         self.tabs[active].inset = f64::from((content.left() - rect.left()) * ppp);
+        self.tabs[active].inset_right = f64::from((rect.right() - content.right()) * ppp);
         let pointer = response.hover_pos().map(|pos| {
             [
                 f64::from((pos.x - rect.min.x) * ppp),
@@ -2969,7 +3187,13 @@ impl ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// The window is transparent-capable, and the panels paint every pixel:
+    /// opaque, or as translucent as the window's opacity.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
         let seconds = (now - self.last_update).as_secs_f64().min(0.1);
@@ -2980,6 +3204,11 @@ impl eframe::App for ReaderApp {
         }
         self.frames.tick();
         self.apply_theme(&ctx);
+        let blur = self.user_settings.get().is_some_and(|settings| {
+            settings.window.blur() && settings.window.effective_opacity(true) < 1.0
+        });
+        self.window_blur
+            .update(frame, blur, ctx.content_rect().size());
 
         for path in self.pickers.take() {
             self.open(&path, &ctx, None);
@@ -3069,11 +3298,26 @@ impl eframe::App for ReaderApp {
 
         let mut animating = false;
         let mut pages_drawn = true;
+        // A document shown (opened, or chosen from the palette) leaves the
+        // shortcuts tab.
+        self.keymap_focused &= self.active.is_none() && self.keymap_page.is_some();
         egui::CentralPanel::no_frame()
-            .frame(egui::Frame::new().fill(tokens.pasteboard))
+            // A document's stage is filled by its background effect; a
+            // fill under it would double a transparent window's opacity.
+            .frame(egui::Frame::new().fill(if self.active.is_some() {
+                egui::Color32::TRANSPARENT
+            } else {
+                tokens.pasteboard
+            }))
             .show(ui, |ui| {
                 if self.active.is_some() {
                     (animating, pages_drawn) = self.stage(ui, actions, &pad, seconds, now);
+                } else if self.keymap_focused
+                    && let Some(page) = self.keymap_page.as_mut()
+                {
+                    if page.show(ui, &mut self.prefs, &self.keymap) {
+                        self.rebuild_keymap();
+                    }
                 } else if let Some(action) =
                     self.home.ui(ui, &self.library, self.pickers.is_showing())
                 {
@@ -3127,6 +3371,10 @@ impl eframe::App for ReaderApp {
             let fps = self.prefs.background_fps.max(1);
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 / f64::from(fps)));
         }
+    }
+
+    fn on_exit(&mut self) {
+        self.window_blur.detach();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

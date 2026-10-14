@@ -42,6 +42,19 @@ serde_json.workspace = true
 tiny_http.workspace = true
 wgpu.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The desktop's light/dark choice through the XDG portal (see
+# `desktop_theme.rs`). Already in the tree through accesskit and oo7, with
+# these features, so nothing is built twice.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }
+# Blur behind the window through ext-background-effect-v1 on winit's Wayland
+# connection (see `window_blur.rs`); the versions and features winit already
+# builds.
+raw-window-handle = "=0.6.2"
+wayland-backend = { version = "=0.3.17", features = ["client_system"] }
+wayland-client = "=0.31.15"
+wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
+
 [dev-dependencies]
 glyphst-library = { path = "../library", features = ["test-support"] }
 glyphst-pdf = { path = "../pdf", features = ["test-support"] }

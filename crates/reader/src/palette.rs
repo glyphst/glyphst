@@ -437,7 +437,9 @@ mod tests {
             Item::Open(PathBuf::from("/books/brochure.pdf"))
         );
         let found = hits("shortcuts", &sources(true), &[]);
-        assert_eq!(found[0].item, Item::Settings(Section::Shortcuts));
+        assert_eq!(found[0].item, Item::Command(Command::KeyboardShortcuts));
+        let found = hits("appearance", &sources(true), &[]);
+        assert_eq!(found[0].item, Item::Settings(Section::Appearance));
         // A subsequence still finds it.
         let found = hits("fdnx", &sources(true), &[]);
         assert_eq!(found[0].item, Item::Command(Command::FindNext));

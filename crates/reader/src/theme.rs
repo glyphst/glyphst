@@ -34,15 +34,16 @@ impl ThemePreference {
     }
 
     /// The colours to draw. `system` is the desktop's answer, `None` when
-    /// it gives none; `fallback` is what the app last drew.
-    pub fn resolve(self, system: Option<egui::Theme>, fallback: ThemeKind) -> ThemeKind {
+    /// it gives none; then System keeps `last_system`, the desktop's last
+    /// answer, never the Light or Dark chosen before it.
+    pub fn resolve(self, system: Option<egui::Theme>, last_system: Option<ThemeKind>) -> ThemeKind {
         match self {
             Self::Light => ThemeKind::Light,
             Self::Dark => ThemeKind::Dark,
             Self::System => match system {
                 Some(egui::Theme::Dark) => ThemeKind::Dark,
                 Some(egui::Theme::Light) => ThemeKind::Light,
-                None => fallback,
+                None => last_system.unwrap_or_default(),
             },
         }
     }
@@ -55,13 +56,15 @@ pub struct Tokens {
     pub titlebar: Color32,
     /// Bars and docks.
     pub chrome: Color32,
-    /// Drawers and side panels.
+    /// The drawers and the assistant docked at the stage's sides.
     pub panel: Color32,
     /// The document area behind pages.
     pub pasteboard: Color32,
     pub page: Color32,
     /// Popups, cards and dialogs.
     pub card: Color32,
+    /// Groups of rows on a card, as in Settings.
+    pub group: Color32,
     pub border: Color32,
     /// Hairlines between groups.
     pub divider: Color32,
@@ -81,6 +84,9 @@ pub struct Tokens {
     pub danger: Color32,
     pub page_shadow: Color32,
     pub radius: u8,
+    /// How opaque the window's surfaces are: 1 unless the window is
+    /// transparent.
+    pub opacity: f32,
 }
 
 impl Tokens {
@@ -94,6 +100,7 @@ impl Tokens {
                 pasteboard: Color32::from_rgb(0xF1, 0xF1, 0xF3),
                 page: Color32::WHITE,
                 card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                group: Color32::from_rgb(0xF6, 0xF6, 0xF8),
                 border: Color32::from_rgb(0xDA, 0xDA, 0xDE),
                 divider: Color32::from_rgb(0xE8, 0xE8, 0xEB),
                 text: Color32::from_rgb(0x22, 0x22, 0x26),
@@ -109,15 +116,17 @@ impl Tokens {
                 danger: Color32::from_rgb(0xC4, 0x2B, 0x1C),
                 page_shadow: Color32::from_black_alpha(34),
                 radius: 6,
+                opacity: 1.0,
             },
             ThemeKind::Dark => Self {
                 kind,
                 titlebar: Color32::from_rgb(0x1B, 0x1B, 0x1E),
                 chrome: Color32::from_rgb(0x26, 0x26, 0x2A),
-                panel: Color32::from_rgb(0x26, 0x26, 0x2A),
+                panel: Color32::from_rgb(0x2E, 0x2E, 0x33),
                 pasteboard: Color32::from_rgb(0x19, 0x19, 0x1C),
                 page: Color32::WHITE,
                 card: Color32::from_rgb(0x2E, 0x2E, 0x33),
+                group: Color32::from_rgb(0x28, 0x28, 0x2D),
                 border: Color32::from_rgb(0x3C, 0x3C, 0x43),
                 divider: Color32::from_rgb(0x33, 0x33, 0x39),
                 text: Color32::from_rgb(0xEC, 0xEC, 0xEF),
@@ -133,8 +142,31 @@ impl Tokens {
                 danger: Color32::from_rgb(0xF2, 0x8B, 0x82),
                 page_shadow: Color32::from_black_alpha(120),
                 radius: 6,
+                opacity: 1.0,
             },
         }
+    }
+
+    /// The tokens for a transparent window `opacity` opaque: the base layer
+    /// (the title bar and its selected tab, the background around the
+    /// pages) shows the desktop through. Everything over the pages (the
+    /// docked panels, cards, popups, menus, dialogs), fields, highlights,
+    /// text, lines and pages stays opaque, so content never shows through
+    /// it and it never shows the desktop instead of the document.
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        let opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if opacity >= 1.0 {
+            return self;
+        }
+        for surface in [&mut self.titlebar, &mut self.chrome, &mut self.pasteboard] {
+            *surface = surface.gamma_multiply(opacity);
+        }
+        self.opacity = opacity;
+        self
     }
 
     pub fn get(ctx: &egui::Context) -> Self {
@@ -146,9 +178,10 @@ impl Tokens {
         self.kind == ThemeKind::Dark
     }
 
-    /// RGB of the pasteboard in 0..=1, for the solid background effect.
+    /// RGB of the pasteboard in 0..=1, for the solid background effect
+    /// (which takes the window's opacity separately).
     pub fn pasteboard_rgb(&self) -> [f32; 3] {
-        let [r, g, b, _] = self.pasteboard.to_array();
+        let [r, g, b, _] = self.pasteboard.to_srgba_unmultiplied();
         [r, g, b].map(|channel| f32::from(channel) / 255.0)
     }
 
@@ -164,7 +197,7 @@ impl Tokens {
         }
     }
 
-    /// The shadow under cards, drawers and dialogs.
+    /// The shadow under cards and dialogs.
     pub fn card_shadow(&self) -> Shadow {
         Shadow {
             offset: [0, 8],
@@ -203,15 +236,17 @@ pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
 }
 
-/// Applies the theme's tokens to egui's style, after pdfcraft's `apply`.
-pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
+/// Applies the theme's tokens to egui's style, after pdfcraft's `apply`;
+/// `opacity` below 1 makes the surfaces translucent (see
+/// [`Tokens::with_opacity`]).
+pub fn apply(ctx: &egui::Context, kind: ThemeKind, opacity: f32) {
     // Popups and menus take their style from egui's theme, so it must
     // match the colours drawn.
     ctx.set_theme(match kind {
         ThemeKind::Light => egui::Theme::Light,
         ThemeKind::Dark => egui::Theme::Dark,
     });
-    let t = Tokens::for_kind(kind);
+    let t = Tokens::for_kind(kind).with_opacity(opacity);
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(TOKENS_ID), t));
     let mut v = if t.dark() {
         Visuals::dark()
@@ -277,17 +312,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_preference_follows_the_desktop_and_keeps_the_last_answer() {
+    fn system_preference_follows_the_desktop_and_keeps_its_last_answer() {
         let system = ThemePreference::System;
         assert_eq!(
-            system.resolve(Some(egui::Theme::Dark), ThemeKind::Light),
+            system.resolve(Some(egui::Theme::Dark), Some(ThemeKind::Light)),
             ThemeKind::Dark
         );
-        assert_eq!(system.resolve(None, ThemeKind::Dark), ThemeKind::Dark);
+        assert_eq!(system.resolve(None, Some(ThemeKind::Dark)), ThemeKind::Dark);
         assert_eq!(
-            ThemePreference::Light.resolve(Some(egui::Theme::Dark), ThemeKind::Dark),
+            ThemePreference::Light.resolve(Some(egui::Theme::Dark), Some(ThemeKind::Dark)),
             ThemeKind::Light
         );
+    }
+
+    /// The bug where System kept the Dark picked before it: with no desktop
+    /// answer ever, System is Light, whatever was drawn.
+    #[test]
+    fn system_without_a_desktop_answer_is_light_not_the_previous_choice() {
+        assert_eq!(
+            ThemePreference::System.resolve(None, None),
+            ThemeKind::Light
+        );
+    }
+
+    #[test]
+    fn opacity_makes_the_base_translucent_and_keeps_everything_over_content_opaque() {
+        for kind in [ThemeKind::Light, ThemeKind::Dark] {
+            let opaque = Tokens::for_kind(kind);
+            assert_eq!(opaque.with_opacity(1.0), opaque);
+            assert_eq!(opaque.with_opacity(f32::NAN), opaque);
+            let half = opaque.with_opacity(0.5);
+            assert_eq!(half.opacity, 0.5);
+            for (surface, was) in [
+                (half.titlebar, opaque.titlebar),
+                (half.chrome, opaque.chrome),
+                (half.pasteboard, opaque.pasteboard),
+            ] {
+                assert!((126..=129).contains(&surface.a()), "{surface:?}");
+                // The same colour, only less opaque.
+                let [r, g, b, _] = surface.to_srgba_unmultiplied();
+                let [r0, g0, b0, _] = was.to_srgba_unmultiplied();
+                assert!(r.abs_diff(r0) <= 2 && g.abs_diff(g0) <= 2 && b.abs_diff(b0) <= 2);
+            }
+            // What floats over content, and what is drawn on it, stays
+            // opaque.
+            for fixed in [
+                half.panel,
+                half.card,
+                half.group,
+                half.field,
+                half.hover,
+                half.pressed,
+                half.accent_soft,
+                half.text,
+                half.icon,
+                half.border,
+                half.accent,
+                half.page,
+            ] {
+                assert_eq!(fixed.a(), 255);
+            }
+            // The solid background takes the colour, not its opacity.
+            for (h, o) in half
+                .pasteboard_rgb()
+                .into_iter()
+                .zip(opaque.pasteboard_rgb())
+            {
+                assert!((h - o).abs() <= 2.0 / 255.0);
+            }
+            assert_eq!(half.card_shadow(), opaque.card_shadow());
+            // The docked panels look like cards while the window is opaque.
+            assert_eq!(opaque.panel, opaque.card);
+        }
     }
 
     /// WCAG 2 contrast ratio between two opaque colours.
@@ -321,6 +417,7 @@ mod tests {
                     t.chrome,
                     t.panel,
                     t.card,
+                    t.group,
                     t.pasteboard,
                     t.hover,
                     t.accent_soft,
@@ -340,8 +437,16 @@ mod tests {
     #[test]
     fn applying_a_theme_stores_its_tokens() {
         let ctx = egui::Context::default();
-        apply(&ctx, ThemeKind::Dark);
+        apply(&ctx, ThemeKind::Dark, 1.0);
         assert_eq!(Tokens::get(&ctx).kind, ThemeKind::Dark);
         assert!(ctx.global_style().visuals.dark_mode);
+        assert_eq!(ctx.global_style().visuals.window_fill.a(), 255);
+
+        // Popups, menus and panels are over content: opaque.
+        apply(&ctx, ThemeKind::Light, 0.6);
+        let visuals = &ctx.global_style().visuals;
+        assert_eq!(visuals.window_fill.a(), 255);
+        assert_eq!(visuals.panel_fill.a(), 255);
+        assert_eq!(Tokens::get(&ctx).opacity, 0.6);
     }
 }

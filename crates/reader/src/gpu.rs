@@ -807,6 +807,7 @@ impl CallbackTrait for ViewCallback {
                 progress: 0.0,
                 direction: 1.0,
                 params: overlay.params,
+                opacity: 1.0,
             };
             effects.prepare(device, &overlay.id, &inputs)
         });
@@ -857,6 +858,7 @@ impl CallbackTrait for ViewCallback {
                 progress,
                 direction,
                 params,
+                opacity: 1.0,
             };
             effects
                 .prepare(device, id, &effect_inputs)
@@ -1010,6 +1012,7 @@ impl CallbackTrait for PreviewCallback {
             progress,
             direction: 1.0,
             params: self.effect.params,
+            opacity: 1.0,
         };
         match gpu.effects.prepare(device, &self.effect.id, &inputs) {
             Some(prepared) => gpu.previews.insert(self.key.clone(), prepared),
@@ -1040,6 +1043,8 @@ pub struct BackdropCallback {
     pub time: f32,
     /// The pointer in stage pixels.
     pub pointer: Option<[f32; 2]>,
+    /// How opaque it is drawn: the window's opacity.
+    pub opacity: f32,
 }
 
 impl CallbackTrait for BackdropCallback {
@@ -1080,6 +1085,7 @@ impl CallbackTrait for BackdropCallback {
             progress: 0.0,
             direction: 1.0,
             params: self.background.params,
+            opacity: self.opacity,
         };
         gpu.backdrop = gpu
             .effects

@@ -3045,11 +3045,16 @@ dependencies = [
  "image",
  "mupdf",
  "pollster 0.4.0",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "tiny_http",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wgpu",
+ "zbus",
 ]
 
 [[package]]

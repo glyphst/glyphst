@@ -22,9 +22,30 @@ use glyphst_settings::{
 
 use crate::{
     icons,
-    theme::Tokens,
+    theme::{self, Tokens},
     user_settings::{SecretStatus, UserSettings},
+    widgets::{self, Group},
 };
+
+/// One AI provider's row: which it is, where it is in the order, and the
+/// settings it edits.
+struct ProviderRow<'a> {
+    provider: AiProvider,
+    index: usize,
+    count: usize,
+    current: &'a Settings,
+    draft: &'a mut Settings,
+    user: &'a UserSettings,
+    chatgpt: &'a ChatGptSubscription,
+}
+
+/// What the providers' rows asked for, done after them.
+struct ProviderEdits<'a> {
+    remove: &'a mut Option<AiProvider>,
+    reorder: &'a mut Option<(usize, usize)>,
+    fetch: &'a mut Option<AiProvider>,
+    test: &'a mut Option<AiProvider>,
+}
 
 /// A provider's models being listed.
 type Fetch = (AiProvider, Receiver<Result<Vec<AiModelInfo>, String>>);
@@ -173,64 +194,69 @@ impl ProviderPages {
         };
         let mut draft = Settings::clone(&current);
         let translation = &mut draft.translation;
-        ui.label(RichText::new("Service").strong());
-        egui::ComboBox::from_id_salt("translation-provider")
-            .selected_text(translation.active_provider.label())
-            .show_ui(ui, |ui| {
-                for provider in TranslationProvider::ALL {
-                    ui.selectable_value(
-                        &mut translation.active_provider,
-                        provider,
-                        provider.label(),
-                    );
-                }
+        widgets::settings_group(ui, "Service", |group| {
+            group.row("Service", None, |ui| {
+                egui::ComboBox::from_id_salt("translation-provider")
+                    .selected_text(translation.active_provider.label())
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for provider in TranslationProvider::ALL {
+                            ui.selectable_value(
+                                &mut translation.active_provider,
+                                provider,
+                                provider.label(),
+                            );
+                        }
+                    });
             });
-        let provider = translation.active_provider;
-        ui.add_space(6.0);
-        if provider == TranslationProvider::Ai {
-            ui.label("Translates with the AI translation model (AI page).");
-        } else {
+            let provider = translation.active_provider;
+            if provider == TranslationProvider::Ai {
+                group.note("Translates with the AI translation model (AI page).");
+                return;
+            }
             let id = ProviderSecretId::TranslationApiKey(provider);
             let config = translation.provider_config_mut(provider);
-            self.secret(ui, "API key", &mut config.api_key, id, user.status(id));
+            self.secret(group, "API key", &mut config.api_key, id, user.status(id));
             optional_field(
-                ui,
+                group,
                 "Host",
                 &mut config.base_url,
                 provider.default_base_url().unwrap_or_default(),
             );
             if provider == TranslationProvider::Microsoft {
-                optional_field(ui, "Region", &mut config.region, "global");
+                optional_field(group, "Region", &mut config.region, "global");
             }
-        }
-        ui.add_space(8.0);
-        ui.label(RichText::new("Translate into").strong());
-        let chosen = match &translation.target_language {
-            TranslationTargetLanguage::UiLanguage => "The interface language".to_string(),
-            TranslationTargetLanguage::Explicit(code) => language_label(code),
-        };
-        egui::ComboBox::from_id_salt("translation-target")
-            .selected_text(chosen)
-            .height(360.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut translation.target_language,
-                    TranslationTargetLanguage::UiLanguage,
-                    "The interface language",
-                );
-                for language in glyphst_translation::TARGET_LANGUAGES {
-                    ui.selectable_value(
-                        &mut translation.target_language,
-                        TranslationTargetLanguage::Explicit(language.code.into()),
-                        language.label,
-                    );
-                }
-            });
-        ui.label(
-            RichText::new("The toolbar's language menu overrides this in this app.")
-                .small()
-                .color(Tokens::get(ui.ctx()).text_muted),
-        );
+        });
+        widgets::settings_group(ui, "Language", |group| {
+            let chosen = match &translation.target_language {
+                TranslationTargetLanguage::UiLanguage => "The interface language".to_string(),
+                TranslationTargetLanguage::Explicit(code) => language_label(code),
+            };
+            group.row(
+                "Translate into",
+                Some("The toolbar's language menu overrides this in this app."),
+                |ui| {
+                    egui::ComboBox::from_id_salt("translation-target")
+                        .selected_text(chosen)
+                        .width(220.0)
+                        .height(360.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut translation.target_language,
+                                TranslationTargetLanguage::UiLanguage,
+                                "The interface language",
+                            );
+                            for language in glyphst_translation::TARGET_LANGUAGES {
+                                ui.selectable_value(
+                                    &mut translation.target_language,
+                                    TranslationTargetLanguage::Explicit(language.code.into()),
+                                    language.label,
+                                );
+                            }
+                        });
+                },
+            );
+        });
         apply(user, &current, draft);
     }
 
@@ -241,68 +267,75 @@ impl ProviderPages {
         };
         let mut draft = Settings::clone(&current);
         let ocr = &mut draft.ocr;
-        ui.label(RichText::new("Recognize text in scanned pages").strong());
-        ui.horizontal(|ui| {
-            for (mode, label) in [
-                (OcrMode::Always, "Always"),
-                (OcrMode::Auto, "When a page has no text"),
-                (OcrMode::Off, "Never"),
-            ] {
-                ui.radio_value(&mut ocr.mode, mode, label);
-            }
-        });
-        ui.add_space(6.0);
-        ui.label(RichText::new("Service").strong());
-        ui.horizontal(|ui| {
-            ui.radio_value(
-                &mut ocr.provider,
-                OcrProvider::Unlimited,
-                "Baidu Unlimited OCR",
+        widgets::settings_group(ui, "Recognition", |group| {
+            group.row(
+                "Recognize text",
+                Some("In scanned pages, for selection, search and translation."),
+                |ui| {
+                    widgets::segmented(
+                        ui,
+                        &mut ocr.mode,
+                        &[
+                            (OcrMode::Always, "Always"),
+                            (OcrMode::Auto, "When a page has no text"),
+                            (OcrMode::Off, "Never"),
+                        ],
+                    );
+                },
             );
-            ui.radio_value(&mut ocr.provider, OcrProvider::Paddle, "PaddleOCR");
         });
-        ui.add_space(6.0);
-        match ocr.provider {
-            OcrProvider::Paddle => {
-                let id = ProviderSecretId::PaddleOcrToken;
-                self.secret(ui, "Token", &mut ocr.paddle.token, id, user.status(id));
-                text_field(ui, "Endpoint", &mut ocr.paddle.endpoint, "");
-                text_field(ui, "Model", &mut ocr.paddle.model, "");
-            }
-            OcrProvider::Unlimited => {
-                let id = ProviderSecretId::UnlimitedOcrApiKey;
-                self.secret(
+        widgets::settings_group(ui, "Service", |group| {
+            group.row("Service", None, |ui| {
+                widgets::segmented(
                     ui,
-                    "API key",
-                    &mut ocr.unlimited.api_key,
-                    id,
-                    user.status(id),
+                    &mut ocr.provider,
+                    &[
+                        (OcrProvider::Unlimited, "Baidu Unlimited OCR"),
+                        (OcrProvider::Paddle, "PaddleOCR"),
+                    ],
                 );
-                let id = ProviderSecretId::UnlimitedOcrSecretKey;
-                self.secret(
-                    ui,
-                    "Secret key",
-                    &mut ocr.unlimited.secret_key,
-                    id,
-                    user.status(id),
-                );
-                text_field(ui, "Endpoint", &mut ocr.unlimited.endpoint, "");
+            });
+            match ocr.provider {
+                OcrProvider::Paddle => {
+                    let id = ProviderSecretId::PaddleOcrToken;
+                    self.secret(group, "Token", &mut ocr.paddle.token, id, user.status(id));
+                    text_field(group, "Endpoint", &mut ocr.paddle.endpoint, "");
+                    text_field(group, "Model", &mut ocr.paddle.model, "");
+                }
+                OcrProvider::Unlimited => {
+                    let id = ProviderSecretId::UnlimitedOcrApiKey;
+                    self.secret(
+                        group,
+                        "API key",
+                        &mut ocr.unlimited.api_key,
+                        id,
+                        user.status(id),
+                    );
+                    let id = ProviderSecretId::UnlimitedOcrSecretKey;
+                    self.secret(
+                        group,
+                        "Secret key",
+                        &mut ocr.unlimited.secret_key,
+                        id,
+                        user.status(id),
+                    );
+                    text_field(group, "Endpoint", &mut ocr.unlimited.endpoint, "");
+                }
             }
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let running = self.ocr_test.as_ref().is_some_and(Test::running);
-            if ui
-                .add_enabled(!running, egui::Button::new("Test connection"))
-                .clicked()
-            {
-                let config = current.ocr.clone();
-                let run = config.clone();
-                self.ocr_test = Some(Test::start(config, ui.ctx(), move || {
-                    test_ocr_connection(run)
-                }));
-            }
-            test_status(ui, self.ocr_test.as_ref(), &current.ocr);
+            group.row("Connection", None, |ui| {
+                let running = self.ocr_test.as_ref().is_some_and(Test::running);
+                if ui
+                    .add_enabled(!running, egui::Button::new("Test connection"))
+                    .clicked()
+                {
+                    let config = current.ocr.clone();
+                    let run = config.clone();
+                    self.ocr_test = Some(Test::start(config, ui.ctx(), move || {
+                        test_ocr_connection(run)
+                    }));
+                }
+                test_status(ui, self.ocr_test.as_ref(), &current.ocr);
+            });
         });
         apply(user, &current, draft);
     }
@@ -317,7 +350,6 @@ impl ProviderPages {
             loading(ui);
             return;
         };
-        let tokens = Tokens::get(ui.ctx());
         let mut draft = Settings::clone(&current);
         let mut fetch = None;
         let mut test = None;
@@ -331,217 +363,88 @@ impl ProviderPages {
                     .set_provider_enabled(AiProvider::ChatGptSubscription, true);
             }
         }
-        ui.label(RichText::new("Models").strong());
         let choices = model_choices(&draft);
-        egui::Grid::new("ai-models").num_columns(2).show(ui, |ui| {
-            ui.label("Assistant");
-            model_picker(ui, "main-model", &mut draft.ai.main_model, &choices, None);
-            ui.end_row();
-            ui.label("Translation");
-            model_picker(
-                ui,
-                "translation-model",
-                &mut draft.ai.translation_model,
-                &choices,
-                Some("Same as the assistant"),
-            );
-            ui.end_row();
+        widgets::settings_group(ui, "Models", |group| {
+            group.row("Assistant", None, |ui| {
+                model_picker(ui, "main-model", &mut draft.ai.main_model, &choices, None);
+            });
+            group.row("Translation", Some("For AI translation."), |ui| {
+                model_picker(
+                    ui,
+                    "translation-model",
+                    &mut draft.ai.translation_model,
+                    &choices,
+                    Some("Same as the assistant"),
+                );
+            });
+            if choices.is_empty() {
+                group.note("Turn a provider on and give it a model to choose one.");
+            }
         });
-        if choices.is_empty() {
-            ui.label(
-                RichText::new("Turn a provider on and give it a model to choose one.")
-                    .color(tokens.text_muted),
-            );
-        }
-        ui.add_space(8.0);
-        ui.label(RichText::new("Providers").strong());
-        ui.label(
-            RichText::new("The first provider turned on answers when a model is not chosen.")
-                .small()
-                .color(tokens.text_muted),
-        );
         let mut remove = None;
         let mut reorder = None;
         let order = draft.ai.provider_order.clone();
-        for (index, provider) in order.iter().copied().enumerate() {
-            let config = draft.ai.provider_config(provider);
-            let title = if config.enabled {
-                config.name.clone()
-            } else {
-                format!("{} (off)", config.name)
-            };
-            let listing = self.fetched.contains_key(&provider)
-                || self.fetching.as_ref().is_some_and(|(p, _)| *p == provider);
-            egui::CollapsingHeader::new(title)
-                .id_salt(("ai-provider", provider.as_str()))
-                .default_open(listing)
-                .show(ui, |ui| {
-                    let mut enabled = config.enabled;
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut enabled, "On").changed() {
-                            draft.ai.set_provider_enabled(provider, enabled);
-                        }
-                        ui.add_enabled_ui(index > 0, |ui| {
-                            if icons::button(ui, "arrow-up", 24.0, false, "Move up").clicked() {
-                                reorder = Some((index, index - 1));
-                            }
-                        });
-                        ui.add_enabled_ui(index + 1 < order.len(), |ui| {
-                            if icons::button(ui, "arrow-down", 24.0, false, "Move down").clicked() {
-                                reorder = Some((index, index + 1));
-                            }
-                        });
-                        let running = self.ai_tests.get(&provider).is_some_and(Test::running);
-                        if ui
-                            .add_enabled(!running, egui::Button::new("Test connection"))
-                            .clicked()
-                        {
-                            test = Some(provider);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        test_status(
-                            ui,
-                            self.ai_tests.get(&provider),
-                            &current.ai.resolved_provider(provider),
-                        );
-                    });
-                    if provider == AiProvider::ChatGptSubscription {
-                        self.chatgpt_account(ui, chatgpt);
-                        return;
-                    }
-                    let id = ProviderSecretId::AiApiKey(provider);
-                    let status = user.status(id);
-                    let config = draft.ai.provider_config_mut(provider);
-                    self.secret(ui, "API key", &mut config.api_key, id, status);
-                    if provider.is_custom() {
-                        text_field(ui, "Name", &mut config.name, "");
-                        optional_field(ui, "Host", &mut config.base_url, "https://…/v1");
-                    }
-                    ui.label("Models");
-                    let mut drop = None;
-                    for model in &config.models {
-                        ui.horizontal(|ui| {
-                            ui.label(&model.name);
-                            if model.name != model.id {
-                                ui.label(RichText::new(&model.id).small().color(tokens.text_muted));
-                            }
-                            if ui
-                                .push_id(&model.id, |ui| {
-                                    icons::button(ui, "x", 22.0, false, "Remove")
-                                })
-                                .inner
-                                .clicked()
-                            {
-                                drop = Some(model.id.clone());
-                            }
-                        });
-                    }
-                    if let Some(id) = drop {
-                        config.remove_model(&id);
-                    }
-                    ui.horizontal(|ui| {
-                        let new = self.new_model.entry(provider).or_default();
-                        ui.add(
-                            egui::TextEdit::singleline(new)
-                                .hint_text("model id")
-                                .desired_width(200.0),
-                        );
-                        if ui
-                            .add_enabled(!new.trim().is_empty(), egui::Button::new("Add"))
-                            .clicked()
-                        {
-                            let id = new.trim().to_string();
-                            config.ensure_model(AiModel::new(id.clone(), id, config.name.clone()));
-                            new.clear();
-                        }
-                        let busy = self.is_fetching();
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Fetch models"))
-                            .on_hover_text("List the models the provider offers")
-                            .clicked()
-                        {
-                            fetch = Some(provider);
-                        }
-                        if busy && self.fetching.as_ref().is_some_and(|(p, _)| *p == provider) {
-                            ui.spinner();
-                        }
-                    });
-                    match self.fetched.get(&provider) {
-                        Some(Ok(found)) => {
-                            let missing: Vec<&AiModelInfo> = found
-                                .iter()
-                                .filter(|info| config.model(&info.id).is_none())
-                                .collect();
-                            if missing.is_empty() {
-                                ui.label(
-                                    RichText::new("All the provider's models are listed.")
-                                        .color(tokens.text_muted),
-                                );
-                            }
-                            egui::ScrollArea::vertical()
-                                .id_salt(("fetched", provider.as_str()))
-                                .max_height(160.0)
-                                .show(ui, |ui| {
-                                    for info in missing {
-                                        ui.horizontal(|ui| {
-                                            if ui.small_button("+").clicked() {
-                                                config.ensure_model(AiModel::new(
-                                                    info.id.clone(),
-                                                    info.label.clone(),
-                                                    config.name.clone(),
-                                                ));
-                                            }
-                                            ui.label(&info.label);
-                                        });
-                                    }
-                                });
-                        }
-                        Some(Err(error)) => {
-                            ui.colored_label(egui::Color32::from_rgb(0xD0, 0x40, 0x40), error);
-                        }
-                        None => {}
-                    }
-                    if provider.is_custom() && ui.button("Remove this provider").clicked() {
-                        remove = Some(provider);
-                    }
+        widgets::settings_group(ui, "Providers", |group| {
+            group.note("The first provider turned on answers when a model is not chosen.");
+            for (index, provider) in order.iter().copied().enumerate() {
+                group.full(|ui| {
+                    self.provider(
+                        ui,
+                        ProviderRow {
+                            provider,
+                            index,
+                            count: order.len(),
+                            current: &current,
+                            draft: &mut draft,
+                            user: &*user,
+                            chatgpt,
+                        },
+                        &mut ProviderEdits {
+                            remove: &mut remove,
+                            reorder: &mut reorder,
+                            fetch: &mut fetch,
+                            test: &mut test,
+                        },
+                    );
                 });
-        }
+            }
+        });
         if let Some(provider) = remove {
             draft.ai.remove_custom_provider(provider);
         }
         if let Some((from, to)) = reorder {
             draft.ai.provider_order.swap(from, to);
         }
-        ui.add_space(6.0);
-        ui.label(RichText::new("Add an OpenAI-compatible provider").strong());
-        ui.horizontal(|ui| {
-            let (name, host) = &mut self.new_provider;
-            ui.add(
-                egui::TextEdit::singleline(name)
-                    .hint_text("Name")
-                    .desired_width(140.0),
+        widgets::settings_group(ui, "Add a provider", |group| {
+            group.row(
+                "OpenAI-compatible",
+                Some("Any service with an OpenAI-style API: a name and its host."),
+                |ui| {
+                    let (name, host) = &mut self.new_provider;
+                    let ready = !name.trim().is_empty() && !host.trim().is_empty();
+                    if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
+                        let provider = draft.ai.add_custom_provider(
+                            name.trim(),
+                            AiApiStyle::OpenAi,
+                            host.trim(),
+                            "",
+                        );
+                        draft.ai.set_provider_enabled(provider, true);
+                        name.clear();
+                        host.clear();
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(host)
+                            .hint_text("https://host/v1")
+                            .desired_width(200.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("Name")
+                            .desired_width(120.0),
+                    );
+                },
             );
-            ui.add(
-                egui::TextEdit::singleline(host)
-                    .hint_text("https://host/v1")
-                    .desired_width(220.0),
-            );
-            if ui
-                .add_enabled(
-                    !name.trim().is_empty() && !host.trim().is_empty(),
-                    egui::Button::new("Add"),
-                )
-                .clicked()
-            {
-                let provider =
-                    draft
-                        .ai
-                        .add_custom_provider(name.trim(), AiApiStyle::OpenAi, host.trim(), "");
-                draft.ai.set_provider_enabled(provider, true);
-                name.clear();
-                host.clear();
-            }
         });
         apply(user, &current, draft);
         if let (Some(provider), Some(settings)) = (fetch, user.get().cloned()) {
@@ -549,6 +452,180 @@ impl ProviderPages {
         }
         if let (Some(provider), Some(settings)) = (test, user.get().cloned()) {
             self.test_ai(&settings, provider, ui.ctx());
+        }
+    }
+
+    /// One AI provider: a header that opens to its switch, order, test,
+    /// key, host and models.
+    fn provider(&mut self, ui: &mut egui::Ui, row: ProviderRow<'_>, edits: &mut ProviderEdits<'_>) {
+        let tokens = Tokens::get(ui.ctx());
+        let ProviderRow {
+            provider,
+            index,
+            count,
+            current,
+            draft,
+            user,
+            chatgpt,
+        } = row;
+        let config = draft.ai.provider_config(provider);
+        let title = if config.enabled {
+            config.name.clone()
+        } else {
+            format!("{} (off)", config.name)
+        };
+        let listing = self.fetched.contains_key(&provider)
+            || self.fetching.as_ref().is_some_and(|(p, _)| *p == provider);
+        egui::CollapsingHeader::new(RichText::new(title).font(theme::medium(13.0)))
+            .id_salt(("ai-provider", provider.as_str()))
+            .default_open(listing)
+            .show(ui, |ui| {
+                let mut enabled = config.enabled;
+                ui.horizontal(|ui| {
+                    if widgets::toggle(ui, &mut enabled).changed() {
+                        draft.ai.set_provider_enabled(provider, enabled);
+                    }
+                    ui.label(if enabled { "On" } else { "Off" });
+                    ui.add_space(8.0);
+                    ui.add_enabled_ui(index > 0, |ui| {
+                        if icons::button(ui, "arrow-up", 24.0, false, "Move up").clicked() {
+                            *edits.reorder = Some((index, index - 1));
+                        }
+                    });
+                    ui.add_enabled_ui(index + 1 < count, |ui| {
+                        if icons::button(ui, "arrow-down", 24.0, false, "Move down").clicked() {
+                            *edits.reorder = Some((index, index + 1));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let running = self.ai_tests.get(&provider).is_some_and(Test::running);
+                        if ui
+                            .add_enabled(!running, egui::Button::new("Test connection"))
+                            .clicked()
+                        {
+                            *edits.test = Some(provider);
+                        }
+                        test_status(
+                            ui,
+                            self.ai_tests.get(&provider),
+                            &current.ai.resolved_provider(provider),
+                        );
+                    });
+                });
+                if provider == AiProvider::ChatGptSubscription {
+                    self.chatgpt_account(ui, chatgpt);
+                    return;
+                }
+                let id = ProviderSecretId::AiApiKey(provider);
+                let status = user.status(id);
+                let config = draft.ai.provider_config_mut(provider);
+                widgets::settings_group(ui, "", |group| {
+                    self.secret(group, "API key", &mut config.api_key, id, status);
+                    if provider.is_custom() {
+                        text_field(group, "Name", &mut config.name, "");
+                        optional_field(group, "Host", &mut config.base_url, "https://…/v1");
+                    }
+                    group.full(|ui| self.models(ui, provider, config, edits.fetch, &tokens));
+                });
+                if provider.is_custom() && ui.button("Remove this provider").clicked() {
+                    *edits.remove = Some(provider);
+                }
+            });
+    }
+
+    /// A provider's models: the listed ones, adding one by id, and the
+    /// ones fetched from the provider.
+    fn models(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: AiProvider,
+        config: &mut glyphst_settings::AiProviderConfig,
+        fetch: &mut Option<AiProvider>,
+        tokens: &Tokens,
+    ) {
+        ui.label(RichText::new("Models").font(theme::medium(13.0)));
+        let mut drop = None;
+        for model in &config.models {
+            ui.horizontal(|ui| {
+                ui.label(&model.name);
+                if model.name != model.id {
+                    ui.label(RichText::new(&model.id).small().color(tokens.text_muted));
+                }
+                if ui
+                    .push_id(&model.id, |ui| {
+                        icons::button(ui, "x", 22.0, false, "Remove")
+                    })
+                    .inner
+                    .clicked()
+                {
+                    drop = Some(model.id.clone());
+                }
+            });
+        }
+        if let Some(id) = drop {
+            config.remove_model(&id);
+        }
+        ui.horizontal(|ui| {
+            let new = self.new_model.entry(provider).or_default();
+            ui.add(
+                egui::TextEdit::singleline(new)
+                    .hint_text("model id")
+                    .desired_width(200.0),
+            );
+            if ui
+                .add_enabled(!new.trim().is_empty(), egui::Button::new("Add"))
+                .clicked()
+            {
+                let id = new.trim().to_string();
+                config.ensure_model(AiModel::new(id.clone(), id, config.name.clone()));
+                new.clear();
+            }
+            let busy = self.is_fetching();
+            if ui
+                .add_enabled(!busy, egui::Button::new("Fetch models"))
+                .on_hover_text("List the models the provider offers")
+                .clicked()
+            {
+                *fetch = Some(provider);
+            }
+            if busy && self.fetching.as_ref().is_some_and(|(p, _)| *p == provider) {
+                ui.spinner();
+            }
+        });
+        match self.fetched.get(&provider) {
+            Some(Ok(found)) => {
+                let missing: Vec<&AiModelInfo> = found
+                    .iter()
+                    .filter(|info| config.model(&info.id).is_none())
+                    .collect();
+                if missing.is_empty() {
+                    ui.label(
+                        RichText::new("All the provider's models are listed.")
+                            .color(tokens.text_muted),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt(("fetched", provider.as_str()))
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for info in missing {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("+").clicked() {
+                                    config.ensure_model(AiModel::new(
+                                        info.id.clone(),
+                                        info.label.clone(),
+                                        config.name.clone(),
+                                    ));
+                                }
+                                ui.label(&info.label);
+                            });
+                        }
+                    });
+            }
+            Some(Err(error)) => {
+                ui.colored_label(tokens.danger, error);
+            }
+            None => {}
         }
     }
 
@@ -595,22 +672,22 @@ impl ProviderPages {
     /// A key field, hidden unless revealed, with where it is kept.
     fn secret(
         &mut self,
-        ui: &mut egui::Ui,
+        group: &mut Group<'_>,
         label: &str,
         value: &mut String,
         id: ProviderSecretId,
         status: SecretStatus,
     ) {
-        let tokens = Tokens::get(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.add_sized([90.0, 20.0], egui::Label::new(label));
+        let tokens = Tokens::get(group.ctx());
+        let color = match status {
+            SecretStatus::NotSaved(_) => tokens.danger,
+            _ => tokens.text_muted,
+        };
+        let description = RichText::new(status.label())
+            .font(theme::regular(11.5))
+            .color(color);
+        group.row_with(label, Some(description), |ui| {
             let shown = self.revealed.contains(&id);
-            ui.add(
-                egui::TextEdit::singleline(value)
-                    .password(!shown)
-                    .hint_text("not set")
-                    .desired_width(260.0),
-            );
             let (icon, tip) = if shown {
                 ("eye-off", "Hide")
             } else {
@@ -626,11 +703,12 @@ impl ProviderPages {
             {
                 self.revealed.insert(id);
             }
-            let color = match status {
-                SecretStatus::NotSaved(_) => tokens.danger,
-                _ => tokens.text_faint,
-            };
-            ui.label(RichText::new(status.label()).small().color(color));
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .password(!shown)
+                    .hint_text("not set")
+                    .desired_width(FIELD_WIDTH - 32.0),
+            );
         });
     }
 }
@@ -649,21 +727,23 @@ fn loading(ui: &mut egui::Ui) {
     });
 }
 
-fn text_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
-    ui.horizontal(|ui| {
-        ui.add_sized([90.0, 20.0], egui::Label::new(label));
+/// The width of a text field in a settings row.
+const FIELD_WIDTH: f32 = 280.0;
+
+fn text_field(group: &mut Group<'_>, label: &str, value: &mut String, hint: &str) {
+    group.row(label, None, |ui| {
         ui.add(
             egui::TextEdit::singleline(value)
                 .hint_text(hint)
-                .desired_width(260.0),
+                .desired_width(FIELD_WIDTH),
         );
     });
 }
 
 /// A field for an optional value; empty means the default (`hint`).
-fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>, hint: &str) {
+fn optional_field(group: &mut Group<'_>, label: &str, value: &mut Option<String>, hint: &str) {
     let mut text = value.clone().unwrap_or_default();
-    text_field(ui, label, &mut text, hint);
+    text_field(group, label, &mut text, hint);
     let trimmed = text.trim();
     let edited = (!trimmed.is_empty()).then(|| text.clone());
     if edited != *value && !(edited.is_none() && value.as_deref().is_some_and(str::is_empty)) {

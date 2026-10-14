@@ -13,7 +13,9 @@ struct EffectUniforms {
     progress: f32,
     // +1 for forward (next page, next tab), -1 for backward.
     direction: f32,
-    padding: f32,
+    // How opaque the result is drawn: below 1 for the background of a
+    // transparent window. The prelude applies it; effects can ignore it.
+    opacity: f32,
     // The effect's parameters, in manifest order.
     params: vec4<f32>,
 }
@@ -96,5 +98,5 @@ fn fx_luminance(rgb: vec3<f32>) -> f32 {
 
 @fragment
 fn fx_fragment(in: FxVertex) -> @location(0) vec4<f32> {
-    return effect(in.uv, in.position.xy);
+    return effect(in.uv, in.position.xy) * fx.opacity;
 }

@@ -1,6 +1,6 @@
 //! Small widgets on the design tokens, after pdfcraft's `widgets.rs`: pill,
 //! ghost and search-box buttons, section titles, key chips, segmented
-//! choices, card frames and toasts.
+//! choices, switches, settings groups and rows, card frames and toasts.
 
 use std::time::Duration;
 
@@ -16,6 +16,11 @@ use crate::{
 #[cfg(test)]
 pub const ICONS_IN_USE: &[&str] = &[
     "house",
+    "monitor",
+    "sun",
+    "moon",
+    "keyboard",
+    "arrow-right",
     "file-text",
     "book-open",
     "book-open-text",
@@ -346,11 +351,26 @@ pub fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
+    let options: Vec<(T, Option<&str>, &str)> = options
+        .iter()
+        .map(|&(option, label)| (option, None, label))
+        .collect();
+    segmented_with_icons(ui, value, &options)
+}
+
+/// [`segmented`] with an icon before each label.
+pub fn segmented_with_icons<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    value: &mut T,
+    options: &[(T, Option<&str>, &str)],
+) -> bool {
     let t = Tokens::get(ui.ctx());
     let font = theme::medium(12.5);
     let widths: Vec<f32> = options
         .iter()
-        .map(|(_, label)| text_width(ui, label, &font) + 24.0)
+        .map(|(_, icon, label)| {
+            text_width(ui, label, &font) + 24.0 + if icon.is_some() { 20.0 } else { 0.0 }
+        })
         .collect();
     let (rect, _) =
         ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, 30.0), Sense::hover());
@@ -363,18 +383,14 @@ pub fn segmented<T: PartialEq + Copy>(
     );
     let mut x = rect.left() + 2.0;
     let mut changed = false;
-    for ((option, label), width) in options.iter().zip(widths) {
+    let enabled = ui.is_enabled();
+    for ((option, icon, label), width) in options.iter().zip(widths) {
         let cell = Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(width, 26.0));
         x += width;
         let response = ui.interact(cell, ui.id().with(("segment", label)), Sense::click());
         let selected = *value == *option;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::RadioButton,
-                ui.is_enabled(),
-                selected,
-                *label,
-            )
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, *label)
         });
         if selected {
             ui.painter().rect(
@@ -384,23 +400,322 @@ pub fn segmented<T: PartialEq + Copy>(
                 Stroke::new(1.0, t.border),
                 StrokeKind::Inside,
             );
-        } else if response.hovered() {
+        } else if response.hovered() && enabled {
             ui.painter()
                 .rect_filled(cell, CornerRadius::same(6), t.pressed);
         }
-        ui.painter().text(
-            cell.center(),
-            Align2::CENTER_CENTER,
-            *label,
-            font.clone(),
-            if selected { t.text } else { t.text_muted },
-        );
+        let mut color = if selected { t.text } else { t.text_muted };
+        if !enabled {
+            color = color.gamma_multiply(0.5);
+        }
+        let mut center = cell.center();
+        if let Some(icon) = icon {
+            let label_width = text_width(ui, label, &font);
+            let left = cell.center().x - (label_width + 20.0) / 2.0;
+            icons::paint(
+                ui,
+                Rect::from_center_size(egui::pos2(left + 7.0, center.y), vec2(14.0, 14.0)),
+                icon,
+                14.0,
+                if selected { t.accent } else { color },
+            );
+            center.x = left + 20.0 + label_width / 2.0;
+        }
+        ui.painter()
+            .text(center, Align2::CENTER_CENTER, *label, font.clone(), color);
         if response.clicked() && !selected {
             *value = *option;
             changed = true;
         }
     }
     changed
+}
+
+/// An on/off switch; the response is changed when it flips.
+pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, mut response) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let enabled = ui.is_enabled();
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, ""));
+    let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+    let off = if response.hovered() && enabled {
+        t.text_faint
+    } else {
+        t.border
+    };
+    let mut track = off.lerp_to_gamma(t.accent, how_on);
+    let mut knob = Color32::WHITE;
+    if !enabled {
+        track = track.gamma_multiply(0.45);
+        knob = knob.gamma_multiply(0.8);
+    }
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(10), track);
+    let x = egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), how_on);
+    let center = egui::pos2(x, rect.center().y);
+    ui.painter()
+        .circle_filled(center + vec2(0.0, 0.5), 8.0, Color32::from_black_alpha(30));
+    ui.painter().circle_filled(center, 8.0, knob);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            CornerRadius::same(12),
+            Stroke::new(1.5, t.accent),
+            StrokeKind::Outside,
+        );
+    }
+    response
+}
+
+/// The look of egui's own controls on a form: fields, buttons and menus
+/// framed on the field colour, an accent focus ring, checkboxes and
+/// radios with a border. The theme leaves them flat, for toolbars.
+pub fn form_style(ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let style = ui.style_mut();
+    let radius = CornerRadius::same(t.radius);
+    let border = Stroke::new(1.0, t.border);
+    let widgets = &mut style.visuals.widgets;
+    widgets.inactive.bg_fill = t.field;
+    widgets.inactive.weak_bg_fill = t.field;
+    widgets.inactive.bg_stroke = border;
+    widgets.hovered.weak_bg_fill = t.hover;
+    widgets.hovered.bg_stroke = Stroke::new(1.0, t.text_faint);
+    widgets.active.weak_bg_fill = t.pressed;
+    widgets.active.bg_stroke = Stroke::new(1.0, t.accent);
+    widgets.open.weak_bg_fill = t.hover;
+    widgets.open.bg_stroke = Stroke::new(1.0, t.accent);
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.corner_radius = radius;
+    }
+    style.visuals.selection.stroke = Stroke::new(1.5, t.accent);
+    style.spacing.interact_size.y = 28.0;
+    style.spacing.button_padding = vec2(12.0, 5.0);
+}
+
+/// A titled group of settings rows on its own surface, rows split by
+/// hairlines; `add` adds them through [`Group`].
+pub fn settings_group<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    add: impl FnOnce(&mut Group<'_>) -> R,
+) -> R {
+    let t = Tokens::get(ui.ctx());
+    if !title.is_empty() {
+        ui.add_space(14.0);
+        ui.label(
+            egui::RichText::new(title)
+                .font(theme::semibold(13.0))
+                .color(t.text),
+        );
+        ui.add_space(4.0);
+    }
+    egui::Frame::new()
+        .fill(t.group)
+        .stroke(Stroke::new(1.0, t.divider))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(14, 2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut group = Group { ui, rows: 0 };
+            add(&mut group)
+        })
+        .inner
+}
+
+/// The rows of a [`settings_group`].
+pub struct Group<'a> {
+    ui: &'a mut egui::Ui,
+    rows: usize,
+}
+
+impl Group<'_> {
+    pub fn ctx(&self) -> &egui::Context {
+        self.ui.ctx()
+    }
+
+    /// A hairline before every row but the first.
+    fn next_row(&mut self) {
+        if self.rows > 0 {
+            let t = Tokens::get(self.ui.ctx());
+            let (rect, _) = self
+                .ui
+                .allocate_exact_size(vec2(self.ui.available_width(), 1.0), Sense::hover());
+            self.ui
+                .painter()
+                .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, t.divider));
+        }
+        self.rows += 1;
+    }
+
+    /// A setting: its name and what it does on the left, `control` at the
+    /// right (laid out right to left, so add the rightmost first).
+    pub fn row<R>(
+        &mut self,
+        label: &str,
+        description: Option<&str>,
+        control: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> R {
+        let t = Tokens::get(self.ui.ctx());
+        let description = description.map(|text| {
+            egui::RichText::new(text)
+                .font(theme::regular(11.5))
+                .color(t.text_muted)
+        });
+        self.row_with(label, description, control)
+    }
+
+    /// [`Self::row`] with a description styled by the caller (a warning
+    /// colour, say).
+    pub fn row_with<R>(
+        &mut self,
+        label: &str,
+        description: Option<egui::RichText>,
+        control: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> R {
+        self.next_row();
+        let t = Tokens::get(self.ui.ctx());
+        let ui = &mut *self.ui;
+        let width = ui.available_width();
+        let label_width = (width * 0.45).clamp(140.0, 320.0);
+        let wrap = Some(egui::TextWrapMode::Wrap);
+        let galley = |ui: &egui::Ui, text: egui::RichText| {
+            egui::WidgetText::from(text).into_galley(
+                ui,
+                wrap,
+                label_width,
+                egui::FontSelection::Default,
+            )
+        };
+        let title = galley(
+            ui,
+            egui::RichText::new(label)
+                .font(theme::medium(13.0))
+                .color(t.text),
+        );
+        let description = description.map(|text| galley(ui, text));
+        let text_height = title.size().y
+            + description
+                .as_ref()
+                .map_or(0.0, |galley| 2.0 + galley.size().y);
+        // The label and the control are centred on the row's height.
+        let height = (text_height + 20.0).max(48.0);
+        let top_left = ui.cursor().min;
+        let rect = Rect::from_min_size(top_left, vec2(width, height));
+        let mut y = rect.center().y - text_height / 2.0;
+        let title_height = title.size().y;
+        ui.painter()
+            .galley(egui::pos2(rect.left(), y), title, t.text);
+        y += title_height + 2.0;
+        if let Some(description) = description {
+            ui.painter()
+                .galley(egui::pos2(rect.left(), y), description, t.text_muted);
+        }
+        let controls = Rect::from_min_max(
+            egui::pos2(rect.left() + label_width + 12.0, rect.top()),
+            rect.max,
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(controls)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        child.spacing_mut().item_spacing = vec2(8.0, 4.0);
+        let inner = control(&mut child);
+        let used = child.min_rect().union(rect);
+        ui.allocate_rect(
+            Rect::from_min_max(rect.min, egui::pos2(rect.right(), used.bottom())),
+            Sense::hover(),
+        );
+        inner
+    }
+
+    /// A row the width of the group, for galleries, lists and notes.
+    pub fn full<R>(&mut self, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        self.next_row();
+        self.ui
+            .vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.add_space(10.0);
+                let inner = add(ui);
+                ui.add_space(10.0);
+                inner
+            })
+            .inner
+    }
+
+    /// A muted line of explanation.
+    pub fn note(&mut self, text: &str) {
+        self.full(|ui| {
+            let t = Tokens::get(ui.ctx());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .font(theme::regular(11.5))
+                        .color(t.text_muted),
+                )
+                .wrap(),
+            );
+        });
+    }
+
+    /// A row that goes somewhere else: an icon, `label` and a chevron;
+    /// returns whether it was clicked.
+    pub fn link(&mut self, icon: &str, label: &str) -> bool {
+        self.next_row();
+        link_row(self.ui, icon, label, "chevron-right").clicked()
+    }
+}
+
+/// A full-width row with an icon, `label` and a trailing icon, highlighted
+/// on hover.
+pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, trailing: &str) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect.expand2(vec2(6.0, -4.0)),
+            CornerRadius::same(t.radius),
+            t.hover,
+        );
+    }
+    icons::paint(
+        ui,
+        Rect::from_center_size(rect.left_center() + vec2(8.0, 0.0), vec2(16.0, 16.0)),
+        icon,
+        16.0,
+        t.icon,
+    );
+    row_text(
+        ui,
+        rect.left_center() + vec2(26.0, 0.0),
+        label,
+        theme::medium(13.0),
+        t.text,
+        rect.width() - 52.0,
+    );
+    icons::paint(
+        ui,
+        Rect::from_center_size(rect.right_center() - vec2(8.0, 0.0), vec2(14.0, 14.0)),
+        trailing,
+        14.0,
+        t.text_muted,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The frame of floating cards: popovers, the find bar, drawers.

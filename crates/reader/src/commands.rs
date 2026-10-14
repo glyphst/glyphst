@@ -17,11 +17,13 @@ pub enum Command {
     PreviousTab,
     Palette,
     Settings,
+    KeyboardShortcuts,
     ToggleSidebar,
     ToggleStats,
     ThemeSystem,
     ThemeLight,
     ThemeDark,
+    ToggleTransparency,
     KeysStandard,
     KeysVim,
     ScrollDown,
@@ -130,18 +132,20 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 54] = [
         Self::Open,
         Self::CloseTab,
         Self::NextTab,
         Self::PreviousTab,
         Self::Palette,
         Self::Settings,
+        Self::KeyboardShortcuts,
         Self::ToggleSidebar,
         Self::ToggleStats,
         Self::ThemeSystem,
         Self::ThemeLight,
         Self::ThemeDark,
+        Self::ToggleTransparency,
         Self::KeysStandard,
         Self::KeysVim,
         Self::ScrollDown,
@@ -194,6 +198,8 @@ impl Command {
             Self::PreviousTab => "app.previous_tab",
             Self::Palette => "app.command_palette",
             Self::Settings => "app.settings",
+            Self::KeyboardShortcuts => "app.keyboard_shortcuts",
+            Self::ToggleTransparency => "app.toggle_transparency",
             Self::ToggleSidebar => "app.sidebar",
             Self::ToggleStats => "app.statistics",
             Self::ThemeSystem => "app.theme_system",
@@ -255,6 +261,8 @@ impl Command {
             Self::PreviousTab => "Previous tab",
             Self::Palette => "Command palette",
             Self::Settings => "Settings…",
+            Self::KeyboardShortcuts => "Keyboard shortcuts",
+            Self::ToggleTransparency => "Toggle transparency",
             Self::ToggleSidebar => "Show or hide the sidebar",
             Self::ToggleStats => "Show or hide statistics",
             Self::ThemeSystem => "Theme: System",
@@ -313,6 +321,8 @@ impl Command {
             Self::PreviousTab => "chevron-left",
             Self::Palette => "command",
             Self::Settings => "settings",
+            Self::KeyboardShortcuts => "keyboard",
+            Self::ToggleTransparency => "eye",
             Self::ToggleSidebar => "panel-left",
             Self::ToggleStats => "gauge",
             Self::ThemeSystem => "monitor",
@@ -366,11 +376,13 @@ impl Command {
             | Self::PreviousTab
             | Self::Palette
             | Self::Settings
+            | Self::KeyboardShortcuts
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
+            | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim => Category::App,
             Self::ScrollDown
@@ -468,6 +480,8 @@ impl Command {
             Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
+            | Self::KeyboardShortcuts
+            | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim
             | Self::LargerText
@@ -542,11 +556,13 @@ impl Command {
             | Self::PreviousTab
             | Self::Palette
             | Self::Settings
+            | Self::KeyboardShortcuts
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
+            | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,

@@ -77,6 +77,21 @@ fn render(
     to: &wgpu::Texture,
     progress: f32,
 ) -> Vec<u8> {
+    render_at(device, queue, registry, id, from, to, progress, 1.0)
+}
+
+/// [`render`] drawn `opacity` opaque.
+#[allow(clippy::too_many_arguments)]
+fn render_at(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    registry: &EffectRegistry,
+    id: &str,
+    from: &wgpu::Texture,
+    to: &wgpu::Texture,
+    progress: f32,
+    opacity: f32,
+) -> Vec<u8> {
     let target = solid_texture(device, queue, [0, 0, 0, 0]);
     let target_view = target.create_view(&Default::default());
     let (from, to) = (
@@ -97,6 +112,7 @@ fn render(
                 progress,
                 direction: 1.0,
                 params: def.default_params(),
+                opacity,
             },
         )
         .unwrap();
@@ -150,6 +166,23 @@ fn render(
         .chunks_exact(256)
         .flat_map(|row| row[..(SIZE * 4) as usize].to_vec())
         .collect()
+}
+
+/// A transparent window's background: the solid colour, premultiplied
+/// by the window's opacity.
+#[test]
+fn a_background_drawn_half_opaque_is_premultiplied() {
+    let (device, queue) = require_device!();
+    let registry = EffectRegistry::new(&device, FORMAT);
+    let blank = solid_texture(&device, &queue, [0, 0, 0, 0]);
+    let opaque = render_at(&device, &queue, &registry, SOLID, &blank, &blank, 0.0, 1.0);
+    let half = render_at(&device, &queue, &registry, SOLID, &blank, &blank, 0.0, 0.5);
+    assert_eq!(opaque[3], 255);
+    assert!((126..=129).contains(&half[3]), "alpha {}", half[3]);
+    for channel in 0..3 {
+        let expected = f32::from(opaque[channel]) / 2.0;
+        assert!((f32::from(half[channel]) - expected).abs() <= 1.5);
+    }
 }
 
 #[test]

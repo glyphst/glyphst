@@ -46,8 +46,8 @@ pub struct StageLayout {
     /// Where pages are laid out: under the closed rail, beside an open
     /// drawer.
     pub reading: Rect,
-    /// Where pages are drawn: `reading`, reaching under an open drawer that
-    /// pushes them aside, so the drawer floats over them too.
+    /// Where pages are drawn: `reading`, reaching under an open drawer and
+    /// assistant that push them aside, so those float over them too.
     pub pages: Rect,
     /// Drawers float over the pages (a narrow window).
     pub overlay: bool,
@@ -118,7 +118,9 @@ impl StageLayout {
             drawer,
             assistant,
             reading,
-            pages: reading.with_min_x(stage.left().min(reading.left())),
+            pages: reading
+                .with_min_x(stage.left().min(reading.left()))
+                .with_max_x(stage.right().max(reading.right())),
             overlay,
             progress: Some(progress),
             dock_anchor: Some(pos2(reading.center().x, stage.bottom() - DOCK_LIFT)),
@@ -228,10 +230,12 @@ mod tests {
         assert!(!open.overlay);
         assert!(open.reading.left() > drawer.right());
         assert!(open.reading.right() < assistant.left());
-        // The pages are drawn under the drawer, and laid out beside it.
+        // The pages are drawn under the drawer and the assistant, and laid
+        // out between them.
         assert_eq!(open.pages.left(), 0.0);
-        assert_eq!(open.pages.right(), open.reading.right());
+        assert_eq!(open.pages.right(), 1400.0);
         assert!(open.pages.contains_rect(drawer));
+        assert!(open.pages.contains_rect(assistant));
         assert_eq!(closed.pages, closed.reading);
         assert_eq!(drawer.width(), 300.0);
         assert_eq!(assistant.width(), 380.0);

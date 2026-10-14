@@ -188,8 +188,9 @@ pub fn save_user_settings(
     save_user_settings_to(&config_path(), edited, config_owned)
 }
 
-/// Writes `edited`'s provider sections (`ai`, `translation`, `ocr`) into the
-/// settings file at `path`, keeping everything else as the file has it now
+/// Writes the sections the Reader edits (`ai`, `translation`, `ocr` and
+/// `window`) from `edited` into the settings file at `path`, keeping
+/// everything else as the file has it now
 /// (or as the legacy state file has it, when there is no config yet).
 /// Secrets outside `config_owned` are left out: they belong in the
 /// keychain. The file is replaced atomically, readable by the user only.
@@ -208,6 +209,7 @@ pub fn save_user_settings_to(
     settings.ai = edited.ai.clone();
     settings.translation = edited.translation.clone();
     settings.ocr = edited.ocr.clone();
+    settings.window = edited.window;
     for id in settings.provider_secret_ids() {
         if !config_owned.contains(&id) {
             settings.set_provider_secret(id, String::new());
@@ -428,6 +430,50 @@ mod user_tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn the_window_is_opaque_by_default_and_its_transparency_is_saved() {
+        let defaults = Settings::default();
+        assert!(!defaults.window.transparent());
+        assert_eq!(defaults.window.effective_opacity(true), 1.0);
+        // A GPUI file's blurred background reads as transparency, which is
+        // off while the opacity is full.
+        let gpui = parse_settings("window { opacity 1.0; appearance blurred; }").unwrap();
+        assert_eq!(gpui.window.background, WindowBackgroundMode::Blurred);
+        assert!(gpui.window.transparent());
+        assert_eq!(gpui.window.effective_opacity(true), 1.0);
+
+        // Turning it on at full opacity starts from the default opacity,
+        // and keeps the file's blur.
+        let mut window = gpui.window;
+        window.set_transparent(true);
+        assert!(window.blur());
+        assert!(window.effective_opacity(true) < 1.0);
+        window.set_blur(false);
+        assert_eq!(window.background, WindowBackgroundMode::Transparent);
+        window.set_transparent(false);
+        assert_eq!(window.effective_opacity(true), 1.0);
+        // Blur means nothing while opaque, and transparency starts blurred.
+        window.set_blur(true);
+        assert_eq!(window.background, WindowBackgroundMode::Opaque);
+        window.set_transparent(true);
+        assert_eq!(window.background, WindowBackgroundMode::Blurred);
+
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-settings-window-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let path = directory.join("config.kdl");
+        let mut edited = Settings::default();
+        edited.window.set_transparent(true);
+        edited.window.opacity = 0.8;
+        save_user_settings_to(&path, &edited, &BTreeSet::new()).unwrap();
+        let saved = load_settings(&path).unwrap();
+        assert_eq!(saved.window.background, WindowBackgroundMode::Blurred);
+        assert!((saved.window.opacity - 0.8).abs() < 1e-6);
         fs::remove_dir_all(&directory).unwrap();
     }
 }

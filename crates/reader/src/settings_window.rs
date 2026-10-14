@@ -1,18 +1,18 @@
 //! Settings, after pdfcraft's preferences dialog: an in-app window with a
-//! section list. Changes apply at once and are saved with the
-//! preferences.
+//! grouped section list at the left and the section's settings at the
+//! right, in titled groups of rows. Changes apply at once and are saved
+//! with the preferences (or the settings file). Keyboard shortcuts have
+//! their own tab (`keymap_page.rs`).
 
-use egui::{Key, RichText};
+use egui::{CornerRadius, RichText, Sense, Stroke, vec2};
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_effects::EffectDef;
 
 use crate::{
-    commands::{Category, Command},
     icons,
-    keys::{self, Keymap, KeymapPreset, Keys, Overrides, Shortcut},
     prefs::Prefs,
     settings_providers::ProviderPages,
-    theme::{self, ThemePreference, Tokens},
+    theme::{self, ThemeKind, ThemePreference, Tokens},
     user_settings::{Persistence, UserSettings},
     widgets,
 };
@@ -20,26 +20,36 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Appearance,
-    Effects,
     Reading,
-    Shortcuts,
+    Effects,
     Translation,
     Ocr,
     Ai,
 }
 
+/// The section list's groups, top to bottom.
+const GROUPS: [(&str, &[Section]); 3] = [
+    ("General", &[Section::Appearance, Section::Reading]),
+    ("Look", &[Section::Effects]),
+    (
+        "Services",
+        &[Section::Translation, Section::Ocr, Section::Ai],
+    ),
+];
+
+const SIDEBAR_WIDTH: f32 = 212.0;
+
 impl Section {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Appearance,
-        Self::Effects,
         Self::Reading,
-        Self::Shortcuts,
+        Self::Effects,
         Self::Translation,
         Self::Ocr,
         Self::Ai,
     ];
 
-    /// The section a scripted run names: `appearance`, `shortcuts`…
+    /// The section a scripted run names: `appearance`, `ai`…
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|section| {
             section
@@ -53,9 +63,8 @@ impl Section {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Appearance => "palette",
-            Self::Effects => "wand-sparkles",
             Self::Reading => "book-open",
-            Self::Shortcuts => "keyboard",
+            Self::Effects => "wand-sparkles",
             Self::Translation => "languages",
             Self::Ocr => "scan-text",
             Self::Ai => "sparkles",
@@ -65,65 +74,50 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
-            Self::Effects => "Effects",
             Self::Reading => "Reading",
-            Self::Shortcuts => "Keyboard shortcuts",
+            Self::Effects => "Effects",
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
             Self::Ai => "AI",
         }
     }
-}
 
-/// Keys recorded for `command` that other bindings have, start, or are
-/// the start of.
-#[derive(Clone, Debug, PartialEq)]
-struct Conflict {
-    command: Command,
-    keys: Keys,
-    others: Vec<(Keys, Command)>,
-}
-
-/// Keys being recorded for `command`: each press adds one, and a pause
-/// ends the sequence.
-#[derive(Clone, Debug, PartialEq)]
-struct Recording {
-    command: Command,
-    strokes: Vec<Shortcut>,
-    /// When the last key was pressed (egui's input time).
-    last: f64,
-}
-
-impl Recording {
-    fn new(command: Command) -> Self {
-        Self {
-            command,
-            strokes: Vec::new(),
-            last: 0.0,
+    /// The line under the section's title.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Appearance => "The theme, and how much of the desktop shows through the window.",
+            Self::Reading => "What opens at start, and what shows while you read.",
+            Self::Effects => "Backgrounds, page transitions and tints for every book.",
+            Self::Translation => "The service that translates selections and documents.",
+            Self::Ocr => "Recognizing the text of scanned pages.",
+            Self::Ai => "Models and providers for the assistant and AI translation.",
         }
     }
-}
 
-/// Seconds without a key press that end a recorded sequence.
-const RECORD_PAUSE: f64 = 1.0;
+    /// Whether its settings live in the settings file (and keys in the
+    /// keychain) rather than the app's preferences.
+    fn in_settings_file(self) -> bool {
+        matches!(
+            self,
+            Self::Appearance | Self::Translation | Self::Ocr | Self::Ai
+        )
+    }
+}
 
 #[derive(Default)]
 pub struct SettingsWindow {
     pub open: bool,
     section: Option<Section>,
-    filter: String,
-    /// The keys being recorded for a command.
-    recording: Option<Recording>,
-    conflict: Option<Conflict>,
     providers: ProviderPages,
     /// What the Effects page asked for, for the app to do.
     pub effects_actions: Vec<crate::effects_page::Action>,
+    /// The Keyboard shortcuts row was clicked: the app opens their tab.
+    pub open_shortcuts: bool,
 }
 
 /// What the window needs from the app.
 pub struct SettingsContext<'a> {
     pub prefs: &'a mut Prefs,
-    pub keymap: &'a Keymap,
     pub effects: &'a [EffectDef],
     /// Effects that failed to load, and the user's effects folder.
     pub effect_errors: &'a [String],
@@ -132,6 +126,11 @@ pub struct SettingsContext<'a> {
     pub time: f32,
     pub user: &'a mut UserSettings,
     pub chatgpt: &'a ChatGptSubscription,
+    /// The theme the desktop last asked for, if it ever did.
+    pub system_theme: Option<ThemeKind>,
+    /// Whether the compositor can blur behind the window; `None` until
+    /// known.
+    pub blur_supported: Option<bool>,
 }
 
 impl SettingsWindow {
@@ -150,652 +149,417 @@ impl SettingsWindow {
         self.providers.fetch_models(settings, provider, ctx);
     }
 
-    /// Whether key presses are going to a recording, so shortcuts must not
-    /// run.
-    pub fn is_recording(&self) -> bool {
-        self.open && (self.recording.is_some() || self.conflict.is_some())
-    }
-
-    /// Draws the window; returns whether the shortcuts changed.
-    pub fn show(&mut self, ctx: &egui::Context, app: SettingsContext<'_>) -> bool {
+    /// Draws the window.
+    pub fn show(&mut self, ctx: &egui::Context, app: SettingsContext<'_>) {
         if !self.open {
-            return false;
+            return;
         }
-        let mut changed = false;
         self.providers.poll();
         let tokens = Tokens::get(ctx);
         let screen = ctx.content_rect();
-        let size = egui::vec2(
-            (screen.width() - 48.0).clamp(320.0, 760.0),
-            (screen.height() - 96.0).clamp(240.0, 560.0),
+        let size = vec2(
+            (screen.width() - 48.0).clamp(360.0, 960.0),
+            (screen.height() - 80.0).clamp(280.0, 680.0),
         );
         let response = egui::Modal::new(egui::Id::new("settings"))
-            .frame(widgets::card_frame(ctx).inner_margin(egui::Margin::same(16)))
+            .frame(widgets::card_frame(ctx).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
-                ui.set_min_size(size);
-                ui.set_max_size(size);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Settings").font(theme::semibold(17.0)));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::button(ui, "x", 28.0, false, "Close").clicked() {
-                            self.open = false;
-                        }
-                    });
-                });
-                ui.add_space(6.0);
+                let (full, _) = ui.allocate_exact_size(size, Sense::hover());
+                let sidebar = egui::Rect::from_min_size(full.min, vec2(SIDEBAR_WIDTH, size.y));
+                let content =
+                    egui::Rect::from_min_max(egui::pos2(sidebar.right(), full.top()), full.max);
+                ui.painter().rect_filled(
+                    sidebar,
+                    CornerRadius {
+                        nw: 10,
+                        sw: 10,
+                        ne: 0,
+                        se: 0,
+                    },
+                    tokens.group,
+                );
+                ui.painter().vline(
+                    sidebar.right(),
+                    sidebar.y_range(),
+                    Stroke::new(1.0, tokens.divider),
+                );
                 let current = self.section.unwrap_or(Section::Appearance);
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(170.0);
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for section in Section::ALL {
-                            let selected = current == section;
-                            let (rect, response) = widgets::list_row(ui, 32.0, selected);
-                            let color = if selected {
-                                tokens.accent_text
-                            } else {
-                                tokens.icon
-                            };
-                            icons::paint(
-                                ui,
-                                egui::Rect::from_center_size(
-                                    rect.left_center() + egui::vec2(18.0, 0.0),
-                                    egui::vec2(16.0, 16.0),
-                                ),
-                                section.icon(),
-                                16.0,
-                                color,
-                            );
-                            widgets::row_text(
-                                ui,
-                                rect.left_center() + egui::vec2(36.0, 0.0),
-                                section.label(),
-                                if selected {
-                                    theme::medium(13.0)
-                                } else {
-                                    theme::regular(13.0)
-                                },
-                                if selected {
-                                    tokens.text
-                                } else {
-                                    tokens.text_muted
-                                },
-                                rect.width() - 40.0,
-                            );
-                            if response.clicked() {
-                                self.section = Some(section);
-                            }
-                        }
-                        if matches!(current, Section::Translation | Section::Ocr | Section::Ai) {
-                            ui.add_space(12.0);
-                            let note = match app.user.persistence() {
-                                Persistence::User => {
-                                    "Saved in the settings file and the system keychain."
-                                }
-                                Persistence::Memory => "Scripted run: changes are not saved.",
-                            };
-                            ui.label(RichText::new(note).small().color(tokens.text_faint));
-                        }
-                    });
-                    let line = ui.available_rect_before_wrap();
-                    ui.painter().vline(
-                        line.left(),
-                        line.y_range(),
-                        egui::Stroke::new(1.0, tokens.divider),
-                    );
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| match current {
-                                Section::Appearance => appearance(ui, app.prefs),
-                                Section::Effects => {
-                                    // The previews are animated.
-                                    ui.ctx().request_repaint();
-                                    crate::effects_page::settings_page(
-                                        ui,
-                                        crate::effects_page::SettingsPage {
-                                            prefs: app.prefs,
-                                            effects: app.effects,
-                                            errors: app.effect_errors,
-                                            folder: app.effects_folder,
-                                            time: app.time,
-                                            actions: &mut self.effects_actions,
-                                        },
-                                    );
-                                }
-                                Section::Reading => reading(ui, app.prefs),
-                                Section::Shortcuts => {
-                                    changed = self.shortcuts(ui, app.prefs, app.keymap, &tokens);
-                                }
-                                Section::Translation => self.providers.translation(ui, app.user),
-                                Section::Ocr => self.providers.ocr(ui, app.user),
-                                Section::Ai => self.providers.ai(ui, app.user, app.chatgpt),
-                            });
-                    });
-                });
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(sidebar.shrink2(vec2(10.0, 16.0))),
+                    |ui| self.sidebar(ui, current, &tokens),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(content.shrink2(vec2(28.0, 20.0))),
+                    |ui| self.content(ui, current, app, &tokens),
+                );
             });
-        if response.should_close() && !self.is_recording() {
+        if response.should_close() {
             self.open = false;
         }
-        if !self.open {
-            self.recording = None;
-            self.conflict = None;
-        }
-        changed
     }
 
-    fn shortcuts(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Prefs,
-        keymap: &Keymap,
-        tokens: &Tokens,
-    ) -> bool {
-        let mut changed = false;
-        if let Some((command, recorded)) = take_recorded(ui.ctx(), &mut self.recording) {
-            let others: Vec<(Keys, Command)> = keymap
-                .conflicts(&recorded)
-                .into_iter()
-                .filter(|(_, owner)| *owner != command)
-                .collect();
-            if others.is_empty() {
-                keys::assign(&mut prefs.shortcuts, keymap, command, recorded);
-                changed = true;
-            } else {
-                self.conflict = Some(Conflict {
-                    command,
-                    keys: recorded,
-                    others,
-                });
-            }
-        }
+    fn sidebar(&mut self, ui: &mut egui::Ui, current: Section, tokens: &Tokens) {
         ui.horizontal(|ui| {
-            ui.label("Keys");
-            let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
-            changed |= widgets::segmented(ui, &mut prefs.keymap, &options);
+            ui.add_space(8.0);
+            ui.label(RichText::new("Settings").font(theme::semibold(16.0)));
         });
-        ui.label(
-            RichText::new(match prefs.keymap {
-                KeymapPreset::Standard => "Ctrl shortcuts, arrows and Page Up/Down.",
-                KeymapPreset::Vim => {
-                    "hjkl, gg and G (42G goes to page 42), Ctrl+D/U, / n N, \
-                     Ctrl+O/I, : for the palette, Ctrl+W v/s/w/q for panes. \
-                     A number typed first repeats a move."
-                }
-            })
-            .small()
-            .color(tokens.text_muted),
-        );
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Search commands or keys")
-                    .desired_width(220.0),
-            );
-            if ui
-                .add_enabled_ui(!prefs.shortcuts.is_empty(), |ui| {
-                    widgets::ghost_button(ui, "rotate-ccw", "Reset all")
-                })
-                .inner
-                .clicked()
-            {
-                prefs.shortcuts = Overrides::new();
-                changed = true;
-            }
-        });
-        if let Some(conflict) = self.conflict.clone() {
-            egui::Frame::new()
-                .fill(tokens.accent_soft)
-                .corner_radius(tokens.radius)
-                .inner_margin(8)
-                .show(ui, |ui| {
-                    let others: Vec<String> = conflict
-                        .others
-                        .iter()
-                        .map(|(keys, owner)| format!("{} (“{}”)", keys.label(), owner.label()))
-                        .collect();
-                    ui.label(format!(
-                        "{} meets {}.",
-                        conflict.keys.label(),
-                        others.join(", ")
-                    ));
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(format!("Use it for “{}”", conflict.command.label()))
-                            .clicked()
-                        {
-                            changed |= self.resolve_conflict(prefs, keymap, true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.resolve_conflict(prefs, keymap, false);
-                        }
-                    });
-                });
-        }
-        let filter = self.filter.trim().to_lowercase();
-        for category in Category::ALL {
-            let commands: Vec<Command> = Command::ALL
-                .into_iter()
-                .filter(|command| command.category() == category)
-                .filter(|command| {
-                    filter.is_empty()
-                        || command.label().to_lowercase().contains(&filter)
-                        || keymap
-                            .keys(*command)
-                            .iter()
-                            .any(|key| key.label().to_lowercase().contains(&filter))
-                })
-                .collect();
-            if commands.is_empty() {
-                continue;
-            }
-            widgets::section_title(ui, category.label());
-            for command in commands {
-                changed |= self.shortcut_row(ui, prefs, keymap, command, tokens);
-            }
-        }
-        changed
-    }
-
-    /// Moves the conflicting shortcut to the command recording it, or
-    /// leaves it; returns whether the shortcuts changed.
-    fn resolve_conflict(&mut self, prefs: &mut Prefs, keymap: &Keymap, accept: bool) -> bool {
-        let Some(conflict) = self.conflict.take() else {
-            return false;
-        };
-        if accept {
-            keys::assign(
-                &mut prefs.shortcuts,
-                keymap,
-                conflict.command,
-                conflict.keys,
-            );
-        }
-        accept
-    }
-
-    fn shortcut_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Prefs,
-        keymap: &Keymap,
-        command: Command,
-        tokens: &Tokens,
-    ) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.allocate_ui_with_layout(
-                egui::vec2(220.0, 28.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(220.0);
-                    ui.add(egui::Label::new(command.label()).truncate());
-                },
-            );
-            for bound in keymap.keys(command) {
-                if shortcut_chip(ui, &bound.label(), tokens)
-                    .on_hover_text("Remove")
+        ui.add_space(6.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for (title, sections) in GROUPS {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                widgets::section_title(ui, title);
+            });
+            for &section in sections {
+                let selected = current == section;
+                let (rect, response) = widgets::list_row(ui, 32.0, selected);
+                icons::paint(
+                    ui,
+                    egui::Rect::from_center_size(
+                        rect.left_center() + vec2(18.0, 0.0),
+                        vec2(16.0, 16.0),
+                    ),
+                    section.icon(),
+                    16.0,
+                    if selected {
+                        tokens.accent_text
+                    } else {
+                        tokens.icon
+                    },
+                );
+                widgets::row_text(
+                    ui,
+                    rect.left_center() + vec2(36.0, 0.0),
+                    section.label(),
+                    if selected {
+                        theme::medium(13.0)
+                    } else {
+                        theme::regular(13.0)
+                    },
+                    if selected {
+                        tokens.text
+                    } else {
+                        tokens.text_muted
+                    },
+                    rect.width() - 40.0,
+                );
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    keys::unbind(&mut prefs.shortcuts, keymap, command, bound);
-                    changed = true;
+                    self.section = Some(section);
                 }
             }
-            if let Some(recording) = self
-                .recording
-                .as_ref()
-                .filter(|recording| recording.command == command)
-            {
-                let text = match Keys::new(recording.strokes.clone()) {
-                    Some(so_far) => format!("{} …", so_far.label()),
-                    None => "Press keys… (Esc cancels)".to_string(),
-                };
-                ui.label(RichText::new(text).color(tokens.accent_text));
-            } else if ui
-                .push_id(("add", command.id()), |ui| {
-                    icons::button(ui, "plus", 24.0, false, "Add a shortcut")
-                })
-                .inner
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if widgets::link_row(ui, "keyboard", "Keyboard shortcuts", "arrow-right")
+                .on_hover_text("Open the keyboard shortcuts in a tab")
                 .clicked()
             {
-                self.recording = Some(Recording::new(command));
-                self.conflict = None;
+                self.open_shortcuts = true;
+                self.open = false;
             }
-            if prefs.shortcuts.contains_key(command.id())
-                && ui
-                    .push_id(("reset", command.id()), |ui| {
-                        icons::button(ui, "rotate-ccw", 24.0, false, "Back to the default keys")
-                    })
-                    .inner
-                    .clicked()
-            {
-                keys::reset(&mut prefs.shortcuts, command);
-                changed = true;
-            }
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+            ui.painter().hline(
+                rect.x_range(),
+                rect.center().y,
+                Stroke::new(1.0, tokens.divider),
+            );
         });
-        changed
+    }
+
+    fn content(
+        &mut self,
+        ui: &mut egui::Ui,
+        current: Section,
+        app: SettingsContext<'_>,
+        tokens: &Tokens,
+    ) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - 40.0).max(0.0));
+                ui.label(RichText::new(current.label()).font(theme::semibold(20.0)));
+                let mut description = current.description().to_string();
+                if current.in_settings_file() {
+                    description.push(' ');
+                    description.push_str(match app.user.persistence() {
+                        Persistence::User => {
+                            "Saved in the settings file; keys in the system keychain."
+                        }
+                        Persistence::Memory => "Scripted run: changes are not saved.",
+                    });
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(description).color(tokens.text_muted)).wrap(),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if icons::button(ui, "x", 28.0, false, "Close").clicked() {
+                    self.open = false;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("settings-page", current.label()))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                widgets::form_style(ui);
+                ui.set_width(ui.available_width() - 4.0);
+                match current {
+                    Section::Appearance => {
+                        if appearance(
+                            ui,
+                            app.prefs,
+                            app.user,
+                            app.system_theme,
+                            app.blur_supported,
+                        ) {
+                            self.section = Some(Section::Effects);
+                        }
+                    }
+                    Section::Reading => reading(ui, app.prefs),
+                    Section::Effects => {
+                        // The previews are animated.
+                        ui.ctx().request_repaint();
+                        crate::effects_page::settings_page(
+                            ui,
+                            crate::effects_page::SettingsPage {
+                                prefs: app.prefs,
+                                effects: app.effects,
+                                errors: app.effect_errors,
+                                folder: app.effects_folder,
+                                time: app.time,
+                                actions: &mut self.effects_actions,
+                            },
+                        );
+                    }
+                    Section::Translation => self.providers.translation(ui, app.user),
+                    Section::Ocr => self.providers.ocr(ui, app.user),
+                    Section::Ai => self.providers.ai(ui, app.user, app.chatgpt),
+                }
+                ui.add_space(16.0);
+            });
     }
 }
 
-/// The keys recorded once the user pauses (or presses the most a
-/// sequence has), taking the presses from egui's input. Escape ends the
-/// recording with nothing.
-fn take_recorded(
-    ctx: &egui::Context,
-    recording: &mut Option<Recording>,
-) -> Option<(Command, Keys)> {
-    let now = ctx.input(|input| input.time);
-    ctx.input_mut(|input| {
-        input.events.retain(|event| {
-            let Some(active) = recording.as_mut() else {
-                return true;
-            };
-            let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            else {
-                return true;
-            };
-            if active.strokes.len() >= keys::MAX_KEYS {
-                return true;
+/// The Appearance page; returns whether the Effects link was clicked.
+fn appearance(
+    ui: &mut egui::Ui,
+    prefs: &mut Prefs,
+    user: &mut UserSettings,
+    system: Option<ThemeKind>,
+    blur_supported: Option<bool>,
+) -> bool {
+    widgets::settings_group(ui, "Theme", |group| {
+        let caption = match (prefs.theme, system) {
+            (ThemePreference::System, Some(ThemeKind::Dark)) => {
+                Some("Following the desktop, which asks for dark.")
             }
-            if *key == Key::Escape && modifiers.is_none() {
-                *recording = None;
-                return false;
+            (ThemePreference::System, Some(ThemeKind::Light)) => {
+                Some("Following the desktop, which asks for light.")
             }
-            match Shortcut::from_key(*key, *modifiers) {
-                Some(shortcut) => {
-                    active.strokes.push(shortcut);
-                    active.last = now;
-                    false
-                }
-                None => true,
+            (ThemePreference::System, None) => {
+                Some("The desktop states no preference, so the theme is light.")
             }
+            _ => None,
+        };
+        group.row("Colour scheme", caption, |ui| {
+            widgets::segmented_with_icons(
+                ui,
+                &mut prefs.theme,
+                &[
+                    (ThemePreference::System, Some("monitor"), "System"),
+                    (ThemePreference::Light, Some("sun"), "Light"),
+                    (ThemePreference::Dark, Some("moon"), "Dark"),
+                ],
+            );
         });
     });
-    let active = recording.as_ref()?;
-    if active.strokes.is_empty() {
-        return None;
-    }
-    let waited = now - active.last;
-    if active.strokes.len() < keys::MAX_KEYS && waited < RECORD_PAUSE {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(RECORD_PAUSE - waited));
-        return None;
-    }
-    let done = recording.take()?;
-    Some((done.command, Keys::new(done.strokes)?))
-}
-
-/// A key chip with an × that removes it.
-fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Response {
-    let size = widgets::kbd_size(ui, label) + egui::vec2(18.0, 4.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let fill = if response.hovered() {
-        tokens.pressed
-    } else {
-        tokens.hover
-    };
-    ui.painter().rect(
-        rect,
-        6.0,
-        fill,
-        egui::Stroke::new(1.0, tokens.border),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        theme::medium(11.5),
-        tokens.text,
-    );
-    icons::paint(
-        ui,
-        egui::Rect::from_center_size(
-            rect.right_center() - egui::vec2(11.0, 0.0),
-            egui::vec2(12.0, 12.0),
-        ),
-        "x",
-        11.0,
-        tokens.text_muted,
-    );
-    response
-}
-
-fn appearance(ui: &mut egui::Ui, prefs: &mut Prefs) {
-    widgets::section_title(ui, "Theme");
-    let options: Vec<(ThemePreference, &str)> = ThemePreference::ALL
-        .into_iter()
-        .map(|preference| (preference, preference.label()))
-        .collect();
-    widgets::segmented(ui, &mut prefs.theme, &options);
-    ui.label(
-        RichText::new("Backgrounds, page transitions and tints are under Effects.")
-            .small()
-            .color(Tokens::get(ui.ctx()).text_faint),
-    );
+    widgets::settings_group(ui, "Window", |group| {
+        let Some(mut window) = user.draft().map(|settings| settings.window) else {
+            group.note("Reading your settings…");
+            return;
+        };
+        let before = window;
+        let mut transparent = window.transparent();
+        group.row(
+            "Transparent window",
+            Some(
+                "Shows the desktop through the title bar and the background around the \
+                 pages; panels, menus, dialogs and the palette stay opaque.",
+            ),
+            |ui| {
+                if widgets::toggle(ui, &mut transparent).changed() {
+                    window.set_transparent(transparent);
+                }
+            },
+        );
+        group.row(
+            "Opacity",
+            Some("How much of the window stays opaque."),
+            |ui| {
+                ui.add_enabled_ui(transparent, |ui| {
+                    let mut percent = (window.opacity * 100.0).round();
+                    let min = (glyphst_settings::WindowSettings::MIN_OPACITY * 100.0).round();
+                    let response = widgets::slider(
+                        ui,
+                        egui::Slider::new(&mut percent, min..=100.0)
+                            .step_by(1.0)
+                            .suffix(" %"),
+                    );
+                    if response.changed() {
+                        window.opacity = percent / 100.0;
+                    }
+                });
+            },
+        );
+        let mut blur = window.blur();
+        let blur_description = match blur_supported {
+            Some(false) => "Your compositor doesn't offer blur (ext-background-effect).",
+            _ => "Blurs the desktop behind the window, where the compositor can.",
+        };
+        group.row("Blur behind the window", Some(blur_description), |ui| {
+            ui.add_enabled_ui(transparent && blur_supported != Some(false), |ui| {
+                if widgets::toggle(ui, &mut blur).changed() {
+                    window.set_blur(blur);
+                }
+            });
+        });
+        if window != before {
+            user.edit(|settings| settings.window = window);
+        }
+    });
+    widgets::settings_group(ui, "", |group| {
+        group.link("wand-sparkles", "Backgrounds, page transitions and tints")
+    })
 }
 
 fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
-    widgets::section_title(ui, "Session");
-    ui.checkbox(
-        &mut prefs.reopen_last_session,
-        "Reopen the last session's documents",
-    );
-    widgets::section_title(ui, "While reading");
-    ui.checkbox(&mut prefs.show_sidebar, "Show the side drawer");
-    ui.checkbox(
-        &mut prefs.autohide_controls,
-        "Hide the reading controls after a few seconds without moving the pointer",
-    );
+    widgets::settings_group(ui, "Session", |group| {
+        group.row(
+            "Reopen the last session",
+            Some("Open the documents, pages and panes you had when the app closed."),
+            |ui| widgets::toggle(ui, &mut prefs.reopen_last_session),
+        );
+    });
+    widgets::settings_group(ui, "While reading", |group| {
+        group.row(
+            "Side drawer",
+            Some("The outline, pages, bookmarks, notes and search beside the pages."),
+            |ui| widgets::toggle(ui, &mut prefs.show_sidebar),
+        );
+        group.row(
+            "Hide the reading controls",
+            Some("After a few seconds without moving the pointer."),
+            |ui| widgets::toggle(ui, &mut prefs.autohide_controls),
+        );
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One frame at `time` seconds, pressing `key` if there is one.
-    fn frame(
-        ctx: &egui::Context,
-        window: &mut SettingsWindow,
-        prefs: &mut Prefs,
-        keymap: &Keymap,
-        key: Option<(Key, egui::Modifiers)>,
-        time: f64,
-    ) -> bool {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1000.0, 700.0),
-            )),
-            time: Some(time),
-            events: key
-                .into_iter()
-                .map(|(key, modifiers)| egui::Event::Key {
-                    key,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                })
-                .collect(),
-            ..Default::default()
-        };
-        let mut changed = false;
-        let mut user = UserSettings::in_memory(
+    fn user(ctx: &egui::Context) -> UserSettings {
+        UserSettings::in_memory(
             ctx,
             glyphst_settings::Settings::default(),
             Default::default(),
-        );
-        let chatgpt = ChatGptSubscription::start(
+        )
+    }
+
+    fn chatgpt() -> ChatGptSubscription {
+        ChatGptSubscription::start(
             std::sync::Arc::new(glyphst_settings::MemoryCredentials::default()),
             || {},
-        );
-        let mut output = ctx.run_ui(input, |ui| {
-            changed = window.show(
-                ui.ctx(),
-                SettingsContext {
-                    prefs,
-                    keymap,
-                    effects: &[],
-                    effect_errors: &[],
-                    effects_folder: None,
-                    time: 0.0,
-                    user: &mut user,
-                    chatgpt: &chatgpt,
-                },
-            );
-        });
-        output.textures_delta.clear();
-        changed
+        )
     }
 
-    fn keys(text: &str) -> Keys {
-        Keys::parse(text).expect("parses")
-    }
-
-    /// Records `key` for `command` and lets the pause pass; returns whether
-    /// the shortcuts changed.
-    fn record(
+    /// Runs `frames` frames of the window and returns the last output.
+    fn run(
         ctx: &egui::Context,
         window: &mut SettingsWindow,
         prefs: &mut Prefs,
-        keymap: &Keymap,
-        command: Command,
-        key: Key,
-        clock: &mut f64,
-    ) -> bool {
-        window.recording = Some(Recording::new(command));
-        let none = egui::Modifiers::NONE;
-        *clock += 1.0;
-        let mut changed = frame(ctx, window, prefs, keymap, Some((key, none)), *clock);
-        *clock += RECORD_PAUSE;
-        changed |= frame(ctx, window, prefs, keymap, None, *clock);
-        changed
-    }
-
-    #[test]
-    fn a_recorded_shortcut_another_command_has_moves_only_when_confirmed() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::fonts::embedded());
-        let mut prefs = Prefs::default();
-        let mut window = SettingsWindow::default();
-        window.show_section(Section::Shortcuts);
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-        let mut clock = 0.0;
-
-        assert!(!record(
-            &ctx,
-            &mut window,
-            &mut prefs,
-            &keymap,
-            Command::Assistant,
-            Key::P,
-            &mut clock
-        ));
-        let p = keys("P");
-        assert_eq!(
-            window.conflict,
-            Some(Conflict {
-                command: Command::Assistant,
-                keys: p.clone(),
-                others: vec![(p.clone(), Command::Present)],
-            })
-        );
-        assert!(window.is_recording(), "shortcuts wait for the answer");
-        assert!(!window.resolve_conflict(&mut prefs, &keymap, false));
-        assert!(prefs.shortcuts.is_empty());
-
-        record(
-            &ctx,
-            &mut window,
-            &mut prefs,
-            &keymap,
-            Command::Assistant,
-            Key::P,
-            &mut clock,
-        );
-        assert!(window.resolve_conflict(&mut prefs, &keymap, true));
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-        assert_eq!(keymap.owner(&p), Some(Command::Assistant));
-        assert!(keymap.keys(Command::Present).is_empty());
-
-        // A free key is taken after the pause; Escape ends a recording
-        // with nothing, and the window stays open.
-        window.recording = Some(Recording::new(Command::Present));
-        clock += 1.0;
-        let f7 = Some((Key::F7, egui::Modifiers::NONE));
-        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, f7, clock));
-        assert!(window.is_recording(), "a sequence may follow");
-        clock += RECORD_PAUSE;
-        assert!(frame(&ctx, &mut window, &mut prefs, &keymap, None, clock));
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-        assert_eq!(keymap.keys(Command::Present), &[keys("F7")]);
-        window.recording = Some(Recording::new(Command::Present));
-        let escape = Some((Key::Escape, egui::Modifiers::NONE));
-        assert!(!frame(
-            &ctx,
-            &mut window,
-            &mut prefs,
-            &keymap,
-            escape,
-            clock
-        ));
-        assert_eq!(window.recording, None);
-        assert!(window.open);
-    }
-
-    #[test]
-    fn sequences_are_recorded_and_prefixes_conflict() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::fonts::embedded());
-        let mut prefs = Prefs {
-            keymap: KeymapPreset::Vim,
-            ..Prefs::default()
+        user: &mut UserSettings,
+        effects: &[EffectDef],
+        frames: usize,
+    ) -> egui::FullOutput {
+        let chatgpt = chatgpt();
+        let errors = ["wave.wgsl: line 3".to_string()];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 900.0),
+            )),
+            ..Default::default()
         };
-        let mut window = SettingsWindow::default();
-        window.show_section(Section::Shortcuts);
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-
-        window.recording = Some(Recording::new(Command::ToggleStats));
-        let ctrl_w = Some((Key::W, egui::Modifiers::COMMAND));
-        let x = Some((Key::X, egui::Modifiers::NONE));
-        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, ctrl_w, 1.0));
-        assert!(!frame(&ctx, &mut window, &mut prefs, &keymap, x, 1.5));
-        assert!(frame(&ctx, &mut window, &mut prefs, &keymap, None, 3.0));
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-        assert_eq!(keymap.owner(&keys("Ctrl+W X")), Some(Command::ToggleStats));
-
-        // G starts First page's and the tabs' sequences.
-        let mut clock = 3.0;
-        record(
-            &ctx,
-            &mut window,
-            &mut prefs,
-            &keymap,
-            Command::Zen,
-            Key::G,
-            &mut clock,
-        );
-        let conflict = window.conflict.clone().expect("G conflicts");
-        assert_eq!(conflict.others.len(), 3);
-        assert!(window.resolve_conflict(&mut prefs, &keymap, true));
-        let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
-        assert_eq!(keymap.owner(&keys("G")), Some(Command::Zen));
-        assert_eq!(keymap.keys(Command::FirstPage), &[keys("Home")]);
+        let mut output = egui::FullOutput::default();
+        for _ in 0..frames {
+            output = ctx.run_ui(input.clone(), |ui| {
+                window.show(
+                    ui.ctx(),
+                    SettingsContext {
+                        prefs: &mut *prefs,
+                        effects,
+                        effect_errors: &errors,
+                        effects_folder: Some(std::path::Path::new("/config/glyphst/effects")),
+                        time: 1.0,
+                        user: &mut *user,
+                        chatgpt: &chatgpt,
+                        system_theme: Some(ThemeKind::Dark),
+                        blur_supported: Some(false),
+                    },
+                );
+            });
+            output.textures_delta.clear();
+        }
+        output
     }
 
     #[test]
     fn sections_are_named_by_their_last_word() {
-        assert_eq!(Section::parse("shortcuts"), Some(Section::Shortcuts));
+        assert_eq!(Section::parse("ai"), Some(Section::Ai));
         assert_eq!(Section::parse("Appearance"), Some(Section::Appearance));
+        // Shortcuts have their own tab now.
+        assert_eq!(Section::parse("shortcuts"), None);
         assert_eq!(Section::parse("nope"), None);
+        let grouped: Vec<Section> = GROUPS
+            .iter()
+            .flat_map(|(_, sections)| sections.iter().copied())
+            .collect();
+        assert_eq!(grouped, Section::ALL, "every section is listed once");
+    }
+
+    #[test]
+    fn every_section_draws_in_both_themes_and_transparent() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        for (kind, opacity) in [(ThemeKind::Light, 1.0), (ThemeKind::Dark, 0.7)] {
+            theme::apply(&ctx, kind, opacity);
+            let mut prefs = Prefs::default();
+            let mut user = user(&ctx);
+            for section in Section::ALL {
+                let mut window = SettingsWindow::default();
+                window.show_section(section);
+                run(&ctx, &mut window, &mut prefs, &mut user, &[], 3);
+                assert!(window.open, "{section:?} stays open");
+            }
+        }
+    }
+
+    #[test]
+    fn transparency_is_off_until_turned_on_and_saved_in_the_settings() {
+        let ctx = egui::Context::default();
+        let mut user = user(&ctx);
+        let mut window = user.draft().unwrap().window;
+        assert!(!window.transparent());
+        // What the Appearance toggle does.
+        window.set_transparent(true);
+        user.edit(|settings| settings.window = window);
+        let settings = user.get().unwrap();
+        assert!(settings.window.transparent());
+        assert!(settings.window.effective_opacity(true) < 1.0);
     }
 
     #[test]
@@ -831,47 +595,31 @@ mod tests {
             overlay: Some("night".into()),
             ..Prefs::default()
         };
-        let keymap = Keymap::default();
-        let mut window = SettingsWindow::default();
-        window.show_section(Section::Effects);
-        let mut user = UserSettings::in_memory(
-            &ctx,
-            glyphst_settings::Settings::default(),
-            Default::default(),
-        );
-        let chatgpt = ChatGptSubscription::start(
-            std::sync::Arc::new(glyphst_settings::MemoryCredentials::default()),
-            || {},
-        );
-        let errors = ["wave.wgsl: line 3".to_string()];
+        // The page itself, tall enough that every gallery is in view
+        // (in the window, the tints are scrolled to).
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(1000.0, 900.0),
+                egui::vec2(900.0, 2000.0),
             )),
             ..Default::default()
         };
-        // A window's first frame only measures it.
-        let mut output = Default::default();
-        for _ in 0..3 {
-            output = ctx.run_ui(input.clone(), |ui| {
-                window.show(
-                    ui.ctx(),
-                    SettingsContext {
-                        prefs: &mut prefs,
-                        keymap: &keymap,
-                        effects: &effects,
-                        effect_errors: &errors,
-                        effects_folder: Some(std::path::Path::new("/config/glyphst/effects")),
-                        time: 1.0,
-                        user: &mut user,
-                        chatgpt: &chatgpt,
-                    },
-                );
-            });
-            output.textures_delta.clear();
-        }
-        let output: egui::FullOutput = output;
+        let errors = ["wave.wgsl: line 3".to_string()];
+        let mut actions = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| {
+            crate::effects_page::settings_page(
+                ui,
+                crate::effects_page::SettingsPage {
+                    prefs: &mut prefs,
+                    effects: &effects,
+                    errors: &errors,
+                    folder: Some(std::path::Path::new("/config/glyphst/effects")),
+                    time: 1.0,
+                    actions: &mut actions,
+                },
+            );
+        });
+        output.textures_delta.clear();
         // Cards draw live previews: one per effect, none for "None".
         let previews = output
             .shapes
@@ -879,6 +627,6 @@ mod tests {
             .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
             .count();
         assert_eq!(previews, effects.len());
-        assert_eq!(window.effects_actions, []);
+        assert_eq!(actions, []);
     }
 }

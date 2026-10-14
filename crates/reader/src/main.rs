@@ -5,7 +5,7 @@
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT]
-//!     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai]
+//!     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
@@ -24,6 +24,7 @@ mod annotations;
 mod app;
 mod book_effects;
 mod commands;
+mod desktop_theme;
 mod doc_text;
 mod document;
 mod document_tab;
@@ -37,6 +38,7 @@ mod harness;
 mod home;
 mod icon_data;
 mod icons;
+mod keymap_page;
 mod keys;
 mod overview;
 mod palette;
@@ -56,6 +58,7 @@ mod translation;
 mod user_settings;
 mod wallpaper;
 mod widgets;
+mod window_blur;
 
 use std::path::PathBuf;
 
@@ -65,7 +68,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] \
-                     [--palette QUERY] [--settings appearance|reading|shortcuts|translation|ocr|ai] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
+                     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -94,6 +97,7 @@ fn parse_args() -> Result<Launch> {
         ask: None,
         palette: None,
         settings: None,
+        shortcuts: false,
         commands: Vec::new(),
         select_region: None,
     };
@@ -186,10 +190,15 @@ fn parse_args() -> Result<Launch> {
             }
             "--settings" => {
                 let name = value()?;
-                launch.settings = Some(
-                    settings_window::Section::parse(&name)
-                        .with_context(|| format!("unknown settings section {name}\n{USAGE}"))?,
-                );
+                // The shortcuts have their own tab.
+                if name.eq_ignore_ascii_case("shortcuts") {
+                    launch.shortcuts = true;
+                } else {
+                    launch.settings =
+                        Some(settings_window::Section::parse(&name).with_context(|| {
+                            format!("unknown settings section {name}\n{USAGE}")
+                        })?);
+                }
             }
             "--page" => {
                 let page: usize = value()?.parse().context("--page takes a page number")?;
@@ -277,7 +286,10 @@ fn main() -> Result<()> {
             .with_app_id("glyphst-reader")
             .with_inner_size([1440.0, 920.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            // Always able to show the desktop through, so transparency
+            // turns on and off without a restart; opaque until it is on.
+            .with_transparent(true),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: wgpu_configuration(),
         persistence_path,

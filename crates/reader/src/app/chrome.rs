@@ -67,6 +67,7 @@ impl ReaderApp {
                 background: self.background_effect(&tokens),
                 time: self.started.elapsed().as_secs_f32(),
                 pointer,
+                opacity: tokens.opacity,
             },
         ));
         // The focused pane's tab is always on the stage.
@@ -94,15 +95,15 @@ impl ReaderApp {
                 continue;
             };
             let focused = index == active;
-            // A pane at the left of the reading area is drawn on under an
-            // open drawer, which floats over it.
-            let draw = if layout.pages.left() < layout.reading.left()
-                && (pane.left() - layout.reading.left()).abs() < 0.5
-            {
-                rect.with_min_x(layout.pages.left())
-            } else {
-                rect
-            };
+            // The panes at the reading area's edges are drawn on under an
+            // open drawer and assistant, which float over them.
+            let mut draw = rect;
+            if (pane.left() - layout.reading.left()).abs() < 0.5 {
+                draw.min.x = draw.min.x.min(layout.pages.left());
+            }
+            if (pane.right() - layout.reading.right()).abs() < 0.5 {
+                draw.max.x = draw.max.x.max(layout.pages.right());
+            }
             let mut view = PaneView {
                 rect,
                 draw,
