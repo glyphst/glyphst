@@ -88,6 +88,12 @@ Known gaps:
   The change log of agents' edits lives while the app runs (saved chats
   keep their trace, not their undo list), and picture pasting needs
   `wl-paste` (Wayland) or `xclip` (X11).
+- Assistant panel: Markdown bold is a stronger colour only (egui's text has
+  no weights); chips of a reopened chat carry what was kept when sent (a
+  selection's text, a page's label), not the live pages; streamed text
+  appears without a fade, and the empty state's composer does not glide to
+  the bottom on the first message; the fake provider streams no reasoning,
+  so `--ai-fake` runs show no thoughts (`--assistant-demo` does).
 - External agents: only Codex's sandbox keeps writes in the document's
   working folder (Claude Code's and Pi's shells, and ACP agents, are not
   confined); ACP agents are configured in `config.kdl` only, with no

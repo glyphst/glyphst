@@ -1,12 +1,23 @@
 //! The assistant: a chat about the open document in a right-side panel.
 //!
-//! Turns run the `ai` crate's agent on a worker thread with the app's tools;
-//! the current page and selection can be attached as context, and each
-//! message ends with what the reader showed. Sessions are the library's AI
-//! sessions, saved with their whole trace (reasoning, tool calls and
-//! results, images), so a reopened chat continues where it was. Long chats
-//! are summarized before the context fills up, and a model names each new
-//! chat. The panel follows pdfcraft's side panels; answers are Markdown.
+//! Turns run the `ai` crate's agent on a worker thread with the app's tools,
+//! or an external coding agent; messages carry `@` mentions and pictures as
+//! chips, and each ends with what the reader showed. Sessions are the
+//! library's AI sessions, saved with their whole trace (reasoning, tool
+//! calls and results, images) and the chips as typed, so a reopened chat
+//! continues where it was. Long chats are summarized before the context
+//! fills up, and a model names each new chat.
+//!
+//! The panel ([`header`], [`thread`], [`composer`]) follows Zed's agent
+//! panel for the composer and Lody's and Zeron's threads: answers are
+//! Markdown after a quiet timeline of the work, folded once done.
+
+mod composer;
+mod demo;
+mod header;
+mod thread;
+
+pub use demo::DEMO_STATES;
 
 use std::{
     path::PathBuf,
@@ -14,7 +25,8 @@ use std::{
         Arc,
         mpsc::{self, Receiver},
     },
-    thread,
+    thread as threads,
+    time::Instant,
 };
 
 use glyphst_agent_host::{
@@ -34,9 +46,9 @@ use glyphst_ai::{
 };
 use glyphst_core::DocumentLayout;
 use glyphst_library::{
-    AiSession, AiSessionAgent, AiSessionAgentPart, AiSessionImage, AiSessionMessage, AiSessionRole,
-    AiSessionSummary, AiSessionToolResultPart, AiSessionToolStatus, LibraryStore,
-    current_timestamp,
+    AiSession, AiSessionAgent, AiSessionAgentPart, AiSessionImage, AiSessionMention,
+    AiSessionMessage, AiSessionRole, AiSessionSummary, AiSessionToolResultPart,
+    AiSessionToolStatus, LibraryStore, current_timestamp,
 };
 use glyphst_settings::{
     AiApiStyle, AiProvider, AiThinkingLevel, ModelRef, ResolvedAiConfig, Settings,
@@ -44,9 +56,11 @@ use glyphst_settings::{
 
 use crate::{
     ai_changes::{ChangeAction, ChangeLog},
+    ai_editor::{ChipKind, Draft, MentionEditor},
     ai_mentions::{self, Mention, Sources},
-    ai_tools::describe_call,
-    theme::Tokens,
+    ai_menu::Menu,
+    ai_preview::Previews,
+    ai_tools::{Step, describe_step},
 };
 
 const TITLE_CHARS: usize = 60;
@@ -84,11 +98,85 @@ pub struct ToolRow {
     pub name: String,
     pub arguments: String,
     pub state: ToolState,
+    /// What it returned, for its details.
+    pub output: Option<String>,
 }
 
 impl ToolRow {
+    pub fn step(&self) -> Step {
+        describe_step(&self.name, &self.arguments)
+    }
+
+    #[cfg(test)]
     pub fn label(&self) -> String {
-        describe_call(&self.name, &self.arguments)
+        self.step().done()
+    }
+}
+
+/// A part of an answer, in the order it came.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Segment {
+    Thought(String),
+    Tool(ToolRow),
+    Text(String),
+}
+
+/// What the panel keeps about a message besides what the model reads.
+#[derive(Default)]
+struct MessageView {
+    /// A user message as typed, with its chips.
+    draft: Option<Draft>,
+    /// Thumbnails of the pictures a user message carried.
+    images: Vec<egui::TextureHandle>,
+    /// Pictures of a reopened message, made thumbnails when first drawn.
+    pending_images: Vec<AgentImage>,
+    /// When a user message was sent, in seconds since the epoch.
+    sent_at: Option<u64>,
+    /// An answer's reasoning, tool calls and text, in order.
+    segments: Vec<Segment>,
+    /// How long an answer took.
+    duration_ms: Option<u64>,
+    /// The work before a finished answer is shown, not folded.
+    unfolded: bool,
+    /// Steps whose details are open, by segment.
+    open_steps: std::collections::HashSet<usize>,
+}
+
+impl MessageView {
+    fn push_text(&mut self, text: &str) {
+        match self.segments.last_mut() {
+            Some(Segment::Text(last)) => last.push_str(text),
+            _ => self.segments.push(Segment::Text(text.to_string())),
+        }
+    }
+
+    fn push_reasoning(&mut self, text: &str) {
+        match self.segments.last_mut() {
+            Some(Segment::Thought(last)) => last.push_str(text),
+            _ => self.segments.push(Segment::Thought(text.to_string())),
+        }
+    }
+
+    fn tool_mut(&mut self, id: &str) -> Option<&mut ToolRow> {
+        self.segments.iter_mut().find_map(|segment| match segment {
+            Segment::Tool(row) if row.id == id => Some(row),
+            _ => None,
+        })
+    }
+
+    fn tools(&self) -> impl Iterator<Item = &ToolRow> {
+        self.segments.iter().filter_map(|segment| match segment {
+            Segment::Tool(row) => Some(row),
+            _ => None,
+        })
+    }
+
+    /// Where the answer starts: after the last thought or tool call.
+    fn answer_start(&self) -> usize {
+        self.segments
+            .iter()
+            .rposition(|segment| !matches!(segment, Segment::Text(_)))
+            .map_or(0, |index| index + 1)
     }
 }
 
@@ -111,6 +199,13 @@ struct Run {
     events: Receiver<RunEvent>,
     /// The answer being written.
     answer: usize,
+    started: Instant,
+}
+
+/// A sent message being edited in place.
+struct Editing {
+    index: usize,
+    editor: MentionEditor,
 }
 
 pub struct Assistant {
@@ -118,9 +213,17 @@ pub struct Assistant {
     session_id: u64,
     created: u64,
     messages: Vec<ChatMessage>,
-    /// Tool calls of each message.
-    tools: Vec<Vec<ToolRow>>,
-    pub composer: String,
+    /// What the panel shows of each message, by index.
+    views: Vec<MessageView>,
+    /// The composer's text and chips.
+    pub editor: MentionEditor,
+    /// The composer's `@`, `/` and `+` menu.
+    menu: Menu,
+    previews: Previews,
+    /// Messages written while an answer runs, sent in turn after it.
+    queue: Vec<Draft>,
+    /// The page and selection go with each message as context (for quick
+    /// questions; the panel attaches them as chips).
     pub include_page: bool,
     pub include_selection: bool,
     run: Option<Run>,
@@ -128,12 +231,7 @@ pub struct Assistant {
     markdown: egui_commonmark::CommonMarkCache,
     show_sessions: bool,
     sessions: Vec<AiSession>,
-    /// Images the next message carries (page regions).
-    pub attachments: Vec<Attachment>,
-    /// Thumbnails of the images sent with each message, by index.
-    sent_images: std::collections::HashMap<usize, Vec<egui::TextureHandle>>,
-    /// The model's reasoning summary for each answer, by index.
-    reasoning: std::collections::HashMap<usize, String>,
+    sessions_query: String,
     /// What the running turn waits for, such as a retry.
     status: Option<String>,
     /// Names the conversation to the provider's prompt cache.
@@ -153,15 +251,13 @@ pub struct Assistant {
     chat_id: u64,
     /// The user message whose "Restore to here" waits for confirmation.
     confirm_restore: Option<usize>,
-    /// What the next message mentions.
-    pub mentions: Vec<Mention>,
-    /// The chips of the mentions sent with each message, by index.
-    sent_mentions: std::collections::HashMap<usize, Vec<String>>,
-    /// The `@` menu: its highlighted entry, and whether `+` opened it.
-    menu_selected: usize,
-    menu_forced: bool,
-    /// An input method is composing text in the composer.
-    composing: bool,
+    editing: Option<Editing>,
+    /// The composer takes most of the panel.
+    expanded: bool,
+    /// The model and agent menu is open.
+    selector_open: bool,
+    /// The `…` menu is open.
+    more_open: bool,
     /// A picture being read from the clipboard.
     paste_job: Option<Receiver<Vec<u8>>>,
     /// The id of the external agent the chat runs on; `None` for the
@@ -173,6 +269,17 @@ pub struct Assistant {
     file_changes: Vec<(ToolContext, Scratch, FileChanges)>,
     /// The tool context of the running turn.
     run_context: ToolContext,
+    /// Who answers: the model's or the agent's name.
+    answerer: String,
+    /// The composer's height last frame, to lay out the thread above it.
+    composer_height: f32,
+    /// The "Scroll to bottom" pill shows.
+    pill: bool,
+    jump_to_bottom: bool,
+    /// A canned state for screenshots; holds its never-ending run open.
+    demo: Option<mpsc::Sender<RunEvent>>,
+    /// The canned state shows the composer's first chip's preview.
+    demo_hover: bool,
 }
 
 /// What an external agent's turn needs from the app.
@@ -183,48 +290,25 @@ pub struct ExternalAccess {
     pub model: Option<String>,
 }
 
-/// An entry of the composer's menu.
-enum MenuEntry {
-    Mention(Box<ai_mentions::Candidate>),
-    Slash(Slash),
-}
-
-/// The composer's slash commands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Slash {
-    New,
-    Compact,
-    Undo,
-}
-
-impl Slash {
-    const ALL: [Self; 3] = [Self::New, Self::Compact, Self::Undo];
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::New => "/new",
-            Self::Compact => "/compact",
-            Self::Undo => "/undo",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::New => "Start a new chat",
-            Self::Compact => "Summarize the chat so far before the next message",
-            Self::Undo => "Undo every change agents made",
-        }
-    }
-}
-
 /// An image attached to the next message.
+#[derive(Clone)]
 pub struct Attachment {
     pub image: AttachedImage,
     pub thumbnail: egui::TextureHandle,
     pub label: String,
 }
 
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attachment")
+            .field("image", &self.image)
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What an attached image is.
+#[derive(Clone, Debug)]
 pub enum AttachedImage {
     /// A region of a page, drawn with the region tool.
     Region(ImageContext),
@@ -244,16 +328,16 @@ impl Default for Assistant {
             session_id: 0,
             created: 0,
             messages: Vec::new(),
-            tools: Vec::new(),
-            composer: String::new(),
-            include_page: true,
-            include_selection: true,
+            views: Vec::new(),
+            editor: MentionEditor::new(egui::Id::new("assistant-input")),
+            menu: Menu::default(),
+            previews: Previews::default(),
+            queue: Vec::new(),
+            include_page: false,
+            include_selection: false,
             run: None,
             error: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
-            attachments: Vec::new(),
-            sent_images: Default::default(),
-            reasoning: Default::default(),
             status: None,
             cache_key: None,
             summary: None,
@@ -264,27 +348,35 @@ impl Default for Assistant {
             title_config: None,
             chat_id: 0,
             confirm_restore: None,
-            mentions: Vec::new(),
-            sent_mentions: Default::default(),
-            menu_selected: 0,
-            menu_forced: false,
-            composing: false,
+            editing: None,
+            expanded: false,
+            selector_open: false,
+            more_open: false,
             paste_job: None,
             agent: None,
             agent_session: None,
             file_changes: Vec::new(),
             run_context: ToolContext::default(),
+            answerer: String::new(),
+            composer_height: 110.0,
+            pill: false,
+            jump_to_bottom: false,
+            demo: None,
+            demo_hover: false,
             show_sessions: false,
             sessions: Vec::new(),
+            sessions_query: String::new(),
         }
     }
 }
 
 /// What the panel shows besides the chat.
 pub struct Panel<'a> {
-    /// Whether the active document has a page and a selection to attach.
-    pub has_page: bool,
-    pub has_selection: bool,
+    /// The active document's title, current page (from 0, once its text
+    /// is read) and selected words, for the composer's suggestions.
+    pub document: Option<String>,
+    pub page: Option<usize>,
+    pub selection_words: Option<usize>,
     pub models: &'a [(ModelRef, String)],
     pub model: Option<ModelRef>,
     pub changes: &'a mut ChangeLog,
@@ -295,21 +387,28 @@ pub struct Panel<'a> {
 }
 
 /// What the panel asks for.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum PanelAction {
-    Send(String),
+    Send(Draft),
     NewSession,
     LoadSession(u64),
+    DeleteSession(u64),
     /// The user chose the assistant's model.
     SetModel(ModelRef),
     /// Review or undo what agents changed.
     Change(ChangeAction),
     /// Rewind the chat to the user message at this index and undo what the
-    /// agent changed since.
-    Restore(usize),
+    /// agent changed since; with a draft, send it in its place.
+    Restore(usize, Option<Draft>),
     /// Run new chats on the external agent with this id, or the built-in
     /// assistant.
     SetAgent(Option<String>),
+    /// Choose a picture file to attach.
+    ChoosePicture,
+    /// Draw a region of a page to attach.
+    SelectRegion,
+    Command(crate::commands::Command),
+    OpenAiSettings,
 }
 
 impl Assistant {
@@ -323,8 +422,11 @@ impl Assistant {
     }
 
     #[cfg(test)]
-    pub fn tools(&self, message: usize) -> &[ToolRow] {
-        self.tools.get(message).map_or(&[], Vec::as_slice)
+    pub fn tools(&self, message: usize) -> Vec<ToolRow> {
+        self.views
+            .get(message)
+            .map(|view| view.tools().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn refresh_sessions(&mut self, library: &LibraryStore) {
@@ -333,21 +435,25 @@ impl Assistant {
         self.sessions = sessions;
     }
 
-    /// Starts a turn: the message, with the page and selection as context
-    /// when chosen, then the agent with the document tools.
+    /// Starts a turn: the message with its chips read, then the agent with
+    /// the document tools. While one runs, the message waits its turn.
     pub fn send(
         &mut self,
-        text: String,
+        draft: Draft,
         ask: AskContext,
         tools: ToolRegistry,
         external: Option<ExternalAccess>,
         settings: &Settings,
         ctx: &egui::Context,
     ) {
-        let text = text.trim().to_string();
-        if text.is_empty() || self.run.is_some() {
+        if draft.is_empty() {
             return;
         }
+        if self.run.is_some() {
+            self.queue.push(draft);
+            return;
+        }
+        let (text, spans) = draft.prompt();
         self.error = None;
         let page = ask.current_page + 1;
         let mut contexts = Vec::new();
@@ -395,25 +501,22 @@ impl Assistant {
             .with_document_scope(Some(scope))
             .with_reader_state(state.block());
         let mut thumbnails = Vec::new();
-        for attachment in std::mem::take(&mut self.attachments) {
+        for attachment in draft.images() {
             match attachment.image {
                 AttachedImage::Region(image) => message.attach_image(image),
                 AttachedImage::Picture(image) => message.attach_user_image(image),
             }
             thumbnails.push(attachment.thumbnail);
         }
-        if !thumbnails.is_empty() {
-            self.sent_images.insert(self.messages.len(), thumbnails);
-        }
-        let mentions = std::mem::take(&mut self.mentions);
-        if !mentions.is_empty() {
-            self.sent_mentions.insert(
-                self.messages.len(),
-                mentions.iter().map(Mention::label).collect(),
-            );
-        }
+        let mentions = draft.mentions();
+        debug_assert_eq!(spans.len(), draft.chips.len());
         self.messages.push(message);
-        self.tools.push(Vec::new());
+        self.views.push(MessageView {
+            draft: Some(draft),
+            images: thumbnails,
+            sent_at: Some(current_timestamp()),
+            ..MessageView::default()
+        });
 
         if let Some(external) = external {
             self.start_external(external, mentions, settings, ctx);
@@ -446,7 +549,8 @@ impl Assistant {
             }));
         }
         self.messages.push(ChatMessage::assistant(String::new()));
-        self.tools.push(Vec::new());
+        self.views.push(MessageView::default());
+        self.answerer = config.model.clone();
         let cache_key = self
             .cache_key
             .get_or_insert_with(|| format!("glyphst-chat-{}", unique_suffix()))
@@ -464,7 +568,7 @@ impl Assistant {
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
         let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
-        thread::spawn(move || {
+        threads::spawn(move || {
             let mut history = prior;
             if compact {
                 // A failed summary leaves the conversation as it was.
@@ -512,6 +616,7 @@ impl Assistant {
             cancel,
             events,
             answer: self.messages.len() - 1,
+            started: Instant::now(),
         });
     }
 
@@ -536,13 +641,14 @@ impl Assistant {
                 .or_else(|| config.can_request().then_some(config));
         }
         self.messages.push(ChatMessage::assistant(String::new()));
-        self.tools.push(Vec::new());
+        self.views.push(MessageView::default());
+        self.answerer = external.agent.name.clone();
         self.run_context = self.tool_context(question, Some(&external.agent.name));
         let resume = self.agent_session.clone();
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
         let (worker_cancel, ctx) = (cancel.clone(), ctx.clone());
-        thread::spawn(move || {
+        threads::spawn(move || {
             let send = |event: RunEvent| {
                 let _ = events_tx.send(event);
                 ctx.request_repaint();
@@ -592,6 +698,7 @@ impl Assistant {
             cancel,
             events,
             answer: self.messages.len() - 1,
+            started: Instant::now(),
         });
     }
 
@@ -618,6 +725,12 @@ impl Assistant {
     /// Files external agents changed since the last call.
     pub fn take_file_changes(&mut self) -> Vec<(ToolContext, Scratch, FileChanges)> {
         std::mem::take(&mut self.file_changes)
+    }
+
+    /// The next queued message, once nothing runs.
+    pub fn take_queued(&mut self) -> Option<Draft> {
+        (self.run.is_none() && self.error.is_none() && !self.queue.is_empty())
+            .then(|| self.queue.remove(0))
     }
 
     /// The messages before `end` as the model reads them: the summary of
@@ -654,7 +767,7 @@ impl Assistant {
         let Some(run) = &self.run else {
             return;
         };
-        let answer = run.answer;
+        let (answer, started) = (run.answer, run.started);
         let events: Vec<RunEvent> = run.events.try_iter().collect();
         let mut finished = false;
         for event in events {
@@ -688,8 +801,12 @@ impl Assistant {
         if finished {
             self.run = None;
             self.status = None;
-            for row in &mut self.tools[answer] {
-                if row.state == ToolState::Running {
+            let view = &mut self.views[answer];
+            view.duration_ms = Some(started.elapsed().as_millis() as u64);
+            for segment in &mut view.segments {
+                if let Segment::Tool(row) = segment
+                    && row.state == ToolState::Running
+                {
                     row.state = ToolState::Failed;
                 }
             }
@@ -714,7 +831,7 @@ impl Assistant {
             return;
         }
         let (titles, job) = mpsc::channel();
-        thread::spawn(move || {
+        threads::spawn(move || {
             if let Ok(title) = compaction::generate_title(
                 config,
                 &question,
@@ -728,21 +845,25 @@ impl Assistant {
     }
 
     fn apply_external(&mut self, answer: usize, event: ExternalEvent) {
-        let rows = &mut self.tools[answer];
+        let view = &mut self.views[answer];
         match event {
             ExternalEvent::Session(session) => self.agent_session = Some(session),
-            ExternalEvent::Text(text) => self.messages[answer].push_text(&text),
-            ExternalEvent::Reasoning(text) => {
-                self.reasoning.entry(answer).or_default().push_str(&text);
+            ExternalEvent::Text(text) => {
+                self.messages[answer].push_text(&text);
+                view.push_text(&text);
             }
-            ExternalEvent::ToolStarted { id, title } => rows.push(ToolRow {
-                id,
-                name: title,
-                arguments: String::new(),
-                state: ToolState::Running,
-            }),
+            ExternalEvent::Reasoning(text) => view.push_reasoning(&text),
+            ExternalEvent::ToolStarted { id, title } => {
+                view.segments.push(Segment::Tool(ToolRow {
+                    id,
+                    name: title,
+                    arguments: String::new(),
+                    state: ToolState::Running,
+                    output: None,
+                }));
+            }
             ExternalEvent::ToolFinished { id, failed } => {
-                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                if let Some(row) = view.tool_mut(&id) {
                     row.state = if failed {
                         ToolState::Failed
                     } else {
@@ -750,28 +871,30 @@ impl Assistant {
                     };
                 }
             }
-            ExternalEvent::Refused(what) => rows.push(ToolRow {
+            ExternalEvent::Refused(what) => view.segments.push(Segment::Tool(ToolRow {
                 id: String::new(),
                 name: format!("Refused {what} (outside its folder)"),
                 arguments: String::new(),
                 state: ToolState::Failed,
-            }),
+                output: None,
+            })),
         }
     }
 
     fn apply(&mut self, answer: usize, event: AgentEvent) {
-        let rows = &mut self.tools[answer];
+        let view = &mut self.views[answer];
         if !matches!(event, AgentEvent::Retrying { .. }) {
             self.status = None;
         }
         match event {
-            AgentEvent::TextDelta(delta) => self.messages[answer].push_text(&delta),
-            AgentEvent::ReasoningDelta(delta) => {
-                self.reasoning.entry(answer).or_default().push_str(&delta);
+            AgentEvent::TextDelta(delta) => {
+                self.messages[answer].push_text(&delta);
+                view.push_text(&delta);
             }
+            AgentEvent::ReasoningDelta(delta) => view.push_reasoning(&delta),
             AgentEvent::Retrying { attempt, delay, .. } => {
                 self.status = Some(format!(
-                    "The provider is busy; trying again in {:.0} s (attempt {attempt})…",
+                    "The provider is busy — retrying in {:.0}s (attempt {attempt})",
                     delay.as_secs_f32().ceil()
                 ));
             }
@@ -783,29 +906,33 @@ impl Assistant {
                     self.error = Some("The model declined this request.".into());
                 }
             }
-            AgentEvent::ToolCallStarted { id, name } => rows.push(ToolRow {
-                id,
-                name,
-                arguments: String::new(),
-                state: ToolState::Running,
-            }),
+            AgentEvent::ToolCallStarted { id, name } => {
+                view.segments.push(Segment::Tool(ToolRow {
+                    id,
+                    name,
+                    arguments: String::new(),
+                    state: ToolState::Running,
+                    output: None,
+                }));
+            }
             AgentEvent::ToolCallArgumentsDelta { id, delta } => {
-                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                if let Some(row) = view.tool_mut(&id) {
                     row.arguments.push_str(&delta);
                 }
             }
             AgentEvent::ToolCallCompleted(call) => {
-                if let Some(row) = rows.iter_mut().find(|row| row.id == call.id) {
+                if let Some(row) = view.tool_mut(&call.id) {
                     row.arguments = call.arguments;
                 }
             }
             AgentEvent::ToolExecutionCompleted(result) => {
-                if let Some(row) = rows.iter_mut().find(|row| row.id == result.call_id) {
+                if let Some(row) = view.tool_mut(&result.call_id) {
                     row.state = if result.is_error {
                         ToolState::Failed
                     } else {
                         ToolState::Done
                     };
+                    row.output = Some(result_text(&result.content));
                 }
             }
             AgentEvent::LimitReached => {
@@ -830,9 +957,8 @@ impl Assistant {
         self.session_id = 0;
         self.created = 0;
         self.messages.clear();
-        self.tools.clear();
-        self.sent_images.clear();
-        self.reasoning.clear();
+        self.views.clear();
+        self.queue.clear();
         self.status = None;
         self.cache_key = None;
         self.summary = None;
@@ -843,7 +969,7 @@ impl Assistant {
         self.title_config = None;
         self.chat_id = 0;
         self.confirm_restore = None;
-        self.sent_mentions.clear();
+        self.editing = None;
         self.agent_session = None;
         self.error = None;
         self.show_sessions = false;
@@ -855,24 +981,25 @@ impl Assistant {
     }
 
     /// Rewinds the chat to before the user message at `index`; returns the
-    /// message's text for the composer.
-    pub fn rewind(&mut self, index: usize) -> Option<String> {
+    /// message as typed, for the composer.
+    pub fn rewind(&mut self, index: usize) -> Option<Draft> {
         let message = self.messages.get(index)?;
         if message.role != Role::User {
             return None;
         }
-        let text = message.display_text();
+        let draft = self.views[index]
+            .draft
+            .clone()
+            .unwrap_or_else(|| Draft::plain(message.display_text()));
         self.stop();
         self.run = None;
         self.status = None;
         self.error = None;
         self.confirm_restore = None;
+        self.editing = None;
         self.compact_next = false;
         self.messages.truncate(index);
-        self.tools.truncate(index);
-        self.reasoning.retain(|&answer, _| answer < index);
-        self.sent_images.retain(|&message, _| message < index);
-        self.sent_mentions.retain(|&message, _| message < index);
+        self.views.truncate(index);
         if self
             .summary
             .as_ref()
@@ -880,7 +1007,19 @@ impl Assistant {
         {
             self.summary = None;
         }
-        Some(text)
+        Some(draft)
+    }
+
+    /// Puts `draft` in the composer.
+    pub fn compose(&mut self, ctx: &egui::Context, draft: Draft) {
+        self.editor.set(ctx, draft);
+        ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
+    }
+
+    /// Attaches `attachment` to the next message as a chip.
+    pub fn attach(&mut self, ctx: &egui::Context, attachment: Attachment) {
+        self.editor
+            .insert_chip(ctx, None, ChipKind::Image(attachment));
     }
 
     /// The last answer's text, while one is written or once done.
@@ -899,15 +1038,13 @@ impl Assistant {
         }
         self.new_session();
         self.messages = std::mem::take(&mut other.messages);
-        self.tools = std::mem::take(&mut other.tools);
-        self.sent_images = std::mem::take(&mut other.sent_images);
-        self.reasoning = std::mem::take(&mut other.reasoning);
-        self.sent_mentions = std::mem::take(&mut other.sent_mentions);
+        self.views = std::mem::take(&mut other.views);
         self.cache_key = other.cache_key.take();
         self.summary = other.summary.take();
         self.context_tokens = std::mem::take(&mut other.context_tokens);
         self.compact_next = other.compact_next;
         self.chat_id = other.chat_id;
+        self.answerer = std::mem::take(&mut other.answerer);
         other.new_session();
         true
     }
@@ -930,21 +1067,9 @@ impl Assistant {
         self.agent = session.agent.as_ref().map(|agent| agent.agent.clone());
         self.agent_session = session.agent.and_then(|agent| agent.session);
         for message in session.messages {
-            let index = self.messages.len();
-            self.tools.push(tool_rows(&message.agent_parts));
-            let reasoning = message
-                .agent_parts
-                .iter()
-                .filter_map(|part| match part {
-                    AiSessionAgentPart::Reasoning(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if !reasoning.is_empty() {
-                self.reasoning.insert(index, reasoning);
-            }
-            self.messages.push(chat_message(message, library));
+            let (chat, view) = chat_message(message, library);
+            self.messages.push(chat);
+            self.views.push(view);
         }
     }
 
@@ -976,7 +1101,8 @@ impl Assistant {
         let messages = self
             .messages
             .iter()
-            .map(|message| session_message(message, library))
+            .zip(&self.views)
+            .map(|(message, view)| session_message(message, view, library))
             .collect();
         let session = AiSession {
             id: self.session_id,
@@ -1004,38 +1130,8 @@ impl Assistant {
         name: Option<String>,
         bytes: Vec<u8>,
     ) -> Result<(), String> {
-        if bytes.len() > MAX_PICTURE_BYTES {
-            return Err("the picture is larger than 16 MB".into());
-        }
-        let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .map_err(|error| error.to_string())?;
-        let media_type = match reader.format() {
-            Some(image::ImageFormat::Png) => "image/png",
-            Some(image::ImageFormat::Jpeg) => "image/jpeg",
-            Some(image::ImageFormat::Gif) => "image/gif",
-            Some(image::ImageFormat::WebP) => "image/webp",
-            _ => return Err("only PNG, JPEG, GIF and WebP pictures can be attached".into()),
-        };
-        let decoded = reader.decode().map_err(|error| error.to_string())?;
-        let (width, height) = (decoded.width(), decoded.height());
-        let small = decoded
-            .thumbnail(THUMBNAIL_PIXELS, THUMBNAIL_PIXELS)
-            .to_rgba8();
-        let size = [small.width() as usize, small.height() as usize];
-        let thumbnail = ctx.load_texture(
-            format!("assistant-picture-{}", unique_suffix()),
-            egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw()),
-            egui::TextureOptions::LINEAR,
-        );
-        let label = name.clone().unwrap_or_else(|| "Pasted picture".into());
-        self.attachments.push(Attachment {
-            image: AttachedImage::Picture(
-                AgentImage::new(media_type, width, height, bytes).with_optional_name(name),
-            ),
-            thumbnail,
-            label,
-        });
+        let attachment = picture_attachment(ctx, name, bytes)?;
+        self.attach(ctx, attachment);
         Ok(())
     }
 
@@ -1044,7 +1140,7 @@ impl Assistant {
     fn start_paste(&mut self, ctx: &egui::Context) {
         let (sender, receiver) = mpsc::channel();
         let ctx = ctx.clone();
-        thread::spawn(move || {
+        threads::spawn(move || {
             if let Some(bytes) = clipboard_picture() {
                 let _ = sender.send(bytes);
                 ctx.request_repaint();
@@ -1064,601 +1160,124 @@ impl Assistant {
         }
     }
 
-    /// Follows the input method, so keys go to it while it composes.
-    fn track_input_method(&mut self, ui: &egui::Ui) {
-        ui.input(|i| {
-            for event in &i.events {
-                match event {
-                    egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
-                        self.composing = !text.is_empty();
-                    }
-                    egui::Event::Ime(_) => self.composing = false,
-                    _ => {}
-                }
-            }
-        });
-    }
-
-    /// The menu for what is typed before the cursor: slash commands at the
-    /// start, mentions after `@`, or all mentions after `+`; with the typed
-    /// range to replace.
-    fn menu_entries(
-        &self,
-        ctx: &egui::Context,
-        input: egui::Id,
-        sources: &mut dyn FnMut() -> Sources,
-    ) -> (Option<std::ops::Range<usize>>, Vec<MenuEntry>) {
-        let text = &self.composer;
-        let cursor = egui::TextEdit::load_state(ctx, input)
-            .and_then(|state| state.cursor.char_range())
-            .map_or(text.len(), |range| {
-                text.char_indices()
-                    .nth(range.primary.index.0)
-                    .map_or(text.len(), |(byte, _)| byte)
-            });
-        if text.starts_with('/') && !text.contains(char::is_whitespace) {
-            let entries = Slash::ALL
-                .into_iter()
-                .filter(|slash| slash.name().starts_with(text.as_str()))
-                .map(MenuEntry::Slash)
-                .collect();
-            return (Some(0..text.len()), entries);
-        }
-        let range = ai_mentions::active_query(text, cursor);
-        let query = match &range {
-            Some(range) => &text[range.start + 1..range.end],
-            None if self.menu_forced => "",
-            None => return (None, Vec::new()),
-        };
-        let entries = ai_mentions::candidates(&sources(), query)
-            .into_iter()
-            .map(|candidate| MenuEntry::Mention(Box::new(candidate)))
-            .collect();
-        (range, entries)
-    }
-
-    /// The panel. `can_attach` says whether the page and selection exist.
+    /// The panel.
     pub fn ui(&mut self, ui: &mut egui::Ui, panel: Panel<'_>) -> Option<PanelAction> {
+        self.previews.poll(ui.ctx());
+        let mut action = self.header_ui(ui, &panel);
+        if self.show_sessions {
+            if let Some(chosen) = self.history_ui(ui) {
+                action = Some(chosen);
+            }
+            return action;
+        }
         let Panel {
-            has_page,
-            has_selection,
+            document,
+            page,
+            selection_words,
             models,
             model,
             changes,
             sources,
             agents,
         } = panel;
-        let tokens = Tokens::get(ui.ctx());
-        let mut action = None;
-        ui.horizontal(|ui| {
-            ui.add(crate::icons::image("sparkles", 16.0, tokens.accent));
-            ui.label(egui::RichText::new("Assistant").font(crate::theme::semibold(15.0)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if crate::icons::button(ui, "message-square-plus", 28.0, false, "New chat")
-                    .clicked()
-                {
-                    action = Some(PanelAction::NewSession);
-                }
-                if crate::icons::button(ui, "clock", 28.0, self.show_sessions, "Saved chats")
-                    .clicked()
-                {
-                    self.show_sessions = !self.show_sessions;
-                }
-            });
-        });
-        if !agents.is_empty() || self.agent.is_some() {
-            let name = |id: Option<&str>| match id {
-                None => "Built-in assistant".to_string(),
-                Some(id) => agents
-                    .iter()
-                    .find(|agent| agent.id() == id)
-                    .map_or_else(|| format!("{id} (not found)"), |agent| agent.name.clone()),
-            };
-            egui::ComboBox::from_id_salt("assistant-agent")
-                .selected_text(name(self.agent.as_deref()))
-                .width(ui.available_width() - 8.0)
-                .show_ui(ui, |ui| {
-                    let choices = std::iter::once(None)
-                        .chain(agents.iter().map(|agent| Some(agent.id())))
-                        .collect::<Vec<_>>();
-                    for choice in choices {
-                        if ui
-                            .selectable_label(self.agent == choice, name(choice.as_deref()))
-                            .on_hover_text(match choice {
-                                None => "The Reader's own assistant, with the model chosen below",
-                                Some(_) => "A coding agent on this computer, with its own model and sign-in; it works in a folder for this document and reaches the Reader through MCP",
-                            })
-                            .clicked()
-                            && self.agent != choice
-                        {
-                            action = Some(PanelAction::SetAgent(choice));
-                        }
-                    }
-                });
+        let composer = composer::Composer {
+            document: document.as_deref(),
+            page,
+            selection_words,
+            models,
+            model,
+            agents,
+        };
+        if let Some(chosen) = self.body_ui(ui, &composer, changes, sources) {
+            action = Some(chosen);
         }
-        if !models.is_empty() && self.agent.is_none() {
-            let mut chosen = model;
-            if crate::settings_providers::model_picker(
-                ui,
-                "assistant-model",
-                &mut chosen,
-                models,
-                None,
-            ) && let Some(chosen) = chosen
-            {
-                action = Some(PanelAction::SetModel(chosen));
-            }
-        }
-        ui.add_space(4.0);
-        if self.show_sessions {
-            crate::widgets::section_title(ui, "Saved chats");
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    if self.sessions.is_empty() {
-                        ui.label(egui::RichText::new("No saved chats.").color(tokens.text_muted));
-                    }
-                    for session in &self.sessions {
-                        let selected = session.id == self.session_id;
-                        let (rect, response) = crate::widgets::list_row(ui, 30.0, selected);
-                        crate::widgets::row_text(
-                            ui,
-                            rect.left_center() + egui::vec2(8.0, 0.0),
-                            session.title.as_str(),
-                            crate::theme::regular(13.0),
-                            if selected {
-                                tokens.accent_text
-                            } else {
-                                tokens.text
-                            },
-                            rect.width() - 16.0,
-                        );
-                        if response.clicked() {
-                            action = Some(PanelAction::LoadSession(session.id));
-                        }
-                    }
-                });
-            return action;
-        }
-
-        let composer_height = 150.0;
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .stick_to_bottom(true)
-            .max_height((ui.available_height() - composer_height).max(80.0))
-            .show(ui, |ui| {
-                if self.messages.is_empty() {
-                    ui.label(
-                        egui::RichText::new(
-                            "Ask about this document. The assistant can search it, read pages and look at them.",
-                        )
-                        .color(tokens.text_muted),
-                    );
-                }
-                for (index, message) in self.messages.iter().enumerate() {
-                    match message.role {
-                        Role::User => {
-                            let width = ui.available_width();
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                egui::Frame::new()
-                                    .fill(tokens.accent_soft)
-                                    .corner_radius(egui::CornerRadius {
-                                        nw: 12,
-                                        ne: 12,
-                                        sw: 12,
-                                        se: 4,
-                                    })
-                                    .inner_margin(egui::Margin::symmetric(12, 8))
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(width * 0.8);
-                                        ui.vertical(|ui| {
-                                            if let Some(labels) = self.sent_mentions.get(&index) {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    for label in labels {
-                                                        ui.label(
-                                                            egui::RichText::new(format!("@{label}"))
-                                                                .small()
-                                                                .color(tokens.accent_text),
-                                                        );
-                                                    }
-                                                });
-                                            }
-                                            for thumbnail in
-                                                self.sent_images.get(&index).into_iter().flatten()
-                                            {
-                                                ui.add(
-                                                    egui::Image::new(thumbnail)
-                                                        .max_size(egui::vec2(width * 0.6, 160.0))
-                                                        .corner_radius(6),
-                                                );
-                                            }
-                                            ui.add(egui::Label::new(message.display_text()).wrap());
-                                        });
-                                    });
-                                if self.run.is_none()
-                                    && crate::icons::button(
-                                        ui,
-                                        "rotate-ccw",
-                                        22.0,
-                                        false,
-                                        "Restore to here: rewind the chat to this message and undo what the agent changed since",
-                                    )
-                                    .clicked()
-                                {
-                                    self.confirm_restore = Some(index);
-                                }
-                            });
-                            if self.confirm_restore == Some(index) {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Rewind to this message and undo the agent's changes since?",
-                                        )
-                                        .small()
-                                        .color(tokens.text_muted),
-                                    );
-                                    if ui.small_button("Restore").clicked() {
-                                        action = Some(PanelAction::Restore(index));
-                                    }
-                                    if ui.small_button("Cancel").clicked() {
-                                        self.confirm_restore = None;
-                                    }
-                                });
-                            }
-                        }
-                        Role::Assistant => {
-                            if let Some(reasoning) = self.reasoning.get(&index) {
-                                egui::CollapsingHeader::new(
-                                    egui::RichText::new("Thoughts").small().color(tokens.text_faint),
-                                )
-                                .id_salt(("assistant-reasoning", index))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(reasoning.trim())
-                                            .small()
-                                            .color(tokens.text_muted),
-                                    );
-                                });
-                            }
-                            for row in self.tools.get(index).into_iter().flatten() {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    match row.state {
-                                        ToolState::Running => {
-                                            ui.add(egui::Spinner::new().size(12.0));
-                                        }
-                                        ToolState::Done => {
-                                            ui.add(crate::icons::image("check", 13.0, tokens.text_faint));
-                                        }
-                                        ToolState::Failed => {
-                                            ui.add(crate::icons::image("x", 13.0, tokens.danger));
-                                        }
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(row.label())
-                                            .small()
-                                            .color(tokens.text_faint),
-                                    );
-                                });
-                            }
-                            let text = message.display_text();
-                            if text.is_empty() && self.run.as_ref().is_some_and(|run| run.answer == index) {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(egui::RichText::new("Thinking…").color(tokens.text_muted));
-                                });
-                            } else {
-                                egui_commonmark::CommonMarkViewer::new().show(
-                                    ui,
-                                    &mut self.markdown,
-                                    &text,
-                                );
-                            }
-                        }
-                    }
-                    ui.add_space(8.0);
-                }
-                if let Some(status) = &self.status {
-                    ui.label(egui::RichText::new(status).color(tokens.text_muted));
-                }
-                if let Some(error) = &self.error {
-                    ui.label(egui::RichText::new(error).color(tokens.danger));
-                }
-            });
-        ui.add_space(4.0);
-        if let Some(change) = changes.ui(ui, &tokens) {
-            action = Some(PanelAction::Change(change));
-        }
-        egui::Frame::new()
-            .fill(tokens.field)
-            .stroke(egui::Stroke::new(1.0, tokens.border))
-            .corner_radius(12)
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                mention_chips(ui, &mut self.mentions, &tokens);
-                attachment_chips(ui, &mut self.attachments, &tokens);
-                let input_id = egui::Id::new("assistant-input");
-                self.poll_paste(ui.ctx());
-                let focused = ui.ctx().memory(|memory| memory.has_focus(input_id));
-                if focused
-                    && ui.input(|i| {
-                        i.events.iter().any(|event| {
-                            matches!(event, egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.command)
-                        })
-                    })
-                {
-                    self.start_paste(ui.ctx());
-                }
-                self.track_input_method(ui);
-                let (query, entries) = self.menu_entries(ui.ctx(), input_id, sources);
-                let mut accepted = None;
-                if !entries.is_empty() && !self.composing {
-                    self.menu_selected = self.menu_selected.min(entries.len() - 1);
-                    let key =
-                        |i: &mut egui::InputState, key| i.consume_key(egui::Modifiers::NONE, key);
-                    let (up, down, accept, close) = ui.input_mut(|i| {
-                        (
-                            key(i, egui::Key::ArrowUp),
-                            key(i, egui::Key::ArrowDown),
-                            key(i, egui::Key::Enter) || key(i, egui::Key::Tab),
-                            key(i, egui::Key::Escape),
-                        )
-                    });
-                    if up {
-                        self.menu_selected =
-                            (self.menu_selected + entries.len() - 1) % entries.len();
-                    }
-                    if down {
-                        self.menu_selected = (self.menu_selected + 1) % entries.len();
-                    }
-                    if accept {
-                        accepted = Some(self.menu_selected);
-                    }
-                    if close {
-                        self.menu_forced = false;
-                        if let Some(range) = &query {
-                            // Esc keeps the typed text but ends the query.
-                            self.composer.insert(range.end, ' ');
-                        }
-                    }
-                } else {
-                    self.menu_selected = 0;
-                }
-                let input = ui.add(
-                    egui::TextEdit::multiline(&mut self.composer)
-                        .id(input_id)
-                        .hint_text("Ask · @ to attach · / for commands")
-                        .frame(egui::Frame::NONE)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
-                if !entries.is_empty()
-                    && !self.composing
-                    && let Some(clicked) =
-                        menu_ui(ui, input.rect, &entries, self.menu_selected, &tokens)
-                {
-                    accepted = Some(clicked);
-                }
-                if let Some(index) = accepted
-                    && let Some(entry) = entries.into_iter().nth(index)
-                {
-                    if let Some(range) = query {
-                        self.composer.replace_range(range.clone(), "");
-                        set_cursor(ui.ctx(), input_id, &self.composer, range.start);
-                    }
-                    self.menu_forced = false;
-                    self.menu_selected = 0;
-                    match entry {
-                        MenuEntry::Mention(candidate) => self.mentions.push(candidate.mention),
-                        MenuEntry::Slash(Slash::New) => action = Some(PanelAction::NewSession),
-                        MenuEntry::Slash(Slash::Compact) => {
-                            self.compact_next = !self.messages.is_empty();
-                            self.status = Some(
-                                "The next message starts by summarizing the chat so far.".into(),
-                            );
-                        }
-                        MenuEntry::Slash(Slash::Undo) => {
-                            action = Some(PanelAction::Change(ChangeAction::UndoAll));
-                        }
-                    }
-                    input.request_focus();
-                }
-                let enter = input.has_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                ui.horizontal(|ui| {
-                    if crate::icons::button(ui, "plus", 24.0, self.menu_forced, "Attach (@)")
-                        .clicked()
-                    {
-                        self.menu_forced = !self.menu_forced;
-                        input.request_focus();
-                    }
-                    ui.add_enabled_ui(has_page, |ui| {
-                        ui.checkbox(&mut self.include_page, "This page")
-                    });
-                    ui.add_enabled_ui(has_selection, |ui| {
-                        ui.checkbox(&mut self.include_selection, "Selection")
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.run.is_some() {
-                            if crate::icons::button(ui, "x", 28.0, true, "Stop").clicked() {
-                                self.stop();
-                            }
-                        } else {
-                            let empty = self.composer.trim().is_empty();
-                            let send = ui
-                                .add_enabled_ui(!empty, |ui| {
-                                    crate::icons::button(ui, "send", 28.0, !empty, "Send (Enter)")
-                                })
-                                .inner;
-                            if (send.clicked() || enter) && !empty {
-                                // Enter inserted a newline into the text before it was seen.
-                                let text = std::mem::take(&mut self.composer);
-                                action = Some(PanelAction::Send(text.trim_end().to_string()));
-                            }
-                        }
-                    });
-                });
-            });
+        self.previews.show_hover(ui.ctx());
         action
     }
 }
 
-/// The mentions the next message carries, each with a button removing it.
-fn mention_chips(ui: &mut egui::Ui, mentions: &mut Vec<Mention>, tokens: &Tokens) {
-    if mentions.is_empty() {
-        return;
-    }
-    let mut remove = None;
-    ui.horizontal_wrapped(|ui| {
-        for (index, mention) in mentions.iter().enumerate() {
-            egui::Frame::new()
-                .fill(tokens.accent_soft)
-                .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(crate::icons::image(
-                            mention.icon(),
-                            12.0,
-                            tokens.accent_text,
-                        ));
-                        ui.label(
-                            egui::RichText::new(mention.label())
-                                .small()
-                                .color(tokens.accent_text),
-                        );
-                        if crate::icons::button(ui, "x", 16.0, false, "Remove").clicked() {
-                            remove = Some(index);
-                        }
-                    });
-                });
-        }
-    });
-    if let Some(index) = remove {
-        mentions.remove(index);
+/// An empty saved message, standing for one in canned histories.
+fn session_message_stub() -> AiSessionMessage {
+    AiSessionMessage {
+        role: AiSessionRole::User,
+        content: String::new(),
+        request_content: None,
+        references: Vec::new(),
+        occurrences: Vec::new(),
+        images: Vec::new(),
+        agent_parts: Vec::new(),
+        document_path: None,
+        document_label: None,
+        mentions: Vec::new(),
+        sent_at: None,
+        duration_ms: None,
     }
 }
 
-/// The menu above the composer; returns the entry clicked.
-fn menu_ui(
-    ui: &egui::Ui,
-    above: egui::Rect,
-    entries: &[MenuEntry],
-    selected: usize,
-    tokens: &Tokens,
-) -> Option<usize> {
-    let mut clicked = None;
-    egui::Area::new(egui::Id::new("assistant-menu"))
-        .order(egui::Order::Foreground)
-        .pivot(egui::Align2::LEFT_BOTTOM)
-        .fixed_pos(above.left_top() - egui::vec2(10.0, 12.0))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(tokens.chrome)
-                .stroke(egui::Stroke::new(1.0, tokens.border))
-                .corner_radius(10)
-                .inner_margin(6)
-                .show(ui, |ui| {
-                    ui.set_width(above.width() + 20.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(280.0)
-                        .show(ui, |ui| {
-                            for (index, entry) in entries.iter().enumerate() {
-                                let (title, detail) = match entry {
-                                    MenuEntry::Mention(candidate) => {
-                                        (candidate.title.clone(), candidate.detail.clone())
-                                    }
-                                    MenuEntry::Slash(slash) => {
-                                        (slash.name().to_string(), slash.description().to_string())
-                                    }
-                                };
-                                let (rect, response) =
-                                    crate::widgets::list_row(ui, 30.0, index == selected);
-                                if index == selected {
-                                    response.scroll_to_me(None);
-                                }
-                                crate::widgets::row_text(
-                                    ui,
-                                    rect.left_center() + egui::vec2(8.0, 0.0),
-                                    &title,
-                                    crate::theme::regular(13.0),
-                                    tokens.text,
-                                    rect.width() * 0.6,
-                                );
-                                crate::widgets::row_text(
-                                    ui,
-                                    rect.left_center() + egui::vec2(rect.width() * 0.62, 0.0),
-                                    &detail,
-                                    crate::theme::regular(12.0),
-                                    tokens.text_faint,
-                                    rect.width() * 0.36,
-                                );
-                                if response.clicked() {
-                                    clicked = Some(index);
-                                }
-                            }
-                        });
-                });
-        });
-    clicked
+/// A picture as an attachment, with its thumbnail.
+pub fn picture_attachment(
+    ctx: &egui::Context,
+    name: Option<String>,
+    bytes: Vec<u8>,
+) -> Result<Attachment, String> {
+    if bytes.len() > MAX_PICTURE_BYTES {
+        return Err("the picture is larger than 16 MB".into());
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    let media_type = match reader.format() {
+        Some(image::ImageFormat::Png) => "image/png",
+        Some(image::ImageFormat::Jpeg) => "image/jpeg",
+        Some(image::ImageFormat::Gif) => "image/gif",
+        Some(image::ImageFormat::WebP) => "image/webp",
+        _ => return Err("only PNG, JPEG, GIF and WebP pictures can be attached".into()),
+    };
+    let decoded = reader.decode().map_err(|error| error.to_string())?;
+    let (width, height) = (decoded.width(), decoded.height());
+    let thumbnail = thumbnail_texture(ctx, &decoded);
+    let label = name.clone().unwrap_or_else(|| "Picture".into());
+    Ok(Attachment {
+        image: AttachedImage::Picture(
+            AgentImage::new(media_type, width, height, bytes).with_optional_name(name),
+        ),
+        thumbnail,
+        label,
+    })
 }
 
-/// Puts the composer's cursor at byte `offset` of `text`.
-fn set_cursor(ctx: &egui::Context, input: egui::Id, text: &str, offset: usize) {
-    if let Some(mut state) = egui::TextEdit::load_state(ctx, input) {
-        let index = text[..offset.min(text.len())].chars().count();
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(index),
-            )));
-        state.store(ctx, input);
-    }
+fn thumbnail_texture(ctx: &egui::Context, image: &image::DynamicImage) -> egui::TextureHandle {
+    let small = image
+        .thumbnail(THUMBNAIL_PIXELS, THUMBNAIL_PIXELS)
+        .to_rgba8();
+    let size = [small.width() as usize, small.height() as usize];
+    ctx.load_texture(
+        format!("assistant-picture-{}", unique_suffix()),
+        egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw()),
+        egui::TextureOptions::LINEAR,
+    )
 }
 
-/// The images the next message carries, each with a button removing it.
-pub fn attachment_chips(ui: &mut egui::Ui, attachments: &mut Vec<Attachment>, tokens: &Tokens) {
-    let mut remove = None;
-    if attachments.is_empty() {
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        for (index, attachment) in attachments.iter().enumerate() {
-            egui::Frame::new()
-                .fill(tokens.chrome)
-                .stroke(egui::Stroke::new(1.0, tokens.border))
-                .corner_radius(8)
-                .inner_margin(4)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Image::new(&attachment.thumbnail)
-                                .max_size(egui::vec2(48.0, 36.0))
-                                .corner_radius(4),
-                        );
-                        ui.label(
-                            egui::RichText::new(&attachment.label)
-                                .small()
-                                .color(tokens.text_muted),
-                        );
-                        if crate::icons::button(ui, "x", 20.0, false, "Remove").clicked() {
-                            remove = Some(index);
-                        }
-                    });
-                });
-        }
-    });
-    if let Some(index) = remove {
-        attachments.remove(index);
-    }
+/// The text of a tool's result, for its details.
+fn result_text(content: &[AgentToolResultPart]) -> String {
+    content
+        .iter()
+        .map(|part| match part {
+            AgentToolResultPart::Text(text) => text.clone(),
+            AgentToolResultPart::Image(_) => "[image]".into(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// A chat message as the library stores it: its text, what was sent with
-/// its images, and an answer's whole trace (reasoning, tool calls and
-/// results with their images, and the provider's reasoning state).
-fn session_message(message: &ChatMessage, library: &mut LibraryStore) -> AiSessionMessage {
+/// A chat message as the library stores it: its text and chips, what was
+/// sent with its images, and an answer's whole trace (reasoning, tool calls
+/// and results with their images, and the provider's reasoning state).
+fn session_message(
+    message: &ChatMessage,
+    view: &MessageView,
+    library: &mut LibraryStore,
+) -> AiSessionMessage {
     let content = message.display_text();
     let request = message.request_text();
     let mut install = |image: &AgentImage| -> Option<AiSessionImage> {
@@ -1739,6 +1358,30 @@ fn session_message(message: &ChatMessage, library: &mut LibraryStore) -> AiSessi
             AgentContentPart::Image(_) => continue,
         });
     }
+    let mentions = view
+        .draft
+        .as_ref()
+        .map(|draft| {
+            let (_, spans) = draft.prompt();
+            spans
+                .into_iter()
+                .zip(&draft.chips)
+                .map(|(span, chip)| {
+                    let (kind, text) = match &chip.kind {
+                        ChipKind::Mention(mention) => mention.saved_kind(),
+                        ChipKind::Image(_) => ("image", None),
+                    };
+                    AiSessionMention {
+                        start: span.start,
+                        end: span.end,
+                        label: chip.kind.label(),
+                        kind: kind.to_string(),
+                        text,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     AiSessionMessage {
         role: match message.role {
             Role::User => AiSessionRole::User,
@@ -1752,6 +1395,9 @@ fn session_message(message: &ChatMessage, library: &mut LibraryStore) -> AiSessi
         agent_parts,
         document_path: message.document_scope().map(|scope| scope.path.clone()),
         document_label: message.document_scope().map(|scope| scope.label.clone()),
+        mentions,
+        sent_at: view.sent_at,
+        duration_ms: view.duration_ms,
     }
 }
 
@@ -1888,7 +1534,7 @@ fn image_size(image: &AgentImage) -> Option<(u32, u32)> {
 }
 
 /// A saved message as the chat shows and continues it.
-fn chat_message(message: AiSessionMessage, library: &LibraryStore) -> ChatMessage {
+fn chat_message(message: AiSessionMessage, library: &LibraryStore) -> (ChatMessage, MessageView) {
     let role = match message.role {
         AiSessionRole::User => Role::User,
         AiSessionRole::Assistant => Role::Assistant,
@@ -1903,16 +1549,88 @@ fn chat_message(message: AiSessionMessage, library: &LibraryStore) -> ChatMessag
                 .with_optional_name(image.name.clone())
         })
     };
+    let mut view = MessageView {
+        sent_at: message.sent_at,
+        duration_ms: message.duration_ms,
+        segments: segments(&message.agent_parts),
+        ..MessageView::default()
+    };
+    if role == Role::User {
+        let chips = message
+            .mentions
+            .iter()
+            .filter(|chip| message.content.get(chip.start..chip.end).is_some())
+            .map(|chip| {
+                (
+                    chip.start..chip.end,
+                    ChipKind::Mention(Mention::saved(
+                        &chip.kind,
+                        chip.label.clone(),
+                        chip.text.clone(),
+                    )),
+                )
+            })
+            .collect();
+        view.draft = Some(Draft::from_prompt(&message.content, chips));
+    }
     let mut chat = ChatMessage::from_persisted(role, message.content, message.request_content)
         .with_document_scope(scope);
     for image in message.images.iter().filter_map(load) {
+        view.pending_images.push(image.clone());
         chat.attach_user_image(image);
     }
     let trace = agent_trace(&message.agent_parts, load);
     if !trace.is_empty() {
         chat.set_agent_trace(trace);
     }
-    chat
+    (chat, view)
+}
+
+/// An answer's parts in order, as the panel shows them.
+fn segments(parts: &[AiSessionAgentPart]) -> Vec<Segment> {
+    let results: std::collections::HashMap<&str, String> = parts
+        .iter()
+        .filter_map(|part| match part {
+            AiSessionAgentPart::ToolResult {
+                call_id, content, ..
+            } => Some((
+                call_id.as_str(),
+                content
+                    .iter()
+                    .map(|part| match part {
+                        AiSessionToolResultPart::Text(text) => text.clone(),
+                        AiSessionToolResultPart::Image(_) => "[image]".into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut view = MessageView::default();
+    for part in parts {
+        match part {
+            AiSessionAgentPart::AssistantText(text) => view.push_text(text),
+            AiSessionAgentPart::Reasoning(text) => view.push_reasoning(text),
+            AiSessionAgentPart::ToolCall {
+                id,
+                name,
+                arguments,
+                status,
+            } => view.segments.push(Segment::Tool(ToolRow {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+                state: match status {
+                    AiSessionToolStatus::Completed => ToolState::Done,
+                    _ => ToolState::Failed,
+                },
+                output: results.get(id.as_str()).cloned(),
+            })),
+            AiSessionAgentPart::ToolResult { .. } | AiSessionAgentPart::OpaqueReasoning { .. } => {}
+        }
+    }
+    view.segments
 }
 
 /// The agent messages an answer's saved parts came from: assistant turns,
@@ -1980,29 +1698,6 @@ fn agent_trace(
     trace
 }
 
-fn tool_rows(parts: &[AiSessionAgentPart]) -> Vec<ToolRow> {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            AiSessionAgentPart::ToolCall {
-                id,
-                name,
-                arguments,
-                status,
-            } => Some(ToolRow {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-                state: match status {
-                    AiSessionToolStatus::Completed => ToolState::Done,
-                    _ => ToolState::Failed,
-                },
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -2037,7 +1732,7 @@ mod tests {
         };
         let mut quick = Assistant::default();
         quick.send(
-            "First?".into(),
+            Draft::plain("First?"),
             ask(),
             ToolRegistry::new(),
             None,
@@ -2046,7 +1741,7 @@ mod tests {
         );
         quick.new_session();
         quick.send(
-            "Second?".into(),
+            Draft::plain("Second?"),
             ask(),
             ToolRegistry::new(),
             None,
@@ -2058,7 +1753,7 @@ mod tests {
 
         let mut assistant = Assistant::default();
         assistant.send(
-            "Earlier".into(),
+            Draft::plain("Earlier"),
             ask(),
             ToolRegistry::new(),
             None,
@@ -2066,7 +1761,7 @@ mod tests {
             &ctx,
         );
         assistant.send(
-            "Later".into(),
+            Draft::plain("Later"),
             ask(),
             ToolRegistry::new(),
             None,
@@ -2074,7 +1769,10 @@ mod tests {
             &ctx,
         );
         assert_eq!(assistant.messages().len(), 2);
-        assert_eq!(assistant.rewind(1).as_deref(), Some("Later"));
+        assert_eq!(
+            assistant.rewind(1).map(|draft| draft.prompt().0).as_deref(),
+            Some("Later")
+        );
         assert_eq!(assistant.messages().len(), 1);
         assert!(assistant.adopt(&mut quick));
         assert_eq!(assistant.messages().len(), 1, "a new chat of the quick one");
@@ -2105,8 +1803,9 @@ mod tests {
             assistant.ui(
                 ui,
                 Panel {
-                    has_page: true,
-                    has_selection: false,
+                    document: Some("Paper".into()),
+                    page: Some(0),
+                    selection_words: None,
                     models: &[],
                     model: None,
                     changes: &mut changes,
@@ -2143,18 +1842,22 @@ mod tests {
             &mut assistant,
             vec![egui::Event::Text("Explain @page2".into())],
         );
-        assert_eq!(assistant.composer, "Explain @page2");
+        assert_eq!(assistant.editor.text(), "Explain @page2");
         panel_frame(&ctx, &mut assistant, vec![key(egui::Key::ArrowDown)]);
         panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Enter)]);
         assert_eq!(
-            assistant.composer, "Explain ",
+            assistant.editor.draft().prompt().0,
+            "Explain [Paper p. 2 image]",
             "the query gives way to a chip"
         );
-        assert_eq!(assistant.mentions.len(), 1);
+        assert_eq!(assistant.editor.chips().len(), 1);
         assert!(
-            matches!(&assistant.mentions[0], Mention::PageImages { pages, .. } if pages == &[1]),
+            matches!(
+                &assistant.editor.chips()[0].kind,
+                ChipKind::Mention(Mention::PageImages { pages, .. }) if pages == &[1]
+            ),
             "Down chose the page image: {:?}",
-            assistant.mentions[0]
+            assistant.editor.chips()[0].kind
         );
 
         // While an input method composes, Enter is its own.
@@ -2164,15 +1867,17 @@ mod tests {
             active_range_chars: None,
         });
         panel_frame(&ctx, &mut assistant, vec![preedit, key(egui::Key::Enter)]);
-        assert_eq!(assistant.mentions.len(), 1, "the menu took no key");
+        assert_eq!(assistant.editor.chips().len(), 1, "the menu took no key");
+        assert!(assistant.messages.is_empty(), "nor did sending");
         let commit = egui::Event::Ime(egui::ImeEvent::Commit("ぺ".into()));
         panel_frame(&ctx, &mut assistant, vec![commit]);
 
         // Slash commands run from the start of the composer.
-        assistant.composer.clear();
+        assistant.editor.take();
         assistant
             .messages
             .push(ChatMessage::user_text("Earlier".into()));
+        assistant.views.push(MessageView::default());
         panel_frame(
             &ctx,
             &mut assistant,
@@ -2180,7 +1885,7 @@ mod tests {
         );
         panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Enter)]);
         assert!(assistant.compact_next);
-        assert_eq!(assistant.composer, "");
+        assert_eq!(assistant.editor.text(), "");
     }
 
     #[test]
@@ -2238,7 +1943,7 @@ cat > /dev/null
             model: None,
         };
         assistant.send(
-            "Write notes".into(),
+            Draft::plain("Write notes"),
             ask,
             ToolRegistry::new(),
             Some(external),
@@ -2293,7 +1998,10 @@ cat > /dev/null
         assistant
             .attach_picture(&ctx, Some("chart.png".into()), png)
             .unwrap();
-        match &assistant.attachments[0].image {
+        let ChipKind::Image(attachment) = &assistant.editor.chips()[0].kind else {
+            panic!("a picture chip");
+        };
+        match &attachment.image {
             AttachedImage::Picture(image) => {
                 assert_eq!((image.width, image.height), (300, 120));
                 assert_eq!(image.media_type, "image/png");
@@ -2301,13 +2009,13 @@ cat > /dev/null
             }
             AttachedImage::Region(_) => panic!("a picture"),
         }
-        assert_eq!(assistant.attachments[0].thumbnail.size(), [160, 64]);
+        assert_eq!(attachment.thumbnail.size(), [160, 64]);
         assert!(
             assistant
                 .attach_picture(&ctx, None, b"not a picture".to_vec())
                 .is_err()
         );
-        assert_eq!(assistant.attachments.len(), 1);
+        assert_eq!(assistant.editor.chips().len(), 1);
     }
 
     #[test]
@@ -2326,15 +2034,20 @@ cat > /dev/null
             x1: 10.0,
             y1: 10.0,
         }]);
-        assistant.attachments.push(Attachment {
-            image: AttachedImage::Region(ImageContext::new_region(
-                reference,
-                "image/png",
-                vec![1, 2, 3],
-            )),
-            thumbnail,
-            label: "Region of page 1".into(),
-        });
+        assistant.attach(
+            &ctx,
+            Attachment {
+                image: AttachedImage::Region(ImageContext::new_region(
+                    reference,
+                    "image/png",
+                    vec![1, 2, 3],
+                )),
+                thumbnail,
+                label: "Region of page 1".into(),
+            },
+        );
+        let mut draft = assistant.editor.take();
+        draft.text.push_str("What is this?");
         // No model is set up, so the message stays without an answer.
         let mut settings = Settings::default();
         settings
@@ -2355,14 +2068,7 @@ cat > /dev/null
             page_text: None,
             selection: None,
         };
-        assistant.send(
-            "What is this?".into(),
-            ask(),
-            ToolRegistry::new(),
-            None,
-            &settings,
-            &ctx,
-        );
+        assistant.send(draft, ask(), ToolRegistry::new(), None, &settings, &ctx);
         let images = |message: &ChatMessage| {
             message
                 .into_agent_messages()
@@ -2372,10 +2078,10 @@ cat > /dev/null
                 .count()
         };
         assert_eq!(images(&assistant.messages()[0]), 1);
-        assert!(assistant.attachments.is_empty());
-        assert_eq!(assistant.sent_images.get(&0).map(Vec::len), Some(1));
+        assert!(assistant.editor.chips().is_empty());
+        assert_eq!(assistant.views[0].images.len(), 1);
         assistant.send(
-            "And now?".into(),
+            Draft::plain("And now?"),
             ask(),
             ToolRegistry::new(),
             None,
@@ -2429,26 +2135,25 @@ cat > /dev/null
         );
         let mut tools = ToolRegistry::new();
         documents.register(&mut tools);
-        assistant.mentions.push(Mention::Pages {
-            document: crate::ai_tools::OpenDocument {
-                id: "doc_1".into(),
-                title: "doc.pdf".into(),
-                path: path.clone(),
-                layout: DocumentLayout::Fixed,
-                page_count: 1,
-                current_page: 0,
-            },
-            first: 0,
-            last: 0,
-        });
-        assistant.send(
-            "Where does the story end?".into(),
-            ask,
-            tools,
-            None,
-            &settings,
+        assistant.editor.insert_chip(
             &ctx,
+            None,
+            ChipKind::Mention(Mention::Pages {
+                document: crate::ai_tools::OpenDocument {
+                    id: "doc_1".into(),
+                    title: "doc.pdf".into(),
+                    path: path.clone(),
+                    layout: DocumentLayout::Fixed,
+                    page_count: 1,
+                    current_page: 0,
+                },
+                first: 0,
+                last: 0,
+            }),
         );
+        let mut draft = assistant.editor.take();
+        draft.text.push_str("Where does the story end?");
+        assistant.send(draft, ask, tools, None, &settings, &ctx);
         let started = Instant::now();
         while assistant.is_running() {
             assert!(started.elapsed() < Duration::from_secs(30), "timed out");
@@ -2460,7 +2165,7 @@ cat > /dev/null
         assert_eq!(assistant.messages()[1].display_text(), FAKE_ANSWER);
         let rows = assistant.tools(1).to_vec();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label(), format!("Searched for “{FAKE_SEARCH}”"));
+        assert_eq!(rows[0].label(), format!("Searched “{FAKE_SEARCH}”"));
         assert_eq!(rows[0].state, ToolState::Done);
         assert!(
             assistant.messages()[0]
@@ -2474,7 +2179,9 @@ cat > /dev/null
                 && request.contains("And the story ends."),
             "the mentioned page is read when sent: {request}"
         );
-        assert_eq!(assistant.sent_mentions[&0], ["doc.pdf p. 1"]);
+        let sent = assistant.views[0].draft.as_ref().unwrap();
+        assert_eq!(sent.prompt().0, "[doc.pdf p. 1] Where does the story end?");
+        assert!(assistant.views[1].duration_ms.is_some());
 
         // A model names the chat once it is answered.
         let started = Instant::now();
@@ -2493,6 +2200,14 @@ cat > /dev/null
         let id = reopened.sessions[0].id;
         reopened.load_session(id, &library);
         assert_eq!(reopened.messages()[1].display_text(), FAKE_ANSWER);
+        let chips = &reopened.views[0].draft.as_ref().unwrap().chips;
+        assert_eq!(chips.len(), 1, "the chip comes back");
+        assert_eq!(chips[0].kind.label(), "doc.pdf p. 1");
+        assert_eq!(reopened.views[0].sent_at, assistant.views[0].sent_at);
+        assert_eq!(
+            reopened.views[1].segments, assistant.views[1].segments,
+            "the answer's parts come back in order"
+        );
         assert_eq!(reopened.tools(1)[0].label(), rows[0].label());
         assert_eq!(
             reopened.history(2),
@@ -2519,7 +2234,7 @@ cat > /dev/null
             selection: None,
         };
         reopened.send(
-            "And then?".into(),
+            Draft::plain("And then?"),
             ask,
             ToolRegistry::new(),
             None,
@@ -2568,7 +2283,7 @@ cat > /dev/null
             selection: None,
         };
         unconfigured.send(
-            "Hello?".into(),
+            Draft::plain("Hello?"),
             ask,
             ToolRegistry::new(),
             None,

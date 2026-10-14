@@ -24,6 +24,8 @@ pub struct Pickers {
     image: Arc<Mutex<Option<PathBuf>>>,
     /// Where to save a region image.
     saved_image: Arc<Mutex<Option<PathBuf>>>,
+    /// A picture to attach to the assistant's next message.
+    picture: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Pickers {
@@ -78,6 +80,39 @@ impl Pickers {
         if spawned.is_err() {
             self.showing.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Shows a dialog choosing a picture for the assistant.
+    pub fn choose_picture(&self, ctx: &egui::Context) {
+        if self.showing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Attach a picture")
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif"])
+            .pick_file();
+        let (showing, picture, ctx) = (self.showing.clone(), self.picture.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("picture-dialog".into())
+            .spawn(move || {
+                let file = pollster::block_on(dialog);
+                if let (Some(file), Ok(mut picture)) = (file, picture.lock()) {
+                    *picture = Some(file.path().to_path_buf());
+                }
+                showing.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            self.showing.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The picture chosen for the assistant since last asked.
+    pub fn take_picture(&self) -> Option<PathBuf> {
+        self.picture
+            .lock()
+            .ok()
+            .and_then(|mut picture| picture.take())
     }
 
     /// The wallpaper image chosen since last asked.

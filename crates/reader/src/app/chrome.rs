@@ -593,8 +593,19 @@ impl ReaderApp {
         }
         if let Some(rect) = layout.assistant {
             let tab = &self.tabs[active];
-            let has_page = tab.text.get(tab.current_page()).is_some();
-            let has_selection = tab.selection.is_some();
+            let page = tab
+                .text
+                .get(tab.current_page())
+                .is_some()
+                .then(|| tab.current_page());
+            let selection_words = tab
+                .selection
+                .is_some()
+                .then(|| tab.selected_text())
+                .flatten()
+                .map(|text| text.split_whitespace().count())
+                .filter(|words| *words > 0);
+            let document = Some(tab.title.clone());
             let (models, model) = match self.user_settings.get() {
                 Some(settings) => {
                     let main = settings.ai.resolved_main();
@@ -620,8 +631,9 @@ impl ReaderApp {
                         request = self.assistant.ui(
                             ui,
                             crate::ai::Panel {
-                                has_page,
-                                has_selection,
+                                document,
+                                page,
+                                selection_words,
                                 models: &models,
                                 model: model.clone(),
                                 changes: &mut self.agent_changes,
@@ -647,20 +659,50 @@ impl ReaderApp {
                     (self.prefs.assistant_width + resize).clamp(stage::ASSISTANT_MIN, 1200.0);
             }
             match request {
-                Some(PanelAction::Send(text)) => self.ask(text, ctx),
+                Some(PanelAction::Send(draft)) => self.ask(draft, ctx),
                 Some(PanelAction::NewSession) => self.assistant.new_session(),
                 Some(PanelAction::LoadSession(id)) => {
                     self.assistant.load_session(id, &self.library);
                 }
+                Some(PanelAction::DeleteSession(id)) => {
+                    if let Err(error) = self.library.delete_ai_session(id) {
+                        self.notices
+                            .push(format!("Could not delete the chat: {error:#}"));
+                    }
+                    self.assistant.refresh_sessions(&self.library);
+                }
                 Some(PanelAction::SetModel(model)) => {
+                    // Choosing a model leaves a coding agent's chat.
+                    if self.assistant.agent.is_some() {
+                        self.assistant.new_session();
+                        self.assistant.agent = None;
+                    }
                     self.user_settings
                         .edit(|settings| settings.ai.main_model = Some(model));
                 }
                 Some(PanelAction::Change(action)) => self.apply_change_action(action, ctx),
-                Some(PanelAction::Restore(index)) => self.restore_assistant(index),
+                Some(PanelAction::Restore(index, draft)) => {
+                    self.restore_assistant(index, draft, ctx);
+                }
                 Some(PanelAction::SetAgent(agent)) => {
                     self.assistant.new_session();
                     self.assistant.agent = agent;
+                }
+                Some(PanelAction::ChoosePicture) => self.pickers.choose_picture(ctx),
+                Some(PanelAction::SelectRegion) => {
+                    self.region_for_assistant = true;
+                    self.region_tool = true;
+                    self.notices
+                        .push("Drag a rectangle on the page for the assistant. Esc cancels.");
+                }
+                Some(PanelAction::Command(command)) => {
+                    if let Err(reason) = self.run(command, ctx) {
+                        self.notices.push(reason.to_string());
+                    }
+                }
+                Some(PanelAction::OpenAiSettings) => {
+                    self.settings_window
+                        .show_section(crate::settings_window::Section::Ai);
                 }
                 None => {}
             }

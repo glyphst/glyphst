@@ -107,6 +107,13 @@ struct StoredAiSessionMessageV6 {
     agent_parts: Vec<AiSessionAgentPart>,
     document_path: Option<StoredPathV1>,
     document_label: Option<String>,
+    /// Added after the first v6 sessions, which have none.
+    #[serde(default)]
+    mentions: Vec<AiSessionMention>,
+    #[serde(default)]
+    sent_at: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
 }
 
 impl From<&AiSessionMessage> for StoredAiSessionMessageV6 {
@@ -124,6 +131,9 @@ impl From<&AiSessionMessage> for StoredAiSessionMessageV6 {
                 .as_deref()
                 .map(StoredPathV1::from_path),
             document_label: message.document_label.clone(),
+            mentions: message.mentions.clone(),
+            sent_at: message.sent_at,
+            duration_ms: message.duration_ms,
         }
     }
 }
@@ -143,6 +153,9 @@ impl StoredAiSessionMessageV6 {
                 .map(StoredPathV1::into_path)
                 .transpose()?,
             document_label: self.document_label,
+            mentions: self.mentions,
+            sent_at: self.sent_at,
+            duration_ms: self.duration_ms,
         })
     }
 }
@@ -1483,6 +1496,27 @@ pub struct AiSessionMessage {
     /// It is never included in prompts or tool output.
     pub document_path: Option<PathBuf>,
     pub document_label: Option<String>,
+    /// The chips of a user message, at their `[label]` in `content`.
+    pub mentions: Vec<AiSessionMention>,
+    /// When a user message was sent, in seconds since the epoch.
+    pub sent_at: Option<u64>,
+    /// How long an answer took.
+    pub duration_ms: Option<u64>,
+}
+
+/// A chip in a sent message: an `@` mention or a picture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiSessionMention {
+    /// The bytes of the message's content its `[label]` takes.
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+    /// What it was: `pages`, `page_images`, `document`, `section`,
+    /// `selection`, `annotation`, `book` or `image`.
+    pub kind: String,
+    /// The text it attached when that was copied (a selection, an
+    /// annotation, a book's details), for its preview.
+    pub text: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

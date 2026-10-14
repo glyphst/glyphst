@@ -281,13 +281,22 @@ impl ReaderApp {
     /// Rewinds the assistant's chat to the user message at `index`, undoes
     /// what the agent changed from then on, and puts the message back in
     /// the composer.
-    pub(crate) fn restore_assistant(&mut self, index: usize) {
+    pub(crate) fn restore_assistant(
+        &mut self,
+        index: usize,
+        draft: Option<crate::ai_editor::Draft>,
+        ctx: &egui::Context,
+    ) {
         let chat = self.assistant.chat_id();
         let failures = self.agent_changes.undo_where(&mut self.library, |change| {
             change.thread == Some(chat) && change.turn >= index
         });
-        if let Some(text) = self.assistant.rewind(index) {
-            self.assistant.composer = text;
+        let rewound = self.assistant.rewind(index);
+        match (draft, rewound) {
+            // An edited message, or the same one again.
+            (Some(draft), _) => self.ask(draft, ctx),
+            (None, Some(rewound)) => self.assistant.compose(ctx, rewound),
+            (None, None) => {}
         }
         if self.persist {
             self.assistant.save(&mut self.library);

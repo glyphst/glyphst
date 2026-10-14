@@ -7,7 +7,8 @@
 use glyphst_settings::{QuickAskPosition, QuickAskSettings};
 
 use crate::{
-    ai::{self, Assistant},
+    ai::{Assistant, Attachment},
+    ai_editor::{ChipKind, Draft, EditorStyle, MentionEditor},
     theme::Tokens,
 };
 
@@ -20,11 +21,11 @@ const WIDE_MAX: f32 = 760.0;
 /// The answer scrolls past this height.
 const ANSWER_HEIGHT: f32 = 320.0;
 
-#[derive(Default)]
 pub struct QuickAsk {
     pub open: bool,
-    pub composer: String,
-    /// Answers one question at a time; holds the attachments too.
+    /// The question, with regions as chips.
+    pub editor: MentionEditor,
+    /// Answers one question at a time.
     pub assistant: Assistant,
     /// Focus the composer on the next frame (once: focusing every frame
     /// resets an input method's composition).
@@ -32,10 +33,22 @@ pub struct QuickAsk {
     markdown: egui_commonmark::CommonMarkCache,
 }
 
+impl Default for QuickAsk {
+    fn default() -> Self {
+        Self {
+            open: false,
+            editor: MentionEditor::new(egui::Id::new("quick-ask-input")),
+            assistant: Assistant::default(),
+            focus: false,
+            markdown: egui_commonmark::CommonMarkCache::default(),
+        }
+    }
+}
+
 /// What the quick ask card asked for.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Action {
-    Send(String),
+    Send(Draft),
     Continue,
     Close,
 }
@@ -44,6 +57,12 @@ impl QuickAsk {
     pub fn show_composer(&mut self) {
         self.open = true;
         self.focus = true;
+    }
+
+    /// Attaches a region of a page to the question.
+    pub fn attach(&mut self, ctx: &egui::Context, attachment: Attachment) {
+        self.editor
+            .insert_chip(ctx, None, ChipKind::Image(attachment));
     }
 
     pub fn close(&mut self) {
@@ -120,34 +139,34 @@ impl QuickAsk {
                 }
             });
         });
-        ai::attachment_chips(ui, &mut self.assistant.attachments, tokens);
         let font = egui::FontId::proportional(settings.text_size.clamp(10.0, 24.0));
-        let input = ui.add(
-            egui::TextEdit::multiline(&mut self.composer)
-                .id(egui::Id::new("quick-ask-input"))
-                .hint_text("Ask about this page")
-                .font(font)
-                .frame(egui::Frame::NONE)
-                .desired_rows(1)
-                .desired_width(f32::INFINITY),
-        );
+        self.editor.track_input_method(ui);
+        let focused = ui.ctx().memory(|memory| memory.has_focus(self.editor.id));
+        let enter = focused
+            && !self.editor.composing
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let input = self
+            .editor
+            .show(
+                ui,
+                &EditorStyle {
+                    hint: "Ask about this page",
+                    rows: 1,
+                    max_height: 160.0,
+                    font,
+                },
+            )
+            .response;
         if std::mem::take(&mut self.focus) {
             input.request_focus();
         }
-        let (enter, escape) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift,
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // A text field gives up its focus on Escape.
         if escape && (input.has_focus() || input.lost_focus()) {
             action = Some(Action::Close);
         }
-        if input.has_focus() && enter && !self.composer.trim().is_empty() {
-            // Enter inserted a newline into the text before it was seen.
-            let text = std::mem::take(&mut self.composer);
-            action = Some(Action::Send(text.trim_end().to_string()));
+        if enter && !self.editor.is_empty() {
+            action = Some(Action::Send(self.editor.take()));
         }
         let running = self.assistant.is_running();
         let answer = self.assistant.latest_answer();
@@ -302,20 +321,17 @@ mod tests {
         ctx.set_fonts(crate::fonts::embedded());
         let mut quick = QuickAsk::default();
         quick.show_composer();
-        assert_eq!(frame(&mut quick, &ctx, Vec::new()), None);
-        assert_eq!(
-            frame(&mut quick, &ctx, vec![egui::Event::Text("Why?".into())]),
-            None
-        );
-        assert_eq!(quick.composer, "Why?");
-        assert_eq!(
-            frame(&mut quick, &ctx, vec![key(egui::Key::Enter)]),
-            Some(Action::Send("Why?".into()))
-        );
-        assert!(quick.composer.is_empty());
-        assert_eq!(
+        assert!(frame(&mut quick, &ctx, Vec::new()).is_none());
+        assert!(frame(&mut quick, &ctx, vec![egui::Event::Text("Why?".into())]).is_none());
+        assert_eq!(quick.editor.text(), "Why?");
+        match frame(&mut quick, &ctx, vec![key(egui::Key::Enter)]) {
+            Some(Action::Send(draft)) => assert_eq!(draft.prompt().0, "Why?"),
+            other => panic!("sent, not {other:?}"),
+        }
+        assert!(quick.editor.is_empty());
+        assert!(matches!(
             frame(&mut quick, &ctx, vec![key(egui::Key::Escape)]),
             Some(Action::Close)
-        );
+        ));
     }
 }

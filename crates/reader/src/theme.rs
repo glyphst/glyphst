@@ -82,6 +82,10 @@ pub struct Tokens {
     pub accent_soft: Color32,
     pub field: Color32,
     pub danger: Color32,
+    /// Done steps and kept changes.
+    pub success: Color32,
+    /// Retries, cautions and limits close to full.
+    pub warning: Color32,
     pub page_shadow: Color32,
     pub radius: u8,
     /// How opaque the window's surfaces are: 1 unless the window is
@@ -114,6 +118,8 @@ impl Tokens {
                 accent_soft: Color32::from_rgb(0xE3, 0xEC, 0xFD),
                 field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
                 danger: Color32::from_rgb(0xC4, 0x2B, 0x1C),
+                success: Color32::from_rgb(0x1E, 0x8E, 0x3E),
+                warning: Color32::from_rgb(0xB2, 0x6B, 0x00),
                 page_shadow: Color32::from_black_alpha(34),
                 radius: 6,
                 opacity: 1.0,
@@ -140,6 +146,8 @@ impl Tokens {
                 accent_soft: Color32::from_rgb(0x24, 0x36, 0x57),
                 field: Color32::from_rgb(0x1E, 0x1E, 0x22),
                 danger: Color32::from_rgb(0xF2, 0x8B, 0x82),
+                success: Color32::from_rgb(0x6D, 0xD5, 0x8C),
+                warning: Color32::from_rgb(0xF2, 0xB8, 0x4B),
                 page_shadow: Color32::from_black_alpha(120),
                 radius: 6,
                 opacity: 1.0,
@@ -185,6 +193,40 @@ impl Tokens {
         [r, g, b].map(|channel| f32::from(channel) / 255.0)
     }
 
+    /// The text colour at `alpha`: white in the dark theme, black in the
+    /// light one. Fills of chips (0.05), plates (0.03), hovers (0.08) and
+    /// selections (0.14) over any surface, after Zeron's `ink`.
+    pub fn ink(&self, alpha: f32) -> Color32 {
+        let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if self.dark() {
+            Color32::from_white_alpha(alpha)
+        } else {
+            Color32::from_black_alpha(alpha)
+        }
+    }
+
+    /// A hairline at `alpha`, a little stronger in the light theme where
+    /// thin lines read fainter.
+    pub fn hairline(&self, alpha: f32) -> Color32 {
+        let alpha = if self.dark() {
+            alpha
+        } else {
+            (alpha * 1.35).min(0.5)
+        };
+        self.ink(alpha)
+    }
+
+    /// A soft opaque fill for bubbles: `alpha` of the text colour over the
+    /// card.
+    pub fn wash(&self, alpha: f32) -> Color32 {
+        mix(self.card, self.text, alpha)
+    }
+
+    /// `color` faded to `alpha` of its opacity.
+    pub fn fade(color: Color32, alpha: f32) -> Color32 {
+        color.gamma_multiply(alpha.clamp(0.0, 1.0))
+    }
+
     /// The inverted card of toasts: (fill, text).
     pub fn toast(&self) -> (Color32, Color32) {
         if self.dark() {
@@ -219,6 +261,17 @@ impl Tokens {
 }
 
 const TOKENS_ID: &str = "glyphst-reader-theme";
+
+/// `a` moved `t` of the way to `b`, opaque.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color32::from_rgb(
+        channel(a.r(), b.r()),
+        channel(a.g(), b.g()),
+        channel(a.b(), b.b()),
+    )
+}
 
 pub fn regular(size: f32) -> FontId {
     FontId::proportional(size)

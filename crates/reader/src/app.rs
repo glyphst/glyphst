@@ -53,7 +53,7 @@ use crate::{
     window_blur::WindowBlur,
 };
 
-mod agent;
+pub(crate) mod agent;
 mod chrome;
 
 /// How often the effects folder is looked at for changes.
@@ -121,6 +121,8 @@ pub struct Launch {
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
     pub ask: Option<String>,
+    /// Scripted runs: the assistant in a canned state, for screenshots.
+    pub assistant_demo: Option<String>,
     /// The external agent `ask` goes to (`claude-code`, `codex`).
     pub agent: Option<String>,
     /// Scripted runs: open the palette with this query, settings at this
@@ -185,7 +187,7 @@ pub struct ReaderApp {
     pub(crate) system_theme: Option<ThemeKind>,
     /// The compositor's blur behind the transparent window.
     window_blur: WindowBlur,
-    library: LibraryStore,
+    pub(crate) library: LibraryStore,
     pub(crate) tabs: Vec<DocumentTab>,
     /// Index into `tabs` of the focused pane's tab; `None` shows the home
     /// tab.
@@ -216,6 +218,8 @@ pub struct ReaderApp {
     region_jobs: Vec<region::Job>,
     /// A region waiting for the save dialog's path.
     region_save: Option<Region>,
+    /// The region being drawn goes to the assistant's next message.
+    pub(crate) region_for_assistant: bool,
     pub(crate) quick_ask: QuickAsk,
     sidebar_state: SidebarState,
     /// The tab whose view a primary-button drag is in, and what it does.
@@ -248,6 +252,7 @@ pub struct ReaderApp {
     pub(crate) agent_programs: Vec<glyphst_agent_host::external::AgentSpec>,
     agent_search: Option<std::sync::mpsc::Receiver<Vec<glyphst_agent_host::external::AgentSpec>>>,
     pub(crate) launch_ask: Option<String>,
+    pub(crate) launch_demo: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
     pub(crate) launch_region: Option<(usize, [f32; 4])>,
     page_input: String,
@@ -383,6 +388,7 @@ impl ReaderApp {
             region: None,
             region_jobs: Vec::new(),
             region_save: None,
+            region_for_assistant: false,
             quick_ask: QuickAsk::default(),
             sidebar_state: SidebarState::default(),
             drag: None,
@@ -406,6 +412,7 @@ impl ReaderApp {
             agent_programs: Vec::new(),
             agent_search: Some(crate::app::agent::find_agents(&cc.egui_ctx)),
             launch_ask: launch.ask,
+            launch_demo: launch.assistant_demo,
             launch_commands: launch.commands,
             launch_region: launch.select_region,
             page_input: String::new(),
@@ -1137,7 +1144,7 @@ impl ReaderApp {
     }
 
     /// Asks the assistant about the active document.
-    pub(crate) fn ask(&mut self, text: String, ctx: &egui::Context) {
+    pub(crate) fn ask(&mut self, draft: crate::ai_editor::Draft, ctx: &egui::Context) {
         let Some(ask) = self.ask_context() else {
             return;
         };
@@ -1158,7 +1165,7 @@ impl ReaderApp {
             None => None,
         };
         self.assistant
-            .send(text, ask, tools, external, &settings, ctx);
+            .send(draft, ask, tools, external, &settings, ctx);
     }
 
     /// What a question knows about the active document.
@@ -1304,7 +1311,13 @@ impl ReaderApp {
         let has_text = tab
             .selected_text()
             .is_some_and(|text| !text.trim().is_empty());
-        let Some(action) = region::popover(ctx, screen.right_bottom(), has_text) else {
+        // A region drawn from the assistant's menu goes straight to it.
+        let action = if self.region_for_assistant {
+            Some(region::Action::Ask)
+        } else {
+            region::popover(ctx, screen.right_bottom(), has_text)
+        };
+        let Some(action) = action else {
             return;
         };
         let path = tab.path.clone();
@@ -1335,6 +1348,10 @@ impl ReaderApp {
                     region::Use::Ask(region),
                     ctx,
                 ));
+                if self.region_for_assistant {
+                    self.region = None;
+                    self.tabs[active].selection = None;
+                }
             }
             region::Action::Dismiss => {
                 self.region = None;
@@ -1396,21 +1413,24 @@ impl ReaderApp {
                             region::color_image(&image),
                             egui::TextureOptions::LINEAR,
                         );
-                        self.quick_ask
-                            .assistant
-                            .attachments
-                            .push(crate::ai::Attachment {
-                                image: crate::ai::AttachedImage::Region(
-                                    glyphst_ai::ai_chat::ImageContext::new_region(
-                                        region.reference(),
-                                        "image/png",
-                                        png,
-                                    ),
+                        let attachment = crate::ai::Attachment {
+                            image: crate::ai::AttachedImage::Region(
+                                glyphst_ai::ai_chat::ImageContext::new_region(
+                                    region.reference(),
+                                    "image/png",
+                                    png,
                                 ),
-                                thumbnail,
-                                label: format!("Region of page {}", region.page + 1),
-                            });
-                        self.quick_ask.show_composer();
+                            ),
+                            thumbnail,
+                            label: format!("Region p. {}", region.page + 1),
+                        };
+                        if std::mem::take(&mut self.region_for_assistant) {
+                            self.assistant.open = true;
+                            self.assistant.attach(ctx, attachment);
+                        } else {
+                            self.quick_ask.attach(ctx, attachment);
+                            self.quick_ask.show_composer();
+                        }
                     }
                     Err(error) => self.notices.push(format!("{error:#}")),
                 },
@@ -3350,6 +3370,21 @@ impl eframe::App for ReaderApp {
         self.translator.poll();
         self.assistant
             .poll(self.persist.then_some(&mut self.library));
+        if let Some(draft) = self.assistant.take_queued() {
+            self.ask(draft, &ctx);
+        }
+        if let Some(path) = self.pickers.take_picture() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let attached = std::fs::read(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| self.assistant.attach_picture(&ctx, name, bytes));
+            if let Err(error) = attached {
+                self.notices
+                    .push(format!("Could not attach {}: {error}", path.display()));
+            }
+        }
         self.quick_ask.assistant.poll(None);
         if let Some((tab_id, path)) = self.pickers.take_saved()
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)

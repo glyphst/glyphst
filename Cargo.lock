@@ -3040,6 +3040,7 @@ name = "glyphst-reader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "craft-ui",
  "dirs 7.0.0",
  "eframe",

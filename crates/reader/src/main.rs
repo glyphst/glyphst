@@ -21,7 +21,10 @@
 mod ai;
 mod ai_bridge;
 mod ai_changes;
+mod ai_editor;
 mod ai_mentions;
+mod ai_menu;
+mod ai_preview;
 mod ai_tools;
 mod annotations;
 mod app;
@@ -71,7 +74,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
+                     [--assistant-demo STATE] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
 
@@ -98,6 +101,7 @@ fn parse_args() -> Result<Launch> {
         translate_selection: false,
         ai_fake: false,
         ask: None,
+        assistant_demo: None,
         agent: None,
         palette: None,
         settings: None,
@@ -169,6 +173,16 @@ fn parse_args() -> Result<Launch> {
             "--translate-selection" => launch.translate_selection = true,
             "--ai-fake" => launch.ai_fake = true,
             "--ask" => launch.ask = Some(value()?),
+            "--assistant-demo" => {
+                let state = value()?;
+                if !crate::ai::DEMO_STATES.contains(&state.as_str()) {
+                    bail!(
+                        "unknown assistant state {state} ({})",
+                        crate::ai::DEMO_STATES.join(", ")
+                    );
+                }
+                launch.assistant_demo = Some(state);
+            }
             "--agent" => {
                 let id = value()?;
                 if !["claude-code", "codex", "pi"].contains(&id.as_str()) && !id.starts_with("acp:")

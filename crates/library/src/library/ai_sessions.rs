@@ -11,6 +11,31 @@ impl LibraryStore {
         self.library.next_ai_session_id = id + 1;
         id
     }
+    /// Removes a saved chat and the pictures only it used.
+    pub fn delete_ai_session(&mut self, id: u64) -> Result<()> {
+        if !self
+            .library
+            .ai_sessions
+            .iter()
+            .any(|session| session.id == id)
+        {
+            return Ok(());
+        }
+        if let Some(database) = &self.database {
+            let write_txn = database.begin_write()?;
+            {
+                let mut table = write_txn.open_table(AI_SESSIONS_V6_TABLE)?;
+                table.remove(id)?;
+            }
+            write_txn.commit()?;
+        }
+        self.library.ai_sessions.retain(|session| session.id != id);
+        if let Err(error) = self.garbage_collect_ai_images() {
+            eprintln!("failed to prune unused AI images: {error:#}");
+        }
+        Ok(())
+    }
+
     pub fn save_ai_session(&mut self, mut session: AiSession) -> Result<()> {
         session.title = session.title.trim().to_string();
         if session.title.is_empty() {

@@ -99,6 +99,19 @@ impl ChangeLog {
         });
     }
 
+    /// How many applied changes match `filter`.
+    pub fn count_where(&self, filter: impl Fn(&Change) -> bool) -> usize {
+        self.changes
+            .iter()
+            .filter(|change| change.state == ChangeState::Applied && filter(change))
+            .count()
+    }
+
+    /// Whether there are changes to review.
+    pub fn has_changes(&self) -> bool {
+        !self.changes.is_empty()
+    }
+
     #[cfg(test)]
     pub fn changes(&self) -> &[Change] {
         &self.changes

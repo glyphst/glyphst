@@ -318,6 +318,9 @@ fn persists_history_bookmarks_and_highlights() {
                         images: Vec::new(),
                         document_path: None,
                         document_label: None,
+                        mentions: Vec::new(),
+                        sent_at: None,
+                        duration_ms: None,
                         agent_parts: Vec::new(),
                     },
                     AiSessionMessage {
@@ -329,6 +332,9 @@ fn persists_history_bookmarks_and_highlights() {
                         images: Vec::new(),
                         document_path: None,
                         document_label: None,
+                        mentions: Vec::new(),
+                        sent_at: None,
+                        duration_ms: None,
                         agent_parts: Vec::new(),
                     },
                 ],
@@ -917,6 +923,9 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
                     images: Vec::new(),
                     document_path: Some(document_path.clone()),
                     document_label: Some("v3-session.pdf".to_string()),
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -979,6 +988,9 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
                     images: Vec::new(),
                     document_path: None,
                     document_label: None,
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1035,6 +1047,9 @@ fn round_trips_v6_selected_page_snapshots() {
                     images: Vec::new(),
                     document_path: None,
                     document_label: None,
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1098,6 +1113,9 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                         images: vec![image.clone()],
                         document_path: None,
                         document_label: None,
+                        mentions: Vec::new(),
+                        sent_at: None,
+                        duration_ms: None,
                         agent_parts: Vec::new(),
                     },
                     AiSessionMessage {
@@ -1109,6 +1127,9 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                         images: Vec::new(),
                         document_path: None,
                         document_label: None,
+                        mentions: Vec::new(),
+                        sent_at: None,
+                        duration_ms: None,
                         agent_parts: vec![
                             AiSessionAgentPart::ToolCall {
                                 id: "call-1".to_string(),
@@ -1135,6 +1156,9 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                     images: vec![image.clone()],
                     document_path: None,
                     document_label: None,
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 created: 50,
@@ -1177,6 +1201,9 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
                     images: Vec::new(),
                     document_path: None,
                     document_label: None,
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -1238,6 +1265,9 @@ fn round_trips_v3_region_occurrence_geometry() {
                     images: Vec::new(),
                     document_path: None,
                     document_label: None,
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -2164,6 +2194,9 @@ fn persists_non_utf8_paths_for_all_path_records() {
                     images: Vec::new(),
                     document_path: Some(document_path.clone()),
                     document_label: Some("normalized.pdf".to_string()),
+                    mentions: Vec::new(),
+                    sent_at: None,
+                    duration_ms: None,
                     agent_parts: Vec::new(),
                 }],
                 queued_messages: Vec::new(),
@@ -2782,4 +2815,59 @@ fn ai_sessions_saved_before_summaries_still_decode() {
         reasoning,
         AiSessionAgentPart::Reasoning("Looked at page 2.".into())
     );
+}
+
+#[test]
+fn ai_session_chips_and_times_round_trip_and_chats_can_be_deleted() {
+    let path = temp_library_path("ai-session-chips");
+    let message = AiSessionMessage {
+        role: AiSessionRole::User,
+        content: "Explain [Selection, p. 2]".to_string(),
+        request_content: None,
+        references: Vec::new(),
+        occurrences: Vec::new(),
+        images: Vec::new(),
+        agent_parts: Vec::new(),
+        document_path: None,
+        document_label: None,
+        mentions: vec![AiSessionMention {
+            start: 8,
+            end: 25,
+            label: "Selection, p. 2".to_string(),
+            kind: "selection".to_string(),
+            text: Some("the selected words".to_string()),
+        }],
+        sent_at: Some(1_760_000_000),
+        duration_ms: None,
+    };
+    let (kept, deleted);
+    {
+        let mut store = LibraryStore::open_for_test(path.clone()).unwrap();
+        let save = |store: &mut LibraryStore, title: &str| {
+            let id = store.next_ai_session_id();
+            store
+                .save_ai_session(AiSession {
+                    id,
+                    title: title.to_string(),
+                    messages: vec![message.clone()],
+                    queued_messages: Vec::new(),
+                    created: 1,
+                    updated: 2,
+                    summary: None,
+                    agent: None,
+                })
+                .unwrap();
+            id
+        };
+        kept = save(&mut store, "Kept");
+        deleted = save(&mut store, "Deleted");
+        store.delete_ai_session(deleted).unwrap();
+        store.delete_ai_session(deleted).unwrap();
+    }
+    let store = LibraryStore::open_for_test(path.clone()).unwrap();
+    let sessions = store.ai_sessions();
+    assert_eq!(sessions.len(), 1, "the deleted chat stays deleted");
+    assert_eq!(sessions[0].id, kept);
+    assert_eq!(sessions[0].messages[0], message);
+    let _ = std::fs::remove_file(&path);
 }

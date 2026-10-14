@@ -48,6 +48,13 @@ pub enum Mention {
         label: String,
         text: String,
     },
+    /// A chip of a saved message, as it was sent: what it attached then
+    /// is no longer at hand, so it carries what the chat kept.
+    Saved {
+        icon: &'static str,
+        label: String,
+        text: String,
+    },
 }
 
 impl Mention {
@@ -65,7 +72,38 @@ impl Mention {
             },
             Self::Document(document) => short(&document.title),
             Self::Section { title, .. } => short(title),
-            Self::Text { label, .. } => label.clone(),
+            Self::Text { label, .. } | Self::Saved { label, .. } => label.clone(),
+        }
+    }
+
+    /// What the chat saves about the chip: its kind, and the text it
+    /// copied when it copied any.
+    pub fn saved_kind(&self) -> (&'static str, Option<String>) {
+        match self {
+            Self::Pages { .. } => ("pages", None),
+            Self::PageImages { .. } => ("page_images", None),
+            Self::Document(_) => ("document", None),
+            Self::Section { .. } => ("section", None),
+            Self::Text { kind, text, .. } => (kind, Some(text.clone())),
+            Self::Saved { text, .. } => ("saved", Some(text.clone())),
+        }
+    }
+
+    /// The chip of a saved message.
+    pub fn saved(kind: &str, label: String, text: Option<String>) -> Self {
+        let icon = match kind {
+            "pages" | "section" => "file-text",
+            "page_images" | "image" => "image",
+            "document" => "book-open",
+            "selection" => "type",
+            "annotation" => "highlighter",
+            "book" => "library",
+            _ => "file-text",
+        };
+        Self::Saved {
+            icon,
+            label,
+            text: text.unwrap_or_default(),
         }
     }
 
@@ -80,6 +118,7 @@ impl Mention {
                 "book" => "library",
                 _ => "file-text",
             },
+            Self::Saved { icon, .. } => icon,
         }
     }
 
@@ -156,6 +195,10 @@ impl Mention {
                 block(kind, format!(" label=\"{}\"", escape(label)), text),
                 Vec::new(),
             ),
+            Self::Saved { label, text, .. } => (
+                block("earlier", format!(" label=\"{}\"", escape(label)), text),
+                Vec::new(),
+            ),
         }
     }
 }
@@ -200,6 +243,49 @@ pub struct Candidate {
     pub title: String,
     pub detail: String,
     pub mention: Mention,
+    pub group: Group,
+}
+
+/// The menu's groups, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    ThisDocument,
+    Pages,
+    Sections,
+    Annotations,
+    Documents,
+    Library,
+}
+
+impl Group {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::ThisDocument => "This document",
+            Self::Pages => "Pages",
+            Self::Sections => "Sections",
+            Self::Annotations => "Annotations",
+            Self::Documents => "Open documents",
+            Self::Library => "Library",
+        }
+    }
+}
+
+/// Words that narrow the menu to one group, typed first after `@`
+/// (`@section intro`), as Zed's mention modes.
+pub const MODES: [(&str, Group); 4] = [
+    ("section", Group::Sections),
+    ("note", Group::Annotations),
+    ("doc", Group::Documents),
+    ("book", Group::Library),
+];
+
+/// The group a query names, and the rest of it.
+fn mode(query: &str) -> Option<(Group, &str)> {
+    let (word, rest) = query.split_once(' ')?;
+    MODES
+        .iter()
+        .find(|(mode, _)| *mode == word)
+        .map(|(_, group)| (*group, rest.trim()))
 }
 
 /// What the menu can offer, gathered by the app when the menu is open.
@@ -219,7 +305,16 @@ pub struct Sources {
 
 /// The menu's entries for `query` (the text after `@`), best first.
 pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
-    let query = query.trim().to_lowercase();
+    let query = query.trim_start().to_lowercase();
+    if let Some((group, rest)) = mode(&query) {
+        let mut out = candidates(sources, rest);
+        if group == Group::Library && rest.is_empty() {
+            out = books(sources, "");
+        }
+        out.retain(|candidate| candidate.group == group);
+        return out;
+    }
+    let query = query.trim().to_string();
     let mut out = Vec::new();
     let Some(active) = sources.documents.first() else {
         return books(sources, &query);
@@ -231,6 +326,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
             out.push(Candidate {
                 title: format!("Page text: {}", pages_label(first, last)),
                 detail: active.title.clone(),
+                group: Group::Pages,
                 mention: Mention::Pages {
                     document: active.clone(),
                     first,
@@ -241,6 +337,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
                 out.push(Candidate {
                     title: format!("Page images: {}", pages_label(first, last)),
                     detail: format!("At most {MAX_IMAGE_PAGES} pages"),
+                    group: Group::Pages,
                     mention: Mention::PageImages {
                         document: active.clone(),
                         pages: (first..=last).take(MAX_IMAGE_PAGES).collect(),
@@ -254,6 +351,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
     let mut fixed = vec![Candidate {
         title: "This page".into(),
         detail: format!("Page {} as text", current + 1),
+        group: Group::ThisDocument,
         mention: Mention::Pages {
             document: active.clone(),
             first: current,
@@ -264,6 +362,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
         fixed.push(Candidate {
             title: "This page as an image".into(),
             detail: format!("Page {}", current + 1),
+            group: Group::ThisDocument,
             mention: Mention::PageImages {
                 document: active.clone(),
                 pages: vec![current],
@@ -274,6 +373,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
         fixed.push(Candidate {
             title: "Selection".into(),
             detail: short(text),
+            group: Group::ThisDocument,
             mention: Mention::Text {
                 kind: "selection",
                 label: format!("Selection, p. {}", page + 1),
@@ -284,12 +384,14 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
     fixed.push(Candidate {
         title: "Whole document".into(),
         detail: active.title.clone(),
+        group: Group::ThisDocument,
         mention: Mention::Document(active.clone()),
     });
     for document in &sources.documents[1..] {
         fixed.push(Candidate {
-            title: format!("Document: {}", document.title),
-            detail: format!("{} pages, open", document.page_count),
+            title: document.title.clone(),
+            detail: format!("{} pages", document.page_count),
+            group: Group::Documents,
             mention: Mention::Document(document.clone()),
         });
     }
@@ -303,6 +405,7 @@ pub fn candidates(sources: &Sources, query: &str) -> Vec<Candidate> {
             .map(|(label, text)| Candidate {
                 title: label.clone(),
                 detail: "Annotation".into(),
+                group: Group::Annotations,
                 mention: Mention::Text {
                     kind: "annotation",
                     label: short(label),
@@ -336,8 +439,9 @@ fn sections(sources: &Sources, active: &OpenDocument, query: &str) -> Vec<Candid
                 })
                 .min(first + MAX_TEXT_PAGES - 1);
             Candidate {
-                title: format!("Section: {}", entry.title),
+                title: entry.title.clone(),
                 detail: pages_label(first, last),
+                group: Group::Sections,
                 mention: Mention::Section {
                     document: active.clone(),
                     title: entry.title.clone(),
@@ -356,8 +460,9 @@ fn books(sources: &Sources, query: &str) -> Vec<Candidate> {
         .filter(|(label, _)| matches(query, label))
         .take(10)
         .map(|(label, text)| Candidate {
-            title: format!("Book: {label}"),
+            title: label.clone(),
             detail: "Library".into(),
+            group: Group::Library,
             mention: Mention::Text {
                 kind: "book",
                 label: short(label),
@@ -369,12 +474,22 @@ fn books(sources: &Sources, query: &str) -> Vec<Candidate> {
 
 /// Whether every character of `query` appears in `label` in order.
 fn matches(query: &str, label: &str) -> bool {
-    let label = label.to_lowercase();
-    let mut chars = label.chars();
-    query
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .all(|c| chars.any(|l| l == c))
+    match_positions(query, label).is_some()
+}
+
+/// The characters of `label` (by index) that `query` matched in order,
+/// ignoring case and spaces; `None` when it does not match.
+pub fn match_positions(query: &str, label: &str) -> Option<Vec<usize>> {
+    let mut positions = Vec::new();
+    let mut chars = label.chars().enumerate();
+    for wanted in query.chars().filter(|c| !c.is_whitespace()) {
+        let wanted = wanted.to_lowercase().next().unwrap_or(wanted);
+        let (index, _) = chars
+            .by_ref()
+            .find(|(_, ch)| ch.to_lowercase().next() == Some(wanted))?;
+        positions.push(index);
+    }
+    Some(positions)
 }
 
 /// A page query: `12`, `p12`, `page12`, `page 12`, `pages 3-5`.
@@ -408,10 +523,15 @@ pub fn active_query(text: &str, cursor: usize) -> Option<std::ops::Range<usize>>
         .chars()
         .next_back()
         .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '"' | '\''));
-    // A page range may hold one space ("page 12"); anything longer ends it.
+    // A page range may hold one space ("page 12") and a mode a few words
+    // ("section related work"); anything longer ends it.
     let words = typed.split_whitespace().count();
     let spaced = typed.contains(char::is_whitespace);
-    (boundary && !typed.contains('\n') && (!spaced || (words <= 2 && !typed.ends_with("  "))))
+    let moded = MODES
+        .iter()
+        .any(|(mode, _)| typed.split(' ').next() == Some(*mode));
+    let most = if moded { 4 } else { 2 };
+    (boundary && !typed.contains('\n') && (!spaced || (words <= most && !typed.ends_with("  "))))
         .then_some(start..cursor)
 }
 
@@ -472,16 +592,25 @@ mod tests {
                 "This page as an image",
                 "Selection",
                 "Whole document",
-                "Document: Notes"
+                "Notes"
             ]
         );
-        assert!(all.contains(&"Section: Methods".to_string()));
+        assert!(all.contains(&"Methods".to_string()));
         assert!(all.contains(&"Highlight: key claim".to_string()));
         assert!(
-            !all.iter().any(|title| title.starts_with("Book:")),
+            !all.iter().any(|title| title == "Old book by Ada"),
             "books need a query"
         );
-        assert_eq!(titles("book"), ["Book: Old book by Ada"]);
+        assert_eq!(titles("ada"), ["Old book by Ada"]);
+        assert_eq!(
+            titles("book "),
+            ["Old book by Ada"],
+            "the book mode lists books"
+        );
+        assert_eq!(titles("section meth"), ["Methods"]);
+        assert_eq!(titles("note"), ["Notes"], "a mode needs a space");
+        assert_eq!(match_positions("mth", "Methods"), Some(vec![0, 2, 3]));
+        assert_eq!(match_positions("x", "Methods"), None);
         assert_eq!(titles("page12"), ["Page text: p. 12", "Page images: p. 12"]);
         assert_eq!(
             titles("pages 3-5"),
@@ -491,7 +620,7 @@ mod tests {
 
         let methods = candidates(&sources, "methods")
             .into_iter()
-            .find(|candidate| candidate.title == "Section: Methods")
+            .find(|candidate| candidate.title == "Methods")
             .unwrap();
         match methods.mention {
             Mention::Section { first, last, .. } => assert_eq!((first, last), (3, 8)),

@@ -150,6 +150,18 @@ impl ReaderApp {
         let Some(active) = self.active else {
             return false;
         };
+        // The assistant in a canned state once the page's text is read.
+        if self.launch_demo.is_some() {
+            let tab = &self.tabs[active];
+            if tab.text.get(tab.current_page()).is_none() {
+                return true;
+            }
+            let state = self.launch_demo.take().unwrap_or_default();
+            let sources =
+                crate::app::agent::mention_sources(&self.tabs, self.active, &self.library);
+            self.assistant.open = true;
+            self.assistant.demo(&state, ctx, sources);
+        }
         if self.translator.settings().is_none() {
             return self.launch_translate_document
                 || self.launch_translate_selection
@@ -178,7 +190,7 @@ impl ReaderApp {
             }
             let question = self.launch_ask.take().unwrap_or_default();
             self.assistant.open = true;
-            self.ask(question, ctx);
+            self.ask(crate::ai_editor::Draft::plain(question), ctx);
         }
         let document = self.tabs[active]
             .translation
@@ -189,7 +201,10 @@ impl ReaderApp {
             .card
             .as_ref()
             .is_some_and(|card| card.state == crate::translation::CardState::Loading);
-        document || selection || self.launch_translate_selection || self.assistant.is_running()
+        document
+            || selection
+            || self.launch_translate_selection
+            || (self.assistant.is_running() && !self.assistant.is_demo())
     }
 
     pub(crate) fn run_harness(&mut self, ctx: &egui::Context, pages_drawn: bool, now: Instant) {

@@ -180,13 +180,33 @@ and providers' reasoning state), so a reopened chat continues as it was.
 When a turn used 80% of the model's context window, the next one first
 replaces the conversation with the model's summary (`AiSession.summary`), so
 no earlier reasoning is replayed; a model names each chat after its first
-answer. The composer's `@` menu
-([`ai_mentions`](crates/reader/src/ai_mentions.rs)) attaches pages as text or
-images, the selection, documents, outline sections, annotations and library
-books as chips; what can change in the reader is copied when mentioned, and
-pages are read on the worker when the message is sent, into a `<context>`
-block. `/` runs chat commands; pasted (`wl-paste`/`xclip`) and dropped
-pictures are attached as images. External agents reach the same tools through an
+answer. The panel ([`ai/header.rs`](crates/reader/src/ai/header.rs),
+[`ai/thread.rs`](crates/reader/src/ai/thread.rs),
+[`ai/composer.rs`](crates/reader/src/ai/composer.rs)) follows Zed's agent
+panel for the composer and Lody's and Zeron's threads: user messages are
+bubbles with copy, edit (in place; sending restarts from there) and restore
+on hover; an answer's reasoning and tool calls form a timeline of
+present-tense steps while it runs, folded into "Worked for 12s · searched 2×,
+read 3 pages" once done. Messages written while an answer runs wait in a
+queue. Mentions and pictures are chips in the composer's text
+([`ai_editor`](crates/reader/src/ai_editor.rs)): runs of non-breaking text
+coloured by a layouter, with plates painted under them and icons over their
+leading room; an edit that touches a chip removes all of it, and the caret
+steps over it. The `@` menu ([`ai_menu`](crates/reader/src/ai_menu.rs),
+entries from [`ai_mentions`](crates/reader/src/ai_mentions.rs)) offers pages
+as text or images, the selection, documents, outline sections, annotations
+and library books, grouped, with mode words (`@section`, `@note`, `@doc`,
+`@book`), `/` commands and the `+` actions (a picture file, a region). Beside
+the menu, and on hovering a chip, a card previews what the chip attaches
+([`ai_preview`](crates/reader/src/ai_preview.rs)): text cut at 4,000
+characters, or page renders, read on worker threads and cached. What can
+change in the reader is copied when mentioned, and pages are read on the
+worker when the message is sent, into a `<context>` block; saved chats keep
+the chips (`AiSessionMessage.mentions`), the time of each message and how
+long each answer took. Pasted (`wl-paste`/`xclip`) and dropped pictures
+become image chips. `--assistant-demo STATE` shows the panel in a canned
+state (empty, menu, hover, running, done, edit, error, history) for
+screenshots. External agents reach the same tools through an
 [MCP server](crates/agent-host/src/mcp.rs) (streamable HTTP on 127.0.0.1,
 plain JSON responses), started when first needed. Each agent session has its
 own bearer token, which selects its tools and the origin and conversation its

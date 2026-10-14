@@ -26,6 +26,9 @@ unsafe_code = "deny"
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.23"
+# Local times of chat messages in the egui Reader (already locked through
+# eframe's dependencies); MIT OR Apache-2.0.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 bytemuck = { version = "1", features = ["derive"] }
 # Shared egui controls of the Craft apps (tabs, docking, theme helpers); MIT OR Apache-2.0.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675", features = ["serde"] }

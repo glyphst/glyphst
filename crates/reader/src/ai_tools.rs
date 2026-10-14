@@ -512,38 +512,255 @@ impl Tool for ListLinks {
     }
 }
 
-/// A one-line description of a tool call for the chat.
+/// A tool call's line in the chat, after it ran: "Searched “cats”".
 pub fn describe_call(name: &str, arguments: &str) -> String {
+    describe_step(name, arguments).done()
+}
+
+/// What a step of the assistant's work does, in words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// The verb while it runs ("Searching") and once done ("Searched").
+    pub doing: &'static str,
+    pub did: &'static str,
+    /// What it acts on ("“cats”", "pages 3–5").
+    pub object: String,
+    pub kind: StepKind,
+    /// Pages it read or looked at, for the summary.
+    pub pages: usize,
+}
+
+/// Kinds of steps, counted in a finished answer's summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StepKind {
+    Search,
+    Read,
+    Look,
+    Check,
+    Navigate,
+    Change,
+    /// An external agent's step, named by the agent.
+    Other,
+}
+
+impl Step {
+    pub fn doing(&self) -> String {
+        join(self.doing, &self.object)
+    }
+
+    pub fn done(&self) -> String {
+        join(self.did, &self.object)
+    }
+}
+
+fn join(verb: &str, object: &str) -> String {
+    match (verb.is_empty(), object.is_empty()) {
+        (true, _) => object.to_string(),
+        (false, true) => verb.to_string(),
+        (false, false) => format!("{verb} {object}"),
+    }
+}
+
+/// The step a tool call is.
+pub fn describe_step(name: &str, arguments: &str) -> Step {
     let arguments: Value = serde_json::from_str(arguments).unwrap_or_default();
-    let pages = |arguments: &Value| -> String {
-        match (
-            arguments["pages"].as_array(),
-            arguments["start_page"].as_u64(),
-        ) {
-            (Some(pages), _) => pages
+    let quoted = |key: &str| {
+        let text = arguments[key].as_str().unwrap_or_default();
+        let short = text.chars().take(48).collect::<String>();
+        if text.chars().count() > 48 {
+            format!("“{short}…”")
+        } else {
+            format!("“{short}”")
+        }
+    };
+    let (pages, count) = match (
+        arguments["pages"].as_array(),
+        arguments["start_page"].as_u64(),
+        arguments["page"].as_u64(),
+    ) {
+        (Some(pages), _, _) => {
+            let numbers = pages
                 .iter()
                 .filter_map(Value::as_u64)
                 .map(|page| page.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            (None, Some(start)) => match arguments["end_page"].as_u64() {
-                Some(end) if end != start => format!("{start}–{end}"),
-                _ => start.to_string(),
-            },
-            (None, None) => "the current page".into(),
+                .collect::<Vec<_>>();
+            let label = match numbers.as_slice() {
+                [one] => format!("page {one}"),
+                _ => format!("pages {}", numbers.join(", ")),
+            };
+            (label, numbers.len().max(1))
         }
+        (None, Some(start), _) => match arguments["end_page"].as_u64() {
+            Some(end) if end > start => {
+                (format!("pages {start}–{end}"), (end - start + 1) as usize)
+            }
+            _ => (format!("page {start}"), 1),
+        },
+        (None, None, Some(page)) => (format!("page {page}"), 1),
+        (None, None, None) => ("the current page".into(), 1),
+    };
+    let step = |doing, did, object: String, kind| Step {
+        doing,
+        did,
+        object,
+        kind,
+        pages: 0,
     };
     match name {
-        "search_document" => format!(
-            "Searched for “{}”",
-            arguments["query"].as_str().unwrap_or_default()
+        "search_document" => step("Searching", "Searched", quoted("query"), StepKind::Search),
+        "read_document" => Step {
+            pages: count,
+            ..step("Reading", "Read", pages, StepKind::Read)
+        },
+        "render_document_pages" => Step {
+            pages: count,
+            ..step("Looking at", "Looked at", pages, StepKind::Look)
+        },
+        "list_links" => step(
+            "Reading",
+            "Read",
+            format!("the links on {pages}"),
+            StepKind::Read,
         ),
-        "read_document" => format!("Read page {}", pages(&arguments)),
-        "render_document_pages" => format!("Looked at page {}", pages(&arguments)),
-        // External agents' tool lines are already titles.
-        other if other.contains(' ') => other.to_string(),
-        other => format!("Used {other}"),
+        "get_app_state" => step("Checking", "Checked", "the reader".into(), StepKind::Check),
+        "list_documents" => step("Listing", "Listed", "the documents".into(), StepKind::Check),
+        "get_document_info" => step(
+            "Reading",
+            "Read",
+            "the document's details".into(),
+            StepKind::Check,
+        ),
+        "get_outline" => step("Reading", "Read", "the outline".into(), StepKind::Check),
+        "get_selection" => step("Reading", "Read", "the selection".into(), StepKind::Check),
+        "list_annotations" => step("Reading", "Read", "the annotations".into(), StepKind::Check),
+        "search_library" => step(
+            "Searching",
+            "Searched",
+            format!("the library for {}", quoted("query")),
+            StepKind::Search,
+        ),
+        "list_commands" => step("Listing", "Listed", "the commands".into(), StepKind::Check),
+        "run_command" => step(
+            "Running",
+            "Ran",
+            arguments["id"].as_str().unwrap_or("a command").to_string(),
+            StepKind::Navigate,
+        ),
+        "go_to_page" => step("Going to", "Went to", pages, StepKind::Navigate),
+        "open_document" => step("Opening", "Opened", "a document".into(), StepKind::Navigate),
+        "add_highlight" => {
+            if arguments["note"]
+                .as_str()
+                .is_some_and(|note| !note.is_empty())
+            {
+                step(
+                    "Adding a note on",
+                    "Added a note on",
+                    quoted("quote"),
+                    StepKind::Change,
+                )
+            } else {
+                step(
+                    "Highlighting",
+                    "Highlighted",
+                    quoted("quote"),
+                    StepKind::Change,
+                )
+            }
+        }
+        "update_annotation" => step(
+            "Changing",
+            "Changed",
+            "an annotation".into(),
+            StepKind::Change,
+        ),
+        "remove_annotation" => step(
+            "Removing",
+            "Removed",
+            "an annotation".into(),
+            StepKind::Change,
+        ),
+        "add_bookmark" => step("Bookmarking", "Bookmarked", pages, StepKind::Change),
+        "set_reading_status" => step(
+            "Marking",
+            "Marked",
+            format!(
+                "the book as {}",
+                arguments["status"]
+                    .as_str()
+                    .unwrap_or("read")
+                    .replace('_', " ")
+            ),
+            StepKind::Change,
+        ),
+        "set_library_note" => step(
+            "Editing",
+            "Edited",
+            "the book's note".into(),
+            StepKind::Change,
+        ),
+        // External agents' steps are already titles; the Reader's own tools
+        // among them ("read document") count as theirs.
+        other if other.contains(' ') => {
+            let kind = describe_step(&other.replace(' ', "_"), "{}").kind;
+            let mut title = other.to_string();
+            if let Some(first) = title.get(..1) {
+                title.replace_range(..1, &first.to_uppercase());
+            }
+            step("", "", title, kind)
+        }
+        other => step("Using", "Used", other.to_string(), StepKind::Other),
     }
+}
+
+/// A finished answer's work in a few words: "searched 2×, read 3 pages".
+pub fn summarize_steps(steps: &[Step]) -> String {
+    let count = |kind| steps.iter().filter(|step| step.kind == kind).count();
+    let pages = |kind| {
+        steps
+            .iter()
+            .filter(|step| step.kind == kind)
+            .map(|step| step.pages)
+            .sum::<usize>()
+    };
+    let times = |verb: &str, n: usize| match n {
+        0 => None,
+        1 => Some(verb.to_string()),
+        n => Some(format!("{verb} {n}×")),
+    };
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(times("searched", count(StepKind::Search)));
+    match (count(StepKind::Read), pages(StepKind::Read)) {
+        (0, _) => {}
+        (_, 0) => parts.push("read".into()),
+        (_, n) => parts.push(format!("read {}", plural(n, "page", "pages"))),
+    }
+    if count(StepKind::Look) > 0 {
+        parts.push(format!(
+            "looked at {}",
+            plural(pages(StepKind::Look).max(1), "page", "pages")
+        ));
+    }
+    if count(StepKind::Check) > 0 && parts.is_empty() {
+        parts.push("checked the reader".into());
+    }
+    parts.extend(times("navigated", count(StepKind::Navigate)));
+    match count(StepKind::Change) {
+        0 => {}
+        n => parts.push(format!("made {}", plural(n, "change", "changes"))),
+    }
+    match count(StepKind::Other) {
+        0 => {}
+        n => parts.push(plural(n, "step", "steps")),
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -656,11 +873,28 @@ mod tests {
         assert!(unknown.is_error);
         assert_eq!(
             describe_call("search_document", r#"{"query":"dog"}"#),
-            "Searched for “dog”"
+            "Searched “dog”"
         );
         assert_eq!(
             describe_call("read_document", r#"{"start_page":2,"end_page":4}"#),
-            "Read page 2–4"
+            "Read pages 2–4"
+        );
+        let steps = [
+            describe_step("search_document", r#"{"query":"dog"}"#),
+            describe_step("search_document", r#"{"query":"cat"}"#),
+            describe_step("read_document", r#"{"start_page":2,"end_page":4}"#),
+            describe_step("add_highlight", r#"{"page":2,"quote":"A dog"}"#),
+        ];
+        assert_eq!(steps[3].doing(), "Highlighting “A dog”");
+        let external = describe_step("render document pages", "");
+        assert_eq!(
+            (external.done(), external.kind),
+            ("Render document pages".into(), StepKind::Look)
+        );
+        assert_eq!(describe_step("Bash List files", "").kind, StepKind::Other);
+        assert_eq!(
+            summarize_steps(&steps),
+            "searched 2×, read 3 pages, made 1 change"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
