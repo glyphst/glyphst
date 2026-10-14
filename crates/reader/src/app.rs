@@ -1375,10 +1375,12 @@ impl ReaderApp {
                             .assistant
                             .attachments
                             .push(crate::ai::Attachment {
-                                image: glyphst_ai::ai_chat::ImageContext::new_region(
-                                    region.reference(),
-                                    "image/png",
-                                    png,
+                                image: crate::ai::AttachedImage::Region(
+                                    glyphst_ai::ai_chat::ImageContext::new_region(
+                                        region.reference(),
+                                        "image/png",
+                                        png,
+                                    ),
                                 ),
                                 thumbnail,
                                 label: format!("Region of page {}", region.page + 1),
@@ -3266,6 +3268,37 @@ impl eframe::App for ReaderApp {
         });
         for path in dropped {
             self.open(&path, &ctx, None);
+        }
+        // Pictures dropped while the assistant is open go with its next
+        // message.
+        if self.assistant.open {
+            let pictures: Vec<PathBuf> = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|file| file.path().to_path_buf())
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                ["png", "jpg", "jpeg", "gif", "webp"]
+                                    .contains(&extension.to_ascii_lowercase().as_str())
+                            })
+                    })
+                    .collect()
+            });
+            for path in pictures {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                let attached = std::fs::read(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| self.assistant.attach_picture(&ctx, name, bytes));
+                if let Err(error) = attached {
+                    self.notices
+                        .push(format!("Could not attach {}: {error}", path.display()));
+                }
+            }
         }
         let focused = ctx.input(|i| i.focused);
         if focused && !self.was_focused {

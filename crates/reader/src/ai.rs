@@ -40,6 +40,7 @@ use glyphst_settings::{
 
 use crate::{
     ai_changes::{ChangeAction, ChangeLog},
+    ai_mentions::{self, Mention, Sources},
     ai_tools::describe_call,
     theme::Tokens,
 };
@@ -91,6 +92,8 @@ enum RunEvent {
     Agent(AgentEvent),
     /// The conversation before the new message was summarized.
     Compacted(String),
+    /// The new message with its mentions read.
+    Prepared(ChatMessage),
     Finished(Vec<AgentMessage>),
     Error(String),
 }
@@ -142,14 +145,72 @@ pub struct Assistant {
     chat_id: u64,
     /// The user message whose "Restore to here" waits for confirmation.
     confirm_restore: Option<usize>,
+    /// What the next message mentions.
+    pub mentions: Vec<Mention>,
+    /// The chips of the mentions sent with each message, by index.
+    sent_mentions: std::collections::HashMap<usize, Vec<String>>,
+    /// The `@` menu: its highlighted entry, and whether `+` opened it.
+    menu_selected: usize,
+    menu_forced: bool,
+    /// An input method is composing text in the composer.
+    composing: bool,
+    /// A picture being read from the clipboard.
+    paste_job: Option<Receiver<Vec<u8>>>,
+}
+
+/// An entry of the composer's menu.
+enum MenuEntry {
+    Mention(Box<ai_mentions::Candidate>),
+    Slash(Slash),
+}
+
+/// The composer's slash commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slash {
+    New,
+    Compact,
+    Undo,
+}
+
+impl Slash {
+    const ALL: [Self; 3] = [Self::New, Self::Compact, Self::Undo];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::New => "/new",
+            Self::Compact => "/compact",
+            Self::Undo => "/undo",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::New => "Start a new chat",
+            Self::Compact => "Summarize the chat so far before the next message",
+            Self::Undo => "Undo every change agents made",
+        }
+    }
 }
 
 /// An image attached to the next message.
 pub struct Attachment {
-    pub image: ImageContext,
+    pub image: AttachedImage,
     pub thumbnail: egui::TextureHandle,
     pub label: String,
 }
+
+/// What an attached image is.
+pub enum AttachedImage {
+    /// A region of a page, drawn with the region tool.
+    Region(ImageContext),
+    /// A picture the user pasted or dropped.
+    Picture(AgentImage),
+}
+
+/// Longest side of an attachment's thumbnail, in pixels.
+const THUMBNAIL_PIXELS: u32 = 160;
+/// Pictures larger than this are refused.
+const MAX_PICTURE_BYTES: usize = 16 * 1024 * 1024;
 
 impl Default for Assistant {
     fn default() -> Self {
@@ -178,10 +239,28 @@ impl Default for Assistant {
             title_config: None,
             chat_id: 0,
             confirm_restore: None,
+            mentions: Vec::new(),
+            sent_mentions: Default::default(),
+            menu_selected: 0,
+            menu_forced: false,
+            composing: false,
+            paste_job: None,
             show_sessions: false,
             sessions: Vec::new(),
         }
     }
+}
+
+/// What the panel shows besides the chat.
+pub struct Panel<'a> {
+    /// Whether the active document has a page and a selection to attach.
+    pub has_page: bool,
+    pub has_selection: bool,
+    pub models: &'a [(ModelRef, String)],
+    pub model: Option<ModelRef>,
+    pub changes: &'a mut ChangeLog,
+    /// What the `@` menu offers, gathered when it opens.
+    pub sources: &'a mut dyn FnMut() -> Sources,
 }
 
 /// What the panel asks for.
@@ -282,11 +361,21 @@ impl Assistant {
             .with_reader_state(state.block());
         let mut thumbnails = Vec::new();
         for attachment in std::mem::take(&mut self.attachments) {
-            message.attach_image(attachment.image);
+            match attachment.image {
+                AttachedImage::Region(image) => message.attach_image(image),
+                AttachedImage::Picture(image) => message.attach_user_image(image),
+            }
             thumbnails.push(attachment.thumbnail);
         }
         if !thumbnails.is_empty() {
             self.sent_images.insert(self.messages.len(), thumbnails);
+        }
+        let mentions = std::mem::take(&mut self.mentions);
+        if !mentions.is_empty() {
+            self.sent_mentions.insert(
+                self.messages.len(),
+                mentions.iter().map(Mention::label).collect(),
+            );
         }
         self.messages.push(message);
         self.tools.push(Vec::new());
@@ -305,7 +394,7 @@ impl Assistant {
         }
         let question = self.messages.len() - 1;
         let prior = self.history(question);
-        let new = self.messages[question].into_agent_messages();
+        let mut question_message = self.messages[question].clone();
         let compact = std::mem::take(&mut self.compact_next) && !prior.is_empty();
         if compact {
             self.status = Some("Summarizing the conversation so far…".into());
@@ -347,7 +436,22 @@ impl Assistant {
                     ctx.request_repaint();
                 }
             }
-            history.extend(new);
+            // Mentions are read here, off the UI thread.
+            if !mentions.is_empty() {
+                let mut blocks = Vec::new();
+                for mention in &mentions {
+                    let (block, images) = mention.resolve(&worker_cancel);
+                    blocks.push(block);
+                    for image in images {
+                        question_message.attach_user_image(image);
+                    }
+                }
+                if let Some(context) = ai_mentions::context(&blocks) {
+                    question_message = question_message.with_mention_context(context);
+                }
+                let _ = events_tx.send(RunEvent::Prepared(question_message.clone()));
+            }
+            history.extend(question_message.into_agent_messages());
             let mut send = |event| {
                 ctx.request_repaint();
                 events_tx
@@ -421,6 +525,7 @@ impl Assistant {
         for event in events {
             match event {
                 RunEvent::Agent(event) => self.apply(answer, event),
+                RunEvent::Prepared(message) => self.messages[answer - 1] = message,
                 RunEvent::Compacted(text) => {
                     self.summary = Some(AiSessionSummary {
                         text,
@@ -566,6 +671,7 @@ impl Assistant {
         self.title_config = None;
         self.chat_id = 0;
         self.confirm_restore = None;
+        self.sent_mentions.clear();
         self.error = None;
         self.show_sessions = false;
     }
@@ -593,6 +699,7 @@ impl Assistant {
         self.tools.truncate(index);
         self.reasoning.retain(|&answer, _| answer < index);
         self.sent_images.retain(|&message, _| message < index);
+        self.sent_mentions.retain(|&message, _| message < index);
         if self
             .summary
             .as_ref()
@@ -622,6 +729,7 @@ impl Assistant {
         self.tools = std::mem::take(&mut other.tools);
         self.sent_images = std::mem::take(&mut other.sent_images);
         self.reasoning = std::mem::take(&mut other.reasoning);
+        self.sent_mentions = std::mem::take(&mut other.sent_mentions);
         self.cache_key = other.cache_key.take();
         self.summary = other.summary.take();
         self.context_tokens = std::mem::take(&mut other.context_tokens);
@@ -710,16 +818,136 @@ impl Assistant {
         self.refresh_sessions(library);
     }
 
-    /// The panel. `can_attach` says whether the page and selection exist.
-    pub fn ui(
+    /// Attaches a pasted or dropped picture to the next message.
+    pub fn attach_picture(
         &mut self,
-        ui: &mut egui::Ui,
-        has_page: bool,
-        has_selection: bool,
-        models: &[(ModelRef, String)],
-        model: Option<ModelRef>,
-        changes: &mut ChangeLog,
-    ) -> Option<PanelAction> {
+        ctx: &egui::Context,
+        name: Option<String>,
+        bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        if bytes.len() > MAX_PICTURE_BYTES {
+            return Err("the picture is larger than 16 MB".into());
+        }
+        let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|error| error.to_string())?;
+        let media_type = match reader.format() {
+            Some(image::ImageFormat::Png) => "image/png",
+            Some(image::ImageFormat::Jpeg) => "image/jpeg",
+            Some(image::ImageFormat::Gif) => "image/gif",
+            Some(image::ImageFormat::WebP) => "image/webp",
+            _ => return Err("only PNG, JPEG, GIF and WebP pictures can be attached".into()),
+        };
+        let decoded = reader.decode().map_err(|error| error.to_string())?;
+        let (width, height) = (decoded.width(), decoded.height());
+        let small = decoded
+            .thumbnail(THUMBNAIL_PIXELS, THUMBNAIL_PIXELS)
+            .to_rgba8();
+        let size = [small.width() as usize, small.height() as usize];
+        let thumbnail = ctx.load_texture(
+            format!("assistant-picture-{}", unique_suffix()),
+            egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw()),
+            egui::TextureOptions::LINEAR,
+        );
+        let label = name.clone().unwrap_or_else(|| "Pasted picture".into());
+        self.attachments.push(Attachment {
+            image: AttachedImage::Picture(
+                AgentImage::new(media_type, width, height, bytes).with_optional_name(name),
+            ),
+            thumbnail,
+            label,
+        });
+        Ok(())
+    }
+
+    /// Reads a picture from the clipboard (egui pastes only text), on a
+    /// worker thread; [`Self::poll_paste`] attaches it.
+    fn start_paste(&mut self, ctx: &egui::Context) {
+        let (sender, receiver) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            if let Some(bytes) = clipboard_picture() {
+                let _ = sender.send(bytes);
+                ctx.request_repaint();
+            }
+        });
+        self.paste_job = Some(receiver);
+    }
+
+    fn poll_paste(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.paste_job
+            && let Ok(bytes) = job.try_recv()
+        {
+            self.paste_job = None;
+            if let Err(error) = self.attach_picture(ctx, None, bytes) {
+                self.error = Some(format!("Could not attach the picture: {error}"));
+            }
+        }
+    }
+
+    /// Follows the input method, so keys go to it while it composes.
+    fn track_input_method(&mut self, ui: &egui::Ui) {
+        ui.input(|i| {
+            for event in &i.events {
+                match event {
+                    egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                        self.composing = !text.is_empty();
+                    }
+                    egui::Event::Ime(_) => self.composing = false,
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// The menu for what is typed before the cursor: slash commands at the
+    /// start, mentions after `@`, or all mentions after `+`; with the typed
+    /// range to replace.
+    fn menu_entries(
+        &self,
+        ctx: &egui::Context,
+        input: egui::Id,
+        sources: &mut dyn FnMut() -> Sources,
+    ) -> (Option<std::ops::Range<usize>>, Vec<MenuEntry>) {
+        let text = &self.composer;
+        let cursor = egui::TextEdit::load_state(ctx, input)
+            .and_then(|state| state.cursor.char_range())
+            .map_or(text.len(), |range| {
+                text.char_indices()
+                    .nth(range.primary.index.0)
+                    .map_or(text.len(), |(byte, _)| byte)
+            });
+        if text.starts_with('/') && !text.contains(char::is_whitespace) {
+            let entries = Slash::ALL
+                .into_iter()
+                .filter(|slash| slash.name().starts_with(text.as_str()))
+                .map(MenuEntry::Slash)
+                .collect();
+            return (Some(0..text.len()), entries);
+        }
+        let range = ai_mentions::active_query(text, cursor);
+        let query = match &range {
+            Some(range) => &text[range.start + 1..range.end],
+            None if self.menu_forced => "",
+            None => return (None, Vec::new()),
+        };
+        let entries = ai_mentions::candidates(&sources(), query)
+            .into_iter()
+            .map(|candidate| MenuEntry::Mention(Box::new(candidate)))
+            .collect();
+        (range, entries)
+    }
+
+    /// The panel. `can_attach` says whether the page and selection exist.
+    pub fn ui(&mut self, ui: &mut egui::Ui, panel: Panel<'_>) -> Option<PanelAction> {
+        let Panel {
+            has_page,
+            has_selection,
+            models,
+            model,
+            changes,
+            sources,
+        } = panel;
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
         ui.horizontal(|ui| {
@@ -815,6 +1043,17 @@ impl Assistant {
                                     .show(ui, |ui| {
                                         ui.set_max_width(width * 0.8);
                                         ui.vertical(|ui| {
+                                            if let Some(labels) = self.sent_mentions.get(&index) {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    for label in labels {
+                                                        ui.label(
+                                                            egui::RichText::new(format!("@{label}"))
+                                                                .small()
+                                                                .color(tokens.accent_text),
+                                                        );
+                                                    }
+                                                });
+                                            }
                                             for thumbnail in
                                                 self.sent_images.get(&index).into_iter().flatten()
                                             {
@@ -927,18 +1166,103 @@ impl Assistant {
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
+                mention_chips(ui, &mut self.mentions, &tokens);
                 attachment_chips(ui, &mut self.attachments, &tokens);
+                let input_id = egui::Id::new("assistant-input");
+                self.poll_paste(ui.ctx());
+                let focused = ui.ctx().memory(|memory| memory.has_focus(input_id));
+                if focused
+                    && ui.input(|i| {
+                        i.events.iter().any(|event| {
+                            matches!(event, egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.command)
+                        })
+                    })
+                {
+                    self.start_paste(ui.ctx());
+                }
+                self.track_input_method(ui);
+                let (query, entries) = self.menu_entries(ui.ctx(), input_id, sources);
+                let mut accepted = None;
+                if !entries.is_empty() && !self.composing {
+                    self.menu_selected = self.menu_selected.min(entries.len() - 1);
+                    let key =
+                        |i: &mut egui::InputState, key| i.consume_key(egui::Modifiers::NONE, key);
+                    let (up, down, accept, close) = ui.input_mut(|i| {
+                        (
+                            key(i, egui::Key::ArrowUp),
+                            key(i, egui::Key::ArrowDown),
+                            key(i, egui::Key::Enter) || key(i, egui::Key::Tab),
+                            key(i, egui::Key::Escape),
+                        )
+                    });
+                    if up {
+                        self.menu_selected =
+                            (self.menu_selected + entries.len() - 1) % entries.len();
+                    }
+                    if down {
+                        self.menu_selected = (self.menu_selected + 1) % entries.len();
+                    }
+                    if accept {
+                        accepted = Some(self.menu_selected);
+                    }
+                    if close {
+                        self.menu_forced = false;
+                        if let Some(range) = &query {
+                            // Esc keeps the typed text but ends the query.
+                            self.composer.insert(range.end, ' ');
+                        }
+                    }
+                } else {
+                    self.menu_selected = 0;
+                }
                 let input = ui.add(
                     egui::TextEdit::multiline(&mut self.composer)
-                        .id(egui::Id::new("assistant-input"))
-                        .hint_text("Ask about this document")
+                        .id(input_id)
+                        .hint_text("Ask · @ to attach · / for commands")
                         .frame(egui::Frame::NONE)
                         .desired_rows(3)
                         .desired_width(f32::INFINITY),
                 );
+                if !entries.is_empty()
+                    && !self.composing
+                    && let Some(clicked) =
+                        menu_ui(ui, input.rect, &entries, self.menu_selected, &tokens)
+                {
+                    accepted = Some(clicked);
+                }
+                if let Some(index) = accepted
+                    && let Some(entry) = entries.into_iter().nth(index)
+                {
+                    if let Some(range) = query {
+                        self.composer.replace_range(range.clone(), "");
+                        set_cursor(ui.ctx(), input_id, &self.composer, range.start);
+                    }
+                    self.menu_forced = false;
+                    self.menu_selected = 0;
+                    match entry {
+                        MenuEntry::Mention(candidate) => self.mentions.push(candidate.mention),
+                        MenuEntry::Slash(Slash::New) => action = Some(PanelAction::NewSession),
+                        MenuEntry::Slash(Slash::Compact) => {
+                            self.compact_next = !self.messages.is_empty();
+                            self.status = Some(
+                                "The next message starts by summarizing the chat so far.".into(),
+                            );
+                        }
+                        MenuEntry::Slash(Slash::Undo) => {
+                            action = Some(PanelAction::Change(ChangeAction::UndoAll));
+                        }
+                    }
+                    input.request_focus();
+                }
                 let enter = input.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 ui.horizontal(|ui| {
+                    if crate::icons::button(ui, "plus", 24.0, self.menu_forced, "Attach (@)")
+                        .clicked()
+                    {
+                        self.menu_forced = !self.menu_forced;
+                        input.request_focus();
+                    }
                     ui.add_enabled_ui(has_page, |ui| {
                         ui.checkbox(&mut self.include_page, "This page")
                     });
@@ -967,6 +1291,120 @@ impl Assistant {
                 });
             });
         action
+    }
+}
+
+/// The mentions the next message carries, each with a button removing it.
+fn mention_chips(ui: &mut egui::Ui, mentions: &mut Vec<Mention>, tokens: &Tokens) {
+    if mentions.is_empty() {
+        return;
+    }
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
+        for (index, mention) in mentions.iter().enumerate() {
+            egui::Frame::new()
+                .fill(tokens.accent_soft)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.add(crate::icons::image(
+                            mention.icon(),
+                            12.0,
+                            tokens.accent_text,
+                        ));
+                        ui.label(
+                            egui::RichText::new(mention.label())
+                                .small()
+                                .color(tokens.accent_text),
+                        );
+                        if crate::icons::button(ui, "x", 16.0, false, "Remove").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                });
+        }
+    });
+    if let Some(index) = remove {
+        mentions.remove(index);
+    }
+}
+
+/// The menu above the composer; returns the entry clicked.
+fn menu_ui(
+    ui: &egui::Ui,
+    above: egui::Rect,
+    entries: &[MenuEntry],
+    selected: usize,
+    tokens: &Tokens,
+) -> Option<usize> {
+    let mut clicked = None;
+    egui::Area::new(egui::Id::new("assistant-menu"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(above.left_top() - egui::vec2(10.0, 12.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(tokens.chrome)
+                .stroke(egui::Stroke::new(1.0, tokens.border))
+                .corner_radius(10)
+                .inner_margin(6)
+                .show(ui, |ui| {
+                    ui.set_width(above.width() + 20.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (index, entry) in entries.iter().enumerate() {
+                                let (title, detail) = match entry {
+                                    MenuEntry::Mention(candidate) => {
+                                        (candidate.title.clone(), candidate.detail.clone())
+                                    }
+                                    MenuEntry::Slash(slash) => {
+                                        (slash.name().to_string(), slash.description().to_string())
+                                    }
+                                };
+                                let (rect, response) =
+                                    crate::widgets::list_row(ui, 30.0, index == selected);
+                                if index == selected {
+                                    response.scroll_to_me(None);
+                                }
+                                crate::widgets::row_text(
+                                    ui,
+                                    rect.left_center() + egui::vec2(8.0, 0.0),
+                                    &title,
+                                    crate::theme::regular(13.0),
+                                    tokens.text,
+                                    rect.width() * 0.6,
+                                );
+                                crate::widgets::row_text(
+                                    ui,
+                                    rect.left_center() + egui::vec2(rect.width() * 0.62, 0.0),
+                                    &detail,
+                                    crate::theme::regular(12.0),
+                                    tokens.text_faint,
+                                    rect.width() * 0.36,
+                                );
+                                if response.clicked() {
+                                    clicked = Some(index);
+                                }
+                            }
+                        });
+                });
+        });
+    clicked
+}
+
+/// Puts the composer's cursor at byte `offset` of `text`.
+fn set_cursor(ctx: &egui::Context, input: egui::Id, text: &str, offset: usize) {
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, input) {
+        let index = text[..offset.min(text.len())].chars().count();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(index),
+            )));
+        state.store(ctx, input);
     }
 }
 
@@ -1105,6 +1543,37 @@ fn session_message(message: &ChatMessage, library: &mut LibraryStore) -> AiSessi
         document_path: message.document_scope().map(|scope| scope.path.clone()),
         document_label: message.document_scope().map(|scope| scope.label.clone()),
     }
+}
+
+/// A picture on the clipboard, if it holds one: `wl-paste` on Wayland,
+/// `xclip` on X11.
+fn clipboard_picture() -> Option<Vec<u8>> {
+    let run = |program: &str, arguments: &[&str]| {
+        std::process::Command::new(program)
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let types = if wayland {
+        run("wl-paste", &["--list-types"])?
+    } else {
+        run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"])?
+    };
+    let types = String::from_utf8_lossy(&types);
+    let kind = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+        .into_iter()
+        .find(|kind| types.lines().any(|line| line.trim() == *kind))?;
+    let bytes = if wayland {
+        run("wl-paste", &["--no-newline", "--type", kind])?
+    } else {
+        run("xclip", &["-selection", "clipboard", "-t", kind, "-o"])?
+    };
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 /// An id for a new conversation, unique while the app runs.
@@ -1312,6 +1781,134 @@ mod tests {
         assert!(quick.messages().is_empty());
     }
 
+    /// One frame of the panel with `events`.
+    fn panel_frame(ctx: &egui::Context, assistant: &mut Assistant, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut changes = ChangeLog::default();
+        let mut output = ctx.run_ui(input, |ui| {
+            let document = crate::ai_tools::OpenDocument {
+                id: "doc_1".into(),
+                title: "Paper".into(),
+                path: "/nonexistent.pdf".into(),
+                layout: DocumentLayout::Fixed,
+                page_count: 9,
+                current_page: 0,
+            };
+            assistant.ui(
+                ui,
+                Panel {
+                    has_page: true,
+                    has_selection: false,
+                    models: &[],
+                    model: None,
+                    changes: &mut changes,
+                    sources: &mut || Sources {
+                        documents: vec![document.clone()],
+                        ..Sources::default()
+                    },
+                },
+            );
+        });
+        output.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_composer_menu_attaches_mentions_and_runs_commands() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut assistant = Assistant::default();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("assistant-input")));
+        panel_frame(&ctx, &mut assistant, Vec::new());
+        panel_frame(
+            &ctx,
+            &mut assistant,
+            vec![egui::Event::Text("Explain @page2".into())],
+        );
+        assert_eq!(assistant.composer, "Explain @page2");
+        panel_frame(&ctx, &mut assistant, vec![key(egui::Key::ArrowDown)]);
+        panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Enter)]);
+        assert_eq!(
+            assistant.composer, "Explain ",
+            "the query gives way to a chip"
+        );
+        assert_eq!(assistant.mentions.len(), 1);
+        assert!(
+            matches!(&assistant.mentions[0], Mention::PageImages { pages, .. } if pages == &[1]),
+            "Down chose the page image: {:?}",
+            assistant.mentions[0]
+        );
+
+        // While an input method composes, Enter is its own.
+        panel_frame(&ctx, &mut assistant, vec![egui::Event::Text("@".into())]);
+        let preedit = egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "ぺ".into(),
+            active_range_chars: None,
+        });
+        panel_frame(&ctx, &mut assistant, vec![preedit, key(egui::Key::Enter)]);
+        assert_eq!(assistant.mentions.len(), 1, "the menu took no key");
+        let commit = egui::Event::Ime(egui::ImeEvent::Commit("ぺ".into()));
+        panel_frame(&ctx, &mut assistant, vec![commit]);
+
+        // Slash commands run from the start of the composer.
+        assistant.composer.clear();
+        assistant
+            .messages
+            .push(ChatMessage::user_text("Earlier".into()));
+        panel_frame(
+            &ctx,
+            &mut assistant,
+            vec![egui::Event::Text("/comp".into())],
+        );
+        panel_frame(&ctx, &mut assistant, vec![key(egui::Key::Enter)]);
+        assert!(assistant.compact_next);
+        assert_eq!(assistant.composer, "");
+    }
+
+    #[test]
+    fn pasted_pictures_are_attached_with_their_size() {
+        let ctx = egui::Context::default();
+        let mut assistant = Assistant::default();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(300, 120, image::Rgba([10, 20, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assistant
+            .attach_picture(&ctx, Some("chart.png".into()), png)
+            .unwrap();
+        match &assistant.attachments[0].image {
+            AttachedImage::Picture(image) => {
+                assert_eq!((image.width, image.height), (300, 120));
+                assert_eq!(image.media_type, "image/png");
+                assert_eq!(image.name.as_deref(), Some("chart.png"));
+            }
+            AttachedImage::Region(_) => panic!("a picture"),
+        }
+        assert_eq!(assistant.attachments[0].thumbnail.size(), [160, 64]);
+        assert!(
+            assistant
+                .attach_picture(&ctx, None, b"not a picture".to_vec())
+                .is_err()
+        );
+        assert_eq!(assistant.attachments.len(), 1);
+    }
+
     #[test]
     fn attached_region_images_go_with_the_next_message_only() {
         let ctx = egui::Context::default();
@@ -1329,7 +1926,11 @@ mod tests {
             y1: 10.0,
         }]);
         assistant.attachments.push(Attachment {
-            image: ImageContext::new_region(reference, "image/png", vec![1, 2, 3]),
+            image: AttachedImage::Region(ImageContext::new_region(
+                reference,
+                "image/png",
+                vec![1, 2, 3],
+            )),
             thumbnail,
             label: "Region of page 1".into(),
         });
@@ -1425,6 +2026,18 @@ mod tests {
         );
         let mut tools = ToolRegistry::new();
         documents.register(&mut tools);
+        assistant.mentions.push(Mention::Pages {
+            document: crate::ai_tools::OpenDocument {
+                id: "doc_1".into(),
+                title: "doc.pdf".into(),
+                path: path.clone(),
+                layout: DocumentLayout::Fixed,
+                page_count: 1,
+                current_page: 0,
+            },
+            first: 0,
+            last: 0,
+        });
         assistant.send(
             "Where does the story end?".into(),
             ask,
@@ -1451,6 +2064,13 @@ mod tests {
                 .contains("Here the story begins."),
             "the page goes with the question"
         );
+        let request = assistant.messages()[0].request_text();
+        assert!(
+            request.contains("<mention kind=\"pages\" document=\"doc_1\"")
+                && request.contains("And the story ends."),
+            "the mentioned page is read when sent: {request}"
+        );
+        assert_eq!(assistant.sent_mentions[&0], ["doc.pdf p. 1"]);
 
         // A model names the chat once it is answered.
         let started = Instant::now();

@@ -187,6 +187,9 @@ pub struct ChatMessage {
     request_content: Option<String>,
     agent_trace: Vec<AgentMessage>,
     document_scope: Option<DocumentContextScope>,
+    /// Context the user attached with mentions, sent before the reader
+    /// state.
+    mention_context: Option<String>,
     /// The `<reader_state>` block sent at the end of the message.
     reader_state: Option<String>,
 }
@@ -211,6 +214,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            mention_context: None,
             reader_state: None,
         }
     }
@@ -226,6 +230,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            mention_context: None,
             reader_state: None,
         }
     }
@@ -241,6 +246,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: None,
+            mention_context: None,
             reader_state: None,
         }
     }
@@ -259,6 +265,7 @@ impl ChatMessage {
             request_content,
             agent_trace: Vec::new(),
             document_scope: None,
+            mention_context: None,
             reader_state: None,
         }
     }
@@ -320,14 +327,23 @@ impl ChatMessage {
             text.pop();
         }
 
-        if let Some(state) = &self.reader_state {
+        for block in [&self.mention_context, &self.reader_state]
+            .into_iter()
+            .flatten()
+        {
             if !text.trim().is_empty() {
                 text.push_str("\n\n");
             }
-            text.push_str(state);
+            text.push_str(block);
         }
 
         text
+    }
+
+    /// Adds the context of the message's mentions to the request text.
+    pub fn with_mention_context(mut self, context: String) -> Self {
+        self.mention_context = Some(context);
+        self
     }
 
     /// Ends the request text with what the reader showed (see
@@ -523,6 +539,7 @@ impl ChatMessage {
             request_content: None,
             agent_trace: Vec::new(),
             document_scope: self.document_scope.clone(),
+            mention_context: None,
             reader_state: None,
         }
     }

@@ -12,13 +12,17 @@ use super::ReaderApp;
 use crate::{
     ai_bridge::{UiCall, UiOutput, UiReply},
     ai_changes::ChangeAction,
+    ai_mentions::Sources,
     ai_tools::{OpenDocument, document_id},
     annotations,
     commands::{Category, Command},
+    document_tab::DocumentTab,
     document_tab::ViewAction,
 };
 
 const MAX_OUTLINE_ENTRIES: usize = 400;
+/// Library books the `@` menu offers at most.
+const MAX_MENTION_BOOKS: usize = 300;
 const MAX_RECENT: usize = 15;
 
 impl ReaderApp {
@@ -665,6 +669,78 @@ impl ReaderApp {
             Err(error) => Err(format!("{error:#}")),
         }
     }
+}
+
+/// What the assistant's `@` menu can offer: the open documents (the active
+/// one first), its outline, selection and annotations, and library books.
+pub(crate) fn mention_sources(
+    tabs: &[DocumentTab],
+    active: Option<usize>,
+    library: &glyphst_library::LibraryStore,
+) -> Sources {
+    let open = |tab: &DocumentTab| OpenDocument {
+        id: document_id(tab.id),
+        title: tab.title.clone(),
+        path: tab.path.clone(),
+        layout: tab.document_layout,
+        page_count: tab.layout.len(),
+        current_page: tab.current_page(),
+    };
+    let mut sources = Sources::default();
+    if let Some(tab) = active.map(|active| &tabs[active]) {
+        sources.documents.push(open(tab));
+        sources.outline = tab.outline.clone();
+        sources.selection = tab.selected_text().and_then(|text| {
+            let page = *tab.selection.as_ref()?.pages().start();
+            Some((page, text))
+        });
+        for highlight in library.highlights_for(&tab.path) {
+            let page = highlight.rects.first().map_or(0, |rect| rect.page_idx + 1);
+            sources.annotations.push((
+                format!("Highlight p. {page}: {}", highlight.text),
+                format!("Highlighted on page {page}: \"{}\"", highlight.text),
+            ));
+        }
+        for note in library.notes_for(&tab.path) {
+            let page = note.rects.first().map_or(0, |rect| rect.page_idx + 1);
+            sources.annotations.push((
+                format!("Note p. {page}: {}", note.body),
+                format!("Note on page {page} about \"{}\": {}", note.text, note.body),
+            ));
+        }
+    }
+    sources.documents.extend(
+        tabs.iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != active)
+            .map(|(_, tab)| open(tab)),
+    );
+    let mut items = library
+        .library_items()
+        .iter()
+        .filter(|item| item.trashed_at.is_none())
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| std::cmp::Reverse(item.updated));
+    sources.books = items
+        .into_iter()
+        .take(MAX_MENTION_BOOKS)
+        .map(|item| {
+            let mut details = describe_item(item);
+            if !item.abstract_text.is_empty() {
+                details.push_str(&format!("\nAbstract: {}", item.abstract_text));
+            }
+            if !item.work_note.is_empty() {
+                details.push_str(&format!("\nNote: {}", item.work_note));
+            }
+            details.push_str("\nOpen it with open_document to read it.");
+            let label = match item.creators.first() {
+                Some(creator) => format!("{} by {}", item.title, creator.name),
+                None => item.title.clone(),
+            };
+            (label, details)
+        })
+        .collect();
+    sources
 }
 
 /// Commands agents may run: moving around and changing the view, never

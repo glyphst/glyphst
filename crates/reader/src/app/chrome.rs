@@ -615,13 +615,19 @@ impl ReaderApp {
                         let inner = rect.size() - vec2(26.0, 26.0);
                         ui.set_min_size(inner);
                         ui.set_max_size(inner);
+                        let (tabs, active, library) = (&self.tabs, self.active, &self.library);
                         request = self.assistant.ui(
                             ui,
-                            has_page,
-                            has_selection,
-                            &models,
-                            model.clone(),
-                            &mut self.agent_changes,
+                            crate::ai::Panel {
+                                has_page,
+                                has_selection,
+                                models: &models,
+                                model: model.clone(),
+                                changes: &mut self.agent_changes,
+                                sources: &mut || {
+                                    super::agent::mention_sources(tabs, active, library)
+                                },
+                            },
                         );
                     });
                     // Dragging the left edge left widens it.

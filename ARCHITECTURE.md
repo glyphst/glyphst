@@ -179,7 +179,13 @@ and providers' reasoning state), so a reopened chat continues as it was.
 When a turn used 80% of the model's context window, the next one first
 replaces the conversation with the model's summary (`AiSession.summary`), so
 no earlier reasoning is replayed; a model names each chat after its first
-answer.
+answer. The composer's `@` menu
+([`ai_mentions`](crates/reader/src/ai_mentions.rs)) attaches pages as text or
+images, the selection, documents, outline sections, annotations and library
+books as chips; what can change in the reader is copied when mentioned, and
+pages are read on the worker when the message is sent, into a `<context>`
+block. `/` runs chat commands; pasted (`wl-paste`/`xclip`) and dropped
+pictures are attached as images.
 ChatGPT Subscription sign-in waits for the browser's callback, exchanges
 the code and saves the credentials (in the keychain item the GPUI Reader
 used, so its sign-in carries over) on worker threads, and the app repaints

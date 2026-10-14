@@ -83,9 +83,11 @@ Known gaps:
 - Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
-- The assistant takes page regions as images but no other image
-  mentions, and has no Mermaid diagrams (`mermaid-render` is kept for
+- The assistant has no Mermaid diagrams (`mermaid-render` is kept for
   them). A region is one page's; the overview selects no pages for it.
+  The change log of agents' edits lives while the app runs (saved chats
+  keep their trace, not their undo list), and picture pasting needs
+  `wl-paste` (Wayland) or `xclip` (X11).
 - Dropped with the GPUI Reader: multiple windows and tearing tabs off,
   synchronized panes, the publisher-styles toggle, and translated (i18n)
   interface text.

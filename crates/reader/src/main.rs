@@ -21,6 +21,7 @@
 mod ai;
 mod ai_bridge;
 mod ai_changes;
+mod ai_mentions;
 mod ai_tools;
 mod annotations;
 mod app;

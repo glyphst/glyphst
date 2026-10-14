@@ -183,9 +183,20 @@ impl OpenDocument {
         let max_chars = arguments["max_chars"]
             .as_u64()
             .map_or(MAX_READ_CHARS, |chars| (chars as usize).min(MAX_READ_CHARS));
+        self.page_texts(&self.pages(arguments, MAX_READ_PAGES)?, max_chars, cancel)
+    }
+
+    /// The text of 0-based `pages`, each under a heading, cut at
+    /// `max_chars`.
+    pub fn page_texts(
+        &self,
+        pages: &[usize],
+        max_chars: usize,
+        cancel: &AgentCancellationToken,
+    ) -> Result<String> {
         let document = self.document()?;
         let mut out = String::new();
-        for page in self.pages(arguments, MAX_READ_PAGES)? {
+        for &page in pages {
             if cancel.is_canceled() {
                 bail!("agent run canceled");
             }
@@ -203,9 +214,35 @@ impl OpenDocument {
         arguments: &Value,
         cancel: &AgentCancellationToken,
     ) -> Result<Vec<AgentToolResultPart>> {
+        let pages = self.pages(arguments, MAX_RENDER_PAGES)?;
+        let images = self.page_images(&pages, cancel)?;
+        Ok(pages
+            .into_iter()
+            .zip(images)
+            .flat_map(|(page, image)| {
+                [
+                    AgentToolResultPart::Text(format!("Page {}:", page + 1)),
+                    AgentToolResultPart::Image(image),
+                ]
+            })
+            .collect())
+    }
+
+    /// 0-based `pages` as JPEG images (PDFs only).
+    pub fn page_images(
+        &self,
+        pages: &[usize],
+        cancel: &AgentCancellationToken,
+    ) -> Result<Vec<AgentImage>> {
+        if !self.renders() {
+            bail!(
+                "{} is a reflowed book; its pages have no images",
+                self.title
+            );
+        }
         let document = self.document()?;
-        let mut parts = Vec::new();
-        for page in self.pages(arguments, MAX_RENDER_PAGES)? {
+        let mut images = Vec::new();
+        for &page in pages {
             if cancel.is_canceled() {
                 bail!("agent run canceled");
             }
@@ -229,16 +266,15 @@ impl OpenDocument {
                     image::ExtendedColorType::Rgb8,
                 )
                 .context("failed to encode the page image")?;
-            parts.push(AgentToolResultPart::Text(format!("Page {}:", page + 1)));
-            parts.push(AgentToolResultPart::Image(
+            images.push(
                 AgentImage::new("image/jpeg", width, height, jpeg)
                     .with_name(format!("page-{}.jpg", page + 1)),
-            ));
+            );
         }
-        Ok(parts)
+        Ok(images)
     }
 
-    fn renders(&self) -> bool {
+    pub fn renders(&self) -> bool {
         matches!(self.layout, DocumentLayout::Fixed)
     }
 
