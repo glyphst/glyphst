@@ -280,6 +280,13 @@ impl Settings {
                 }
             }
 
+            settings.ai.acp_agents = ai
+                .nodes()
+                .iter()
+                .filter(|node| node.name().value() == "acp_agent")
+                .filter_map(AcpAgentConfig::from_node)
+                .collect();
+
             if let Some(providers) = ai.get("providers").and_then(KdlNode::children) {
                 let mut ordered_providers = Vec::new();
                 let mut has_ordered_provider_nodes = false;
@@ -743,6 +750,9 @@ impl Settings {
                     self.ai.quick_ask.text_size as f64,
                 );
                 ai_children.nodes_mut().push(quick_ask);
+            }
+            for agent in &self.ai.acp_agents {
+                agent.write_to_document(ai_children);
             }
 
             let mut providers = KdlNode::new("providers");

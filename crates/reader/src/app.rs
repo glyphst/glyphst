@@ -244,10 +244,9 @@ pub struct ReaderApp {
     mcp: Option<glyphst_agent_host::mcp::McpServer>,
     /// The MCP token of each conversation's latest external turn.
     mcp_tokens: HashMap<u64, String>,
-    /// The external agents found on this machine, with their programs.
-    pub(crate) agent_programs: Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>,
-    agent_search:
-        Option<std::sync::mpsc::Receiver<Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>>>,
+    /// The coding agents found on this machine.
+    pub(crate) agent_programs: Vec<glyphst_agent_host::external::AgentSpec>,
+    agent_search: Option<std::sync::mpsc::Receiver<Vec<glyphst_agent_host::external::AgentSpec>>>,
     pub(crate) launch_ask: Option<String>,
     pub(crate) launch_commands: Vec<Command>,
     pub(crate) launch_region: Option<(usize, [f32; 4])>,
@@ -504,10 +503,7 @@ impl ReaderApp {
             }
         }
         app.transition = None;
-        app.assistant.agent = launch
-            .agent
-            .as_deref()
-            .and_then(glyphst_agent_host::external::AgentKind::from_id);
+        app.assistant.agent = launch.agent;
         Ok(app)
     }
 
@@ -1151,8 +1147,8 @@ impl ReaderApp {
             return;
         };
         let tools = self.agent_tools();
-        let external = match self.assistant.agent {
-            Some(kind) => match self.external_access(kind, &ask) {
+        let external = match self.assistant.agent.clone() {
+            Some(id) => match self.external_access(&id, &ask) {
                 Ok(access) => Some(access),
                 Err(error) => {
                     self.assistant.error = Some(format!("{error:#}"));

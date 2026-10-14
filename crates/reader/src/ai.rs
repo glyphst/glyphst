@@ -18,7 +18,7 @@ use std::{
 };
 
 use glyphst_agent_host::{
-    external::{AgentKind, ExternalEvent, ExternalTurn, McpAccess},
+    external::{AgentSpec, ExternalEvent, ExternalTurn, McpAccess},
     scratch::{FileChanges, Scratch},
 };
 use glyphst_ai::{
@@ -164,8 +164,9 @@ pub struct Assistant {
     composing: bool,
     /// A picture being read from the clipboard.
     paste_job: Option<Receiver<Vec<u8>>>,
-    /// The external agent the chat runs on; `None` for the built-in one.
-    pub agent: Option<AgentKind>,
+    /// The id of the external agent the chat runs on; `None` for the
+    /// built-in assistant.
+    pub agent: Option<String>,
     /// The external agent's own session, to continue.
     agent_session: Option<String>,
     /// Files external agents changed, for the app's change log.
@@ -176,8 +177,7 @@ pub struct Assistant {
 
 /// What an external agent's turn needs from the app.
 pub struct ExternalAccess {
-    pub kind: AgentKind,
-    pub program: PathBuf,
+    pub agent: AgentSpec,
     pub scratch: Scratch,
     pub mcp: McpAccess,
     pub model: Option<String>,
@@ -290,8 +290,8 @@ pub struct Panel<'a> {
     pub changes: &'a mut ChangeLog,
     /// What the `@` menu offers, gathered when it opens.
     pub sources: &'a mut dyn FnMut() -> Sources,
-    /// The external agents installed.
-    pub agents: &'a [AgentKind],
+    /// The external agents installed or configured.
+    pub agents: &'a [AgentSpec],
 }
 
 /// What the panel asks for.
@@ -307,8 +307,9 @@ pub enum PanelAction {
     /// Rewind the chat to the user message at this index and undo what the
     /// agent changed since.
     Restore(usize),
-    /// Run new chats on this external agent, or the built-in assistant.
-    SetAgent(Option<AgentKind>),
+    /// Run new chats on the external agent with this id, or the built-in
+    /// assistant.
+    SetAgent(Option<String>),
 }
 
 impl Assistant {
@@ -536,7 +537,7 @@ impl Assistant {
         }
         self.messages.push(ChatMessage::assistant(String::new()));
         self.tools.push(Vec::new());
-        self.run_context = self.tool_context(question, Some(external.kind));
+        self.run_context = self.tool_context(question, Some(&external.agent.name));
         let resume = self.agent_session.clone();
         let cancel = AgentCancellationToken::default();
         let (events_tx, events) = mpsc::channel();
@@ -561,7 +562,7 @@ impl Assistant {
                 })
                 .collect();
             let turn = ExternalTurn {
-                program: external.program,
+                agent: external.agent,
                 scratch: external.scratch.clone(),
                 mcp: external.mcp,
                 resume,
@@ -571,15 +572,11 @@ impl Assistant {
             };
             let before = turn.scratch.checkpoint().ok();
             let mut answer = ExternalAnswer::default();
-            let result = glyphst_agent_host::external::run_turn(
-                external.kind,
-                &turn,
-                &worker_cancel,
-                &mut |event| {
+            let result =
+                glyphst_agent_host::external::run_turn(&turn, &worker_cancel, &mut |event| {
                     answer.add(&event);
                     send(RunEvent::External(event));
-                },
-            );
+                });
             if let (Some(before), Ok(after)) = (before, turn.scratch.checkpoint())
                 && let Ok(changes) = turn.scratch.changes(&before, &after)
                 && !changes.files.is_empty()
@@ -599,7 +596,7 @@ impl Assistant {
     }
 
     /// The tool context of a turn answering the message at `turn`.
-    pub fn tool_context(&mut self, turn: usize, agent: Option<AgentKind>) -> ToolContext {
+    pub fn tool_context(&mut self, turn: usize, agent: Option<&str>) -> ToolContext {
         if self.chat_id == 0 {
             self.chat_id = next_chat_id();
         }
@@ -607,7 +604,7 @@ impl Assistant {
             thread: Some(self.chat_id),
             turn,
             origin: agent.map_or(ToolOrigin::Builtin, |agent| {
-                ToolOrigin::External(agent.name().to_string())
+                ToolOrigin::External(agent.to_string())
             }),
             ..ToolContext::default()
         }
@@ -930,10 +927,7 @@ impl Assistant {
         self.created = session.created;
         self.title = Some(session.title);
         self.summary = session.summary;
-        self.agent = session
-            .agent
-            .as_ref()
-            .and_then(|agent| AgentKind::from_id(&agent.agent));
+        self.agent = session.agent.as_ref().map(|agent| agent.agent.clone());
         self.agent_session = session.agent.and_then(|agent| agent.session);
         for message in session.messages {
             let index = self.messages.len();
@@ -992,8 +986,8 @@ impl Assistant {
             created: self.created,
             updated: now,
             summary: self.summary.clone(),
-            agent: self.agent.map(|agent| AiSessionAgent {
-                agent: agent.id().to_string(),
+            agent: self.agent.clone().map(|agent| AiSessionAgent {
+                agent,
                 session: self.agent_session.clone(),
             }),
         };
@@ -1153,16 +1147,24 @@ impl Assistant {
                 }
             });
         });
-        if !agents.is_empty() {
-            let name =
-                |agent: Option<AgentKind>| agent.map_or("Built-in assistant", AgentKind::name);
+        if !agents.is_empty() || self.agent.is_some() {
+            let name = |id: Option<&str>| match id {
+                None => "Built-in assistant".to_string(),
+                Some(id) => agents
+                    .iter()
+                    .find(|agent| agent.id() == id)
+                    .map_or_else(|| format!("{id} (not found)"), |agent| agent.name.clone()),
+            };
             egui::ComboBox::from_id_salt("assistant-agent")
-                .selected_text(name(self.agent))
+                .selected_text(name(self.agent.as_deref()))
                 .width(ui.available_width() - 8.0)
                 .show_ui(ui, |ui| {
-                    for choice in std::iter::once(None).chain(agents.iter().copied().map(Some)) {
+                    let choices = std::iter::once(None)
+                        .chain(agents.iter().map(|agent| Some(agent.id())))
+                        .collect::<Vec<_>>();
+                    for choice in choices {
                         if ui
-                            .selectable_label(self.agent == choice, name(choice))
+                            .selectable_label(self.agent == choice, name(choice.as_deref()))
                             .on_hover_text(match choice {
                                 None => "The Reader's own assistant, with the model chosen below",
                                 Some(_) => "A coding agent on this computer, with its own model and sign-in; it works in a folder for this document and reaches the Reader through MCP",
@@ -2210,7 +2212,7 @@ cat > /dev/null
         let mut library = LibraryStore::open_for_test(directory.join("library.redb")).unwrap();
         let ctx = egui::Context::default();
         let mut assistant = Assistant {
-            agent: Some(AgentKind::ClaudeCode),
+            agent: Some("claude-code".into()),
             ..Assistant::default()
         };
         let ask = AskContext {
@@ -2227,8 +2229,7 @@ cat > /dev/null
             selection: None,
         };
         let external = ExternalAccess {
-            kind: AgentKind::ClaudeCode,
-            program,
+            agent: AgentSpec::known(glyphst_agent_host::external::AgentKind::ClaudeCode, program),
             scratch: scratch.clone(),
             mcp: McpAccess {
                 url: "http://127.0.0.1:9/mcp".into(),
@@ -2274,7 +2275,7 @@ cat > /dev/null
         reopened.refresh_sessions(&library);
         let id = reopened.sessions[0].id;
         reopened.load_session(id, &library);
-        assert_eq!(reopened.agent, Some(AgentKind::ClaudeCode));
+        assert_eq!(reopened.agent.as_deref(), Some("claude-code"));
         assert_eq!(reopened.agent_session.as_deref(), Some("s1"));
         assert_eq!(reopened.tools(1)[0].label(), "Write notes.md");
         drop(library);

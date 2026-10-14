@@ -1169,6 +1169,89 @@ pub struct AiSettings {
     pub page_image_quality: PageImageQuality,
     pub page_image_limit: usize,
     pub quick_ask: QuickAskSettings,
+    /// Agent Client Protocol agents the assistant can run, besides the
+    /// coding agents it finds by name.
+    pub acp_agents: Vec<AcpAgentConfig>,
+}
+
+/// An agent speaking the Agent Client Protocol, started as a command:
+///
+/// ```kdl
+/// ai {
+///     acp_agent "Gemini" command="gemini" {
+///         arg "--experimental-acp"
+///         env "GEMINI_API_KEY" "…"
+///     }
+/// }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AcpAgentConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl AcpAgentConfig {
+    pub(super) fn from_node(node: &KdlNode) -> Option<Self> {
+        let name = node
+            .get(0)
+            .and_then(KdlValue::as_string)?
+            .trim()
+            .to_string();
+        let command = node
+            .get("command")
+            .and_then(KdlValue::as_string)?
+            .trim()
+            .to_string();
+        if name.is_empty() || command.is_empty() {
+            return None;
+        }
+        let mut agent = Self {
+            name,
+            command,
+            ..Self::default()
+        };
+        for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+            let text = |index| {
+                child
+                    .get(index)
+                    .and_then(KdlValue::as_string)
+                    .map(str::to_string)
+            };
+            match child.name().value() {
+                "arg" => agent.args.extend(text(0)),
+                "env" => {
+                    if let (Some(key), Some(value)) = (text(0), text(1)) {
+                        agent.env.push((key, value));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(agent)
+    }
+
+    pub(super) fn write_to_document(&self, document: &mut KdlDocument) {
+        let mut node = KdlNode::new("acp_agent");
+        node.push(self.name.clone());
+        node.insert("command", self.command.clone());
+        if !self.args.is_empty() || !self.env.is_empty() {
+            let children = node.ensure_children();
+            for arg in &self.args {
+                let mut child = KdlNode::new("arg");
+                child.push(arg.clone());
+                children.nodes_mut().push(child);
+            }
+            for (key, value) in &self.env {
+                let mut child = KdlNode::new("env");
+                child.push(key.clone());
+                child.push(value.clone());
+                children.nodes_mut().push(child);
+            }
+        }
+        document.nodes_mut().push(node);
+    }
 }
 
 impl Default for AiSettings {
@@ -1188,6 +1271,7 @@ impl Default for AiSettings {
             page_image_quality: PageImageQuality::Medium,
             page_image_limit: DEFAULT_PAGE_IMAGE_LIMIT,
             quick_ask: QuickAskSettings::default(),
+            acp_agents: Vec::new(),
         }
     }
 }
@@ -1531,5 +1615,32 @@ mod tests {
             8_192
         );
         assert_eq!(ModelLimits::for_model("gpt-5.5").context_window, 272_000);
+    }
+}
+
+#[cfg(test)]
+mod acp_agent_tests {
+    use crate::settings::parse_settings;
+
+    #[test]
+    fn acp_agents_are_read_and_written_back() {
+        let settings = parse_settings(
+            r#"ai {
+    acp_agent "Gemini" command="gemini" {
+        arg "--experimental-acp"
+        env "GEMINI_MODEL" "pro"
+    }
+    acp_agent "Broken"
+}"#,
+        )
+        .unwrap();
+        let agents = &settings.ai.acp_agents;
+        assert_eq!(agents.len(), 1, "an agent without a command is skipped");
+        assert_eq!(agents[0].name, "Gemini");
+        assert_eq!(agents[0].command, "gemini");
+        assert_eq!(agents[0].args, ["--experimental-acp"]);
+        assert_eq!(agents[0].env, [("GEMINI_MODEL".into(), "pro".into())]);
+        let again = parse_settings(&settings.to_kdl_string()).unwrap();
+        assert_eq!(again.ai.acp_agents, settings.ai.acp_agents);
     }
 }

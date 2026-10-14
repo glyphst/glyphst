@@ -88,6 +88,11 @@ Known gaps:
   The change log of agents' edits lives while the app runs (saved chats
   keep their trace, not their undo list), and picture pasting needs
   `wl-paste` (Wayland) or `xclip` (X11).
+- External agents: only Codex's sandbox keeps writes in the document's
+  working folder (Claude Code's and Pi's shells, and ACP agents, are not
+  confined); ACP agents are configured in `config.kdl` only, with no
+  settings page; each turn starts the agent's CLI anew (no steering of a
+  running turn); the agent's model is its own (no picker).
 - Dropped with the GPUI Reader: multiple windows and tearing tabs off,
   synchronized panes, the publisher-styles toggle, and translated (i18n)
   interface text.

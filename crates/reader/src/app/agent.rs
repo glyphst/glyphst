@@ -74,15 +74,14 @@ impl ReaderApp {
     /// token of the conversation stops working).
     pub(crate) fn external_access(
         &mut self,
-        kind: glyphst_agent_host::external::AgentKind,
+        id: &str,
         ask: &crate::ai::AskContext,
     ) -> anyhow::Result<crate::ai::ExternalAccess> {
-        let program = self
-            .agent_programs
-            .iter()
-            .find(|(found, _)| *found == kind)
-            .map(|(_, program)| program.clone())
-            .ok_or_else(|| anyhow::anyhow!("{} is not installed", kind.name()))?;
+        let agent = self
+            .agent_specs()
+            .into_iter()
+            .find(|agent| agent.id() == id)
+            .ok_or_else(|| anyhow::anyhow!("the agent {id} is not installed or configured"))?;
         let root = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("the system has no data folder"))?
             .join("glyphst")
@@ -93,7 +92,7 @@ impl ReaderApp {
             &ask.title,
         )?;
         let turn = self.assistant.next_turn();
-        let context = self.assistant.tool_context(turn, Some(kind));
+        let context = self.assistant.tool_context(turn, Some(&agent.name));
         let chat = context.thread.unwrap_or_default();
         let tools = std::sync::Arc::new(self.agent_tools());
         let server = self.mcp_server()?;
@@ -110,12 +109,37 @@ impl ReaderApp {
             server.sessions.close(&previous);
         }
         Ok(crate::ai::ExternalAccess {
-            kind,
-            program,
+            agent,
             scratch,
             mcp,
             model: None,
         })
+    }
+
+    /// The agents chats can run on: the coding agents found on this
+    /// computer and the ACP agents of the settings whose command exists.
+    pub(crate) fn agent_specs(&self) -> Vec<glyphst_agent_host::external::AgentSpec> {
+        use glyphst_agent_host::external::{AgentKind, AgentSpec};
+
+        let mut agents = self.agent_programs.clone();
+        if let Some(settings) = self.user_settings.get() {
+            agents.extend(settings.ai.acp_agents.iter().filter_map(|config| {
+                let command = std::path::Path::new(&config.command);
+                let program = if command.components().count() > 1 {
+                    command.is_file().then(|| command.to_path_buf())
+                } else {
+                    glyphst_agent_host::executable::find(&config.command, None)
+                }?;
+                Some(AgentSpec {
+                    kind: AgentKind::Acp,
+                    name: config.name.clone(),
+                    program,
+                    args: config.args.clone(),
+                    env: config.env.clone(),
+                })
+            }));
+        }
+        agents
     }
 
     /// Whether the agents' programs are still being looked for.
@@ -781,26 +805,28 @@ impl ReaderApp {
     }
 }
 
-/// Looks for the external agents' programs on a worker thread
-/// (`CLAUDE_CODE_EXECUTABLE` and `CODEX_EXECUTABLE` name them explicitly).
+/// Looks for the coding agents' programs on a worker thread (an
+/// environment variable such as `CLAUDE_CODE_EXECUTABLE` can name one).
 pub(crate) fn find_agents(
     ctx: &egui::Context,
-) -> std::sync::mpsc::Receiver<Vec<(glyphst_agent_host::external::AgentKind, PathBuf)>> {
-    use glyphst_agent_host::{executable, external::AgentKind};
+) -> std::sync::mpsc::Receiver<Vec<glyphst_agent_host::external::AgentSpec>> {
+    use glyphst_agent_host::{
+        executable,
+        external::{AgentKind, AgentSpec},
+    };
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let found = AgentKind::ALL
+        let found = AgentKind::KNOWN
             .into_iter()
             .filter_map(|kind| {
-                let variable = match kind {
-                    AgentKind::ClaudeCode => "CLAUDE_CODE_EXECUTABLE",
-                    AgentKind::Codex => "CODEX_EXECUTABLE",
-                };
-                let configured = std::env::var_os(variable).map(PathBuf::from);
+                let configured = kind
+                    .program_variable()
+                    .and_then(std::env::var_os)
+                    .map(PathBuf::from);
                 executable::find(kind.program(), configured.as_deref())
-                    .map(|program| (kind, program))
+                    .map(|program| AgentSpec::known(kind, program))
             })
             .collect();
         let _ = sender.send(found);

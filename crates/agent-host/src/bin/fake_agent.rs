@@ -1,7 +1,7 @@
-//! A stand-in for the `claude` and `codex` CLIs in the driver tests: it
-//! speaks enough of their protocols, calls the Reader's MCP server, asks to
-//! write a file outside and inside its working folder, and reports what it
-//! saw in its answer.
+//! A stand-in for the `claude`, `codex` and `pi` CLIs and an ACP agent in
+//! the driver tests: it speaks enough of their protocols, calls the
+//! Reader's MCP server, writes a file in its working folder, and reports
+//! what it saw in its answer.
 
 use std::io::{BufRead as _, Write as _};
 
@@ -11,6 +11,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "app-server") {
         codex();
+    } else if args.iter().any(|arg| arg == "rpc") {
+        pi(&args);
+    } else if args.iter().any(|arg| arg == "acp") {
+        acp();
     } else {
         claude(&args);
     }
@@ -157,6 +161,124 @@ fn codex() {
                 assert_eq!(message["result"]["decision"], "accept");
                 say(
                     json!({"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed", "items": []}}}),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn pi(args: &[String]) {
+    let extension = args
+        .iter()
+        .position(|arg| arg == "--extension")
+        .and_then(|index| args.get(index + 1))
+        .expect("--extension");
+    let script = std::fs::read_to_string(extension).unwrap();
+    assert!(script.contains("registerMcpServer"));
+    let tools = mcp_tools(
+        &std::env::var("GLYPHST_MCP_URL").unwrap(),
+        &std::env::var("GLYPHST_MCP_TOKEN").unwrap(),
+    );
+    let resumed = args.iter().any(|arg| arg == "--session");
+    for line in std::io::stdin().lock().lines() {
+        let record: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        match record["type"].as_str().unwrap_or_default() {
+            "prompt" => {
+                say(
+                    json!({"id": "prompt", "type": "response", "command": "prompt", "success": true, "data": {"disposition": "started"}}),
+                );
+                say(
+                    json!({"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "write", "args": {"path": "notes.md"}}),
+                );
+                std::fs::write("notes.md", "written by fake pi\n").unwrap();
+                say(
+                    json!({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "write", "result": {"content": [{"type": "text", "text": "ok"}]}, "isError": false}),
+                );
+                let prompt = record["message"].as_str().unwrap_or_default();
+                say(
+                    json!({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": format!("tools={tools} resumed={resumed} prompt={}", prompt.lines().next().unwrap_or_default())}}),
+                );
+                say(json!({"type": "agent_settled", "aborted": false}));
+            }
+            "get_state" => say(
+                json!({"id": record["id"], "type": "response", "command": "get_state", "success": true, "data": {"sessionId": "pi-session"}}),
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn acp() {
+    let (mut url, mut token, mut prompt_id) = (String::new(), String::new(), Value::Null);
+    let mut prompt = String::new();
+    for line in std::io::stdin().lock().lines() {
+        let message: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let id = message["id"].clone();
+        let params = &message["params"];
+        match message["method"].as_str().unwrap_or_default() {
+            "initialize" => say(json!({"jsonrpc": "2.0", "id": id, "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": {"loadSession": true, "mcpCapabilities": {"http": true}, "promptCapabilities": {"image": false}},
+            }})),
+            "session/new" | "session/load" => {
+                let server = &params["mcpServers"][0];
+                assert_eq!(server["type"], "http");
+                url = server["url"].as_str().unwrap().to_string();
+                token = server["headers"][0]["value"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("Bearer ")
+                    .to_string();
+                if message["method"] == "session/load" {
+                    // A loaded session replays its history first.
+                    say(
+                        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "acp-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OLD "}}}}),
+                    );
+                    say(json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                } else {
+                    say(
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "acp-session"}}),
+                    );
+                }
+            }
+            "session/prompt" => {
+                prompt_id = id;
+                prompt = params["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                say(
+                    json!({"jsonrpc": "2.0", "id": 50, "method": "session/request_permission", "params": {
+                        "sessionId": "acp-session",
+                        "toolCall": {"toolCallId": "tool-1", "title": "Write notes.md"},
+                        "options": [{"optionId": "no", "name": "Reject", "kind": "reject_once"}, {"optionId": "yes", "name": "Allow", "kind": "allow_once"}],
+                    }}),
+                );
+            }
+            "" if id == json!(50) => {
+                let chosen = message["result"]["outcome"]["optionId"]
+                    .as_str()
+                    .unwrap_or_default();
+                std::fs::write("notes.md", "written by the fake ACP agent\n").unwrap();
+                let tools = mcp_tools(&url, &token);
+                let update = |update: Value| {
+                    say(
+                        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "acp-session", "update": update}}),
+                    )
+                };
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Write notes.md", "status": "pending"}),
+                );
+                update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1", "status": "completed"}),
+                );
+                let first = prompt.lines().last().unwrap_or_default().to_string();
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("tools={tools} permission={chosen} last={first}")}}),
+                );
+                say(
+                    json!({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}}),
                 );
             }
             _ => {}

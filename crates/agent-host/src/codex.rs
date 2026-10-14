@@ -166,7 +166,7 @@ pub fn run_turn(
     cancel: &AgentCancellationToken,
     events: &mut dyn FnMut(ExternalEvent),
 ) -> Result<()> {
-    let mut command = command(&turn.program, &turn.scratch.dir);
+    let mut command = command(&turn.agent.program, &turn.scratch.dir);
     command
         .arg("app-server")
         .env(TOKEN_VARIABLE, &turn.mcp.token);

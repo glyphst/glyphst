@@ -37,7 +37,7 @@ pub fn run_turn(
     events: &mut dyn FnMut(ExternalEvent),
 ) -> Result<()> {
     let config = McpConfigFile::write(turn)?;
-    let mut command = command(&turn.program, &turn.scratch.dir);
+    let mut command = command(&turn.agent.program, &turn.scratch.dir);
     command.args([
         "--print",
         "--input-format",

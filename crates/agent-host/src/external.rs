@@ -6,22 +6,28 @@ use std::path::PathBuf;
 use anyhow::Result;
 use glyphst_ai::agent::{AgentCancellationToken, AgentImage};
 
-use crate::{claude, codex, scratch::Scratch};
+use crate::{acp, claude, codex, pi, scratch::Scratch};
 
-/// The external agents the Reader can drive.
+/// How the Reader drives an external agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    Pi,
+    /// Any agent speaking the Agent Client Protocol, as configured.
+    Acp,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 2] = [Self::ClaudeCode, Self::Codex];
+    /// The agents found by their program's name.
+    pub const KNOWN: [Self; 3] = [Self::ClaudeCode, Self::Codex, Self::Pi];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Pi => "Pi",
+            Self::Acp => "ACP agent",
         }
     }
 
@@ -30,6 +36,8 @@ impl AgentKind {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::Acp => "",
         }
     }
 
@@ -38,11 +46,51 @@ impl AgentKind {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::Acp => "acp",
         }
     }
 
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.id() == id)
+    /// The environment variable naming its program explicitly.
+    pub fn program_variable(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("CLAUDE_CODE_EXECUTABLE"),
+            Self::Codex => Some("CODEX_EXECUTABLE"),
+            Self::Pi => Some("PI_EXECUTABLE"),
+            Self::Acp => None,
+        }
+    }
+}
+
+/// An agent the Reader can run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentSpec {
+    pub kind: AgentKind,
+    pub name: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl AgentSpec {
+    /// A known agent run as `program`.
+    pub fn known(kind: AgentKind, program: PathBuf) -> Self {
+        Self {
+            kind,
+            name: kind.name().to_string(),
+            program,
+            args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    /// The stable id saved with conversations: `claude-code`, `codex`, `pi`
+    /// or `acp:<name>`.
+    pub fn id(&self) -> String {
+        match self.kind {
+            AgentKind::Acp => format!("acp:{}", self.name),
+            kind => kind.id().to_string(),
+        }
     }
 }
 
@@ -56,7 +104,7 @@ pub struct McpAccess {
 /// One user turn for an external agent.
 #[derive(Clone, Debug)]
 pub struct ExternalTurn {
-    pub program: PathBuf,
+    pub agent: AgentSpec,
     pub scratch: Scratch,
     pub mcp: McpAccess,
     /// The agent's session to continue.
@@ -87,14 +135,15 @@ pub enum ExternalEvent {
 
 /// Runs a turn to its end; `Err` when the agent failed.
 pub fn run_turn(
-    kind: AgentKind,
     turn: &ExternalTurn,
     cancel: &AgentCancellationToken,
     events: &mut dyn FnMut(ExternalEvent),
 ) -> Result<()> {
-    match kind {
+    match turn.agent.kind {
         AgentKind::ClaudeCode => claude::run_turn(turn, cancel, events),
         AgentKind::Codex => codex::run_turn(turn, cancel, events),
+        AgentKind::Pi => pi::run_turn(turn, cancel, events),
+        AgentKind::Acp => acp::run_turn(turn, cancel, events),
     }
 }
 

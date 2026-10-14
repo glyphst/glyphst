@@ -616,11 +616,7 @@ impl ReaderApp {
                         ui.set_min_size(inner);
                         ui.set_max_size(inner);
                         let (tabs, active, library) = (&self.tabs, self.active, &self.library);
-                        let agents = self
-                            .agent_programs
-                            .iter()
-                            .map(|(kind, _)| *kind)
-                            .collect::<Vec<_>>();
+                        let agents = self.agent_specs();
                         request = self.assistant.ui(
                             ui,
                             crate::ai::Panel {
