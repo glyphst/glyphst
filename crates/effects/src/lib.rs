@@ -45,12 +45,14 @@ pub const IMAGE_PARALLAX: &str = "image-parallax";
 pub const SEPIA: &str = "sepia";
 pub const NIGHT: &str = "night";
 pub const PAPER: &str = "paper";
+pub const DOTS: &str = "dots";
+pub const GENERATE: &str = "generate";
 
 /// Effects may declare at most this many parameters (one `vec4`).
 pub const MAX_PARAMS: usize = 4;
 
 const PRELUDE: &str = include_str!("prelude.wgsl");
-const BUILTIN: [(&str, &str); 11] = [
+const BUILTIN: [(&str, &str); 15] = [
     ("present.wgsl", include_str!("builtin/present.wgsl")),
     ("crossfade.wgsl", include_str!("builtin/crossfade.wgsl")),
     ("slide_over.wgsl", include_str!("builtin/slide_over.wgsl")),
@@ -65,6 +67,13 @@ const BUILTIN: [(&str, &str); 11] = [
     ("sepia.wgsl", include_str!("builtin/sepia.wgsl")),
     ("night.wgsl", include_str!("builtin/night.wgsl")),
     ("paper.wgsl", include_str!("builtin/paper.wgsl")),
+    ("dots.wgsl", include_str!("builtin/dots.wgsl")),
+    (
+        "paper_ground.wgsl",
+        include_str!("builtin/paper_ground.wgsl"),
+    ),
+    ("night_sky.wgsl", include_str!("builtin/night_sky.wgsl")),
+    ("generate.wgsl", include_str!("builtin/generate.wgsl")),
 ];
 
 /// A starting point for a user effect: a commented background.

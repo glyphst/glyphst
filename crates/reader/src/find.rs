@@ -10,7 +10,13 @@ use std::{
 
 use glyphst_pdf::text::PageText;
 
-use crate::{doc_text::DocText, icons, theme::Tokens, widgets};
+use glyphst_ui::Tip;
+
+use crate::{
+    doc_text::DocText,
+    icons,
+    theme::{self, Tokens},
+};
 
 /// A query is searched once typing pauses this long.
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -33,10 +39,14 @@ pub struct Find {
     pub query: String,
     pub case_sensitive: bool,
     pub whole_words: bool,
+    /// The query is a regular expression.
+    pub pattern: bool,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
     /// The search the matches are for: query and options.
-    applied: Option<(String, bool, bool)>,
+    applied: Option<Applied>,
+    /// The applied pattern, compiled; `Err` when it does not parse.
+    compiled: Option<Result<regex::Regex, String>>,
     edited: Option<Instant>,
     searched: Vec<bool>,
     /// Ask the find bar to take keyboard focus.
@@ -111,7 +121,11 @@ impl Find {
         self.reset(None);
     }
 
-    fn reset(&mut self, applied: Option<(String, bool, bool)>) {
+    fn reset(&mut self, applied: Option<Applied>) {
+        self.compiled = applied
+            .as_ref()
+            .filter(|applied| applied.pattern)
+            .map(|applied| applied.compile());
         self.applied = applied;
         self.revealed = None;
         self.matches.clear();
@@ -126,17 +140,18 @@ impl Find {
         if self.searched.len() != text.page_count() {
             self.searched = vec![false; text.page_count()];
         }
-        let wanted = (
-            self.query.trim().to_string(),
-            self.case_sensitive,
-            self.whole_words,
-        );
+        let wanted = Applied {
+            query: self.query.trim().to_string(),
+            case_sensitive: self.case_sensitive,
+            whole_words: self.whole_words,
+            pattern: self.pattern,
+        };
         let settled = self
             .edited
             .is_none_or(|edited| now.saturating_duration_since(edited) >= DEBOUNCE);
         if settled && self.applied.as_ref() != Some(&wanted) {
             self.edited = None;
-            if wanted.0.is_empty() {
+            if wanted.query.is_empty() {
                 self.reset(None);
             } else {
                 self.start_page = current_page;
@@ -159,11 +174,15 @@ impl Find {
     /// Adds a page's matches in page order, keeping the current match.
     fn add_page(&mut self, page: usize, text: &PageText) {
         self.searched[page] = true;
-        let Some((query, case_sensitive, whole_words)) = &self.applied else {
+        let Some(applied) = &self.applied else {
             return;
         };
-        let found: Vec<Match> = text
-            .find(query, *case_sensitive, *whole_words)
+        let ranges = match &self.compiled {
+            Some(Ok(pattern)) => text.find_pattern(pattern),
+            Some(Err(_)) => Vec::new(),
+            None => text.find(&applied.query, applied.case_sensitive, applied.whole_words),
+        };
+        let found: Vec<Match> = ranges
             .into_iter()
             .map(|range| context(page, text, range))
             .collect();
@@ -225,26 +244,62 @@ impl Find {
         self.current_match()
     }
 
+    /// Why the pattern does not parse, while it does not.
+    pub fn pattern_error(&self) -> Option<&str> {
+        match &self.compiled {
+            Some(Err(error)) => Some(error),
+            _ => None,
+        }
+    }
+
     pub fn status(&self) -> String {
         if self.applied.is_none() {
             return String::new();
+        }
+        if self.pattern_error().is_some() {
+            return "invalid pattern".into();
         }
         let pages = self.searched.len();
         let searched = self.searched_pages();
         if self.matches.is_empty() {
             if searched < pages {
-                format!("Searching… {searched}/{pages}")
+                format!("searching… {searched}/{pages}")
             } else {
-                "No matches".into()
+                "no matches".into()
             }
         } else {
             let more = if searched < pages { "+" } else { "" };
             format!(
-                "{} of {}{more}",
+                "{}/{}{more}",
                 self.current.map_or(0, |current| current + 1),
                 self.matches.len()
             )
         }
+    }
+}
+
+/// A search as applied: the query and its options.
+#[derive(Clone, Debug, PartialEq)]
+struct Applied {
+    query: String,
+    case_sensitive: bool,
+    whole_words: bool,
+    pattern: bool,
+}
+
+impl Applied {
+    /// The query as a regular expression, with the options.
+    fn compile(&self) -> Result<regex::Regex, String> {
+        let source = if self.whole_words {
+            format!(r"\b(?:{})\b", self.query)
+        } else {
+            self.query.clone()
+        };
+        regex::RegexBuilder::new(&source)
+            .case_insensitive(!self.case_sensitive)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -292,9 +347,11 @@ pub enum FindBarAction {
     Close,
 }
 
-/// The floating find bar at the top right of the document view. Enter
-/// finds the next match and keeps the field focused for another, unless
-/// `enter_leaves` (the Vim preset, where n and N go on from the page).
+/// The find bar (frame 02d): a popover at the top right of the pages with
+/// the query, the count, the options (`Aa` case, `.*` pattern, `ab` whole
+/// words), previous, next and close. Enter finds the next match and keeps
+/// the field focused for another, unless `enter_leaves` (the Vim preset,
+/// where n and N go on from the page).
 pub fn find_bar(
     find: &mut Find,
     area: egui::Rect,
@@ -307,20 +364,22 @@ pub fn find_bar(
     egui::Area::new(egui::Id::new("find-bar"))
         .order(egui::Order::Middle)
         .pivot(egui::Align2::RIGHT_TOP)
-        .fixed_pos(area.right_top() + egui::vec2(-18.0, 12.0))
+        .fixed_pos(area.right_top() + egui::vec2(-24.0, 8.0))
         .show(ctx, |ui| {
-            widgets::card_frame(ctx)
-                .shadow(egui::Shadow::NONE)
-                .inner_margin(egui::Margin::symmetric(10, 6))
+            glyphst_ui::pane::popover(ctx)
+                .inner_margin(egui::Margin::symmetric(8, 3))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(icons::image("search", 16.0, tokens.muted));
+                        ui.add(icons::image("search", 14.0, tokens.faint));
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut find.query)
                                 .id(egui::Id::new("find-input"))
-                                .hint_text("Find text")
-                                .desired_width(220.0)
+                                .font(theme::mono(12.0))
+                                .hint_text(
+                                    egui::RichText::new("find in document").color(tokens.faint),
+                                )
+                                .desired_width(150.0)
                                 .frame(egui::Frame::NONE),
                         );
                         if find.focus {
@@ -339,35 +398,37 @@ pub fn find_bar(
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             action = Some(FindBarAction::Close);
                         }
-                        ui.label(
-                            egui::RichText::new(find.status())
-                                .size(12.0)
-                                .color(tokens.muted),
+                        let status = find.status();
+                        let color = if find.pattern_error().is_some() {
+                            tokens.err
+                        } else {
+                            tokens.accent_text
+                        };
+                        let status = ui.label(
+                            egui::RichText::new(status)
+                                .font(theme::mono(11.0))
+                                .color(color),
                         );
-                        if icons::button(ui, "chevron-up", 26.0, false, "Previous (Shift+Enter)")
+                        if let Some(error) = find.pattern_error() {
+                            status.tip(error);
+                        }
+                        let mut changed = false;
+                        changed |= option(ui, "Aa", &mut find.case_sensitive, "match case");
+                        changed |= option(ui, ".*", &mut find.pattern, "regular expression");
+                        changed |= option(ui, "ab", &mut find.whole_words, "whole words");
+                        if changed {
+                            find.edited(now);
+                        }
+                        if icons::button(ui, "chevron-up", 22.0, false, "previous (shift enter)")
                             .clicked()
                         {
                             action = Some(FindBarAction::Step(false));
                         }
-                        if icons::button(ui, "chevron-down", 26.0, false, "Next (Enter)").clicked()
+                        if icons::button(ui, "chevron-down", 22.0, false, "next (enter)").clicked()
                         {
                             action = Some(FindBarAction::Step(true));
                         }
-                        let options = icons::button(
-                            ui,
-                            "sliders-horizontal",
-                            26.0,
-                            find.case_sensitive || find.whole_words,
-                            "Find options",
-                        );
-                        egui::Popup::menu(&options).show(|ui| {
-                            let words = ui.checkbox(&mut find.whole_words, "Whole words only");
-                            let case = ui.checkbox(&mut find.case_sensitive, "Case-sensitive");
-                            if words.changed() || case.changed() {
-                                find.edited(now);
-                            }
-                        });
-                        if icons::button(ui, "x", 26.0, false, "Close (Esc)").clicked() {
+                        if icons::button(ui, "x", 22.0, false, "close (esc)").clicked() {
                             action = Some(FindBarAction::Close);
                         }
                     });
@@ -376,71 +437,160 @@ pub fn find_bar(
     action
 }
 
-/// The search panel: the query, options and every match with its context.
-/// Returns the index of a match to go to.
+/// A search option toggled by its glyph (`Aa`, `.*`, `ab`); returns
+/// whether it flipped.
+fn option(ui: &mut egui::Ui, label: &str, on: &mut bool, tip: &str) -> bool {
+    let tokens = Tokens::get(ui.ctx());
+    let font = theme::mono(10.0);
+    let size = egui::vec2(glyphst_ui::text::width(ui, label, &font) + 8.0, 17.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let response = response.tip(tip);
+    if response.clicked() {
+        *on = !*on;
+    }
+    let (fill, color) = if *on {
+        (tokens.accent_soft, tokens.accent_text)
+    } else if response.hovered() {
+        (tokens.hover, tokens.text)
+    } else {
+        (egui::Color32::TRANSPARENT, tokens.faint)
+    };
+    ui.painter().rect_filled(rect, tokens.ctl_radius(), fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        color,
+    );
+    response.clicked()
+}
+
+/// The Search tab (frame 03): the query with its options, then the
+/// matches grouped by page under `── p.4 ──── 3`, each a line of context
+/// with the match in accent. Returns the index of a match to go to.
 pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<usize> {
     let tokens = Tokens::get(ui.ctx());
-    let response = widgets::filter_field(ui, &mut find.query, "Search the document");
-    if response.changed() {
+    ui.add_space(4.0);
+    let mut case = find.case_sensitive;
+    let mut pattern = find.pattern;
+    let response = glyphst_ui::field::TextField::search(&mut find.query, "search the document")
+        .toggle(glyphst_ui::field::FieldToggle {
+            label: "Aa",
+            on: &mut case,
+            tooltip: "match case",
+        })
+        .toggle(glyphst_ui::field::FieldToggle {
+            label: ".*",
+            on: &mut pattern,
+            tooltip: "regular expression",
+        })
+        .show(ui);
+    if response.changed() || case != find.case_sensitive || pattern != find.pattern {
+        find.case_sensitive = case;
+        find.pattern = pattern;
         find.edited(now);
     }
-    ui.horizontal(|ui| {
-        let words = ui.checkbox(&mut find.whole_words, "Whole words");
-        let case = ui.checkbox(&mut find.case_sensitive, "Match case");
-        if words.changed() || case.changed() {
-            find.edited(now);
-        }
-    });
-    ui.label(egui::RichText::new(find.status()).color(tokens.muted));
-    ui.separator();
+    let status = find.status();
+    if !status.is_empty() && find.matches.is_empty() {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(find.pattern_error().unwrap_or(&status))
+                .font(theme::mono(11.0))
+                .color(tokens.muted),
+        );
+    }
+    ui.add_space(6.0);
     let mut go = None;
-    let line = ui.text_style_height(&egui::TextStyle::Body);
-    let row_height = line * 2.0 + 12.0;
+    // Rows: a page's title row, then its matches.
+    #[derive(Clone, Copy)]
+    enum Line {
+        Page(usize, usize),
+        Match(usize),
+    }
+    let mut lines = Vec::new();
+    let mut index = 0;
+    while index < find.matches.len() {
+        let page = find.matches[index].page;
+        let range = find.on_page(page);
+        lines.push(Line::Page(page, range.len()));
+        lines.extend(range.clone().map(Line::Match));
+        index = range.end.max(index + 1);
+    }
+    let row_height = 24.0;
     egui::ScrollArea::vertical().auto_shrink(false).show_rows(
         ui,
         row_height,
-        find.matches.len(),
+        lines.len(),
         |ui, rows| {
-            for index in rows {
-                let found = &find.matches[index];
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), row_height),
-                    egui::Sense::click(),
-                );
-                let selected = find.current == Some(index);
-                if selected || response.hovered() {
-                    let fill = if selected {
-                        tokens.accent_soft
-                    } else {
-                        tokens.hover
-                    };
-                    ui.painter().rect_filled(rect, 4.0, fill);
-                }
-                let normal = egui::TextFormat {
-                    color: tokens.muted,
-                    ..Default::default()
-                };
-                let strong = egui::TextFormat {
-                    color: tokens.text,
-                    background: MATCH_TINT,
-                    ..Default::default()
-                };
-                let mut job = egui::text::LayoutJob::default();
-                job.append(&format!("p. {}  ", found.page + 1), 0.0, normal.clone());
-                let chars: Vec<char> = found.context.chars().collect();
-                let part = |range: Range<usize>| chars[range].iter().collect::<String>();
-                let matched = found.context_match.start.min(chars.len())
-                    ..found.context_match.end.min(chars.len());
-                job.append(&part(0..matched.start), 0.0, normal.clone());
-                job.append(&part(matched.clone()), 0.0, strong);
-                job.append(&part(matched.end..chars.len()), 0.0, normal);
-                job.wrap.max_rows = 2;
-                job.wrap.max_width = rect.width() - 12.0;
-                let galley = ui.painter().layout_job(job);
-                ui.painter()
-                    .galley(rect.min + egui::vec2(6.0, 6.0), galley, tokens.muted);
-                if response.clicked() {
-                    go = Some(index);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for line in &lines[rows] {
+                match *line {
+                    Line::Page(page, count) => {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_height),
+                            egui::Sense::hover(),
+                        );
+                        glyphst_ui::motif::paint_rule_title(
+                            ui,
+                            rect.shrink2(egui::vec2(0.0, 2.0)),
+                            &format!("p.{}", page + 1),
+                            Some(&count.to_string()),
+                            true,
+                        );
+                    }
+                    Line::Match(index) => {
+                        let found = &find.matches[index];
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_height),
+                            egui::Sense::click(),
+                        );
+                        let selected = find.current == Some(index);
+                        if selected {
+                            ui.painter().rect_filled(rect, 0, tokens.accent_soft);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
+                                0,
+                                tokens.accent,
+                            );
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(rect, 0, tokens.hover);
+                        }
+                        let font = theme::mono(11.0);
+                        let normal = egui::TextFormat {
+                            font_id: font.clone(),
+                            color: if selected {
+                                tokens.accent_text
+                            } else {
+                                tokens.text_2
+                            },
+                            ..Default::default()
+                        };
+                        let strong = egui::TextFormat {
+                            font_id: theme::mono_strong(11.0),
+                            color: tokens.accent_text,
+                            ..Default::default()
+                        };
+                        let mut job = egui::text::LayoutJob::default();
+                        let chars: Vec<char> = found.context.chars().collect();
+                        let part = |range: Range<usize>| chars[range].iter().collect::<String>();
+                        let matched = found.context_match.start.min(chars.len())
+                            ..found.context_match.end.min(chars.len());
+                        job.append("…", 0.0, normal.clone());
+                        job.append(&part(0..matched.start), 0.0, normal.clone());
+                        job.append(&part(matched.clone()), 0.0, strong);
+                        job.append(&part(matched.end..chars.len()), 0.0, normal);
+                        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 8.0);
+                        let galley = ui.painter().layout_job(job);
+                        ui.painter().galley(
+                            egui::pos2(rect.left() + 4.0, rect.center().y - galley.size().y / 2.0),
+                            galley,
+                            tokens.text_2,
+                        );
+                        if response.clicked() {
+                            go = Some(index);
+                        }
+                    }
                 }
             }
         },
@@ -451,10 +601,18 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
     go
 }
 
-/// The tint of search matches, and of the current one.
-pub const MATCH_TINT: egui::Color32 = egui::Color32::from_rgba_premultiplied(90, 69, 0, 90);
-pub const CURRENT_MATCH_TINT: egui::Color32 =
-    egui::Color32::from_rgba_premultiplied(160, 80, 0, 160);
+/// The tint of a search match on the page and, for the current one, its
+/// accent outline: the theme's accent, see-through over the text.
+pub fn match_tint(tokens: &Tokens, current: bool) -> (egui::Color32, Option<egui::Stroke>) {
+    if current {
+        (
+            Tokens::fade(tokens.accent, 0.45),
+            Some(egui::Stroke::new(1.0, tokens.accent)),
+        )
+    } else {
+        (Tokens::fade(tokens.accent, 0.28), None)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -486,7 +644,7 @@ mod tests {
         assert!(find.refresh(&text, start + DEBOUNCE, 2));
         assert_eq!(find.matches.len(), 2);
         assert_eq!(find.current, Some(0));
-        assert_eq!(find.status(), "1 of 2+");
+        assert_eq!(find.status(), "1/2+");
 
         text.insert(0, page("cat"));
         find.refresh(&text, start + DEBOUNCE, 2);
@@ -503,7 +661,7 @@ mod tests {
             !find.refresh(&text, start + DEBOUNCE, 2),
             "every page searched"
         );
-        assert_eq!(find.status(), "2 of 4");
+        assert_eq!(find.status(), "2/4");
         assert_eq!(find.on_page(2).len(), 2);
         assert_eq!(find.take_reveal().unwrap().page, 2);
         assert!(find.take_reveal().is_none(), "revealed once");
@@ -575,5 +733,25 @@ mod tests {
         find.refresh(&text, now, 1);
         assert_eq!(find.matches.len(), 1, "the new text has no match");
         assert!(find.is_complete());
+    }
+
+    #[test]
+    fn patterns_search_and_report_bad_ones() {
+        let mut text = DocText::new(1);
+        text.insert(0, page("attention is all you need"));
+        let mut find = Find {
+            query: "a[a-z]+".into(),
+            pattern: true,
+            ..Default::default()
+        };
+        let start = Instant::now();
+        find.refresh(&text, start + DEBOUNCE, 0);
+        assert_eq!(find.matches.len(), 2, "attention, all");
+        find.query = "a(".into();
+        find.edited(start);
+        find.refresh(&text, start + DEBOUNCE * 2, 0);
+        assert!(find.matches.is_empty());
+        assert!(find.pattern_error().is_some());
+        assert_eq!(find.status(), "invalid pattern");
     }
 }

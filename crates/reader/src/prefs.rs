@@ -55,6 +55,10 @@ pub struct Prefs {
     pub assistant_width: f32,
     /// Language to translate into; `None` follows the translation settings.
     pub target_language: Option<String>,
+    /// While translated pages show, the original shows under the pointer.
+    pub original_on_hover: bool,
+    /// Opening a PDF starts translating it.
+    pub translate_as_read: bool,
     /// Keyboard shortcuts the user changed: command id to keys.
     pub shortcuts: Overrides,
     /// Which default keys commands have.
@@ -84,6 +88,8 @@ impl Default for Prefs {
             drawer_width: crate::shell::SIDEBAR_WIDTH,
             assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,
+            original_on_hover: true,
+            translate_as_read: false,
             shortcuts: Overrides::new(),
             keymap: KeymapPreset::Standard,
             last_session: LastSession::default(),

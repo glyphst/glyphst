@@ -44,7 +44,7 @@ use crate::{
     quick_ask::{self, QuickAsk},
     region::{self, Region},
     settings_window::{Section, SettingsContext, SettingsWindow},
-    sidebar::{self, SidebarAction, SidebarState, SidebarTab, TranslationInfo},
+    sidebar::{self, OtherBookmark, SidebarAction, SidebarInfo, SidebarState, SidebarTab},
     text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
     transition::ViewTransition,
@@ -554,6 +554,13 @@ impl ReaderApp {
                     let _ = self.library.mark_library_item_opened(path);
                 }
                 self.activate(Some(self.tabs.len() - 1));
+                // Translate as I read: a PDF starts translating as it opens.
+                let is_pdf = path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+                if self.prefs.translate_as_read && is_pdf && self.user_settings.get().is_some() {
+                    self.start_document_translation(ctx);
+                }
             }
             Err(error) => self
                 .notices
@@ -1028,7 +1035,89 @@ impl ReaderApp {
                     self.tabs[active].outline_view.locate();
                 }
             }
+            SidebarAction::Close => self.prefs.show_sidebar = false,
+            SidebarAction::Command(command) => self.run_or_notify(command, ctx),
+            SidebarAction::OpenBookmark(id) => {
+                let found = self
+                    .library
+                    .bookmarks()
+                    .iter()
+                    .find(|bookmark| bookmark.id == id)
+                    .map(|bookmark| (bookmark.path.clone(), bookmark.position.clone()));
+                if let Some((path, position)) = found {
+                    self.open(&path, ctx, None);
+                    if let Some(active) = self.active
+                        && self.tabs[active].path == path
+                    {
+                        self.tabs[active].go_to_position(&position);
+                    }
+                }
+            }
+            SidebarAction::SetSourceLanguage(language) => {
+                self.user_settings
+                    .edit(|settings| settings.translation.source_language = language);
+            }
+            SidebarAction::SetTargetLanguage(language) => {
+                self.prefs.target_language = Some(language);
+            }
+            SidebarAction::SetProvider(provider) => {
+                self.user_settings
+                    .edit(|settings| settings.translation.active_provider = provider);
+            }
+            SidebarAction::SetOriginalOnHover(on) => self.prefs.original_on_hover = on,
+            SidebarAction::SetTranslateAsRead(on) => {
+                self.prefs.translate_as_read = on;
+                if on
+                    && self
+                        .active
+                        .is_some_and(|active| self.tabs[active].translation.is_none())
+                {
+                    self.start_document_translation(ctx);
+                }
+            }
         }
+    }
+
+    /// When the document of tab `active` was last opened, as the
+    /// document card writes it.
+    pub(crate) fn opened_label(&self, active: usize) -> Option<String> {
+        let path = glyphst_library::normalize_path(&self.tabs[active].path);
+        self.library
+            .history_entries()
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| sidebar::when(entry.opened))
+    }
+
+    /// The other documents' bookmarks, for the Bookmarks tab.
+    pub(crate) fn other_bookmarks(&self, active: usize) -> Vec<OtherBookmark> {
+        let path = &self.tabs[active].path;
+        self.library
+            .bookmarks()
+            .iter()
+            .filter(|bookmark| &bookmark.path != path)
+            .map(|bookmark| {
+                let document = bookmark
+                    .path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let short: String = document.chars().take(12).collect();
+                OtherBookmark {
+                    id: bookmark.id,
+                    title: bookmark
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("page {}", bookmark.position.page.max(1))),
+                    place: format!(
+                        "{} p.{}",
+                        short.to_lowercase(),
+                        bookmark.position.page.max(1)
+                    ),
+                    document,
+                }
+            })
+            .collect()
     }
 
     /// Steps to the next or previous match.
@@ -2556,6 +2645,7 @@ impl ReaderApp {
 
         // Over a translated block: its outline, and the original text.
         if self.drag.is_none()
+            && self.prefs.original_on_hover
             && let Some(pos) = response.hover_pos()
             && let Some((map, point)) = under(pos)
             && let Some((block, original)) = tab.original_at(map.page, point)
@@ -2891,17 +2981,20 @@ impl ReaderApp {
             };
             for index in tab.find.on_page(map.page) {
                 let found = &tab.find.matches[index];
-                let tint = if tab.find.current == Some(index) {
-                    find::CURRENT_MATCH_TINT
-                } else {
-                    find::MATCH_TINT
-                };
-                fill_rects(
-                    painter,
-                    map,
-                    text.selection_rects(found.range.clone()),
-                    tint,
-                );
+                let current = tab.find.current == Some(index);
+                let (tint, edge) = find::match_tint(tokens, current);
+                let rects = text.selection_rects(found.range.clone());
+                fill_rects(painter, map, rects.iter().copied(), tint);
+                if let Some(edge) = edge {
+                    for rect in rects {
+                        painter.rect_stroke(
+                            map.rect_to_screen(rect).expand(1.0),
+                            1,
+                            edge,
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
             }
             if let Some(selection) = &tab.selection
                 && selection.touches(map.page)

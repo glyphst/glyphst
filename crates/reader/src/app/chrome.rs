@@ -630,13 +630,28 @@ impl ReaderApp {
             .chain(&self.translator.warnings)
             .cloned()
             .collect();
-        let info = TranslationInfo {
+        let other_bookmarks = if self.prefs.sidebar == SidebarTab::Bookmarks {
+            self.other_bookmarks(active)
+        } else {
+            Vec::new()
+        };
+        let settings = self.user_settings.get();
+        let info = SidebarInfo {
             target: self
                 .translator
                 .target_language(self.prefs.target_language.as_deref()),
+            source: settings.and_then(|settings| settings.translation.source_language.clone()),
+            provider: settings
+                .map(|settings| settings.translation.active_provider)
+                .unwrap_or_default(),
+            original_on_hover: self.prefs.original_on_hover,
+            translate_as_read: self.prefs.translate_as_read,
             pinned: &self.translator.pinned,
             warnings: &warnings,
-            ready: self.user_settings.get().is_some(),
+            ready: settings.is_some(),
+            other_bookmarks: &other_bookmarks,
+            bookmark_key: self.keymap.label(Command::Bookmark).unwrap_or_default(),
+            opened: self.opened_label(active),
         };
         // The Effects tab edits a copy of this book's choices.
         let showing_effects = self.prefs.sidebar == SidebarTab::Effects;
@@ -664,7 +679,11 @@ impl ReaderApp {
             // The previews are animated.
             ctx.request_repaint();
             let find = |id: Option<&str>| id.and_then(|id| effects.iter().find(|def| def.id == id));
-            book_changed = crate::effects_page::book_page(
+            let mut reduce_motion = self
+                .user_settings
+                .get()
+                .is_some_and(|settings| settings.behavior.reduce_motion);
+            let changes = crate::effects_page::book_page(
                 &mut body,
                 crate::effects_page::BookPage {
                     title: &title,
@@ -673,11 +692,17 @@ impl ReaderApp {
                     default_transition: find(self.prefs.transition.as_deref()),
                     default_overlay: find(self.prefs.overlay.as_deref()),
                     effects: &effects,
-                    params: &self.prefs.effect_params,
+                    params: &mut self.prefs.effect_params,
                     has_wallpaper: self.prefs.wallpaper.is_some(),
+                    reduce_motion: &mut reduce_motion,
                     time,
                 },
             );
+            book_changed = changes.book;
+            if changes.reduce_motion {
+                self.user_settings
+                    .edit(|settings| settings.behavior.reduce_motion = reduce_motion);
+            }
         } else {
             requests.extend(sidebar::show(
                 &mut body,

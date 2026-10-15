@@ -8,10 +8,21 @@ use std::{
 };
 
 use glyphst_library::HighlightColor;
+use glyphst_settings::TranslationProvider;
+use glyphst_ui::{
+    Tip,
+    button::Button,
+    menu as ui_menu, motif,
+    pane::{Action, Header},
+    row::{self as ui_row, ListRow},
+    segmented,
+    toggle::Switch,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     annotations::{self, AnnotationId},
+    commands::Command,
     document::OutlineEntry,
     document_tab::{DocumentTab, ViewAction},
     find, icons,
@@ -93,15 +104,55 @@ pub enum SidebarAction {
     Unpin(usize),
     /// Follow the section being read again and show it.
     LocateOutline,
+    /// Hide the sidebar.
+    Close,
+    Command(Command),
+    /// A bookmark of another document: open it there.
+    OpenBookmark(u64),
+    SetSourceLanguage(Option<String>),
+    SetTargetLanguage(String),
+    SetProvider(TranslationProvider),
+    SetOriginalOnHover(bool),
+    SetTranslateAsRead(bool),
 }
 
-/// What the Translation panel shows besides the tab's session.
-pub struct TranslationInfo<'a> {
+/// What the sidebar shows besides the tab: the translation settings and
+/// the other documents' bookmarks.
+pub struct SidebarInfo<'a> {
     pub target: Option<String>,
+    /// The language translated from; `None` detects it.
+    pub source: Option<String>,
+    pub provider: TranslationProvider,
+    pub original_on_hover: bool,
+    pub translate_as_read: bool,
     pub pinned: &'a [(String, String)],
     pub warnings: &'a [String],
     /// The settings and keys are loaded.
     pub ready: bool,
+    pub other_bookmarks: &'a [OtherBookmark],
+    /// The key that adds a bookmark, for the bookmarks' footer.
+    pub bookmark_key: String,
+    /// When the document was opened (`today 09:42`), for its card.
+    pub opened: Option<String>,
+}
+
+/// A bookmark in another document.
+pub struct OtherBookmark {
+    pub id: u64,
+    /// The document's short name.
+    pub document: String,
+    pub title: String,
+    /// `bert p.4`.
+    pub place: String,
+}
+
+/// Which annotations the Notes tab lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum NotesFilter {
+    #[default]
+    All,
+    Highlights,
+    Notes,
 }
 
 /// Edits in progress in the sidebar.
@@ -116,6 +167,7 @@ pub struct SidebarState {
     open_note: Option<AnnotationId>,
     /// Each section's filter text.
     filters: HashMap<SidebarTab, String>,
+    notes_filter: NotesFilter,
 }
 
 /// A tab's outline and thumbnail lists, after the GPUI Reader's: the
@@ -186,177 +238,569 @@ pub fn show(
     tab: &mut DocumentTab,
     which: &mut SidebarTab,
     state: &mut SidebarState,
-    translation: &TranslationInfo<'_>,
+    info: &SidebarInfo<'_>,
     now: Instant,
 ) -> Vec<SidebarAction> {
     let mut actions = Vec::new();
-    // Lists with entries can be filtered.
+    // Long lists can be filtered.
     let hint = match which {
-        SidebarTab::Outline if !tab.outline.is_empty() => Some("Filter the outline"),
-        SidebarTab::Bookmarks if !tab.annotations.bookmarks.is_empty() => Some("Filter bookmarks"),
-        SidebarTab::Notes if !tab.annotations.items.is_empty() => {
-            Some("Filter highlights and notes")
+        SidebarTab::Outline if tab.outline.len() > LONG_LIST => Some("filter the outline"),
+        SidebarTab::Bookmarks if tab.annotations.bookmarks.len() > LONG_LIST => {
+            Some("filter bookmarks")
         }
+        SidebarTab::Notes if tab.annotations.items.len() > LONG_LIST => Some("filter notes"),
         _ => None,
     };
     let filter = match hint {
         Some(hint) => {
             let text = state.filters.entry(*which).or_default();
+            ui.add_space(8.0);
             widgets::filter_field(ui, text, hint);
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             text.trim().to_lowercase()
         }
         None => String::new(),
     };
+    ui.add_space(4.0);
     match which {
-        SidebarTab::Outline => outline(ui, tab, &filter, &mut actions),
+        SidebarTab::Outline => {
+            // The document's card stays at the foot, under the outline.
+            let card_height = 108.0;
+            let area = ui.available_rect_before_wrap();
+            let list = area.with_max_y((area.bottom() - card_height).max(area.top()));
+            let mut list_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(list)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            outline(&mut list_ui, tab, &filter, &mut actions);
+            let card = area.with_min_y(list.bottom());
+            let mut card_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(card)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            document_card(&mut card_ui, tab, info.opened.as_deref());
+        }
         SidebarTab::Pages => pages(ui, tab, &mut actions),
-        SidebarTab::Bookmarks => bookmarks(ui, tab, state, &filter, &mut actions),
+        SidebarTab::Bookmarks => bookmarks(ui, tab, state, info, &filter, &mut actions),
         SidebarTab::Notes => notes(ui, tab, state, &filter, &mut actions),
         // Choosing a match makes it current; the view brings it in.
         SidebarTab::Search => {
             find::search_panel(&mut tab.find, ui, now);
         }
-        SidebarTab::Translation => translation_panel(ui, tab, translation, &mut actions),
+        SidebarTab::Translation => translation_panel(ui, tab, info, &mut actions),
         SidebarTab::Effects => {}
     }
     actions
 }
 
+/// Lists longer than this get a filter field.
+const LONG_LIST: usize = 40;
+
+/// The document card under the outline: title, authors, pages and format,
+/// when it was opened.
+pub fn document_card(ui: &mut egui::Ui, tab: &DocumentTab, opened: Option<&str>) {
+    let tokens = Tokens::get(ui.ctx());
+    let meta = |label: &str| {
+        tab.metadata
+            .iter()
+            .find(|(name, _)| *name == label)
+            .map(|(_, value)| value.as_str())
+    };
+    let size = std::fs::metadata(&tab.path)
+        .map(|metadata| format_size(metadata.len()))
+        .ok();
+    let mut pages = format!("{}", tab.layout.len());
+    if let Some(format) = meta("Format") {
+        pages.push_str(&format!(" · {}", format.to_lowercase()));
+    }
+    if let Some(size) = size {
+        pages.push_str(&format!(" · {size}"));
+    }
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        ui.cursor().top(),
+        tokens.hairline(),
+    );
+    ui.add_space(8.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.set_width(ui.available_width());
+        motif::rule_title(ui, "document", None);
+        ui.add_space(2.0);
+        let label_width = 72.0;
+        ui_row::field_line(ui, "title", &tab.title, label_width);
+        if let Some(author) = meta("Author") {
+            ui_row::field_line(ui, "authors", author, label_width);
+        }
+        ui_row::field_line(ui, "pages", &pages, label_width);
+        if let Some(opened) = opened {
+            ui_row::field_line(ui, "opened", opened, label_width);
+        }
+    });
+    ui.add_space(8.0);
+}
+
+/// `2.1 MB`.
+pub fn format_size(bytes: u64) -> String {
+    let bytes = bytes as f64;
+    if bytes >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB", bytes / 1024.0 / 1024.0 / 1024.0)
+    } else if bytes >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", bytes / 1024.0 / 1024.0)
+    } else {
+        format!("{:.0} KB", (bytes / 1024.0).max(1.0))
+    }
+}
+
 fn translation_panel(
     ui: &mut egui::Ui,
     tab: &DocumentTab,
-    info: &TranslationInfo<'_>,
+    info: &SidebarInfo<'_>,
     actions: &mut Vec<SidebarAction>,
 ) {
-    let language = info
-        .target
-        .as_deref()
-        .map(language_label)
-        .unwrap_or("the settings' language");
+    let tokens = Tokens::get(ui.ctx());
     let is_pdf = tab
         .path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
-    ui.strong("Document");
-    match &tab.translation {
-        None if !is_pdf => muted(ui, "Only PDFs can be translated as documents."),
-        None => {
-            muted(
-                ui,
-                &format!(
-                    "Translate this PDF into {language}; translated pages replace the originals as they are ready."
-                ),
-            );
-            let start = ui.add_enabled(info.ready, egui::Button::new("Translate document"));
-            if start.clicked() {
-                actions.push(SidebarAction::StartTranslation);
-            }
-            if !info.ready {
-                muted(ui, "Reading the translation settings…");
-            }
-        }
-        Some(session) => {
-            ui.label(session.status_line());
-            if let Some(progress) = &session.progress
-                && let (Some(done), Some(total)) = (progress.completed, progress.total)
-                && total > 0
-                && session.is_running()
+    ui.add_space(6.0);
+    // The three choices: from, to, engine.
+    let source = info
+        .source
+        .as_deref()
+        .map(|code| format!("{} · fixed", language_label(code).to_lowercase()))
+        .unwrap_or_else(|| "detect · auto".to_owned());
+    let target = info
+        .target
+        .as_deref()
+        .map(language_label)
+        .unwrap_or("the settings' language")
+        .to_owned();
+    if let Some(response) = select_row(ui, "from", &source) {
+        egui::Popup::menu(&response).show(|ui| {
+            ui_menu::style(ui);
+            if ui_menu::Item::new("detect")
+                .checked(info.source.is_none())
+                .show(ui)
+                .clicked()
             {
-                ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(6.0));
+                actions.push(SidebarAction::SetSourceLanguage(None));
             }
-            if session.page_count > 0 {
-                muted(
-                    ui,
-                    &format!(
-                        "{} of {} pages translated",
-                        session.previews.len(),
-                        session.page_count
-                    ),
-                );
-            }
-            if !session.failures.is_empty() {
-                muted(
-                    ui,
-                    &format!("{} pages could not be translated", session.failures.len()),
-                );
-            }
-            let mut shown = session.show_translated;
-            if widgets::segmented(ui, &mut shown, &[(false, "Original"), (true, "Translated")]) {
-                actions.push(SidebarAction::ShowTranslated(shown));
-            }
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if session.is_running() {
-                    if widgets::pill_button(ui, Some("x"), "Cancel", false).clicked() {
-                        actions.push(SidebarAction::CancelTranslation);
-                    }
-                } else if widgets::pill_button(ui, Some("refresh-cw"), "Translate again", false)
-                    .clicked()
-                {
-                    actions.push(SidebarAction::StartTranslation);
-                }
-                let can_export = session.status == SessionStatus::Finished
-                    && !matches!(session.export, Some(Export::Running(_)));
-                if ui
-                    .add_enabled_ui(can_export, |ui| {
-                        widgets::pill_button(ui, Some("file-down"), "Export PDF…", false)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    actions.push(SidebarAction::ExportTranslation);
-                }
+            ui_menu::separator(ui);
+            languages(ui, info.source.as_deref(), |code| {
+                actions.push(SidebarAction::SetSourceLanguage(Some(code)));
             });
-            match &session.export {
-                Some(Export::Running(_)) => muted(ui, "Exporting…"),
-                Some(Export::Done(Ok(path))) => muted(ui, &format!("Saved {}", path.display())),
-                Some(Export::Done(Err(error))) => muted(ui, &format!("Export failed: {error}")),
-                None => {}
+        });
+    }
+    ui.add_space(6.0);
+    if let Some(response) = select_row(ui, "to", &target) {
+        egui::Popup::menu(&response).show(|ui| {
+            ui_menu::style(ui);
+            languages(ui, info.target.as_deref(), |code| {
+                actions.push(SidebarAction::SetTargetLanguage(code));
+            });
+        });
+    }
+    ui.add_space(6.0);
+    if let Some(response) = select_row(ui, "engine", info.provider.as_str()) {
+        egui::Popup::menu(&response).show(|ui| {
+            ui_menu::style(ui);
+            for provider in TranslationProvider::ALL {
+                if ui_menu::Item::new(provider.as_str())
+                    .checked(provider == info.provider)
+                    .show(ui)
+                    .clicked()
+                {
+                    actions.push(SidebarAction::SetProvider(provider));
+                }
             }
-        }
+        });
+    }
+    ui.add_space(10.0);
+    let shown = tab
+        .translation
+        .as_ref()
+        .is_some_and(|session| session.show_translated);
+    let mut replace = shown;
+    if switch_row(
+        ui,
+        "replace pages in place",
+        &mut replace,
+        tab.translation.is_some(),
+    ) {
+        actions.push(SidebarAction::ShowTranslated(replace));
+    }
+    let mut hover = info.original_on_hover;
+    if switch_row(ui, "original on hover", &mut hover, true) {
+        actions.push(SidebarAction::SetOriginalOnHover(hover));
+    }
+    let mut as_read = info.translate_as_read;
+    if switch_row(ui, "translate as I read", &mut as_read, is_pdf) {
+        actions.push(SidebarAction::SetTranslateAsRead(as_read));
     }
     for warning in info.warnings {
         muted(ui, warning);
     }
-    widgets::section_title(ui, "Pinned");
-    if info.pinned.is_empty() {
-        muted(
-            ui,
-            "Translate a selection (right-click it) and pin it to keep it here.",
-        );
-        return;
+    let footer = 44.0;
+    match &tab.translation {
+        None if !is_pdf => {
+            ui.add_space(8.0);
+            muted(ui, "only PDFs translate as documents.");
+        }
+        None => {
+            ui.add_space(8.0);
+            muted(
+                ui,
+                &format!("translated pages replace the originals as they are ready, in {target}."),
+            );
+            ui.add_space(8.0);
+            let start = ui.add_enabled(info.ready, Button::primary("translate document"));
+            if start.clicked() {
+                actions.push(SidebarAction::StartTranslation);
+            }
+            if !info.ready {
+                muted(ui, "reading the translation settings…");
+            }
+        }
+        Some(session) => {
+            ui.add_space(8.0);
+            let total = session.page_count.max(tab.layout.len());
+            motif::rule_title(
+                ui,
+                "pages",
+                Some(&format!("{}/{total}", session.previews.len())),
+            );
+            let current = tab.current_page();
+            let failed: HashSet<usize> = session
+                .failures
+                .iter()
+                .map(|failure| failure.page_index)
+                .collect();
+            let status = |page: usize| {
+                if session.previews.contains_key(&page) {
+                    PageStatus::Done
+                } else if failed.contains(&page) {
+                    PageStatus::Failed
+                } else if session.is_running() {
+                    PageStatus::Waiting
+                } else {
+                    PageStatus::Skipped
+                }
+            };
+            let height = (ui.available_height() - footer).max(60.0);
+            egui::ScrollArea::vertical()
+                .id_salt(("translation-pages", tab.id))
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (first, last, state) in page_runs(total, current, status) {
+                        page_status_row(ui, first, last, state, first == current);
+                    }
+                });
+            match &session.export {
+                Some(Export::Running(_)) => muted(ui, "exporting…"),
+                Some(Export::Done(Ok(path))) => muted(ui, &format!("saved {}", path.display())),
+                Some(Export::Done(Err(error))) => muted(ui, &format!("export failed: {error}")),
+                None => {}
+            }
+        }
     }
+    // The pinned translations of selections.
+    if !info.pinned.is_empty() {
+        ui.add_space(8.0);
+        motif::rule_title(ui, "pinned", Some(&info.pinned.len().to_string()));
+        for (index, (source, translated)) in info.pinned.iter().enumerate() {
+            ui.push_id(index, |ui| {
+                let quote: String = source.chars().take(QUOTE_CHARS).collect();
+                let response = quote_card(ui, &tokens, tokens.accent, &quote, translated, "");
+                response.context_menu(|ui| {
+                    ui_menu::style(ui);
+                    if ui_menu::Item::new("copy").icon("copy").show(ui).clicked() {
+                        ui.ctx().copy_text(translated.clone());
+                    }
+                    if ui_menu::Item::new("unpin")
+                        .icon("trash-2")
+                        .danger(true)
+                        .show(ui)
+                        .clicked()
+                    {
+                        actions.push(SidebarAction::Unpin(index));
+                    }
+                });
+            });
+        }
+    }
+    // The actions at the foot of the pane.
+    if let Some(session) = &tab.translation {
+        let bottom = ui.max_rect().bottom();
+        let foot = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left(), bottom - footer + 8.0),
+            egui::pos2(ui.max_rect().right(), bottom),
+        );
+        let mut foot_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(foot)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        if session.is_running() {
+            if foot_ui.add(Button::ghost("cancel")).clicked() {
+                actions.push(SidebarAction::CancelTranslation);
+            }
+        } else {
+            let label = if session.show_translated {
+                "show original"
+            } else {
+                "show translated"
+            };
+            if foot_ui.add(Button::ghost(label)).clicked() {
+                actions.push(SidebarAction::ShowTranslated(!session.show_translated));
+            }
+        }
+        let can_export = session.status == SessionStatus::Finished
+            && !matches!(session.export, Some(Export::Running(_)));
+        if foot_ui
+            .add_enabled(can_export, Button::primary("export bilingual"))
+            .clicked()
+        {
+            actions.push(SidebarAction::ExportTranslation);
+        }
+    }
+}
+
+/// A page's translation state in the Translation tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageStatus {
+    Done,
+    Failed,
+    Waiting,
+    Skipped,
+}
+
+/// The pages as rows: runs of three or more pages in the same state, away
+/// from the current page, fold into one `p.7 … p.15` row.
+fn page_runs(
+    count: usize,
+    current: usize,
+    status: impl Fn(usize) -> PageStatus,
+) -> Vec<(usize, usize, PageStatus)> {
+    let mut runs: Vec<(usize, usize, PageStatus)> = Vec::new();
+    for page in 0..count {
+        let state = status(page);
+        let near = page.abs_diff(current) <= 2;
+        match runs.last_mut() {
+            Some((first, last, run))
+                if *run == state && !near && last.abs_diff(current) > 2 && *first != current =>
+            {
+                *last = page;
+            }
+            _ => runs.push((page, page, state)),
+        }
+    }
+    // Short runs read better unfolded.
+    runs.into_iter()
+        .flat_map(|(first, last, state)| {
+            if last - first + 1 >= 3 {
+                vec![(first, last, state)]
+            } else {
+                (first..=last).map(|page| (page, page, state)).collect()
+            }
+        })
+        .collect()
+}
+
+fn page_status_row(ui: &mut egui::Ui, first: usize, last: usize, state: PageStatus, current: bool) {
     let tokens = Tokens::get(ui.ctx());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), egui::Sense::hover());
+    if current {
+        ui.painter().rect_filled(rect, 0, tokens.accent_soft);
+    }
+    let pages = if first == last {
+        format!("p.{}", first + 1)
+    } else {
+        format!("p.{} … p.{}", first + 1, last + 1)
+    };
+    let font = theme::mono(11.0);
+    let y = rect.center().y;
+    ui.painter().text(
+        egui::pos2(rect.left() + 4.0, y),
+        egui::Align2::LEFT_CENTER,
+        pages,
+        font.clone(),
+        if current {
+            tokens.accent_text
+        } else {
+            tokens.text_2
+        },
+    );
+    let (glyph, label, color) = match state {
+        PageStatus::Done => ("✓", "translated", tokens.ok),
+        PageStatus::Failed => ("✕", "failed", tokens.err),
+        PageStatus::Waiting => ("◐", "waiting", tokens.accent),
+        PageStatus::Skipped => ("·", "not translated", tokens.faint),
+    };
+    let x = rect.left() + rect.width() * 0.45;
+    ui.painter().text(
+        egui::pos2(x, y),
+        egui::Align2::LEFT_CENTER,
+        glyph,
+        font.clone(),
+        color,
+    );
+    ui.painter().text(
+        egui::pos2(x + 14.0, y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        if current { tokens.ok } else { tokens.faint },
+    );
+}
+
+/// A choice shown as `label   value  ⇕` on a raised field; returns its
+/// response for the menu, `None` while disabled.
+fn select_row(ui: &mut egui::Ui, label: &str, value: &str) -> Option<egui::Response> {
+    let tokens = Tokens::get(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let edge = if response.hovered() {
+        egui::Stroke::new(1.0, tokens.faint)
+    } else {
+        tokens.edge()
+    };
+    ui.painter().rect(
+        rect,
+        tokens.ctl_radius(),
+        tokens.raised,
+        edge,
+        egui::StrokeKind::Inside,
+    );
+    let y = rect.center().y;
+    ui.painter().text(
+        egui::pos2(rect.left() + 8.0, y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        theme::mono(11.0),
+        tokens.faint,
+    );
+    widgets::row_text(
+        ui,
+        egui::pos2(rect.left() + 60.0, y),
+        value,
+        theme::mono(12.0),
+        tokens.text,
+        rect.width() - 90.0,
+    );
+    icons::paint(
+        ui,
+        egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, y), egui::vec2(12.0, 12.0)),
+        "chevrons-up-down",
+        12.0,
+        tokens.muted,
+    );
+    Some(response.on_hover_cursor(egui::CursorIcon::PointingHand))
+}
+
+/// The languages, each a menu item; `choose` gets the code clicked.
+fn languages(ui: &mut egui::Ui, current: Option<&str>, mut choose: impl FnMut(String)) {
     egui::ScrollArea::vertical()
-        .auto_shrink(false)
+        .max_height(320.0)
         .show(ui, |ui| {
-            for (index, (source, translated)) in info.pinned.iter().enumerate() {
-                egui::Frame::new()
-                    .fill(tokens.raised)
-                    .stroke(egui::Stroke::new(1.0, tokens.rule))
-                    .corner_radius(8)
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let quote: String = source.chars().take(QUOTE_CHARS).collect();
-                        ui.label(egui::RichText::new(quote).italics().color(tokens.muted));
-                        ui.label(translated);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.push_id(index, |ui| {
-                                if icons::button(ui, "trash-2", 24.0, false, "Remove").clicked() {
-                                    actions.push(SidebarAction::Unpin(index));
-                                }
-                                if icons::button(ui, "copy", 24.0, false, "Copy").clicked() {
-                                    ui.ctx().copy_text(translated.clone());
-                                }
-                            });
-                        });
-                    });
-                ui.add_space(6.0);
+            for language in glyphst_translation::TARGET_LANGUAGES {
+                let chosen = current.is_some_and(|code| code.eq_ignore_ascii_case(language.code));
+                if ui_menu::Item::new(language.label)
+                    .checked(chosen)
+                    .show(ui)
+                    .clicked()
+                {
+                    choose(language.code.to_string());
+                }
             }
         });
+}
+
+/// `label            [switch]`; returns whether it flipped.
+fn switch_row(ui: &mut egui::Ui, label: &str, on: &mut bool, enabled: bool) -> bool {
+    let tokens = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.set_min_height(23.0);
+        ui.label(
+            egui::RichText::new(label)
+                .font(theme::mono(12.0))
+                .color(if enabled { tokens.text_2 } else { tokens.faint }),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_enabled(enabled, Switch(on)).changed()
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A quoted passage with a coloured edge, its note under it and meta at
+/// the foot (notes, pinned translations). The response is the card's.
+fn quote_card(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    edge: egui::Color32,
+    quote: &str,
+    body: &str,
+    meta: &str,
+) -> egui::Response {
+    let inner = egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 4,
+            top: 6,
+            bottom: 8,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if !quote.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("“{quote}”"))
+                            .font(theme::regular(12.0))
+                            .italics()
+                            .color(tokens.muted),
+                    )
+                    .wrap(),
+                );
+            }
+            if !body.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(body)
+                            .font(theme::regular(13.0))
+                            .color(tokens.text),
+                    )
+                    .wrap(),
+                );
+            }
+            if !meta.is_empty() {
+                ui.label(
+                    egui::RichText::new(meta)
+                        .font(theme::mono(10.0))
+                        .color(tokens.faint),
+                );
+            }
+        });
+    let rect = inner.response.rect;
+    let response = ui.interact(rect, ui.id().with("card"), egui::Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0, Tokens::fade(tokens.hover, 0.5));
+    }
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
+        0,
+        edge,
+    );
+    ui.add_space(6.0);
+    response
 }
 
 /// A language's name from its code, or the code itself.
@@ -369,7 +813,14 @@ pub fn language_label(code: &str) -> &str {
 
 fn muted(ui: &mut egui::Ui, text: &str) {
     let tokens = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(text).color(tokens.muted));
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(theme::mono(11.0))
+                .color(tokens.muted),
+        )
+        .wrap(),
+    );
 }
 
 /// The number shown beside a section's title.
@@ -403,49 +854,48 @@ pub fn badge_label(count: usize) -> String {
     }
 }
 
-/// The open section's title, its count and its actions.
+/// The open section's pane header, `outline ──── 24`, and its actions.
 pub fn header(ui: &mut egui::Ui, tab: &DocumentTab, which: SidebarTab) -> Vec<SidebarAction> {
-    let tokens = Tokens::get(ui.ctx());
-    let mut actions = Vec::new();
-    ui.horizontal(|ui| {
-        ui.set_min_height(28.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(egui::RichText::new(which.label()).font(theme::semibold(15.0)));
-        if let Some(count) = count(tab, which).filter(|&count| count > 0) {
-            count_pill(ui, &tokens, count);
+    let trailing = match which {
+        SidebarTab::Translation => tab
+            .translation
+            .as_ref()
+            .map(|session| format!("→{}", session.target.to_lowercase())),
+        SidebarTab::Effects => Some("live".to_owned()),
+        _ => count(tab, which).map(|count| count.to_string()),
+    };
+    let title = which.label().to_lowercase();
+    let mut header = Header::new(&title).trailing(trailing.as_deref());
+    let mut chosen = Vec::new();
+    let following = tab.outline_view.following();
+    match which {
+        SidebarTab::Outline if !tab.outline.is_empty() => {
+            let tip = if following {
+                "following the current section"
+            } else {
+                "locate the current section"
+            };
+            header = header.action(Action::new("locate-fixed", tip).selected(following));
+            chosen.push(SidebarAction::LocateOutline);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if which == SidebarTab::Bookmarks
-                && icons::button(ui, "plus", 26.0, false, "Add a bookmark here").clicked()
-            {
-                actions.push(SidebarAction::AddBookmark);
-            }
-            if which == SidebarTab::Outline && !tab.outline.is_empty() {
-                let following = tab.outline_view.following();
-                let tip = if following {
-                    "Following the current section"
-                } else {
-                    "Locate the current section"
-                };
-                if icons::button(ui, "locate-fixed", 26.0, following, tip).clicked() {
-                    actions.push(SidebarAction::LocateOutline);
-                }
-            }
-        });
-    });
-    ui.add_space(6.0);
-    actions
-}
-
-fn count_pill(ui: &mut egui::Ui, tokens: &Tokens, count: usize) {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(count.to_string(), theme::medium(11.5), tokens.muted);
-    let size = egui::vec2((galley.size().x + 12.0).max(20.0), 18.0);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    ui.painter().rect_filled(rect, 9.0, tokens.hover);
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, tokens.muted);
+        SidebarTab::Pages => {
+            header = header.action(Action::new("maximize-2", "page overview"));
+            chosen.push(SidebarAction::Command(Command::PageOverview));
+        }
+        SidebarTab::Bookmarks => {
+            header = header.action(Action::new("plus", "add a bookmark here"));
+            chosen.push(SidebarAction::AddBookmark);
+        }
+        _ => {}
+    }
+    header = header.action(Action::new("x", "hide the sidebar"));
+    chosen.push(SidebarAction::Close);
+    header
+        .show(ui)
+        .clicked
+        .map(|index| chosen.swap_remove(index))
+        .into_iter()
+        .collect()
 }
 
 /// Whether `text` holds `filter` (already lower-cased; empty holds all).
@@ -458,7 +908,9 @@ struct Row<'a> {
     title: &'a str,
     /// Faint, at the right: a page number.
     detail: Option<String>,
-    depth: usize,
+    /// The outline's tree branches (`│  ├─ `) before the title.
+    prefix: Option<String>,
+    icon: Option<&'a str>,
     /// A colour dot before the title.
     dot: Option<egui::Color32>,
     /// The outline's expand and collapse toggle.
@@ -469,41 +921,43 @@ struct Row<'a> {
     actions: &'a [(&'a str, &'a str)],
 }
 
-/// The toggle before a nested outline entry's title.
+/// Whether a nested outline entry is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Disclosure {
-    /// A flat list: no room for toggles.
+    /// A flat list: no toggles.
     None,
-    /// Room for a toggle, but no children.
+    /// No children.
     Leaf,
     Open,
     Closed,
 }
 
-const DEPTH_INDENT: f32 = 14.0;
-const DISCLOSURE_WIDTH: f32 = 18.0;
-
-/// Where a row's disclosure toggle is, at `depth`.
-fn disclosure_rect(rect: egui::Rect, depth: usize) -> egui::Rect {
-    let left = rect.left() + 4.0 + depth as f32 * DEPTH_INDENT;
+/// Where a row's disclosure toggle is: over its tree branches.
+fn disclosure_rect(ui: &egui::Ui, rect: egui::Rect, prefix: &str) -> egui::Rect {
+    let width = glyphst_ui::text::width(ui, prefix, &theme::mono(12.0)) + 10.0;
     egui::Rect::from_min_size(
-        egui::pos2(left, rect.top() + 2.0),
-        egui::vec2(DISCLOSURE_WIDTH, rect.height() - 4.0),
+        egui::pos2(rect.left() + 12.0, rect.top()),
+        egui::vec2(width, rect.height()),
     )
 }
 
 /// Draws `row`; returns its response and the action button clicked.
 fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     let tokens = Tokens::get(ui.ctx());
-    let (rect, response) = widgets::list_row(ui, 28.0, row.selected);
+    let height = if row.prefix.is_some() {
+        OUTLINE_ROW
+    } else {
+        tokens.row(28.0)
+    };
+    let (rect, response) = widgets::list_row(ui, height, row.selected);
     let hovered = response.contains_pointer() && !row.actions.is_empty();
-    let mut right = rect.right() - 8.0;
+    let mut right = rect.right() - 12.0;
     let mut clicked = None;
     if hovered {
-        let width = row.actions.len() as f32 * 26.0;
+        let width = row.actions.len() as f32 * 24.0;
         let strip = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - 2.0 - width, rect.top()),
-            egui::pos2(rect.right() - 2.0, rect.bottom()),
+            egui::pos2(rect.right() - 4.0 - width, rect.top()),
+            egui::pos2(rect.right() - 4.0, rect.bottom()),
         );
         right = strip.left() - 4.0;
         ui.scope_builder(
@@ -513,65 +967,94 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
             |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 for (index, (icon, tip)) in row.actions.iter().enumerate() {
-                    if icons::button(ui, icon, 26.0, false, tip).clicked() {
+                    if icons::button(ui, icon, 24.0, false, tip).clicked() {
                         clicked = Some(index);
                     }
                 }
             },
         );
     } else if let Some(detail) = row.detail {
+        let color = if row.selected {
+            tokens.accent_text
+        } else {
+            tokens.faint
+        };
         let galley = ui
             .painter()
-            .layout_no_wrap(detail, theme::regular(11.5), tokens.faint);
+            .layout_no_wrap(detail, theme::mono(11.0), color);
         right -= galley.size().x;
         ui.painter().galley(
             egui::pos2(right, rect.center().y - galley.size().y / 2.0),
             galley,
-            tokens.faint,
+            color,
         );
     }
-    let mut left = rect.left() + 8.0 + row.depth as f32 * DEPTH_INDENT;
-    if row.disclosure != Disclosure::None {
-        let toggle = disclosure_rect(rect, row.depth);
-        let icon = match row.disclosure {
-            Disclosure::Open => Some("chevron-down"),
-            Disclosure::Closed => Some("chevron-right"),
-            _ => None,
-        };
-        if let Some(icon) = icon {
-            icons::paint(ui, toggle, icon, 14.0, tokens.muted);
+    let y = rect.center().y;
+    let mut left = rect.left() + 12.0;
+    if let Some(prefix) = &row.prefix {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(prefix.clone(), theme::mono(12.0), tokens.faint);
+        let width = galley.size().x;
+        ui.painter().galley(
+            egui::pos2(left, y - galley.size().y / 2.0),
+            galley,
+            tokens.faint,
+        );
+        left += width;
+        // A closed entry shows that it holds more.
+        if row.disclosure == Disclosure::Closed {
+            ui.painter().text(
+                egui::pos2(left, y),
+                egui::Align2::LEFT_CENTER,
+                "+",
+                theme::mono(12.0),
+                tokens.accent_text,
+            );
+            left += 10.0;
         }
-        left = toggle.right() + 2.0;
+    }
+    if let Some(icon) = row.icon {
+        icons::paint(
+            ui,
+            egui::Rect::from_center_size(egui::pos2(left + 6.5, y), egui::vec2(13.0, 13.0)),
+            icon,
+            13.0,
+            if row.selected {
+                tokens.accent_text
+            } else {
+                tokens.faint
+            },
+        );
+        left += 21.0;
     }
     if let Some(dot) = row.dot {
-        ui.painter()
-            .circle_filled(egui::pos2(left + 4.0, rect.center().y), 4.0, dot);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(egui::pos2(left + 4.0, y), egui::vec2(6.0, 6.0)),
+            1,
+            dot,
+        );
         left += 16.0;
     }
     let color = if !row.enabled {
         tokens.faint
-    } else if row.selected {
-        tokens.accent_text
-    } else {
+    } else if row.selected || response.contains_pointer() {
         tokens.text
-    };
-    let font = if row.depth == 0 {
-        theme::medium(13.0)
     } else {
-        theme::regular(13.0)
+        tokens.text_2
     };
     widgets::row_text(
         ui,
-        egui::pos2(left, rect.center().y),
+        egui::pos2(left, y),
         row.title,
-        font,
+        theme::mono(12.0),
         color,
         right - left - 8.0,
     );
-    (response.on_hover_text(row.title), clicked)
+    (response.tip(row.title), clicked)
 }
 
-const OUTLINE_ROW: f32 = 28.0;
+const OUTLINE_ROW: f32 = 26.0;
 
 fn outline(
     ui: &mut egui::Ui,
@@ -606,6 +1089,18 @@ fn outline(
     }
     let nested = !filtering && entries.iter().any(|entry| entry.parent.is_some());
     let current_row = current.and_then(|entry| rows.iter().position(|&row| row == entry));
+    // The tree branches of the rows listed (none while filtering).
+    let shapes = if filtering {
+        Vec::new()
+    } else {
+        let depths: Vec<usize> = rows.iter().map(|&index| entries[index].depth).collect();
+        motif::tree_shape(&depths)
+    };
+    let prefix = |position: usize| {
+        shapes
+            .get(position)
+            .map(|(ancestors, last)| motif::tree_prefix(ancestors, *last))
+    };
 
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("outline", tab.id))
@@ -662,8 +1157,10 @@ fn outline(
         // nothing shows through them (the drawer may be translucent) and a
         // covered part takes no clicks.
         let band_bottom = origin.y + viewport.min.y + stuck.len() as f32 * OUTLINE_ROW;
-        let mut draw = |ui: &mut egui::Ui, rect: egui::Rect, index: usize, sticky: bool| {
+        let mut draw = |ui: &mut egui::Ui, rect: egui::Rect, position: usize, sticky: bool| {
+            let index = rows[position];
             let entry = &entries[index];
+            let prefix = prefix(position);
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt((index, sticky))
@@ -678,9 +1175,10 @@ fn outline(
             let (response, _) = row(
                 &mut child,
                 Row {
-                    title: &entry.title,
+                    title: &entry.title.to_lowercase(),
                     detail: entry.page.map(|page| (page + 1).to_string()),
-                    depth: entry.depth,
+                    prefix: prefix.clone(),
+                    icon: None,
                     dot: None,
                     disclosure,
                     selected: current == Some(index),
@@ -689,9 +1187,12 @@ fn outline(
                 },
             );
             // A toggle drawn over its row takes its clicks.
-            if !sticky && matches!(disclosure, Disclosure::Open | Disclosure::Closed) {
+            if !sticky
+                && matches!(disclosure, Disclosure::Open | Disclosure::Closed)
+                && let Some(prefix) = &prefix
+            {
                 let toggle = child.interact(
-                    disclosure_rect(rect, entry.depth),
+                    disclosure_rect(&child, rect, prefix),
                     child.id().with("disclosure"),
                     egui::Sense::click(),
                 );
@@ -704,19 +1205,25 @@ fn outline(
                 chosen = Some(index);
             }
         };
-        for (position, &index) in rows.iter().enumerate().take(last).skip(first) {
-            draw(ui, row_rect(position as f32 * OUTLINE_ROW), index, false);
+        for position in first..last {
+            draw(ui, row_rect(position as f32 * OUTLINE_ROW), position, false);
         }
-        for (position, &index) in stuck.iter().enumerate() {
-            draw(
-                ui,
-                row_rect(viewport.min.y + position as f32 * OUTLINE_ROW),
-                index,
-                true,
-            );
+        for (slot, &index) in stuck.iter().enumerate() {
+            let Some(position) = rows.iter().position(|&row| row == index) else {
+                continue;
+            };
+            let rect = row_rect(viewport.min.y + slot as f32 * OUTLINE_ROW);
+            // Sticky rows cover what scrolls under them.
+            ui.painter()
+                .rect_filled(rect, 0, Tokens::get(ui.ctx()).surface.to_opaque());
+            draw(ui, rect, position, true);
         }
         if !stuck.is_empty() {
-            fade_shadow(ui.painter(), origin.x, origin.x + width, band_bottom);
+            ui.painter().hline(
+                origin.x..=origin.x + width,
+                band_bottom - 0.5,
+                Tokens::get(ui.ctx()).hairline(),
+            );
         }
     });
 
@@ -780,20 +1287,6 @@ fn stuck_rows(
 /// whose band ends at `band_bottom`.
 fn below_band(rect: egui::Rect, band_bottom: f32) -> egui::Rect {
     rect.with_min_y(rect.top().max(band_bottom).min(rect.bottom()))
-}
-
-/// A soft shadow under the outline's sticky rows.
-fn fade_shadow(painter: &egui::Painter, left: f32, right: f32, top: f32) {
-    let dark = egui::Color32::from_black_alpha(26);
-    let clear = egui::Color32::TRANSPARENT;
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(egui::pos2(left, top), dark);
-    mesh.colored_vertex(egui::pos2(right, top), dark);
-    mesh.colored_vertex(egui::pos2(right, top + 6.0), clear);
-    mesh.colored_vertex(egui::pos2(left, top + 6.0), clear);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(mesh);
 }
 
 /// The outline entries listed: the matches when filtering, else every
@@ -920,12 +1413,17 @@ fn reveal_offset(
 
 fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarAction>) {
     let tokens = Tokens::get(ui.ctx());
-    let width = (ui.available_width() - 24.0).clamp(60.0, 200.0);
+    // Two columns of thumbnails, their numbers under them.
+    const COLUMNS: usize = 2;
+    let gap = 16.0;
+    let width =
+        ((ui.available_width() - gap * (COLUMNS as f32 + 1.0)) / COLUMNS as f32).clamp(48.0, 160.0);
     let [page_width, page_height] = tab.layout.page_size(0);
     let box_height = width * (page_height / page_width.max(1.0)) as f32;
-    let row_height = box_height + 26.0;
+    let row_height = box_height + 34.0;
     let current = tab.current_page();
     let count = tab.layout.len();
+    let rows = count.div_ceil(COLUMNS);
     let mut shown = 0..0;
     // The current page's thumbnail is brought into view when the page
     // changes, centred when the list opens.
@@ -936,27 +1434,48 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
         .auto_shrink(false);
     if fresh || view.page != Some(current) {
         view.page = Some(current);
-        let stride = row_height + ui.spacing().item_spacing.y;
         let viewport = view.pages.viewport_or(ui);
-        if let Some(offset) = reveal_offset(current, 0, stride, viewport, view.pages.offset, fresh)
-        {
+        if let Some(offset) = reveal_offset(
+            current / COLUMNS,
+            0,
+            row_height,
+            viewport,
+            view.pages.offset,
+            fresh,
+        ) {
             scroll = scroll.vertical_scroll_offset(offset);
         }
     }
-    let output = scroll.show_rows(ui, row_height, count, |ui, rows| {
-        shown = rows.clone();
-        for page in rows {
-            ui.vertical_centered(|ui| {
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(width, box_height), egui::Sense::click());
+    let output = scroll.show_rows(ui, row_height, rows, |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        shown = range.start * COLUMNS..(range.end * COLUMNS).min(count);
+        for row_index in range {
+            let (row_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Sense::hover(),
+            );
+            for column in 0..COLUMNS {
+                let page = row_index * COLUMNS + column;
+                if page >= count {
+                    break;
+                }
+                let cell = egui::Rect::from_min_size(
+                    egui::pos2(
+                        row_rect.left() + gap + column as f32 * (width + gap),
+                        row_rect.top() + 10.0,
+                    ),
+                    egui::vec2(width, box_height),
+                );
                 let [w, h] = tab.layout.page_size(page);
                 let scale = (width / w as f32).min(box_height / h as f32);
                 let paper = egui::Rect::from_center_size(
-                    rect.center(),
+                    cell.center(),
                     egui::vec2(w as f32 * scale, h as f32 * scale),
                 );
+                let response =
+                    ui.interact(paper, ui.id().with(("thumb", page)), egui::Sense::click());
                 let painter = ui.painter();
-                painter.rect_filled(paper, 2.0, tokens.page);
+                painter.rect_filled(paper, 0, tokens.page);
                 if let Some(texture) = tab.thumbnail(page) {
                     widgets::paint_turned_image(
                         painter,
@@ -969,32 +1488,48 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                         paper.center(),
                         egui::Align2::CENTER_CENTER,
                         "dense page",
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::GRAY,
+                        theme::mono(10.0),
+                        tokens.faint,
                     );
-                }
-                let stroke = if page == current {
-                    egui::Stroke::new(2.5, tokens.accent)
-                } else if response.hovered() {
-                    egui::Stroke::new(1.0, tokens.muted)
                 } else {
-                    egui::Stroke::new(1.0, tokens.rule_strong)
+                    glyphst_ui::thumb::paint_placeholder_lines(ui, paper);
+                }
+                let is_current = page == current;
+                if is_current {
+                    painter.rect_stroke(
+                        paper.expand(1.0),
+                        0,
+                        egui::Stroke::new(2.0, tokens.accent),
+                        egui::StrokeKind::Outside,
+                    );
+                } else if response.hovered() {
+                    painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
+                }
+                let label = if is_current {
+                    format!("{} ● current", page + 1)
+                } else {
+                    (page + 1).to_string()
                 };
-                painter.rect_stroke(paper, 2.0, stroke, egui::StrokeKind::Outside);
+                painter.text(
+                    egui::pos2(paper.center().x, paper.bottom() + 6.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    theme::mono(10.0),
+                    if is_current {
+                        tokens.accent_text
+                    } else {
+                        tokens.faint
+                    },
+                );
                 if response.clicked() {
                     actions.push(SidebarAction::View(ViewAction::GoToPage(page)));
                 }
-                ui.label(
-                    egui::RichText::new((page + 1).to_string())
-                        .size(11.0)
-                        .color(tokens.muted),
-                );
-            });
+            }
         }
     });
     tab.outline_view.pages.offset = output.state.offset.y;
     tab.outline_view.pages.viewport = output.inner_rect.height();
-    let ahead = shown.start.saturating_sub(2)..(shown.end + 2).min(count);
+    let ahead = shown.start.saturating_sub(4)..(shown.end + 4).min(count);
     tab.want_thumbnails(ahead);
 }
 
@@ -1002,32 +1537,29 @@ fn bookmarks(
     ui: &mut egui::Ui,
     tab: &DocumentTab,
     state: &mut SidebarState,
+    info: &SidebarInfo<'_>,
     filter: &str,
     actions: &mut Vec<SidebarAction>,
 ) {
-    if tab.annotations.bookmarks.is_empty() {
-        muted(ui, "No bookmarks yet. Add one with + or Ctrl+D.");
-        return;
-    }
+    let tokens = Tokens::get(ui.ctx());
     let title = |bookmark: &glyphst_library::Bookmark| {
         bookmark
             .title
             .clone()
-            .unwrap_or_else(|| format!("Page {}", bookmark.position.page.max(1)))
+            .unwrap_or_else(|| format!("page {}", bookmark.position.page.max(1)))
+            .to_lowercase()
     };
-    if !tab
-        .annotations
-        .bookmarks
-        .iter()
-        .any(|bookmark| matches(filter, &title(bookmark)))
-    {
-        muted(ui, "No matches.");
-        return;
-    }
+    let footer = 32.0;
+    let list_height = (ui.available_height() - footer).max(40.0);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
+        .max_height(list_height)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
+            motif::rule_title(ui, "this document", None);
+            if tab.annotations.bookmarks.is_empty() {
+                muted(ui, "no bookmarks yet.");
+            }
             for bookmark in &tab.annotations.bookmarks {
                 let name = title(bookmark);
                 if !matches(filter, &name) {
@@ -1036,8 +1568,11 @@ fn bookmarks(
                 if let Some((id, text)) = &mut state.bookmark
                     && *id == bookmark.id
                 {
-                    let response =
-                        ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .font(theme::mono(12.0))
+                            .desired_width(f32::INFINITY),
+                    );
                     if std::mem::take(&mut state.focus_rename) {
                         response.request_focus();
                     }
@@ -1050,19 +1585,21 @@ fn bookmarks(
                     continue;
                 }
                 let page = bookmark.position.page.max(1);
+                let active = tab.current_page() + 1 == page;
                 let (response, clicked) = ui
                     .push_id(bookmark.id, |ui| {
                         row(
                             ui,
                             Row {
                                 title: &name,
-                                detail: Some(page.to_string()),
-                                depth: 0,
+                                detail: Some(format!("p.{page}")),
+                                prefix: None,
+                                icon: Some("bookmark"),
                                 dot: None,
                                 disclosure: Disclosure::None,
-                                selected: false,
+                                selected: active,
                                 enabled: true,
-                                actions: &[("pen-line", "Rename"), ("trash-2", "Delete")],
+                                actions: &[("pen-line", "rename"), ("trash-2", "delete")],
                             },
                         )
                     })
@@ -1079,7 +1616,67 @@ fn bookmarks(
                     None => {}
                 }
             }
+            let others: Vec<&OtherBookmark> = info
+                .other_bookmarks
+                .iter()
+                .filter(|other| matches(filter, &other.title) || matches(filter, &other.document))
+                .collect();
+            if !others.is_empty() {
+                ui.add_space(6.0);
+                motif::rule_title(ui, "other documents", None);
+                for other in others {
+                    let name = format!("{} · {}", other.document, other.title).to_lowercase();
+                    let response = ui
+                        .push_id(("other", other.id), |ui| {
+                            ListRow::new(&name)
+                                .icon("bookmark")
+                                .meta(other.place.as_str())
+                                .show(ui)
+                        })
+                        .inner;
+                    if response.clicked() {
+                        actions.push(SidebarAction::OpenBookmark(other.id));
+                    }
+                }
+            }
         });
+    // `add bookmark  [b]` at the foot.
+    let bottom = ui.max_rect().bottom();
+    let foot = egui::Rect::from_min_max(
+        egui::pos2(ui.max_rect().left(), bottom - footer),
+        egui::pos2(ui.max_rect().right(), bottom),
+    );
+    let mut foot_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(foot)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let response = foot_ui.add(
+        Button::plain("add bookmark")
+            .shortcut(&glyphst_ui::key::display(&info.bookmark_key))
+            .small(),
+    );
+    if response.clicked() {
+        actions.push(SidebarAction::AddBookmark);
+    }
+    let _ = tokens;
+}
+
+/// When `seconds` (since the epoch) was, as the notes write it: `today
+/// 09:51`, `yesterday`, `mon`, or `oct 02`.
+pub fn when(seconds: u64) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(time) = Local.timestamp_opt(seconds as i64, 0).single() else {
+        return String::new();
+    };
+    let today = Local::now().date_naive();
+    let days = (today - time.date_naive()).num_days();
+    match days {
+        0 => format!("today {}", time.format("%H:%M")),
+        1 => "yesterday".to_owned(),
+        2..=6 => time.format("%a").to_string().to_lowercase(),
+        _ => time.format("%b %d").to_string().to_lowercase(),
+    }
 }
 
 fn notes(
@@ -1093,14 +1690,42 @@ fn notes(
     if tab.annotations.items.is_empty() {
         muted(
             ui,
-            "No highlights or notes yet. Select text and right-click to add one.",
+            "no highlights or notes yet. select text and right-click to add one.",
         );
         return;
     }
-    let shown =
-        |item: &annotations::Item| matches(filter, &item.text) || matches(filter, &item.body);
+    let is_note = |item: &annotations::Item| matches!(item.id, AnnotationId::Note(_));
+    let total = tab.annotations.items.len();
+    let notes_count = tab
+        .annotations
+        .items
+        .iter()
+        .filter(|item| is_note(item))
+        .count();
+    let all = format!("all {total}");
+    let highlights = format!("highlights {}", total - notes_count);
+    let notes_label = format!("notes {notes_count}");
+    segmented::labels(
+        ui,
+        &mut state.notes_filter,
+        &[
+            (NotesFilter::All, all.as_str()),
+            (NotesFilter::Highlights, highlights.as_str()),
+            (NotesFilter::Notes, notes_label.as_str()),
+        ],
+    );
+    ui.add_space(8.0);
+    let kind = state.notes_filter;
+    let shown = |item: &annotations::Item| {
+        let kind_matches = match kind {
+            NotesFilter::All => true,
+            NotesFilter::Highlights => !is_note(item),
+            NotesFilter::Notes => is_note(item),
+        };
+        kind_matches && (matches(filter, &item.text) || matches(filter, &item.body))
+    };
     if !tab.annotations.items.iter().any(shown) {
-        muted(ui, "No matches.");
+        muted(ui, "no matches.");
         return;
     }
     let reflowed = tab.is_reflowed();
@@ -1111,30 +1736,20 @@ fn notes(
             for item in tab.annotations.items.iter().filter(|item| shown(item)) {
                 let place = tab.annotations.page_of(item, reflowed);
                 let open = state.open_note == Some(item.id);
-                let title = if item.text.is_empty() {
-                    item.body.as_str()
-                } else {
-                    item.text.as_str()
+                let quote: String = item.text.chars().take(QUOTE_CHARS).collect();
+                let page = match place {
+                    Some((page, _)) => format!("p.{}", page + 1),
+                    None => "–".to_owned(),
                 };
-                let title = title.lines().next().unwrap_or_default();
-                let (response, _) = ui
+                let meta = format!("{page} · {}", when(item.created));
+                let edge = if is_note(item) {
+                    tokens.accent
+                } else {
+                    annotations::color(item.color)
+                };
+                let response = ui
                     .push_id(item.id, |ui| {
-                        row(
-                            ui,
-                            Row {
-                                title,
-                                detail: Some(match place {
-                                    Some((page, _)) => (page + 1).to_string(),
-                                    None => "–".to_owned(),
-                                }),
-                                depth: 0,
-                                dot: Some(annotations::color(item.color)),
-                                disclosure: Disclosure::None,
-                                selected: open,
-                                enabled: true,
-                                actions: &[],
-                            },
-                        )
+                        quote_card(ui, &tokens, edge, &quote, &item.body, &meta)
                     })
                     .inner;
                 if response.clicked() {
@@ -1150,8 +1765,7 @@ fn notes(
         });
 }
 
-/// An open note under its row: the whole quote, the note, its colours and
-/// its actions.
+/// An open note under its card: editing, its colours and its actions.
 fn note_details(
     ui: &mut egui::Ui,
     tokens: &Tokens,
@@ -1162,81 +1776,67 @@ fn note_details(
 ) {
     egui::Frame::new()
         .inner_margin(egui::Margin {
-            left: 24,
-            right: 8,
-            top: 4,
+            left: 10,
+            right: 4,
+            top: 0,
             bottom: 10,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 6.0;
             if !placed {
-                muted(ui, "Not found in this layout.");
+                muted(ui, "not found in this layout.");
             }
-            if !item.text.is_empty() {
-                let quote: String = item.text.chars().take(QUOTE_CHARS).collect();
-                let ellipsis = if item.text.chars().count() > QUOTE_CHARS {
-                    "…"
-                } else {
-                    ""
-                };
-                ui.label(
-                    egui::RichText::new(format!("“{quote}{ellipsis}”"))
-                        .italics()
-                        .color(tokens.muted),
+            if let Some((id, body)) = &mut state.note
+                && *id == item.id
+            {
+                ui.add(
+                    egui::TextEdit::multiline(body)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("note"),
                 );
-            }
-            match &mut state.note {
-                Some((id, body)) if *id == item.id => {
-                    ui.add(
-                        egui::TextEdit::multiline(body)
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("Note"),
-                    );
-                    let (save, cancel) = ui
-                        .horizontal(|ui| {
-                            (
-                                widgets::pill_button(ui, None, "Save", true).clicked(),
-                                widgets::pill_button(ui, None, "Cancel", false).clicked(),
-                            )
-                        })
-                        .inner;
-                    if save {
-                        actions.push(SidebarAction::SetBody(*id, body.clone()));
-                    }
-                    if save || cancel {
-                        state.note = None;
-                    }
+                let (save, cancel) = ui
+                    .horizontal(|ui| {
+                        (
+                            ui.add(Button::primary("save")).clicked(),
+                            ui.add(Button::ghost("cancel")).clicked(),
+                        )
+                    })
+                    .inner;
+                if save {
+                    actions.push(SidebarAction::SetBody(*id, body.clone()));
                 }
-                _ => {
-                    if !item.body.is_empty() {
-                        ui.label(&item.body);
-                    }
+                if save || cancel {
+                    state.note = None;
                 }
             }
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 for color in HighlightColor::ALL {
                     let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-                    let radius = if color == item.color { 7.0 } else { 5.0 };
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
                     ui.painter()
-                        .circle_filled(rect.center(), radius, annotations::color(color));
-                    if response
-                        .on_hover_text(annotations::color_name(color))
-                        .clicked()
-                    {
+                        .rect_filled(rect.shrink(1.0), 1, annotations::color(color));
+                    if color == item.color {
+                        ui.painter().rect_stroke(
+                            rect.expand(1.0),
+                            1,
+                            egui::Stroke::new(1.0, tokens.text),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    if response.tip(annotations::color_name(color)).clicked() {
                         actions.push(SidebarAction::SetColor(item.id, color));
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    if icons::button(ui, "trash-2", 26.0, false, "Delete").clicked() {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if ui.add(Button::bracket_muted("delete")).clicked() {
                         actions.push(SidebarAction::Remove(item.id));
                     }
                     if matches!(item.id, AnnotationId::Note(_))
-                        && icons::button(ui, "pen-line", 26.0, false, "Edit the note").clicked()
+                        && ui.add(Button::bracket("edit")).clicked()
                     {
                         state.note = Some((item.id, item.body.clone()));
                     }

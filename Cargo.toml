@@ -51,6 +51,8 @@ log = "0.4"
 lyon_tessellation = "1"
 mupdf = "0.8"
 redb = "4"
+# Pattern search in documents (already in the tree); MIT OR Apache-2.0.
+regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }
 pollster = "0.4"
 # The Secret Service keyring (async-io), reading the items GPUI wrote.

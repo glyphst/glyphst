@@ -36,19 +36,29 @@ pub fn tree_prefix(ancestors_last: &[bool], last: bool) -> String {
     prefix
 }
 
+/// Whether each row of a tree given in pre-order as depths (outline
+/// levels) is the last of its siblings: no later row at its depth comes
+/// before one shallower than it. Linear, for long outlines.
+pub fn last_siblings(depths: &[usize]) -> Vec<bool> {
+    let mut last = vec![true; depths.len()];
+    // Depths of the rows after the current one, nearest on top; a row
+    // deeper than one before it can never be the nearest of anything
+    // earlier.
+    let mut after: Vec<usize> = Vec::new();
+    for (index, &depth) in depths.iter().enumerate().rev() {
+        while after.last().is_some_and(|&next| next > depth) {
+            after.pop();
+        }
+        last[index] = after.last().is_none_or(|&next| next < depth);
+        after.push(depth);
+    }
+    last
+}
+
 /// The `ancestors_last` and `last` of each row of a tree given in
-/// pre-order as depths (outline levels).
+/// pre-order as depths (see [`tree_prefix`]).
 pub fn tree_shape(depths: &[usize]) -> Vec<(Vec<bool>, bool)> {
-    // A row is last when no later row at its depth comes before one
-    // shallower than it.
-    let is_last = |index: usize| {
-        let depth = depths[index];
-        depths[index + 1..]
-            .iter()
-            .find(|&&later| later <= depth)
-            .is_none_or(|&later| later < depth)
-    };
-    let lasts: Vec<bool> = (0..depths.len()).map(is_last).collect();
+    let lasts = last_siblings(depths);
     let mut stack: Vec<bool> = Vec::new();
     depths
         .iter()
@@ -208,6 +218,21 @@ mod tests {
         assert_eq!(tree_prefix(&[], true), "└─ ");
         assert_eq!(tree_prefix(&[false], false), "│  ├─ ");
         assert_eq!(tree_prefix(&[false, true], true), "│     └─ ");
+    }
+
+    #[test]
+    fn last_siblings_match_a_direct_scan() {
+        let depths = [0, 1, 2, 2, 1, 0, 1, 1, 2, 3, 0];
+        let direct: Vec<bool> = (0..depths.len())
+            .map(|index| {
+                let depth = depths[index];
+                depths[index + 1..]
+                    .iter()
+                    .find(|&&later| later <= depth)
+                    .is_none_or(|&later| later < depth)
+            })
+            .collect();
+        assert_eq!(last_siblings(&depths), direct);
     }
 
     #[test]

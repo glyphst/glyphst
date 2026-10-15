@@ -187,6 +187,32 @@ impl PageText {
         out
     }
 
+    /// Glyph ranges matching `pattern` in the page's text, where
+    /// whitespace and line breaks read as one space.
+    pub fn find_pattern(&self, pattern: &regex::Regex) -> Vec<Range<usize>> {
+        // The page as a string, each byte's glyph alongside.
+        let mut text = String::with_capacity(self.len() + 64);
+        let mut glyph_of: Vec<usize> = Vec::with_capacity(self.len() + 64);
+        let mut push = |text: &mut String, ch: char, index: usize| {
+            text.push(ch);
+            glyph_of.extend(std::iter::repeat_n(index, ch.len_utf8()));
+        };
+        for (index, glyph) in self.glyphs.iter().enumerate() {
+            let space = glyph.ch.is_whitespace() || self.new_line(index);
+            if space && !text.is_empty() && !text.ends_with(' ') {
+                push(&mut text, ' ', index);
+            }
+            if !glyph.ch.is_whitespace() {
+                push(&mut text, glyph.ch, index);
+            }
+        }
+        pattern
+            .find_iter(&text)
+            .filter(|found| !found.is_empty())
+            .map(|found| glyph_of[found.start()]..glyph_of[found.end() - 1] + 1)
+            .collect()
+    }
+
     /// The glyph nearest to a page-space point, preferring the same line.
     pub fn nearest(&self, x: f32, y: f32) -> Option<usize> {
         let distance = |rect: &PageRect| {
@@ -404,6 +430,17 @@ mod tests {
         assert_eq!(text.find("lin", false, false).len(), 1);
         assert!(text.find("lin", false, true).is_empty());
         assert!(text.find("   ", false, false).is_empty());
+    }
+
+    #[test]
+    fn patterns_match_across_lines_and_map_to_glyphs() {
+        let text = two_lines();
+        let pattern = |source: &str| regex::Regex::new(source).unwrap();
+        assert_eq!(text.find_pattern(&pattern("W[a-z]+")), vec![6..11]);
+        // The line break reads as a space.
+        assert_eq!(text.find_pattern(&pattern(r"d s")), vec![10..12]);
+        assert_eq!(text.find_pattern(&pattern(r"(?i)\bhello\b")), vec![0..5]);
+        assert!(text.find_pattern(&pattern("x^")).is_empty());
     }
 
     #[test]

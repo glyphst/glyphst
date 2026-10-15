@@ -9,6 +9,8 @@ use eframe::egui_wgpu;
 use egui::{Rect, RichText, Sense, Stroke, StrokeKind, Vec2, vec2};
 use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, ParamKind};
 
+use glyphst_ui::{Tip, button::Button, motif, slider::Slider, toggle::Switch};
+
 use crate::{
     book_effects::{BookEffects, Choice, effect_use},
     gpu::{EffectUse, PreviewCallback},
@@ -27,8 +29,7 @@ pub enum Action {
 }
 
 /// Card sizes in Settings and in the drawer.
-const CARD: Vec2 = vec2(168.0, 104.0);
-const SMALL_CARD: Vec2 = vec2(124.0, 78.0);
+const CARD: Vec2 = vec2(168.0, 100.0);
 
 /// One card: a choice, its label and what its preview draws.
 struct Card {
@@ -59,7 +60,7 @@ fn gallery(
 ) -> Option<Choice> {
     let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+        ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
         for card in cards {
             if card_ui(ui, salt, kind, card, *selected == card.choice, size, time) {
                 clicked = Some(card.choice.clone());
@@ -79,10 +80,10 @@ fn card_ui(
     time: f32,
 ) -> bool {
     let tokens = Tokens::get(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(size + vec2(0.0, 22.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size + vec2(0.0, 20.0), Sense::click());
     let preview = Rect::from_min_size(rect.min, size);
     let painter = ui.painter();
-    painter.rect_filled(preview, 8.0, tokens.bg);
+    painter.rect_filled(preview, 0, tokens.bg);
     match &card.preview {
         Some(effect) if ui.is_rect_visible(preview) => {
             painter.add(egui_wgpu::Callback::new_paint_callback(
@@ -97,55 +98,67 @@ fn card_ui(
             ));
         }
         Some(_) => {}
-        None => icons::paint(ui, preview, "circle-x", 22.0, tokens.faint),
+        None => {
+            painter.text(
+                preview.center(),
+                egui::Align2::CENTER_CENTER,
+                "—",
+                theme::mono(12.0),
+                tokens.faint,
+            );
+        }
     }
     if card.needs_wallpaper {
         painter.text(
             preview.center(),
             egui::Align2::CENTER_CENTER,
-            "Choose a wallpaper",
-            theme::medium(11.5),
+            "no wallpaper",
+            theme::mono(10.0),
             egui::Color32::from_gray(200),
         );
     }
     let stroke = if selected {
-        Stroke::new(2.0, tokens.accent)
+        Stroke::new(1.5, tokens.accent)
     } else if response.hovered() {
         Stroke::new(1.0, tokens.faint)
     } else {
-        Stroke::new(1.0, tokens.rule_strong)
+        tokens.edge()
     };
-    painter.rect_stroke(preview, 8.0, stroke, StrokeKind::Inside);
-    let label_at = egui::pos2(rect.left() + 2.0, preview.bottom() + 11.0);
-    let mut width = size.x - 4.0;
+    painter.rect_stroke(preview, 0, stroke, StrokeKind::Inside);
+    let label_at = egui::pos2(rect.left(), preview.bottom() + 10.0);
+    let mut width = size.x;
     if card.user {
-        let badge = Rect::from_min_size(
-            egui::pos2(preview.right() - 40.0, preview.bottom() + 3.0),
-            vec2(40.0, 16.0),
-        );
-        painter.rect_filled(badge, 8.0, tokens.accent_soft);
         painter.text(
-            badge.center(),
-            egui::Align2::CENTER_CENTER,
-            "Yours",
-            theme::medium(10.5),
+            egui::pos2(preview.right(), preview.bottom() + 10.0),
+            egui::Align2::RIGHT_CENTER,
+            "yours",
+            theme::mono(9.0),
             tokens.accent_text,
         );
-        width -= 44.0;
+        width -= 34.0;
     }
+    let label = if selected {
+        format!("● {}", card.label.to_lowercase())
+    } else {
+        card.label.to_lowercase()
+    };
     widgets::row_text(
         ui,
         label_at,
-        &card.label,
-        theme::medium(12.5),
-        if selected { tokens.text } else { tokens.muted },
+        label,
+        theme::mono(10.0),
+        if selected {
+            tokens.accent_text
+        } else {
+            tokens.muted
+        },
         width,
     );
-    response.on_hover_text(&card.label).clicked()
+    response.tip(&card.label).clicked()
 }
 
-/// Sliders and toggles for `def`'s parameters, with Reset; returns
-/// whether a value changed.
+/// Sliders and switches for `def`'s parameters, one row each, with
+/// `[ reset ]`; returns whether a value changed.
 fn params_editor(
     ui: &mut egui::Ui,
     def: &EffectDef,
@@ -154,33 +167,43 @@ fn params_editor(
     if def.params.is_empty() {
         return false;
     }
+    let tokens = Tokens::get(ui.ctx());
     let mut values = params.get(&def.id).map_or_else(
         || def.default_params(),
         |values| def.sanitize_params(*values),
     );
     let before = values;
     let mut reset = false;
-    egui::Grid::new(("effect-params", &def.id))
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            for (index, param) in def.params.iter().enumerate() {
-                ui.label(&param.label);
-                match param.kind {
+    for (index, param) in def.params.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.set_min_height(24.0);
+            ui.label(
+                egui::RichText::new(param.label.to_lowercase())
+                    .font(theme::mono(12.0))
+                    .color(tokens.text_2),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match param.kind {
                     ParamKind::Float { min, max } => {
-                        widgets::slider(ui, egui::Slider::new(&mut values[index], min..=max));
+                        let width = (ui.available_width() - 48.0).clamp(60.0, 200.0);
+                        ui.add(
+                            Slider::new(&mut values[index], min..=max)
+                                .width(width)
+                                .label(&param.label),
+                        );
                     }
                     ParamKind::Toggle => {
                         let mut on = values[index] >= 0.5;
-                        if ui.checkbox(&mut on, "").changed() {
+                        if ui.add(Switch(&mut on)).changed() {
                             values[index] = if on { 1.0 } else { 0.0 };
                         }
                     }
-                }
-                ui.end_row();
-            }
+                },
+            );
         });
-    if params.contains_key(&def.id) && widgets::ghost_button(ui, "rotate-ccw", "Reset").clicked() {
+    }
+    if params.contains_key(&def.id) && ui.add(Button::bracket_muted("reset")).clicked() {
         reset = true;
     }
     if reset {
@@ -402,8 +425,8 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
     });
 }
 
-/// What the Effects drawer needs: one book's choices and the defaults'
-/// names.
+/// What the Effects tab needs: one book's choices, the defaults' names,
+/// and the settings it shares with Settings (parameters, reduce motion).
 pub struct BookPage<'a> {
     pub title: &'a str,
     pub book: &'a mut BookEffects,
@@ -411,15 +434,24 @@ pub struct BookPage<'a> {
     pub default_transition: Option<&'a EffectDef>,
     pub default_overlay: Option<&'a EffectDef>,
     pub effects: &'a [EffectDef],
-    pub params: &'a BTreeMap<String, [f32; MAX_PARAMS]>,
+    pub params: &'a mut BTreeMap<String, [f32; MAX_PARAMS]>,
     pub has_wallpaper: bool,
+    pub reduce_motion: &'a mut bool,
     pub time: f32,
 }
 
-/// The Effects drawer: this book's background, transition and tint;
-/// returns whether a choice changed.
-pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> bool {
-    let tokens = Tokens::get(ui.ctx());
+/// What the Effects tab changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BookChanges {
+    pub book: bool,
+    pub params: bool,
+    pub reduce_motion: bool,
+}
+
+/// The Effects tab (frame 03): this book's background as tiles, its tint
+/// and the parameters in play as sliders, the page transition, and
+/// reduce motion.
+pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
     let BookPage {
         title,
         book,
@@ -429,80 +461,167 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> bool {
         effects,
         params,
         has_wallpaper,
+        reduce_motion,
         time,
     } = page;
-    let mut changed = false;
-    ui.label(RichText::new(format!("For {title} only")).color(tokens.muted));
-    let default_card = |default: Option<&EffectDef>| Card {
+    let tokens = Tokens::get(ui.ctx());
+    let mut changes = BookChanges::default();
+    let default_card = |default: Option<&EffectDef>,
+                        params: &BTreeMap<String, [f32; MAX_PARAMS]>| Card {
         choice: Choice::Default,
         label: format!(
-            "Default · {}",
-            default.map_or("None", |def| def.name.as_str())
+            "default · {}",
+            default.map_or("none", |def| def.name.as_str())
         ),
         preview: default.map(|def| effect_use(def, params)),
         user: false,
         needs_wallpaper: default.is_some_and(|def| def.image) && !has_wallpaper,
     };
+    // Tiles three to a row.
+    let tile = |ui: &egui::Ui| {
+        let width = ((ui.available_width() - 2.0 * 10.0) / 3.0)
+            .floor()
+            .max(48.0);
+        vec2(width, (width * 0.6).round())
+    };
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for (title, kind, choice, default, offer_off) in [
-                (
-                    "Background",
-                    EffectKind::Background,
-                    &mut book.background,
-                    default_background,
-                    false,
-                ),
-                (
-                    "Page transition",
-                    EffectKind::Transition,
-                    &mut book.transition,
-                    default_transition,
-                    true,
-                ),
-                (
-                    "Page tint",
-                    EffectKind::Overlay,
-                    &mut book.overlay,
-                    default_overlay,
-                    true,
-                ),
-            ] {
-                widgets::section_title(ui, title);
-                let mut first = vec![default_card(default)];
-                if offer_off {
-                    first.push(off_card());
-                }
-                let cards = cards_for(effects, kind, params, has_wallpaper, first);
-                if let Some(picked) = gallery(
-                    ui,
-                    &format!("book-{title}"),
-                    kind,
-                    &cards,
-                    choice,
-                    SMALL_CARD,
-                    time,
-                ) && picked != *choice
-                {
-                    *choice = picked;
-                    changed = true;
-                }
-                ui.add_space(6.0);
-            }
-            if !book.is_default()
-                && widgets::ghost_button(ui, "rotate-ccw", "Use the defaults for this book")
-                    .clicked()
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!("for {} only", title.to_lowercase()))
+                    .font(theme::mono(11.0))
+                    .color(tokens.faint),
+            );
+            ui.add_space(6.0);
+            motif::rule_title(ui, "background", None);
+            ui.add_space(4.0);
+            let cards = cards_for(
+                effects,
+                EffectKind::Background,
+                params,
+                has_wallpaper,
+                vec![default_card(default_background, params)],
+            );
+            let size = tile(ui);
+            if let Some(picked) = gallery(
+                ui,
+                "book-background",
+                EffectKind::Background,
+                &cards,
+                &book.background,
+                size,
+                time,
+            ) && picked != book.background
             {
-                let used = book.used;
-                *book = BookEffects {
-                    used,
-                    ..Default::default()
-                };
-                changed = true;
+                book.background = picked;
+                changes.book = true;
+            }
+            ui.add_space(8.0);
+            motif::rule_title(ui, "tint & grain", None);
+            ui.add_space(4.0);
+            let mut first = vec![default_card(default_overlay, params)];
+            first.push(off_card());
+            let cards = cards_for(effects, EffectKind::Overlay, params, has_wallpaper, first);
+            if let Some(picked) = gallery(
+                ui,
+                "book-overlay",
+                EffectKind::Overlay,
+                &cards,
+                &book.overlay,
+                vec2(size.x, (size.y * 0.7).round()),
+                time,
+            ) && picked != book.overlay
+            {
+                book.overlay = picked;
+                changes.book = true;
+            }
+            // The parameters of what this book shows.
+            fn shown<'e>(
+                effects: &'e [EffectDef],
+                choice: &Choice,
+                default: Option<&'e EffectDef>,
+            ) -> Option<&'e EffectDef> {
+                match choice {
+                    Choice::Default => default,
+                    Choice::Off => None,
+                    Choice::Effect(id) => effects.iter().find(|def| &def.id == id),
+                }
+            }
+            for def in [
+                shown(effects, &book.background, default_background),
+                shown(effects, &book.overlay, default_overlay),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                ui.push_id(&def.id, |ui| {
+                    changes.params |= params_editor(ui, def, params);
+                });
+            }
+            ui.add_space(8.0);
+            motif::rule_title(ui, "page transition", None);
+            ui.add_space(6.0);
+            let mut options: Vec<(Choice, String)> = vec![
+                (
+                    Choice::Default,
+                    format!(
+                        "default · {}",
+                        default_transition.map_or("none".to_owned(), |def| def.name.to_lowercase())
+                    ),
+                ),
+                (Choice::Off, "none".to_owned()),
+            ];
+            options.extend(
+                choosable(effects, EffectKind::Transition)
+                    .map(|def| (Choice::Effect(def.id.clone()), def.name.to_lowercase())),
+            );
+            // As many as fit on a line, wrapping: the choices outgrow a
+            // segmented control.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (choice, label) in &options {
+                    let chosen = *choice == book.transition;
+                    if ui
+                        .add(Button::plain(label).selected(chosen).small())
+                        .clicked()
+                        && !chosen
+                    {
+                        book.transition = choice.clone();
+                        changes.book = true;
+                    }
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.set_min_height(24.0);
+                ui.label(
+                    RichText::new("reduce motion")
+                        .font(theme::mono(12.0))
+                        .color(tokens.text_2),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(Switch(reduce_motion)).changed() {
+                        changes.reduce_motion = true;
+                    }
+                });
+            });
+            if !book.is_default() {
+                ui.add_space(6.0);
+                if ui
+                    .add(Button::bracket_muted("use the defaults for this book"))
+                    .clicked()
+                {
+                    let used = book.used;
+                    *book = BookEffects {
+                        used,
+                        ..Default::default()
+                    };
+                    changes.book = true;
+                }
             }
         });
-    changed
+    changes
 }
 
 /// Writes the starter effect into `dir` as a new `my-effect-N.wgsl`, with

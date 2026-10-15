@@ -2980,6 +2980,7 @@ dependencies = [
  "base64 0.23.1",
  "glyphst-core",
  "mupdf",
+ "regex",
  "tracing",
  "zeroize",
 ]
@@ -3064,6 +3065,7 @@ dependencies = [
  "mupdf",
  "pollster 0.4.0",
  "raw-window-handle",
+ "regex",
  "rfd",
  "serde",
  "serde_json",

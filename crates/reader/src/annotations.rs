@@ -30,6 +30,8 @@ pub struct Item {
     pub body: String,
     pub semantic: Option<SemanticTextRange>,
     pub stored: Vec<HighlightRect>,
+    /// When it was made, in seconds since the epoch.
+    pub created: u64,
 }
 
 #[derive(Default)]
@@ -177,6 +179,7 @@ impl From<Highlight> for Item {
             body: highlight.note,
             semantic: highlight.semantic_range,
             stored: highlight.rects,
+            created: highlight.created,
         }
     }
 }
@@ -190,6 +193,7 @@ impl From<Note> for Item {
             body: note.body,
             semantic: note.semantic_range,
             stored: note.rects,
+            created: note.created,
         }
     }
 }
