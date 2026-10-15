@@ -619,7 +619,11 @@ impl Generations {
             let shown = run.ready.map_or(0.0, |ready| {
                 ((p - ready) * DURATION / REDUCED_FADE).clamp(0.0, 1.0)
             });
-            painter.rect_filled(map.paper, 0.0, tokens.page.gamma_multiply(1.0 - shown));
+            painter.rect_filled(
+                map.paper,
+                0.0,
+                tokens.bg.to_opaque().gamma_multiply(1.0 - shown),
+            );
             return;
         }
         Build::new(painter, run, map, papers, tokens, p).paint();
@@ -704,7 +708,8 @@ const KEY_EXTEND: f32 = 16.0;
 /// Parts smaller than this on screen (longer side, in points) are left out.
 const MIN_PART: f32 = 8.0;
 
-/// The original's monochrome palette.
+/// The palette of the glyph design: the page's structure traced in the
+/// accent over the dot field (frame 02b).
 #[derive(Clone, Copy)]
 struct Palette {
     line: Color32,
@@ -712,17 +717,15 @@ struct Palette {
     ink: Color32,
 }
 
-const LIGHT: Palette = Palette {
-    line: Color32::from_rgb(0x9a, 0x9a, 0x9a),
-    strong: Color32::from_rgb(0x6c, 0x6c, 0x6c),
-    ink: Color32::from_rgba_premultiplied(4, 4, 4, 82),
-};
-
-const DARK: Palette = Palette {
-    line: Color32::from_rgb(0x6f, 0x6f, 0x6f),
-    strong: Color32::from_rgb(0xa3, 0xa3, 0xa3),
-    ink: Color32::from_rgba_premultiplied(74, 74, 74, 77),
-};
+impl Palette {
+    fn of(tokens: &Tokens) -> Self {
+        Self {
+            line: tokens.accent,
+            strong: tokens.accent_text,
+            ink: tokens.dot,
+        }
+    }
+}
 
 /// Dots as one mesh of small octagons; those outside `cull` are left out.
 struct Dots {
@@ -908,16 +911,14 @@ impl<'a> Build<'a> {
                 margins[3] = margins[3].min((other.top() - paper.bottom()) / 2.0);
             }
         }
-        let light_page =
-            tokens.page.r() as u32 + tokens.page.g() as u32 + tokens.page.b() as u32 > 384;
         Self {
             painter,
             run,
             map,
             paper,
             tokens,
-            inside: if light_page { LIGHT } else { DARK },
-            outside: if tokens.dark() { DARK } else { LIGHT },
+            inside: Palette::of(tokens),
+            outside: Palette::of(tokens),
             margins,
             p,
             e: run.ending(p),
@@ -963,7 +964,7 @@ impl<'a> Build<'a> {
             painter.rect_filled(
                 Rect::from_min_max(self.paper.min, self.at(w, cover_from)),
                 0.0,
-                self.tokens.page.gamma_multiply(1.0 - fq),
+                self.tokens.bg.to_opaque().gamma_multiply(1.0 - fq),
             );
         }
         painter.rect_filled(
@@ -972,7 +973,9 @@ impl<'a> Build<'a> {
                 self.paper.max,
             ),
             0.0,
-            self.tokens.page,
+            // Until its reveal the page is the base, as a page being
+            // generated is in the design.
+            self.tokens.bg.to_opaque(),
         );
 
         let parts = self.part_strokes();
@@ -1289,7 +1292,7 @@ impl<'a> Build<'a> {
         }
     }
 
-    /// A corner handle: a small square of the page's colour.
+    /// A corner handle: a small accent square.
     fn handle(&self, painter: &egui::Painter, center: Pos2, size: f32) {
         if size <= 0.1 {
             return;
@@ -1298,7 +1301,7 @@ impl<'a> Build<'a> {
         painter.rect(
             rect,
             0.0,
-            self.tokens.page,
+            self.tokens.accent,
             egui::Stroke::new(1.0, self.inside.strong),
             egui::StrokeKind::Middle,
         );

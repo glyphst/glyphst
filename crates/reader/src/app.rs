@@ -56,6 +56,7 @@ use crate::{
 
 pub(crate) mod agent;
 mod chrome;
+mod page_chrome;
 mod status_bar;
 mod tab_bar;
 
@@ -275,6 +276,8 @@ pub struct ReaderApp {
     chrome: chrome::StageChrome,
     /// Present mode was on last frame (to say how to leave it).
     was_presenting: bool,
+    /// When the current presentation started, for its clock.
+    present_started: Option<Instant>,
     /// The user's effects folder, what it held when last loaded, and when
     /// it was last looked at.
     pub(crate) effects_dir: Option<PathBuf>,
@@ -434,6 +437,7 @@ impl ReaderApp {
             pending_actions: Vec::new(),
             chrome: Default::default(),
             was_presenting: false,
+            present_started: None,
             effects_dir: user_effects,
             effects_stamp,
             effects_checked: Instant::now(),
@@ -1389,13 +1393,31 @@ impl ReaderApp {
             return;
         };
         let screen = map.rect_to_screen(region.rect());
-        painter.rect(
-            screen,
-            2.0,
-            tokens.accent.gamma_multiply(0.08),
-            egui::Stroke::new(1.5, tokens.accent),
-            egui::StrokeKind::Outside,
+        // A dotted accent outline on an accent wash, and its size in
+        // points under it.
+        painter.rect_filled(screen, 0, Tokens::fade(tokens.accent_soft, 0.5));
+        for (from, to) in [
+            (screen.left_top(), screen.right_top()),
+            (screen.right_top(), screen.right_bottom()),
+            (screen.right_bottom(), screen.left_bottom()),
+            (screen.left_bottom(), screen.left_top()),
+        ] {
+            painter.add(egui::Shape::dotted_line(
+                &[from, to],
+                tokens.accent,
+                4.0,
+                1.0,
+            ));
+        }
+        let [x0, y0, x1, y1] = region.rect();
+        let size = format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs());
+        let galley = painter.layout_no_wrap(size, theme::mono(10.0), tokens.on_accent);
+        let chip = egui::Rect::from_min_size(
+            screen.left_bottom() + egui::vec2(0.0, 4.0),
+            galley.size() + egui::vec2(10.0, 4.0),
         );
+        painter.rect_filled(chip, tokens.ctl_radius(), tokens.accent);
+        painter.galley(chip.min + egui::vec2(5.0, 2.0), galley, tokens.on_accent);
         if drawing || self.active != Some(active) {
             return;
         }
@@ -1406,7 +1428,7 @@ impl ReaderApp {
         let action = if self.region_for_assistant {
             Some(region::Action::Ask)
         } else {
-            region::popover(ctx, screen.right_bottom(), has_text)
+            region::popover(ctx, screen.right_top(), has_text)
         };
         let Some(action) = action else {
             return;
@@ -2578,6 +2600,7 @@ impl ReaderApp {
             self.generations
                 .paint(&painter, key, map, &papers, &tokens, now);
         }
+        self.page_chrome(ui, &painter, rect, &maps, active);
         let focused = self.active == Some(active);
         if self.show_stats && focused {
             self.stats_overlay(&painter, rect, active);
@@ -2657,16 +2680,43 @@ impl ReaderApp {
                 ))
                 .with_clip_rect(rect.intersect(map.paper));
             let tokens = Tokens::get(ctx);
-            painter.rect_stroke(
-                map.rect_to_screen(block).expand(2.0),
-                3.0,
-                egui::Stroke::new(1.5, tokens.accent),
-                egui::StrokeKind::Outside,
-            );
-            response.clone().on_hover_ui_at_pointer(|ui| {
-                ui.set_max_width(360.0);
-                ui.label(egui::RichText::new("Original").small().color(tokens.muted));
-                ui.label(original);
+            // The block in a dotted accent outline, its original in a card
+            // at the pointer (frame 02c).
+            let outline = map.rect_to_screen(block).expand(3.0);
+            for (from, to) in [
+                (outline.left_top(), outline.right_top()),
+                (outline.right_top(), outline.right_bottom()),
+                (outline.right_bottom(), outline.left_bottom()),
+                (outline.left_bottom(), outline.left_top()),
+            ] {
+                painter.add(egui::Shape::dotted_line(
+                    &[from, to],
+                    tokens.accent,
+                    4.0,
+                    0.9,
+                ));
+            }
+            let source = tab
+                .translation
+                .as_ref()
+                .map(|session| format!("original — p.{} — → {}", map.page + 1, session.target))
+                .unwrap_or_else(|| "original".into());
+            let mut tip = egui::Tooltip::for_enabled(response).at_pointer();
+            tip.popup = tip
+                .popup
+                .frame(glyphst_ui::pane::popover(ctx).inner_margin(egui::Margin::symmetric(12, 8)));
+            tip.show(|ui| {
+                ui.set_max_width(320.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                glyphst_ui::motif::rule_title(ui, &source.to_lowercase(), None);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(original)
+                            .font(theme::regular(14.0))
+                            .color(tokens.text),
+                    )
+                    .wrap(),
+                );
             });
         }
 
@@ -3281,9 +3331,7 @@ impl eframe::App for ReaderApp {
             .active
             .is_some_and(|active| self.tabs[active].present.is_some());
         if presenting && !self.was_presenting {
-            let key = self.keymap.label(Command::Present).unwrap_or_default();
-            self.notices
-                .push(format!("Presenting. Press Esc or {key} to leave."));
+            self.present_started = Some(now);
         }
         self.was_presenting = presenting;
         // Zen mode is for reading a document; the home page leaves it.
@@ -3337,6 +3385,9 @@ impl eframe::App for ReaderApp {
             self.chrome.tab_drag = None;
         }
         self.overlays(&ctx);
+        if presenting && let Some(active) = self.active {
+            self.present_overlay(&ctx, active, now);
+        }
         // Above the status bar while it shows.
         let lift = if presenting || self.zen {
             28.0

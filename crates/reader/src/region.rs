@@ -137,36 +137,56 @@ pub enum Action {
     Dismiss,
 }
 
-/// The popover's buttons, at `at` (the region's bottom right on screen);
-/// `has_text` when glyphs lie in the region.
+/// The region's toolbar (frame 02c): `copy · save png · copy text · ask ·
+/// translate` on a popover above the region's top right, at `at`;
+/// `has_text` when glyphs lie in the region. The design's letter keys are
+/// left out: plain letters are the app's own shortcuts.
 pub fn popover(ctx: &egui::Context, at: egui::Pos2, has_text: bool) -> Option<Action> {
     let mut chosen = None;
+    let items = [
+        ("copy", "copy", true, Action::CopyImage),
+        ("download", "save png", true, Action::SaveImage),
+        ("type", "copy text", has_text, Action::CopyText),
+        ("sparkles", "ask", true, Action::Ask),
+        ("languages", "translate", has_text, Action::Translate),
+    ];
     egui::Area::new(egui::Id::new("region-popover"))
         .order(egui::Order::Foreground)
-        .fixed_pos(at + egui::vec2(-4.0, 8.0))
-        .pivot(egui::Align2::RIGHT_TOP)
+        .fixed_pos(at + egui::vec2(0.0, -8.0))
+        .pivot(egui::Align2::RIGHT_BOTTOM)
         .show(ctx, |ui| {
-            crate::widgets::card_frame(ctx).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let mut button = |ui: &mut egui::Ui, enabled, icon, tip, action| {
-                        let response = ui
-                            .add_enabled_ui(enabled, |ui| {
-                                crate::icons::button(ui, icon, 28.0, false, tip)
-                            })
-                            .inner;
-                        if response.clicked() {
-                            chosen = Some(action);
+            glyphst_ui::pane::popover(ctx)
+                .inner_margin(egui::Margin::same(3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (index, (icon, label, enabled, action)) in items.into_iter().enumerate()
+                        {
+                            if index > 0 {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(1.0, 18.0),
+                                    egui::Sense::hover(),
+                                );
+                                let tokens = crate::theme::Tokens::get(ui.ctx());
+                                ui.painter().vline(
+                                    rect.center().x,
+                                    rect.y_range(),
+                                    tokens.hairline(),
+                                );
+                            }
+                            let response = ui.add_enabled(
+                                enabled,
+                                glyphst_ui::button::Button::plain(label).icon(icon).small(),
+                            );
+                            if response.clicked() {
+                                chosen = Some(action);
+                            }
                         }
-                    };
-                    button(ui, true, "copy", "Copy image", Action::CopyImage);
-                    button(ui, true, "download", "Save image…", Action::SaveImage);
-                    button(ui, has_text, "type", "Copy text", Action::CopyText);
-                    button(ui, has_text, "languages", "Translate", Action::Translate);
-                    button(ui, true, "message-square", "Ask about it…", Action::Ask);
-                    button(ui, true, "x", "Dismiss (Esc)", Action::Dismiss);
+                        if crate::icons::button(ui, "x", 22.0, false, "dismiss (esc)").clicked() {
+                            chosen = Some(Action::Dismiss);
+                        }
+                    });
                 });
-            });
         });
     chosen
 }

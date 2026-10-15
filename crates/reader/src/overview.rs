@@ -5,7 +5,11 @@
 
 use std::ops::{Range, RangeInclusive};
 
-use crate::{document_tab::DocumentTab, document_tab::ViewAction, theme::Tokens, widgets};
+use crate::{
+    document_tab::{DocumentTab, ViewAction},
+    theme::{self, Tokens},
+    widgets,
+};
 
 /// The grid's zoom range and the step of its keys, as in pdfcraft.
 pub const GRID_ZOOM_RANGE: RangeInclusive<f32> = 0.5..=3.0;
@@ -178,6 +182,15 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
     let rows = count.div_ceil(columns);
     let left = rect.left() + (rect.width() - columns as f32 * (cell + GAP) + GAP) / 2.0;
     let current = tab.current_page();
+    // Notes and highlights per page, for the labels and marks.
+    let reflowed = tab.is_reflowed();
+    let mut notes: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for item in &tab.annotations.items {
+        if let Some((page, _)) = tab.annotations.page_of(item, reflowed) {
+            *notes.entry(page).or_default() += 1;
+        }
+    }
+    let width = count.to_string().len().max(2);
     let mut open = None;
     let mut wanted = Vec::new();
     let mut shown = 0..0;
@@ -227,7 +240,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                     egui::vec2(w as f32 * scale, h as f32 * scale),
                 );
                 let painter = ui.painter();
-                painter.rect_filled(paper, 3.0, tokens.page);
+                painter.rect_filled(paper, 0, tokens.page);
                 // Pixels per page point the cell is drawn at.
                 let want = (scale * ppp).min(MAX_RENDER / w.max(h) as f32);
                 let sharp = tab
@@ -255,33 +268,46 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                         paper.center(),
                         egui::Align2::CENTER_CENTER,
                         "dense page",
-                        egui::FontId::proportional(11.0),
+                        theme::mono(10.0),
                         tokens.faint,
                     );
+                } else {
+                    glyphst_ui::thumb::paint_placeholder_lines(ui, paper);
                 }
-                let stroke = if page == state.cursor {
-                    egui::Stroke::new(3.0, tokens.accent)
+                // A small accent mark on pages with notes.
+                let noted = notes.get(&page).copied().unwrap_or(0);
+                if noted > 0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(paper.right() - 14.0, paper.top() + 6.0),
+                            egui::vec2(8.0, 8.0),
+                        ),
+                        0,
+                        tokens.accent,
+                    );
+                }
+                if page == state.cursor {
+                    glyphst_ui::motif::corner_ticks(ui, paper, 8.0, 10.0, tokens.accent);
                 } else if response.hovered() {
-                    egui::Stroke::new(1.0, tokens.muted)
+                    painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
+                }
+                let number = format!("{:0width$}", page + 1);
+                let (label, color) = if page == current {
+                    (format!("{number} ● current"), tokens.accent_text)
+                } else if noted > 0 {
+                    let unit = if noted == 1 { "note" } else { "notes" };
+                    (format!("{number} {noted} {unit}"), tokens.faint)
+                } else if page < current {
+                    (format!("{number} read"), tokens.faint)
                 } else {
-                    egui::Stroke::new(1.0, tokens.rule_strong)
-                };
-                painter.rect_stroke(paper, 3.0, stroke, egui::StrokeKind::Outside);
-                let label = if page == current {
-                    format!("{} ·", page + 1)
-                } else {
-                    (page + 1).to_string()
+                    (number, tokens.faint)
                 };
                 painter.text(
                     egui::pos2(cell_rect.center().x, cell_rect.bottom() + LABEL / 2.0 + 2.0),
                     egui::Align2::CENTER_CENTER,
                     label,
-                    egui::FontId::proportional(12.0),
-                    if page == state.cursor {
-                        tokens.text
-                    } else {
-                        tokens.muted
-                    },
+                    theme::mono(10.0),
+                    color,
                 );
                 if response.clicked() {
                     open = Some(page);

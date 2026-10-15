@@ -127,8 +127,15 @@ impl ReaderApp {
             } else {
                 pane
             };
+            // Pages are laid out clear of the page ticks at the right.
+            let content =
+                if presenting || self.zen || rect.width() < super::page_chrome::MINIMAP_FROM {
+                    rect
+                } else {
+                    rect.with_max_x(rect.right() - super::page_chrome::MINIMAP_GUTTER)
+                };
             let mut view = PaneView {
-                rect,
+                rect: content,
                 draw: rect,
                 index,
                 focused,
@@ -302,7 +309,13 @@ impl ReaderApp {
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
         painter.hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
         let tab = &self.tabs[active];
-        let meta = if tab.find.open && !tab.find.query.is_empty() {
+        let meta = if tab.overview.is_some() {
+            format!(
+                "overview · {} pages · {:.0}%",
+                tab.layout.len(),
+                tab.overview_zoom * 100.0
+            )
+        } else if tab.find.open && !tab.find.query.is_empty() {
             let pages = tab.find.matched_pages();
             format!("{} matches · {pages} pages", tab.find.matches.len())
         } else {
@@ -329,12 +342,16 @@ impl ReaderApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| tab.title.clone());
         let page = tab.current_page();
-        let sections = shell::section_path(
-            tab.outline
-                .iter()
-                .map(|entry| (entry.depth, entry.page, entry.title.as_str())),
-            page,
-        );
+        let sections = if tab.overview.is_some() {
+            vec!["overview"]
+        } else {
+            shell::section_path(
+                tab.outline
+                    .iter()
+                    .map(|entry| (entry.depth, entry.page, entry.title.as_str())),
+                page,
+            )
+        };
         let mut x = rect.left() + 12.0;
         let right = meta_rect.left() - 16.0;
         let last = sections.len();
@@ -754,13 +771,12 @@ impl ReaderApp {
             }
             None => (Vec::new(), None),
         };
-        let inner = rect.shrink2(vec2(12.0, 0.0));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(inner)
+                .max_rect(rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        child.set_min_size(inner.size());
+        child.set_min_size(rect.size());
         let (tabs, active_tab, library) = (&self.tabs, self.active, &self.library);
         let agents = self.agent_specs();
         let request = self.assistant.ui(
