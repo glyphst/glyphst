@@ -91,7 +91,7 @@ impl Assistant {
         ui.painter().hline(
             ui.max_rect().x_range(),
             rect.bottom() + 4.0,
-            Stroke::new(1.0, tokens.hairline(0.08)),
+            Stroke::new(1.0, tokens.rule),
         );
         ui.add_space(8.0);
         if self.more_open
@@ -112,10 +112,10 @@ impl Assistant {
             .fixed_pos(button.right_bottom() + vec2(0.0, 4.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
+                    .fill(tokens.raised)
+                    .stroke(Stroke::new(1.0, tokens.rule))
                     .corner_radius(CornerRadius::same(10))
-                    .shadow(tokens.popup_shadow())
+                    .shadow(egui::Shadow::NONE)
                     .inner_margin(egui::Margin::same(5))
                     .show(ui, |ui| {
                         ui.set_width(250.0);
@@ -132,11 +132,7 @@ impl Assistant {
                                     tokens.ink(0.07),
                                 );
                             }
-                            let color = if enabled {
-                                tokens.text
-                            } else {
-                                tokens.text_faint
-                            };
+                            let color = if enabled { tokens.text } else { tokens.faint };
                             crate::icons::paint(
                                 ui,
                                 Rect::from_center_size(
@@ -145,11 +141,7 @@ impl Assistant {
                                 ),
                                 icon,
                                 14.0,
-                                if enabled {
-                                    tokens.text_muted
-                                } else {
-                                    tokens.text_faint
-                                },
+                                if enabled { tokens.muted } else { tokens.faint },
                             );
                             ui.painter().text(
                                 rect.left_center() + vec2(32.0, 0.0),
@@ -226,7 +218,7 @@ impl Assistant {
                             } else {
                                 "No chat matches"
                             })
-                            .color(tokens.text_faint),
+                            .color(tokens.faint),
                         );
                     });
                 }
@@ -251,7 +243,7 @@ impl Assistant {
                             Align2::LEFT_CENTER,
                             day,
                             theme::medium(11.0),
-                            tokens.text_faint,
+                            tokens.faint,
                         );
                     }
                     let current = session.id == self.session_id;
@@ -277,7 +269,7 @@ impl Assistant {
                         ),
                         icon,
                         14.0,
-                        tokens.text_muted,
+                        tokens.muted,
                     );
                     let width = rect.width() - 36.0 - if response.hovered() { 30.0 } else { 0.0 };
                     crate::widgets::row_text(
@@ -307,7 +299,7 @@ impl Assistant {
                         egui::pos2(rect.left() + 32.0, rect.top() + 31.0),
                         &detail,
                         theme::regular(11.0),
-                        tokens.text_faint,
+                        tokens.faint,
                         width,
                     );
                     let mut deleted = false;

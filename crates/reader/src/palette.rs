@@ -393,7 +393,7 @@ impl Palette {
             .fixed_pos(egui::pos2(screen.center().x, screen.top() + 72.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
-                    .fill(tokens.card)
+                    .fill(tokens.raised)
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
@@ -405,7 +405,7 @@ impl Palette {
                             } else {
                                 ("search", "Type a command, a page number or a document…")
                             };
-                            ui.add(icons::image(icon, 16.0, tokens.text_muted));
+                            ui.add(icons::image(icon, 16.0, tokens.muted));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
                                     .id(field_id())
@@ -437,7 +437,7 @@ impl Palette {
                         ui.painter().hline(
                             line.x_range(),
                             line.top(),
-                            egui::Stroke::new(1.0, tokens.divider),
+                            egui::Stroke::new(1.0, tokens.rule),
                         );
                         ui.add_space(6.0);
                         for (index, hit) in hits.iter().enumerate() {
@@ -459,11 +459,11 @@ impl Palette {
                             }
                             let blocked = hit.blocked.is_some();
                             let (color, icon_color) = if blocked {
-                                (tokens.text_faint, tokens.text_faint)
+                                (tokens.faint, tokens.faint)
                             } else if highlighted {
                                 (tokens.text, tokens.accent_text)
                             } else {
-                                (tokens.text, tokens.icon)
+                                (tokens.text, tokens.text_2)
                             };
                             icons::paint(
                                 ui,
@@ -481,13 +481,13 @@ impl Palette {
                                 let galley = ui.painter().layout_no_wrap(
                                     reason.to_string(),
                                     crate::theme::regular(12.0),
-                                    tokens.text_faint,
+                                    tokens.faint,
                                 );
                                 right -= galley.size().x;
                                 ui.painter().galley(
                                     egui::pos2(right, rect.center().y - galley.size().y / 2.0),
                                     galley,
-                                    tokens.text_faint,
+                                    tokens.faint,
                                 );
                             } else if !hit.detail.is_empty() {
                                 let is_key = matches!(hit.item, Item::Command(_));
@@ -506,13 +506,13 @@ impl Palette {
                                     let galley = ui.painter().layout_no_wrap(
                                         hit.detail.clone(),
                                         crate::theme::regular(12.0),
-                                        tokens.text_faint,
+                                        tokens.faint,
                                     );
                                     right -= galley.size().x;
                                     ui.painter().galley(
                                         egui::pos2(right, rect.center().y - galley.size().y / 2.0),
                                         galley,
-                                        tokens.text_faint,
+                                        tokens.faint,
                                     );
                                 }
                             }
@@ -536,7 +536,7 @@ impl Palette {
                             } else {
                                 "Nothing matches"
                             };
-                            ui.label(egui::RichText::new(empty).color(tokens.text_muted));
+                            ui.label(egui::RichText::new(empty).color(tokens.muted));
                             ui.add_space(4.0);
                         }
                     });

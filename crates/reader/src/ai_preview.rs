@@ -280,10 +280,10 @@ impl Previews {
         // stay that small without room to grow into.
         ui.set_max_height(max_height + 160.0);
         egui::Frame::new()
-            .fill(tokens.card)
-            .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
+            .fill(tokens.raised)
+            .stroke(Stroke::new(1.0, tokens.rule))
             .corner_radius(CornerRadius::same(10))
-            .shadow(tokens.popup_shadow())
+            .shadow(egui::Shadow::NONE)
             .show(ui, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -298,7 +298,7 @@ impl Previews {
                         egui::Frame::new()
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new(error).size(12.0).color(tokens.danger));
+                                ui.label(egui::RichText::new(error).size(12.0).color(tokens.err));
                             });
                         return;
                     }
@@ -307,7 +307,7 @@ impl Previews {
                     None => {
                         let (rect, _) =
                             ui.allocate_exact_size(vec2(width, 72.0), egui::Sense::hover());
-                        crate::widgets::loading_dots(ui, rect, tokens.text_muted);
+                        crate::widgets::loading_dots(ui, rect, tokens.muted);
                     }
                     Some(Ok((text, cut))) => {
                         egui::ScrollArea::vertical()
@@ -332,7 +332,7 @@ impl Previews {
                             ui.painter().hline(
                                 rect.x_range(),
                                 rect.top(),
-                                Stroke::new(1.0, tokens.hairline(0.1)),
+                                Stroke::new(1.0, tokens.rule),
                             );
                             egui::Frame::new()
                                 .inner_margin(egui::Margin::symmetric(12, 6))
@@ -342,7 +342,7 @@ impl Previews {
                                             "Preview limited to {PREVIEW_CHARS} characters. The full text is still sent."
                                         ))
                                         .size(10.5)
-                                        .color(tokens.text_faint),
+                                        .color(tokens.faint),
                                     );
                                 });
                         }
@@ -396,7 +396,7 @@ fn header(ui: &mut egui::Ui, kind: &ChipKind, tokens: &Tokens) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.add(crate::icons::image(kind.icon(), 13.0, tokens.text_muted));
+                ui.add(crate::icons::image(kind.icon(), 13.0, tokens.muted));
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(title)
@@ -409,9 +409,7 @@ fn header(ui: &mut egui::Ui, kind: &ChipKind, tokens: &Tokens) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(detail)
-                                    .size(11.0)
-                                    .color(tokens.text_faint),
+                                egui::RichText::new(detail).size(11.0).color(tokens.faint),
                             )
                             .truncate(),
                         );
@@ -420,11 +418,8 @@ fn header(ui: &mut egui::Ui, kind: &ChipKind, tokens: &Tokens) {
             });
         });
     let rect = ui.min_rect();
-    ui.painter().hline(
-        rect.x_range(),
-        rect.bottom(),
-        Stroke::new(1.0, tokens.hairline(0.08)),
-    );
+    ui.painter()
+        .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, tokens.rule));
 }
 
 /// A chip's title and detail in its card.

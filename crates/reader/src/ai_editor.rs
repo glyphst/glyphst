@@ -450,7 +450,7 @@ impl MentionEditor {
             .show(ui, |ui| {
                 egui::TextEdit::multiline(text)
                     .id(self.id)
-                    .hint_text(egui::RichText::new(style.hint).color(tokens.text_faint))
+                    .hint_text(egui::RichText::new(style.hint).color(tokens.faint))
                     .font(style.font.clone())
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
@@ -497,7 +497,7 @@ impl MentionEditor {
                 shapes.push(plate(rect, selected, &tokens));
             }
             if let Some(icon) = icon_rect(&galley, origin, &text, &chip.range) {
-                crate::icons::paint(ui, icon, chip.kind.icon(), 12.0, tokens.text_muted);
+                crate::icons::paint(ui, icon, chip.kind.icon(), 12.0, tokens.muted);
             }
         }
         ui.painter().set(plates, egui::Shape::Vec(shapes));
@@ -651,7 +651,7 @@ fn plate(rect: Rect, selected: bool, tokens: &Tokens) -> egui::Shape {
     let (fill, stroke) = if selected {
         (tokens.accent_soft, tokens.accent)
     } else {
-        (tokens.ink(0.05), tokens.hairline(0.14))
+        (tokens.ink(0.05), tokens.rule)
     };
     egui::Shape::Rect(egui::epaint::RectShape::new(
         rect,
@@ -708,7 +708,7 @@ pub fn show_static(
         let band = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 14.0), rect.max);
         let mut mesh = egui::Mesh::default();
         let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
-        let fill = tokens.wash(if tokens.dark() { 0.1 } else { 0.055 });
+        let fill = tokens.raised;
         mesh.colored_vertex(band.left_top(), clear);
         mesh.colored_vertex(band.right_top(), clear);
         mesh.colored_vertex(band.left_bottom(), fill);
@@ -726,7 +726,7 @@ pub fn show_static(
                 icon,
                 chip.kind.icon(),
                 12.0,
-                theme::mix(color, tokens.card, 0.3),
+                theme::mix(color, tokens.raised, 0.3),
             );
         }
     }

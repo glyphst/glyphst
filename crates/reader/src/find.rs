@@ -303,12 +303,12 @@ pub fn find_bar(
         .fixed_pos(area.right_top() + egui::vec2(-18.0, 12.0))
         .show(ctx, |ui| {
             widgets::card_frame(ctx)
-                .shadow(tokens.popup_shadow())
+                .shadow(egui::Shadow::NONE)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(icons::image("search", 16.0, tokens.text_muted));
+                        ui.add(icons::image("search", 16.0, tokens.muted));
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut find.query)
                                 .id(egui::Id::new("find-input"))
@@ -335,7 +335,7 @@ pub fn find_bar(
                         ui.label(
                             egui::RichText::new(find.status())
                                 .size(12.0)
-                                .color(tokens.text_muted),
+                                .color(tokens.muted),
                         );
                         if icons::button(ui, "chevron-up", 26.0, false, "Previous (Shift+Enter)")
                             .clicked()
@@ -384,7 +384,7 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
             find.edited(now);
         }
     });
-    ui.label(egui::RichText::new(find.status()).color(tokens.text_muted));
+    ui.label(egui::RichText::new(find.status()).color(tokens.muted));
     ui.separator();
     let mut go = None;
     let line = ui.text_style_height(&egui::TextStyle::Body);
@@ -410,7 +410,7 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
                     ui.painter().rect_filled(rect, 4.0, fill);
                 }
                 let normal = egui::TextFormat {
-                    color: tokens.text_muted,
+                    color: tokens.muted,
                     ..Default::default()
                 };
                 let strong = egui::TextFormat {
@@ -431,7 +431,7 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
                 job.wrap.max_width = rect.width() - 12.0;
                 let galley = ui.painter().layout_job(job);
                 ui.painter()
-                    .galley(rect.min + egui::vec2(6.0, 6.0), galley, tokens.text_muted);
+                    .galley(rect.min + egui::vec2(6.0, 6.0), galley, tokens.muted);
                 if response.clicked() {
                     go = Some(index);
                 }

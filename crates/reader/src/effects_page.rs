@@ -82,7 +82,7 @@ fn card_ui(
     let (rect, response) = ui.allocate_exact_size(size + vec2(0.0, 22.0), Sense::click());
     let preview = Rect::from_min_size(rect.min, size);
     let painter = ui.painter();
-    painter.rect_filled(preview, 8.0, tokens.pasteboard);
+    painter.rect_filled(preview, 8.0, tokens.bg);
     match &card.preview {
         Some(effect) if ui.is_rect_visible(preview) => {
             painter.add(egui_wgpu::Callback::new_paint_callback(
@@ -97,7 +97,7 @@ fn card_ui(
             ));
         }
         Some(_) => {}
-        None => icons::paint(ui, preview, "circle-x", 22.0, tokens.text_faint),
+        None => icons::paint(ui, preview, "circle-x", 22.0, tokens.faint),
     }
     if card.needs_wallpaper {
         painter.text(
@@ -111,9 +111,9 @@ fn card_ui(
     let stroke = if selected {
         Stroke::new(2.0, tokens.accent)
     } else if response.hovered() {
-        Stroke::new(1.0, tokens.text_faint)
+        Stroke::new(1.0, tokens.faint)
     } else {
-        Stroke::new(1.0, tokens.border)
+        Stroke::new(1.0, tokens.rule_strong)
     };
     painter.rect_stroke(preview, 8.0, stroke, StrokeKind::Inside);
     let label_at = egui::pos2(rect.left() + 2.0, preview.bottom() + 11.0);
@@ -138,11 +138,7 @@ fn card_ui(
         label_at,
         &card.label,
         theme::medium(12.5),
-        if selected {
-            tokens.text
-        } else {
-            tokens.text_muted
-        },
+        if selected { tokens.text } else { tokens.muted },
         width,
     );
     response.on_hover_text(&card.label).clicked()
@@ -389,7 +385,7 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 ui.label(
                     RichText::new(folder)
                         .font(theme::mono(11.5))
-                        .color(tokens.text_muted),
+                        .color(tokens.muted),
                 );
             });
         }
@@ -397,8 +393,8 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
             group.full(|ui| {
                 for error in errors {
                     ui.horizontal_wrapped(|ui| {
-                        ui.add(icons::image("triangle-alert", 14.0, tokens.danger));
-                        ui.label(RichText::new(error).small().color(tokens.danger));
+                        ui.add(icons::image("triangle-alert", 14.0, tokens.err));
+                        ui.label(RichText::new(error).small().color(tokens.err));
                     });
                 }
             });
@@ -436,7 +432,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> bool {
         time,
     } = page;
     let mut changed = false;
-    ui.label(RichText::new(format!("For {title} only")).color(tokens.text_muted));
+    ui.label(RichText::new(format!("For {title} only")).color(tokens.muted));
     let default_card = |default: Option<&EffectDef>| Card {
         choice: Choice::Default,
         label: format!(

@@ -333,18 +333,14 @@ fn translation_panel(
         .show(ui, |ui| {
             for (index, (source, translated)) in info.pinned.iter().enumerate() {
                 egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(egui::Stroke::new(1.0, tokens.divider))
+                    .fill(tokens.raised)
+                    .stroke(egui::Stroke::new(1.0, tokens.rule))
                     .corner_radius(8)
                     .inner_margin(10)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let quote: String = source.chars().take(QUOTE_CHARS).collect();
-                        ui.label(
-                            egui::RichText::new(quote)
-                                .italics()
-                                .color(tokens.text_muted),
-                        );
+                        ui.label(egui::RichText::new(quote).italics().color(tokens.muted));
                         ui.label(translated);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -373,7 +369,7 @@ pub fn language_label(code: &str) -> &str {
 
 fn muted(ui: &mut egui::Ui, text: &str) {
     let tokens = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(text).color(tokens.text_muted));
+    ui.label(egui::RichText::new(text).color(tokens.muted));
 }
 
 /// The number shown beside a section's title.
@@ -442,17 +438,14 @@ pub fn header(ui: &mut egui::Ui, tab: &DocumentTab, which: SidebarTab) -> Vec<Si
 }
 
 fn count_pill(ui: &mut egui::Ui, tokens: &Tokens, count: usize) {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(count.to_string(), theme::medium(11.5), tokens.text_muted);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(count.to_string(), theme::medium(11.5), tokens.muted);
     let size = egui::vec2((galley.size().x + 12.0).max(20.0), 18.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect_filled(rect, 9.0, tokens.hover);
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        tokens.text_muted,
-    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, tokens.muted);
 }
 
 /// Whether `text` holds `filter` (already lower-cased; empty holds all).
@@ -529,12 +522,12 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     } else if let Some(detail) = row.detail {
         let galley = ui
             .painter()
-            .layout_no_wrap(detail, theme::regular(11.5), tokens.text_faint);
+            .layout_no_wrap(detail, theme::regular(11.5), tokens.faint);
         right -= galley.size().x;
         ui.painter().galley(
             egui::pos2(right, rect.center().y - galley.size().y / 2.0),
             galley,
-            tokens.text_faint,
+            tokens.faint,
         );
     }
     let mut left = rect.left() + 8.0 + row.depth as f32 * DEPTH_INDENT;
@@ -546,7 +539,7 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
             _ => None,
         };
         if let Some(icon) = icon {
-            icons::paint(ui, toggle, icon, 14.0, tokens.text_muted);
+            icons::paint(ui, toggle, icon, 14.0, tokens.muted);
         }
         left = toggle.right() + 2.0;
     }
@@ -556,7 +549,7 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
         left += 16.0;
     }
     let color = if !row.enabled {
-        tokens.text_faint
+        tokens.faint
     } else if row.selected {
         tokens.accent_text
     } else {
@@ -983,9 +976,9 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                 let stroke = if page == current {
                     egui::Stroke::new(2.5, tokens.accent)
                 } else if response.hovered() {
-                    egui::Stroke::new(1.0, tokens.text_muted)
+                    egui::Stroke::new(1.0, tokens.muted)
                 } else {
-                    egui::Stroke::new(1.0, tokens.border)
+                    egui::Stroke::new(1.0, tokens.rule_strong)
                 };
                 painter.rect_stroke(paper, 2.0, stroke, egui::StrokeKind::Outside);
                 if response.clicked() {
@@ -994,7 +987,7 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                 ui.label(
                     egui::RichText::new((page + 1).to_string())
                         .size(11.0)
-                        .color(tokens.text_muted),
+                        .color(tokens.muted),
                 );
             });
         }
@@ -1190,7 +1183,7 @@ fn note_details(
                 ui.label(
                     egui::RichText::new(format!("“{quote}{ellipsis}”"))
                         .italics()
-                        .color(tokens.text_muted),
+                        .color(tokens.muted),
                 );
             }
             match &mut state.note {

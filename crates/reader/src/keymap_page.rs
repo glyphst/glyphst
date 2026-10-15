@@ -123,7 +123,7 @@ impl KeymapPage {
         ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
             widgets::form_style(ui);
             ui.horizontal(|ui| {
-                ui.add(icons::image("keyboard", 22.0, tokens.icon));
+                ui.add(icons::image("keyboard", 22.0, tokens.text_2));
                 ui.label(RichText::new("Keyboard shortcuts").font(theme::semibold(20.0)));
             });
             ui.label(
@@ -131,7 +131,7 @@ impl KeymapPage {
                     "Click + to record keys (a pause ends a sequence), \
                      a key to remove it, or double-click a row.",
                 )
-                .color(tokens.text_muted),
+                .color(tokens.muted),
             );
             ui.add_space(12.0);
             changed |= self.toolbar(ui, prefs, keymap, &tokens);
@@ -146,7 +146,7 @@ impl KeymapPage {
                     }
                 })
                 .small()
-                .color(tokens.text_muted),
+                .color(tokens.muted),
             );
             ui.add_space(8.0);
             if let Some(conflict) = self.conflict.clone() {
@@ -195,7 +195,7 @@ impl KeymapPage {
                 widgets::filter_field(ui, &mut self.filter, "Search commands, keys or categories");
             });
             ui.add_space(8.0);
-            ui.label(RichText::new("Keymap").color(tokens.text_muted));
+            ui.label(RichText::new("Keymap").color(tokens.muted));
             let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
             changed |= widgets::segmented(ui, &mut prefs.keymap, &options);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -221,7 +221,7 @@ impl KeymapPage {
                         Command::ALL.len()
                     ))
                     .small()
-                    .color(tokens.text_faint),
+                    .color(tokens.faint),
                 );
             });
         });
@@ -307,8 +307,8 @@ impl KeymapPage {
         let rows_height =
             (ui.available_height() - HEADER_HEIGHT - BOTTOM_GAP).max(ROW_HEIGHT * 3.0);
         egui::Frame::new()
-            .fill(tokens.card)
-            .stroke(egui::Stroke::new(1.0, tokens.border))
+            .fill(tokens.raised)
+            .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
             .corner_radius(10)
             .inner_margin(egui::Margin::symmetric(6, 4))
             .show(ui, |ui| {
@@ -319,8 +319,7 @@ impl KeymapPage {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         ui.label(
-                            RichText::new("No command matches the search.")
-                                .color(tokens.text_muted),
+                            RichText::new("No command matches the search.").color(tokens.muted),
                         );
                     });
                     ui.add_space(24.0);
@@ -353,11 +352,7 @@ impl KeymapPage {
                     .then_some(sort)
             });
             let active = sort.is_some() && sort == Some(self.sort);
-            let color = if active {
-                tokens.text
-            } else {
-                tokens.text_muted
-            };
+            let color = if active { tokens.text } else { tokens.muted };
             let galley = ui
                 .painter()
                 .layout_no_wrap(label.to_uppercase(), font.clone(), color);
@@ -387,7 +382,7 @@ impl KeymapPage {
         ui.painter().hline(
             rect.x_range(),
             rect.bottom(),
-            egui::Stroke::new(1.0, tokens.divider),
+            egui::Stroke::new(1.0, tokens.rule),
         );
     }
 
@@ -415,7 +410,7 @@ impl KeymapPage {
             ),
             command.icon(),
             15.0,
-            tokens.icon,
+            tokens.text_2,
         );
         widgets::row_text(
             ui,
@@ -430,7 +425,7 @@ impl KeymapPage {
             egui::pos2(columns.category.min + 10.0, y),
             command.category().label(),
             theme::regular(12.5),
-            tokens.text_muted,
+            tokens.muted,
             columns.category.span() - 14.0,
         );
         let custom = prefs.shortcuts.contains_key(command.id());
@@ -462,7 +457,7 @@ impl KeymapPage {
                 egui::pos2(columns.source.min + 10.0, y),
                 "Default",
                 theme::regular(12.5),
-                tokens.text_faint,
+                tokens.faint,
                 columns.source.span() - 14.0,
             );
         }
@@ -623,7 +618,7 @@ fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Respo
     let size = widgets::kbd_size(ui, label) + egui::vec2(18.0, 4.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let fill = if response.hovered() {
-        tokens.pressed
+        tokens.rule_strong
     } else {
         tokens.hover
     };
@@ -631,7 +626,7 @@ fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Respo
         rect,
         6.0,
         fill,
-        egui::Stroke::new(1.0, tokens.border),
+        egui::Stroke::new(1.0, tokens.rule_strong),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
@@ -649,7 +644,7 @@ fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Respo
         ),
         "x",
         11.0,
-        tokens.text_muted,
+        tokens.muted,
     );
     response
 }
@@ -872,7 +867,14 @@ mod tests {
     fn the_page_draws_while_recording_and_with_a_conflict() {
         let ctx = context();
         for kind in [theme::ThemeKind::Light, theme::ThemeKind::Dark] {
-            theme::apply(&ctx, kind, 0.8);
+            theme::apply(
+                &ctx,
+                &theme::Appearance {
+                    kind,
+                    opacity: 0.8,
+                    ..Default::default()
+                },
+            );
             let mut prefs = Prefs::default();
             let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
             let mut page = KeymapPage {

@@ -37,14 +37,11 @@ mod document_tab;
 mod effects_page;
 mod fake_providers;
 mod find;
-mod fonts;
 mod gamepad;
 mod generation;
 mod gpu;
 mod harness;
 mod home;
-mod icon_data;
-mod icons;
 mod keymap_page;
 mod keys;
 mod overview;
@@ -59,7 +56,6 @@ mod settings_window;
 mod sidebar;
 mod stage;
 mod text_overlay;
-mod theme;
 mod transition;
 mod translation;
 mod user_settings;
@@ -68,6 +64,8 @@ mod widgets;
 mod window_blur;
 
 use std::path::PathBuf;
+
+use glyphst_ui::{fonts, icons, theme};
 
 use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};

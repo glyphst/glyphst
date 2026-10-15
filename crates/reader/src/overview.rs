@@ -256,15 +256,15 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                         egui::Align2::CENTER_CENTER,
                         "dense page",
                         egui::FontId::proportional(11.0),
-                        tokens.text_faint,
+                        tokens.faint,
                     );
                 }
                 let stroke = if page == state.cursor {
                     egui::Stroke::new(3.0, tokens.accent)
                 } else if response.hovered() {
-                    egui::Stroke::new(1.0, tokens.text_muted)
+                    egui::Stroke::new(1.0, tokens.muted)
                 } else {
-                    egui::Stroke::new(1.0, tokens.border)
+                    egui::Stroke::new(1.0, tokens.rule_strong)
                 };
                 painter.rect_stroke(paper, 3.0, stroke, egui::StrokeKind::Outside);
                 let label = if page == current {
@@ -280,7 +280,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                     if page == state.cursor {
                         tokens.text
                     } else {
-                        tokens.text_muted
+                        tokens.muted
                     },
                 );
                 if response.clicked() {

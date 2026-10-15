@@ -10,8 +10,9 @@ use crate::{
     book_effects::{self, BookEffects},
     keys::{self, KeymapPreset, Overrides},
     sidebar::SidebarTab,
-    theme::ThemePreference,
+    theme::{Accent, Density, ThemePreference},
 };
+use glyphst_ui::fonts::FontChoice;
 
 /// The egui Reader's key before it became the only Reader, so preferences
 /// carry over.
@@ -23,6 +24,15 @@ pub const MAX_SESSION_FILES: usize = 64;
 #[serde(default)]
 pub struct Prefs {
     pub theme: ThemePreference,
+    pub accent: Accent,
+    pub density: Density,
+    /// The chrome's base size in points (`theme::BASE_SCALE` is the
+    /// design's).
+    pub ui_scale: f32,
+    /// Rule titles, tree lines and dot fields; off draws plain labels.
+    pub glyph_ornaments: bool,
+    /// The chrome and prose families.
+    pub fonts: FontChoice,
     pub reopen_last_session: bool,
     /// Effect id of the transition between views, or `None` for a cut.
     pub transition: Option<String>,
@@ -58,6 +68,11 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             theme: ThemePreference::System,
+            accent: Accent::default(),
+            density: Density::default(),
+            ui_scale: glyphst_ui::theme::BASE_SCALE,
+            glyph_ornaments: true,
+            fonts: FontChoice::default(),
             reopen_last_session: true,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),

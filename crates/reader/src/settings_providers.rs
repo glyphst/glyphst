@@ -106,16 +106,16 @@ fn test_status<C: PartialEq, E: std::fmt::Display>(
     };
     if test.running() {
         ui.spinner();
-        ui.label(RichText::new("Testing…").color(tokens.text_muted));
+        ui.label(RichText::new("Testing…").color(tokens.muted));
         return;
     }
     let (text, color) = match &test.result {
         _ if test.config != *current => (
             "Settings changed since the test; test again.".to_string(),
-            tokens.text_muted,
+            tokens.muted,
         ),
-        Some(Ok(())) => ("Connected".to_string(), tokens.text_muted),
-        Some(Err(error)) => (format!("Failed: {error}"), tokens.danger),
+        Some(Ok(())) => ("Connected".to_string(), tokens.muted),
+        Some(Err(error)) => (format!("Failed: {error}"), tokens.err),
         None => return,
     };
     ui.label(RichText::new(text).small().color(color));
@@ -549,7 +549,7 @@ impl ProviderPages {
             ui.horizontal(|ui| {
                 ui.label(&model.name);
                 if model.name != model.id {
-                    ui.label(RichText::new(&model.id).small().color(tokens.text_muted));
+                    ui.label(RichText::new(&model.id).small().color(tokens.muted));
                 }
                 if ui
                     .push_id(&model.id, |ui| {
@@ -600,8 +600,7 @@ impl ProviderPages {
                     .collect();
                 if missing.is_empty() {
                     ui.label(
-                        RichText::new("All the provider's models are listed.")
-                            .color(tokens.text_muted),
+                        RichText::new("All the provider's models are listed.").color(tokens.muted),
                     );
                 }
                 egui::ScrollArea::vertical()
@@ -623,7 +622,7 @@ impl ProviderPages {
                     });
             }
             Some(Err(error)) => {
-                ui.colored_label(tokens.danger, error);
+                ui.colored_label(tokens.err, error);
             }
             None => {}
         }
@@ -636,12 +635,10 @@ impl ProviderPages {
         ui.horizontal(|ui| {
             if auth.loading {
                 ui.spinner();
-                ui.label(RichText::new("Reading the saved sign-in…").color(tokens.text_muted));
+                ui.label(RichText::new("Reading the saved sign-in…").color(tokens.muted));
             } else if auth.signing_in {
                 ui.spinner();
-                ui.label(
-                    RichText::new("Finish signing in in your browser…").color(tokens.text_muted),
-                );
+                ui.label(RichText::new("Finish signing in in your browser…").color(tokens.muted));
             } else if let Some(email) = &auth.email {
                 ui.label(format!("Signed in as {email}"));
                 if crate::widgets::ghost_button(ui, "log-out", "Sign out").clicked() {
@@ -660,12 +657,12 @@ impl ProviderPages {
             }
         });
         if let Some(error) = &auth.error {
-            ui.label(RichText::new(error).small().color(tokens.danger));
+            ui.label(RichText::new(error).small().color(tokens.err));
         }
         ui.label(
             RichText::new("Uses your ChatGPT plan; the sign-in is kept in the system keychain.")
                 .small()
-                .color(tokens.text_muted),
+                .color(tokens.muted),
         );
     }
 
@@ -680,8 +677,8 @@ impl ProviderPages {
     ) {
         let tokens = Tokens::get(group.ctx());
         let color = match status {
-            SecretStatus::NotSaved(_) => tokens.danger,
-            _ => tokens.text_muted,
+            SecretStatus::NotSaved(_) => tokens.err,
+            _ => tokens.muted,
         };
         let description = RichText::new(status.label())
             .font(theme::regular(11.5))

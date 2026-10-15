@@ -1,0 +1,13 @@
+[package]
+name = "glyphst-ui"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-ui.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+serde.workspace = true

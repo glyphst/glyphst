@@ -13,6 +13,7 @@ members = [
     "crates/reader",
     "crates/settings",
     "crates/translation",
+    "crates/ui",
 ]
 resolver = "3"
 

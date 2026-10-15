@@ -3058,6 +3058,7 @@ dependencies = [
  "glyphst-pdf-translation-service",
  "glyphst-settings",
  "glyphst-translation",
+ "glyphst-ui",
  "image",
  "log",
  "mupdf",
@@ -3103,6 +3104,16 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-properties",
+]
+
+[[package]]
+name = "glyphst-ui"
+version = "0.1.0"
+dependencies = [
+ "craft-ui",
+ "egui",
+ "egui_extras",
+ "serde",
 ]
 
 [[package]]

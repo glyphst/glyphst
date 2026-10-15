@@ -291,10 +291,10 @@ impl Menu {
             .show(ui.ctx(), |ui| {
                 ui.set_opacity(opened);
                 egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
+                    .fill(tokens.raised)
+                    .stroke(Stroke::new(1.0, tokens.rule))
                     .corner_radius(CornerRadius::same(12))
-                    .shadow(tokens.popup_shadow())
+                    .shadow(egui::Shadow::NONE)
                     .inner_margin(egui::Margin::same(5))
                     .show(ui, |ui| {
                         ui.set_width(width - 10.0);
@@ -304,7 +304,7 @@ impl Menu {
                             ui.label(
                                 egui::RichText::new("Nothing matches")
                                     .size(12.5)
-                                    .color(tokens.text_faint),
+                                    .color(tokens.faint),
                             );
                             ui.add_space(6.0);
                             return;
@@ -326,7 +326,7 @@ impl Menu {
                                             Align2::LEFT_BOTTOM,
                                             group,
                                             theme::medium(11.0),
-                                            tokens.text_faint,
+                                            tokens.faint,
                                         );
                                     }
                                     let selected = index == self.selected;
@@ -373,11 +373,7 @@ fn row(
         Rect::from_center_size(rect.left_center() + vec2(18.0, 0.0), vec2(14.0, 14.0)),
         entry.icon(),
         14.0,
-        if selected {
-            tokens.text
-        } else {
-            tokens.text_muted
-        },
+        if selected { tokens.text } else { tokens.muted },
     );
     let title = entry.title();
     let typed = query.rsplit(' ').next().unwrap_or(query);
@@ -426,7 +422,7 @@ fn row(
         tokens.text,
     );
     if detail_width > 0.0 {
-        let mut job = LayoutJob::simple_singleline(detail, theme::regular(11.5), tokens.text_faint);
+        let mut job = LayoutJob::simple_singleline(detail, theme::regular(11.5), tokens.faint);
         job.wrap.max_width = detail_width;
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
@@ -438,7 +434,7 @@ fn row(
                 rect.center().y - galley.size().y / 2.0,
             ),
             galley,
-            tokens.text_faint,
+            tokens.faint,
         );
     }
     response
@@ -492,14 +488,14 @@ fn aside(
                     MenuEntry::Mention(_) => String::new(),
                 };
                 egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
+                    .fill(tokens.raised)
+                    .stroke(Stroke::new(1.0, tokens.rule))
                     .corner_radius(CornerRadius::same(10))
-                    .shadow(tokens.popup_shadow())
+                    .shadow(egui::Shadow::NONE)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_max_width(width.min(260.0));
-                        ui.label(egui::RichText::new(text).size(12.0).color(tokens.text_muted));
+                        ui.label(egui::RichText::new(text).size(12.0).color(tokens.muted));
                     });
             }
         });

@@ -106,7 +106,7 @@ impl Assistant {
         if sheet {
             egui::Frame::new()
                 .fill(tokens.ink(0.03))
-                .stroke(Stroke::new(1.0, tokens.hairline(0.1)))
+                .stroke(Stroke::new(1.0, tokens.rule))
                 .corner_radius(CornerRadius {
                     nw: 12,
                     ne: 12,
@@ -131,11 +131,8 @@ impl Assistant {
             ui.add_space(-14.0);
         }
         let card = egui::Frame::new()
-            .fill(tokens.field)
-            .stroke(Stroke::new(
-                1.0,
-                tokens.hairline(if focused { 0.22 } else { 0.14 }),
-            ))
+            .fill(tokens.raised)
+            .stroke(Stroke::new(1.0, tokens.rule))
             .corner_radius(CornerRadius::same(14))
             .shadow(egui::Shadow {
                 offset: [0, 2],
@@ -410,9 +407,9 @@ impl Assistant {
         let fraction = *used as f32 / window as f32;
         let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
         let color = if fraction >= 0.85 {
-            tokens.warning
+            tokens.warn
         } else {
-            tokens.text_muted
+            tokens.muted
         };
         crate::widgets::progress_ring(
             ui.painter(),
@@ -420,7 +417,7 @@ impl Assistant {
             6.5,
             fraction,
             color,
-            tokens.hairline(0.26),
+            tokens.rule,
         );
         response.on_hover_text(format!(
             "{:.0}% of the context used ({} of {} tokens). Long chats are summarized when it fills.",
@@ -454,7 +451,7 @@ impl Assistant {
             if self.selector_open {
                 tokens.accent_text
             } else {
-                tokens.text_muted
+                tokens.muted
             },
         );
         let width = (galley.size().x + 40.0).min(ui.available_width().max(60.0));
@@ -473,7 +470,7 @@ impl Assistant {
             Rect::from_center_size(rect.left_center() + vec2(12.0, 0.0), vec2(13.0, 13.0)),
             icon,
             13.0,
-            tokens.text_muted,
+            tokens.muted,
         );
         let text_rect = Rect::from_min_max(
             rect.left_top() + vec2(22.0, 0.0),
@@ -482,14 +479,14 @@ impl Assistant {
         ui.painter().with_clip_rect(text_rect).galley(
             egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0),
             galley,
-            tokens.text_muted,
+            tokens.muted,
         );
         crate::widgets::chevron(
             ui.painter(),
             rect.right_center() - vec2(9.0, 0.0),
             8.0,
             if self.selector_open { 3.0 } else { 1.0 },
-            tokens.text_faint,
+            tokens.faint,
         );
         let response = response.on_hover_text("Model or coding agent");
         if response.clicked() {
@@ -504,10 +501,10 @@ impl Assistant {
             .fixed_pos(rect.right_top() + vec2(0.0, -6.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
-                    .fill(tokens.card)
-                    .stroke(Stroke::new(1.0, tokens.hairline(0.14)))
+                    .fill(tokens.raised)
+                    .stroke(Stroke::new(1.0, tokens.rule))
                     .corner_radius(CornerRadius::same(12))
-                    .shadow(tokens.popup_shadow())
+                    .shadow(egui::Shadow::NONE)
                     .inner_margin(egui::Margin::same(5))
                     .show(ui, |ui| {
                         ui.set_width(280.0);
@@ -579,7 +576,7 @@ impl Assistant {
                 if index == 0 {
                     tokens.accent
                 } else {
-                    tokens.text_faint
+                    tokens.faint
                 },
             );
             let (text, _) = draft.prompt();
@@ -588,7 +585,7 @@ impl Assistant {
                 rect.left_center() + vec2(20.0, 0.0),
                 format!("Queued · {}", text.replace('\n', " ")),
                 theme::regular(12.0),
-                tokens.text_muted,
+                tokens.muted,
                 rect.width() - 80.0,
             );
             if response.contains_pointer() {
@@ -643,10 +640,10 @@ fn round_button(ui: &mut egui::Ui, icon: &str, enabled: bool, tokens: &Tokens) -
         ui.painter().rect_filled(
             Rect::from_center_size(rect.center(), vec2(10.0, 10.0)),
             CornerRadius::same(2),
-            tokens.field,
+            tokens.raised,
         );
     } else {
-        crate::icons::paint(ui, rect, icon, 15.0, tokens.field);
+        crate::icons::paint(ui, rect, icon, 15.0, tokens.raised);
     }
     response
 }
@@ -656,7 +653,7 @@ fn suggestion_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Res
     let font = theme::regular(12.0);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), font, tokens.text_muted);
+        .layout_no_wrap(label.to_string(), font, tokens.muted);
     let width = (galley.size().x + 30.0)
         .min(ui.available_width() - 120.0)
         .max(40.0);
@@ -670,7 +667,7 @@ fn suggestion_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Res
         rect,
         CornerRadius::same(12),
         fill,
-        Stroke::new(1.0, tokens.hairline(0.16)),
+        Stroke::new(1.0, tokens.rule),
         StrokeKind::Inside,
     );
     crate::icons::paint(
@@ -678,7 +675,7 @@ fn suggestion_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Res
         Rect::from_center_size(rect.left_center() + vec2(12.0, 0.0), vec2(11.0, 11.0)),
         "plus",
         11.0,
-        tokens.text_muted,
+        tokens.muted,
     );
     let text = Rect::from_min_max(
         rect.left_top() + vec2(22.0, 0.0),
@@ -687,7 +684,7 @@ fn suggestion_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Res
     ui.painter().with_clip_rect(text).galley(
         egui::pos2(text.left(), rect.center().y - galley.size().y / 2.0),
         galley,
-        tokens.text_muted,
+        tokens.muted,
     );
     response.on_hover_text("Attach it to the message")
 }
@@ -699,7 +696,7 @@ fn group_title(ui: &mut egui::Ui, title: &str, tokens: &Tokens) {
         Align2::LEFT_BOTTOM,
         title,
         theme::medium(11.0),
-        tokens.text_faint,
+        tokens.faint,
     );
 }
 
@@ -724,7 +721,7 @@ fn selector_row(
         if selected {
             tokens.accent
         } else {
-            tokens.text_muted
+            tokens.muted
         },
     );
     crate::widgets::row_text(
@@ -749,7 +746,7 @@ fn selector_row(
             Align2::RIGHT_CENTER,
             detail,
             theme::regular(11.0),
-            tokens.text_faint,
+            tokens.faint,
         );
     }
     response

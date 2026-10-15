@@ -25,7 +25,7 @@ fn white_icons() -> &'static SvgIconSet {
     })
 }
 
-#[cfg(test)]
+/// Whether the set has `name`.
 pub fn exists(name: &str) -> bool {
     white_icons().contains(name)
 }
@@ -45,11 +45,7 @@ pub fn paint(ui: &egui::Ui, rect: Rect, name: &str, size: f32, tint: Color32) {
 /// accent treatment. `tooltip` is also its accessible name.
 pub fn button(ui: &mut egui::Ui, name: &str, size: f32, selected: bool, tooltip: &str) -> Response {
     let t = Tokens::get(ui.ctx());
-    let icon = if ui.is_enabled() {
-        t.icon
-    } else {
-        t.text_faint
-    };
+    let icon = if ui.is_enabled() { t.muted } else { t.faint };
     let style = IconButtonStyle {
         normal: ButtonVisuals {
             fill: Color32::TRANSPARENT,
@@ -59,19 +55,19 @@ pub fn button(ui: &mut egui::Ui, name: &str, size: f32, selected: bool, tooltip:
         hovered: ButtonVisuals {
             fill: t.hover,
             stroke: Stroke::NONE,
-            icon,
+            icon: t.text,
         },
         pressed: Some(ButtonVisuals {
-            fill: t.pressed,
+            fill: t.rule_strong,
             stroke: Stroke::NONE,
             icon,
         }),
         selected: ButtonVisuals {
-            fill: t.accent_soft,
+            fill: t.hover,
             stroke: Stroke::NONE,
-            icon: t.accent_text,
+            icon: t.text,
         },
-        corner_radius: t.radius.into(),
+        corner_radius: t.ctl_radius(),
         focus_stroke: Stroke::new(1.0, t.accent),
     };
     let label = if tooltip.is_empty() { name } else { tooltip };
@@ -84,24 +80,5 @@ pub fn button(ui: &mut egui::Ui, name: &str, size: f32, selected: bool, tooltip:
         response
     } else {
         response.on_hover_text(tooltip)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{commands::Command, settings_window::Section, sidebar::SidebarTab};
-
-    #[test]
-    fn every_icon_in_use_exists() {
-        let names = Command::ALL
-            .iter()
-            .map(|command| command.icon())
-            .chain(Section::ALL.iter().map(|section| section.icon()))
-            .chain(SidebarTab::ALL.iter().map(|tab| tab.icon()))
-            .chain(crate::widgets::ICONS_IN_USE.iter().copied());
-        for name in names {
-            assert!(exists(name), "missing icon {name}");
-        }
     }
 }

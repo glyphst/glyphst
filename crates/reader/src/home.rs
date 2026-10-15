@@ -120,13 +120,13 @@ impl Home {
             widgets::section_title(ui, "Library");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 egui::Frame::new()
-                    .fill(tokens.field)
-                    .stroke(Stroke::new(1.0, tokens.border))
+                    .fill(tokens.raised)
+                    .stroke(Stroke::new(1.0, tokens.rule_strong))
                     .corner_radius(15)
                     .inner_margin(egui::Margin::symmetric(10, 4))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.add(icons::image("search", 14.0, tokens.text_muted));
+                            ui.add(icons::image("search", 14.0, tokens.muted));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.filter)
                                     .hint_text("Filter by title or author")
@@ -182,7 +182,7 @@ fn header(ui: &mut egui::Ui, tokens: &Tokens, picking: bool) -> bool {
             ui.label(egui::RichText::new("Glyphst Reader").font(theme::semibold(22.0)));
             ui.label(
                 egui::RichText::new("Drop PDF, EPUB and other documents anywhere in this window.")
-                    .color(tokens.text_muted),
+                    .color(tokens.muted),
             );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -199,14 +199,14 @@ fn header(ui: &mut egui::Ui, tokens: &Tokens, picking: bool) -> bool {
 
 fn notice(ui: &mut egui::Ui, tokens: &Tokens, error: &str) {
     egui::Frame::new()
-        .fill(tokens.card)
-        .stroke(Stroke::new(1.0, tokens.border))
+        .fill(tokens.raised)
+        .stroke(Stroke::new(1.0, tokens.rule_strong))
         .corner_radius(10)
         .inner_margin(14)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.add(icons::image("triangle-alert", 16.0, tokens.danger));
+                ui.add(icons::image("triangle-alert", 16.0, tokens.err));
                 ui.label(
                     egui::RichText::new("The library is unavailable").font(theme::semibold(13.0)),
                 );
@@ -216,7 +216,7 @@ fn notice(ui: &mut egui::Ui, tokens: &Tokens, error: &str) {
                     "Reading positions are not remembered this session. \
                      Another Glyphst Reader may be running and holding it.\n{error}"
                 ))
-                .color(tokens.text_muted),
+                .color(tokens.muted),
             );
         });
 }
@@ -225,10 +225,10 @@ fn notice(ui: &mut egui::Ui, tokens: &Tokens, error: &str) {
 fn hero(ui: &mut egui::Ui, tokens: &Tokens, path: &Path, page: usize) -> bool {
     let mut open = false;
     egui::Frame::new()
-        .fill(tokens.card)
-        .stroke(Stroke::new(1.0, tokens.border))
+        .fill(tokens.raised)
+        .stroke(Stroke::new(1.0, tokens.rule_strong))
         .corner_radius(16)
-        .shadow(tokens.card_shadow())
+        .shadow(egui::Shadow::NONE)
         .inner_margin(20)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -246,12 +246,10 @@ fn hero(ui: &mut egui::Ui, tokens: &Tokens, path: &Path, page: usize) -> bool {
                         .truncate(),
                     );
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(folder(path)).color(tokens.text_muted),
-                        )
-                        .truncate(),
+                        egui::Label::new(egui::RichText::new(folder(path)).color(tokens.muted))
+                            .truncate(),
                     );
-                    ui.label(egui::RichText::new(format!("Page {page}")).color(tokens.text_faint));
+                    ui.label(egui::RichText::new(format!("Page {page}")).color(tokens.faint));
                     ui.add_space(12.0);
                     open = widgets::pill_button(ui, Some("book-open"), "Continue", true).clicked();
                 });
@@ -284,25 +282,12 @@ fn cover_card(ui: &mut egui::Ui, tokens: &Tokens, path: &Path, page: usize) -> e
         0.0
     };
     let cover = cover.translate(vec2(0.0, lift));
-    ui.painter().add(
-        egui::Shadow {
-            offset: [0, if lift < 0.0 { 8 } else { 4 }],
-            blur: if lift < 0.0 { 20 } else { 12 },
-            spread: 0,
-            color: tokens.page_shadow,
-        }
-        .as_shape(cover, 8),
-    );
     paint_cover(ui, cover, &title, kind_of(path));
     if !exists {
         ui.painter()
-            .rect_filled(cover, 8, tokens.pasteboard.gamma_multiply(0.7));
+            .rect_filled(cover, 8, tokens.bg.gamma_multiply(0.7));
     }
-    let color = if exists {
-        tokens.text
-    } else {
-        tokens.text_faint
-    };
+    let color = if exists { tokens.text } else { tokens.faint };
     widgets::row_text(
         ui,
         pos2(rect.left(), cover.bottom() + 16.0),
@@ -320,7 +305,7 @@ fn cover_card(ui: &mut egui::Ui, tokens: &Tokens, path: &Path, page: usize) -> e
             "Missing".to_string()
         },
         theme::regular(11.5),
-        tokens.text_faint,
+        tokens.faint,
         CARD_COVER.x,
     );
     let response = response.on_hover_text(path.display().to_string());
@@ -345,11 +330,7 @@ fn library_row(ui: &mut egui::Ui, tokens: &Tokens, title: &str, detail: &str, pa
         pos2(left, rect.top() + 16.0),
         title,
         theme::medium(13.0),
-        if exists {
-            tokens.text
-        } else {
-            tokens.text_faint
-        },
+        if exists { tokens.text } else { tokens.faint },
         width,
     );
     widgets::row_text(
@@ -361,7 +342,7 @@ fn library_row(ui: &mut egui::Ui, tokens: &Tokens, title: &str, detail: &str, pa
             "The file is missing"
         },
         theme::regular(11.5),
-        tokens.text_faint,
+        tokens.faint,
         width,
     );
     exists && response.clicked()
@@ -369,12 +350,12 @@ fn library_row(ui: &mut egui::Ui, tokens: &Tokens, title: &str, detail: &str, pa
 
 fn empty(ui: &mut egui::Ui, tokens: &Tokens) {
     ui.vertical_centered(|ui| {
-        ui.add(icons::image("library", 40.0, tokens.text_faint));
+        ui.add(icons::image("library", 40.0, tokens.faint));
         ui.add_space(8.0);
         ui.label(egui::RichText::new("No books yet").font(theme::semibold(15.0)));
         ui.label(
             egui::RichText::new("Books you open appear here, ready to continue.")
-                .color(tokens.text_muted),
+                .color(tokens.muted),
         );
     });
 }

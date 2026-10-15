@@ -111,9 +111,9 @@ pub fn pill_button(ui: &mut egui::Ui, icon: Option<&str>, label: &str, primary: 
         let fill = if response.hovered() && enabled {
             t.hover
         } else {
-            t.card
+            t.raised
         };
-        (fill, Stroke::new(1.0, t.border), t.text)
+        (fill, Stroke::new(1.0, t.rule_strong), t.text)
     };
     let text = if enabled {
         text
@@ -159,23 +159,15 @@ pub fn ghost_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
     });
     if response.hovered() && ui.is_enabled() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(t.radius), t.hover);
+            .rect_filled(rect, CornerRadius::same(t.r_ctl), t.hover);
     }
-    let color = if ui.is_enabled() {
-        t.text
-    } else {
-        t.text_faint
-    };
+    let color = if ui.is_enabled() { t.text } else { t.faint };
     icons::paint(
         ui,
         Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(18.0, 18.0)),
         icon,
         17.0,
-        if ui.is_enabled() {
-            t.icon
-        } else {
-            t.text_faint
-        },
+        if ui.is_enabled() { t.text_2 } else { t.faint },
     );
     ui.painter().text(
         rect.left_center() + vec2(30.0, 0.0),
@@ -235,12 +227,16 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), placeholder)
     });
-    let fill = if response.hovered() { t.hover } else { t.field };
+    let fill = if response.hovered() {
+        t.hover
+    } else {
+        t.raised
+    };
     ui.painter().rect(
         rect,
         CornerRadius::same(15),
         fill,
-        Stroke::new(1.0, t.border),
+        Stroke::new(1.0, t.rule_strong),
         StrokeKind::Inside,
     );
     icons::paint(
@@ -248,11 +244,11 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f
         Rect::from_min_size(rect.min + vec2(10.0, 7.0), vec2(16.0, 16.0)),
         "search",
         15.0,
-        t.text_muted,
+        t.muted,
     );
-    let shortcut =
-        ui.painter()
-            .layout_no_wrap(shortcut.to_owned(), theme::regular(11.5), t.text_faint);
+    let shortcut = ui
+        .painter()
+        .layout_no_wrap(shortcut.to_owned(), theme::regular(11.5), t.faint);
     let shortcut_pos =
         rect.right_center() - vec2(12.0 + shortcut.size().x, shortcut.size().y * 0.5);
     let text_right = (shortcut_pos.x - 10.0).max(rect.left());
@@ -262,12 +258,12 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f
         egui::pos2(text_left, rect.center().y),
         placeholder,
         theme::regular(13.0),
-        t.text_faint,
+        t.faint,
         text_right - text_left,
     );
     ui.painter()
         .with_clip_rect(rect)
-        .galley(shortcut_pos, shortcut, t.text_faint);
+        .galley(shortcut_pos, shortcut, t.faint);
     response.on_hover_cursor(egui::CursorIcon::Text)
 }
 
@@ -275,13 +271,13 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f
 pub fn filter_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> Response {
     let tokens = Tokens::get(ui.ctx());
     egui::Frame::new()
-        .fill(tokens.field)
-        .stroke(Stroke::new(1.0, tokens.border))
+        .fill(tokens.raised)
+        .stroke(Stroke::new(1.0, tokens.rule_strong))
         .corner_radius(15)
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(icons::image("search", 14.0, tokens.text_muted));
+                ui.add(icons::image("search", 14.0, tokens.muted));
                 ui.add(
                     egui::TextEdit::singleline(text)
                         .hint_text(hint)
@@ -301,7 +297,7 @@ pub fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text.to_uppercase())
             .font(theme::semibold(10.5))
-            .color(t.text_faint)
+            .color(t.faint)
             .extra_letter_spacing(0.6),
     );
     ui.add_space(2.0);
@@ -336,7 +332,7 @@ pub fn paint_kbd(ui: &egui::Ui, rect: Rect, label: &str) {
         rect,
         CornerRadius::same(5),
         t.hover,
-        Stroke::new(1.0, t.border),
+        Stroke::new(1.0, t.rule_strong),
         StrokeKind::Inside,
     );
     ui.painter().text(
@@ -344,7 +340,7 @@ pub fn paint_kbd(ui: &egui::Ui, rect: Rect, label: &str) {
         Align2::CENTER_CENTER,
         label,
         theme::medium(11.0),
-        t.text_muted,
+        t.muted,
     );
 }
 
@@ -354,8 +350,8 @@ pub fn slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> Response {
     let tokens = Tokens::get(ui.ctx());
     ui.scope(|ui| {
         let visuals = &mut ui.style_mut().visuals;
-        visuals.widgets.inactive.bg_fill = tokens.divider;
-        visuals.widgets.inactive.weak_bg_fill = tokens.divider;
+        visuals.widgets.inactive.bg_fill = tokens.rule;
+        visuals.widgets.inactive.weak_bg_fill = tokens.rule;
         visuals.selection.bg_fill = tokens.accent;
         visuals.slider_trailing_fill = true;
         ui.add(slider)
@@ -397,7 +393,7 @@ pub fn segmented_with_icons<T: PartialEq + Copy>(
         rect,
         CornerRadius::same(8),
         t.hover,
-        Stroke::new(1.0, t.divider),
+        Stroke::new(1.0, t.rule),
         StrokeKind::Inside,
     );
     let mut x = rect.left() + 2.0;
@@ -415,15 +411,15 @@ pub fn segmented_with_icons<T: PartialEq + Copy>(
             ui.painter().rect(
                 cell,
                 CornerRadius::same(6),
-                t.card,
-                Stroke::new(1.0, t.border),
+                t.raised,
+                Stroke::new(1.0, t.rule_strong),
                 StrokeKind::Inside,
             );
         } else if response.hovered() && enabled {
             ui.painter()
-                .rect_filled(cell, CornerRadius::same(6), t.pressed);
+                .rect_filled(cell, CornerRadius::same(6), t.rule_strong);
         }
-        let mut color = if selected { t.text } else { t.text_muted };
+        let mut color = if selected { t.text } else { t.muted };
         if !enabled {
             color = color.gamma_multiply(0.5);
         }
@@ -463,9 +459,9 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> Response {
         .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, ""));
     let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
     let off = if response.hovered() && enabled {
-        t.text_faint
+        t.faint
     } else {
-        t.border
+        t.rule_strong
     };
     let mut track = off.lerp_to_gamma(t.accent, how_on);
     let mut knob = Color32::WHITE;
@@ -497,15 +493,15 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> Response {
 pub fn form_style(ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let style = ui.style_mut();
-    let radius = CornerRadius::same(t.radius);
-    let border = Stroke::new(1.0, t.border);
+    let radius = CornerRadius::same(t.r_ctl);
+    let border = Stroke::new(1.0, t.rule_strong);
     let widgets = &mut style.visuals.widgets;
-    widgets.inactive.bg_fill = t.field;
-    widgets.inactive.weak_bg_fill = t.field;
+    widgets.inactive.bg_fill = t.raised;
+    widgets.inactive.weak_bg_fill = t.raised;
     widgets.inactive.bg_stroke = border;
     widgets.hovered.weak_bg_fill = t.hover;
-    widgets.hovered.bg_stroke = Stroke::new(1.0, t.text_faint);
-    widgets.active.weak_bg_fill = t.pressed;
+    widgets.hovered.bg_stroke = Stroke::new(1.0, t.faint);
+    widgets.active.weak_bg_fill = t.rule_strong;
     widgets.active.bg_stroke = Stroke::new(1.0, t.accent);
     widgets.open.weak_bg_fill = t.hover;
     widgets.open.bg_stroke = Stroke::new(1.0, t.accent);
@@ -540,8 +536,8 @@ pub fn settings_group<R>(
         ui.add_space(4.0);
     }
     egui::Frame::new()
-        .fill(t.group)
-        .stroke(Stroke::new(1.0, t.divider))
+        .fill(t.hover)
+        .stroke(Stroke::new(1.0, t.rule))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(14, 2))
         .show(ui, |ui| {
@@ -573,7 +569,7 @@ impl Group<'_> {
                 .allocate_exact_size(vec2(self.ui.available_width(), 1.0), Sense::hover());
             self.ui
                 .painter()
-                .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, t.divider));
+                .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, t.rule));
         }
         self.rows += 1;
     }
@@ -590,7 +586,7 @@ impl Group<'_> {
         let description = description.map(|text| {
             egui::RichText::new(text)
                 .font(theme::regular(11.5))
-                .color(t.text_muted)
+                .color(t.muted)
         });
         self.row_with(label, description, control)
     }
@@ -639,7 +635,7 @@ impl Group<'_> {
         y += title_height + 2.0;
         if let Some(description) = description {
             ui.painter()
-                .galley(egui::pos2(rect.left(), y), description, t.text_muted);
+                .galley(egui::pos2(rect.left(), y), description, t.muted);
         }
         let controls = Rect::from_min_max(
             egui::pos2(rect.left() + label_width + 12.0, rect.top()),
@@ -682,7 +678,7 @@ impl Group<'_> {
                 egui::Label::new(
                     egui::RichText::new(text)
                         .font(theme::regular(11.5))
-                        .color(t.text_muted),
+                        .color(t.muted),
                 )
                 .wrap(),
             );
@@ -708,7 +704,7 @@ pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, trailing: &str) -> R
     if response.hovered() {
         ui.painter().rect_filled(
             rect.expand2(vec2(6.0, -4.0)),
-            CornerRadius::same(t.radius),
+            CornerRadius::same(t.r_ctl),
             t.hover,
         );
     }
@@ -717,7 +713,7 @@ pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, trailing: &str) -> R
         Rect::from_center_size(rect.left_center() + vec2(8.0, 0.0), vec2(16.0, 16.0)),
         icon,
         16.0,
-        t.icon,
+        t.text_2,
     );
     row_text(
         ui,
@@ -732,7 +728,7 @@ pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, trailing: &str) -> R
         Rect::from_center_size(rect.right_center() - vec2(8.0, 0.0), vec2(14.0, 14.0)),
         trailing,
         14.0,
-        t.text_muted,
+        t.muted,
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -741,10 +737,10 @@ pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, trailing: &str) -> R
 pub fn card_frame(ctx: &egui::Context) -> egui::Frame {
     let t = Tokens::get(ctx);
     egui::Frame::new()
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.border))
+        .fill(t.raised)
+        .stroke(Stroke::new(1.0, t.rule_strong))
         .corner_radius(CornerRadius::same(10))
-        .shadow(t.card_shadow())
+        .shadow(egui::Shadow::NONE)
         .inner_margin(egui::Margin::same(12))
 }
 
@@ -757,10 +753,10 @@ pub fn list_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (Rect, Respon
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     if selected {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(t.radius), t.accent_soft);
+            .rect_filled(rect, CornerRadius::same(t.r_ctl), t.accent_soft);
     } else if response.contains_pointer() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(t.radius), t.hover);
+            .rect_filled(rect, CornerRadius::same(t.r_ctl), t.hover);
     }
     (rect, response)
 }
@@ -802,7 +798,7 @@ impl Toasts {
         let now = ctx.input(|i| i.time);
         let shown_at = *self.shown_at.get_or_insert(now);
         let t = Tokens::get(ctx);
-        let (fill, text) = t.toast();
+        let (fill, text) = (t.raised, t.text);
         let screen = ctx.content_rect();
         let area = egui::Area::new(egui::Id::new("toast"))
             .order(egui::Order::Tooltip)
@@ -813,7 +809,7 @@ impl Toasts {
                 egui::Frame::new()
                     .fill(fill)
                     .corner_radius(CornerRadius::same(8))
-                    .shadow(t.popup_shadow())
+                    .shadow(egui::Shadow::NONE)
                     .inner_margin(egui::Margin::symmetric(16, 10))
                     .show(ui, |ui| {
                         ui.set_max_width((screen.width() - 64.0).clamp(1.0, 560.0));
@@ -838,6 +834,20 @@ impl Toasts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_icon_in_use_exists() {
+        use crate::{commands::Command, settings_window::Section, sidebar::SidebarTab};
+        let names = Command::ALL
+            .iter()
+            .map(|command| command.icon())
+            .chain(Section::ALL.iter().map(|section| section.icon()))
+            .chain(SidebarTab::ALL.iter().map(|tab| tab.icon()))
+            .chain(super::ICONS_IN_USE.iter().copied());
+        for name in names {
+            assert!(crate::icons::exists(name), "missing icon {name}");
+        }
+    }
+
     use super::*;
 
     #[test]

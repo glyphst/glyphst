@@ -109,7 +109,7 @@ impl Assistant {
                 egui::Label::new(
                     egui::RichText::new(detail)
                         .size(12.5)
-                        .color(tokens.text_muted),
+                        .color(tokens.muted),
                 )
                 .wrap(),
             );
@@ -235,11 +235,7 @@ impl Assistant {
                 if let Some(status) = &self.status {
                     ui.add_space(4.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new(status)
-                                .size(12.0)
-                                .color(tokens.text_faint),
-                        );
+                        ui.label(egui::RichText::new(status).size(12.0).color(tokens.faint));
                     });
                 }
             }
@@ -250,10 +246,10 @@ impl Assistant {
         let offset = output.state.offset.y;
         let rest = (output.content_size.y - rect.height() - offset).max(0.0);
         if offset > 1.0 {
-            fade(ui.painter(), rect, tokens.card, true);
+            fade(ui.painter(), rect, tokens.raised, true);
         }
         if rest > 1.0 {
-            fade(ui.painter(), rect, tokens.card, false);
+            fade(ui.painter(), rect, tokens.raised, false);
         }
         if rest > PILL_SHOW {
             self.pill = true;
@@ -319,7 +315,7 @@ impl Assistant {
         let bubble = ui
             .with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 egui::Frame::new()
-                    .fill(tokens.wash(if tokens.dark() { 0.1 } else { 0.055 }))
+                    .fill(tokens.raised)
                     .corner_radius(CornerRadius::same(16))
                     .inner_margin(egui::Margin::symmetric(14, 9))
                     .show(ui, |ui| {
@@ -404,7 +400,7 @@ impl Assistant {
                 child.label(
                     egui::RichText::new(clock(at))
                         .size(11.0)
-                        .color(tokens.text_faint),
+                        .color(tokens.faint),
                 );
             }
         }
@@ -461,7 +457,7 @@ impl Assistant {
         let mut hovered = None;
         let mut close = false;
         egui::Frame::new()
-            .fill(tokens.field)
+            .fill(tokens.raised)
             .stroke(Stroke::new(1.0, tokens.accent))
             .corner_radius(CornerRadius::same(14))
             .inner_margin(egui::Margin::symmetric(12, 9))
@@ -490,11 +486,7 @@ impl Assistant {
                         1 => "Sending restarts from here and undoes 1 agent change.".to_string(),
                         n => format!("Sending restarts from here and undoes {n} agent changes."),
                     };
-                    ui.label(
-                        egui::RichText::new(note)
-                            .size(11.5)
-                            .color(tokens.text_faint),
-                    );
+                    ui.label(egui::RichText::new(note).size(11.5).color(tokens.faint));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if crate::widgets::pill_button(ui, None, "Send", true).clicked() || send {
                             let draft = editing.editor.take();
@@ -635,7 +627,7 @@ impl Assistant {
                 child.label(
                     egui::RichText::new(detail.join(" · "))
                         .size(11.0)
-                        .color(tokens.text_faint),
+                        .color(tokens.faint),
                 );
             }
         }
@@ -657,7 +649,7 @@ impl Assistant {
             } else {
                 Color32::BLACK
             };
-            style.visuals.override_text_color = Some(theme::mix(tokens.text, tokens.card, 0.14));
+            style.visuals.override_text_color = Some(theme::mix(tokens.text, tokens.raised, 0.14));
             style.visuals.widgets.active.fg_stroke.color = strong;
             egui_commonmark::CommonMarkViewer::new().show(ui, &mut self.markdown, text);
         });
@@ -687,9 +679,9 @@ impl Assistant {
         );
         let galley = ui
             .painter()
-            .layout_no_wrap(label, theme::regular(12.5), tokens.text_muted);
+            .layout_no_wrap(label, theme::regular(12.5), tokens.muted);
         let pos = egui::pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0);
-        crate::widgets::shimmer_text(ui, pos, galley, tokens.text_faint, tokens.text);
+        crate::widgets::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
@@ -711,30 +703,27 @@ impl Assistant {
                         let step = row.step();
                         match row.state {
                             ToolState::Running => {
-                                (format!("{}…", step.doing()), tokens.text_muted, true, None)
+                                (format!("{}…", step.doing()), tokens.muted, true, None)
                             }
-                            ToolState::Done => (step.done(), tokens.text_muted, false, None),
-                            ToolState::Failed => (
-                                format!("{} — failed", step.done()),
-                                tokens.danger,
-                                false,
-                                None,
-                            ),
+                            ToolState::Done => (step.done(), tokens.muted, false, None),
+                            ToolState::Failed => {
+                                (format!("{} — failed", step.done()), tokens.err, false, None)
+                            }
                         }
                     }
                     Segment::Thought(text) => {
                         if last {
-                            ("Thinking…".into(), tokens.text_muted, true, None)
+                            ("Thinking…".into(), tokens.muted, true, None)
                         } else {
                             (
                                 "Thought".into(),
-                                tokens.text_muted,
+                                tokens.muted,
                                 false,
                                 Some(first_line(text)),
                             )
                         }
                     }
-                    Segment::Text(text) => (first_line(text), tokens.text_muted, false, None),
+                    Segment::Text(text) => (first_line(text), tokens.muted, false, None),
                 };
             nodes.push((
                 rect.center().y,
@@ -747,7 +736,7 @@ impl Assistant {
             if running {
                 let galley = ui.painter().layout_no_wrap(label, font, color);
                 let pos = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
-                crate::widgets::shimmer_text(ui, pos, galley, tokens.text_faint, tokens.text);
+                crate::widgets::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
             } else {
                 let mut job = egui::text::LayoutJob::default();
                 job.append(
@@ -762,7 +751,7 @@ impl Assistant {
                     job.append(
                         &format!("  {detail}"),
                         0.0,
-                        egui::TextFormat::simple(font, tokens.text_faint),
+                        egui::TextFormat::simple(font, tokens.faint),
                     );
                 }
                 job.wrap.max_width = room;
@@ -787,7 +776,7 @@ impl Assistant {
                     rect.right_center() - vec2(10.0, 0.0),
                     9.0,
                     if open { 1.0 } else { 0.0 },
-                    tokens.text_faint,
+                    tokens.faint,
                 );
             }
             if expandable && response.clicked() {
@@ -805,17 +794,17 @@ impl Assistant {
             let x = ui.min_rect().left() + RAIL_X + 3.0;
             let painter = ui.painter();
             if nodes.len() > 1 {
-                painter.vline(x, first.0..=last.0, Stroke::new(1.0, tokens.hairline(0.14)));
+                painter.vline(x, first.0..=last.0, Stroke::new(1.0, tokens.rule));
             }
             for (y, running, failed) in &nodes {
                 let color = if *failed {
-                    tokens.danger
+                    tokens.err
                 } else if *running {
                     Tokens::fade(tokens.accent, crate::widgets::pulse(ui, 0.45, 1.0, 1.2))
                 } else {
-                    tokens.hairline(0.35)
+                    tokens.rule
                 };
-                painter.circle_filled(egui::pos2(x, *y), 3.0, tokens.card);
+                painter.circle_filled(egui::pos2(x, *y), 3.0, tokens.raised);
                 painter.circle_filled(egui::pos2(x, *y), 2.5, color);
             }
         }
@@ -868,8 +857,8 @@ fn callout(
 ) -> Option<usize> {
     let tokens = Tokens::get(ui.ctx());
     let (color, icon) = match severity {
-        Severity::Error => (tokens.danger, "circle-alert"),
-        Severity::Warning => (tokens.warning, "triangle-alert"),
+        Severity::Error => (tokens.err, "circle-alert"),
+        Severity::Warning => (tokens.warn, "triangle-alert"),
     };
     let mut clicked = None;
     egui::Frame::new()
@@ -890,9 +879,7 @@ fn callout(
                     );
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(detail)
-                                .size(12.0)
-                                .color(tokens.text_muted),
+                            egui::RichText::new(detail).size(12.0).color(tokens.muted),
                         )
                         .wrap(),
                     );
@@ -934,18 +921,14 @@ fn disclosure(
         0.0,
         egui::TextFormat::simple(
             theme::medium(12.5),
-            if hovered {
-                tokens.text
-            } else {
-                tokens.text_muted
-            },
+            if hovered { tokens.text } else { tokens.muted },
         ),
     );
     if !summary.is_empty() {
         job.append(
             &format!(" · {summary}"),
             0.0,
-            egui::TextFormat::simple(theme::regular(12.5), tokens.text_faint),
+            egui::TextFormat::simple(theme::regular(12.5), tokens.faint),
         );
     }
     job.wrap.max_width = rect.width() - 24.0;
@@ -957,7 +940,7 @@ fn disclosure(
     ui.painter().galley(
         egui::pos2(rect.left(), rect.center().y - size.y / 2.0),
         galley,
-        tokens.text_muted,
+        tokens.muted,
     );
     let turn = ui
         .ctx()
@@ -968,7 +951,7 @@ fn disclosure(
             egui::pos2(rect.left() + size.x + 10.0, rect.center().y),
             9.0,
             turn,
-            tokens.text_faint,
+            tokens.faint,
         );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -983,7 +966,7 @@ fn details(
 ) {
     egui::Frame::new()
         .fill(tokens.ink(0.03))
-        .stroke(Stroke::new(1.0, tokens.hairline(0.07)))
+        .stroke(Stroke::new(1.0, tokens.rule))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .outer_margin(egui::Margin {
@@ -1003,7 +986,7 @@ fn details(
                             ui.style_mut()
                                 .text_styles
                                 .insert(egui::TextStyle::Body, theme::regular(12.5));
-                            ui.visuals_mut().override_text_color = Some(tokens.text_muted);
+                            ui.visuals_mut().override_text_color = Some(tokens.muted);
                             egui_commonmark::CommonMarkViewer::new().show(
                                 ui,
                                 markdown,
@@ -1034,13 +1017,13 @@ fn section(ui: &mut egui::Ui, title: &str, text: &str, tokens: &Tokens) {
     ui.label(
         egui::RichText::new(title)
             .font(theme::medium(11.0))
-            .color(tokens.text_faint),
+            .color(tokens.faint),
     );
     ui.add(
         egui::Label::new(
             egui::RichText::new(text)
                 .font(theme::mono(11.0))
-                .color(tokens.text_muted),
+                .color(tokens.muted),
         )
         .wrap(),
     );
@@ -1050,11 +1033,11 @@ fn section(ui: &mut egui::Ui, title: &str, text: &str, tokens: &Tokens) {
 fn divider(ui: &mut egui::Ui, label: &str, tokens: &Tokens) {
     ui.add_space(12.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_string(), theme::regular(11.0), tokens.text_faint);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), theme::regular(11.0), tokens.faint);
     let half = galley.size().x / 2.0 + 10.0;
-    let stroke = Stroke::new(1.0, tokens.hairline(0.1));
+    let stroke = Stroke::new(1.0, tokens.rule);
     ui.painter().hline(
         rect.left()..=rect.center().x - half,
         rect.center().y,
@@ -1065,11 +1048,8 @@ fn divider(ui: &mut egui::Ui, label: &str, tokens: &Tokens) {
         rect.center().y,
         stroke,
     );
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        tokens.text_faint,
-    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, tokens.faint);
 }
 
 /// A soft band where the thread scrolls on past `rect`'s top or bottom.
@@ -1104,16 +1084,16 @@ fn scroll_pill(ui: &mut egui::Ui, thread: Rect, tokens: &Tokens) -> egui::Respon
     );
     let response = ui.interact(rect, egui::Id::new("assistant-scroll-pill"), Sense::click());
     let painter = ui.painter();
-    painter.add(tokens.popup_shadow().as_shape(rect, CornerRadius::same(15)));
+    painter.add(egui::Shadow::NONE.as_shape(rect, CornerRadius::same(15)));
     painter.rect(
         rect,
         CornerRadius::same(15),
         if response.hovered() {
             tokens.hover
         } else {
-            tokens.card
+            tokens.raised
         },
-        Stroke::new(1.0, tokens.hairline(0.16)),
+        Stroke::new(1.0, tokens.rule),
         egui::StrokeKind::Inside,
     );
     crate::icons::paint(
@@ -1121,7 +1101,7 @@ fn scroll_pill(ui: &mut egui::Ui, thread: Rect, tokens: &Tokens) -> egui::Respon
         Rect::from_center_size(rect.left_center() + vec2(17.0, 0.0), vec2(14.0, 14.0)),
         "arrow-down",
         14.0,
-        tokens.text_muted,
+        tokens.muted,
     );
     ui.painter().galley(
         egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0),

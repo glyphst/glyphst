@@ -176,12 +176,12 @@ impl SettingsWindow {
                         ne: 0,
                         se: 0,
                     },
-                    tokens.group,
+                    tokens.hover,
                 );
                 ui.painter().vline(
                     sidebar.right(),
                     sidebar.y_range(),
-                    Stroke::new(1.0, tokens.divider),
+                    Stroke::new(1.0, tokens.rule),
                 );
                 let current = self.section.unwrap_or(Section::Appearance);
                 ui.scope_builder(
@@ -224,7 +224,7 @@ impl SettingsWindow {
                     if selected {
                         tokens.accent_text
                     } else {
-                        tokens.icon
+                        tokens.text_2
                     },
                 );
                 widgets::row_text(
@@ -236,11 +236,7 @@ impl SettingsWindow {
                     } else {
                         theme::regular(13.0)
                     },
-                    if selected {
-                        tokens.text
-                    } else {
-                        tokens.text_muted
-                    },
+                    if selected { tokens.text } else { tokens.muted },
                     rect.width() - 40.0,
                 );
                 if response
@@ -263,7 +259,7 @@ impl SettingsWindow {
             ui.painter().hline(
                 rect.x_range(),
                 rect.center().y,
-                Stroke::new(1.0, tokens.divider),
+                Stroke::new(1.0, tokens.rule),
             );
         });
     }
@@ -289,9 +285,7 @@ impl SettingsWindow {
                         Persistence::Memory => "Scripted run: changes are not saved.",
                     });
                 }
-                ui.add(
-                    egui::Label::new(RichText::new(description).color(tokens.text_muted)).wrap(),
-                );
+                ui.add(egui::Label::new(RichText::new(description).color(tokens.muted)).wrap());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 if icons::button(ui, "x", 28.0, false, "Close").clicked() {
@@ -536,7 +530,14 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::embedded());
         for (kind, opacity) in [(ThemeKind::Light, 1.0), (ThemeKind::Dark, 0.7)] {
-            theme::apply(&ctx, kind, opacity);
+            theme::apply(
+                &ctx,
+                &theme::Appearance {
+                    kind,
+                    opacity,
+                    ..Default::default()
+                },
+            );
             let mut prefs = Prefs::default();
             let mut user = user(&ctx);
             for section in Section::ALL {

@@ -218,8 +218,8 @@ impl ChangeLog {
         }
         let mut action = None;
         egui::Frame::new()
-            .fill(tokens.chrome)
-            .stroke(egui::Stroke::new(1.0, tokens.border))
+            .fill(tokens.surface)
+            .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
             .corner_radius(10)
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
@@ -229,7 +229,7 @@ impl ChangeLog {
                         1 => "1 change by the agent".to_string(),
                         count => format!("{count} changes by the agent"),
                     };
-                    ui.label(egui::RichText::new(text).small().color(tokens.text_muted));
+                    ui.label(egui::RichText::new(text).small().color(tokens.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_enabled(applied > 0, egui::Button::new("Undo all").small())
@@ -258,7 +258,7 @@ impl ChangeLog {
                                 let reverted = change.state == ChangeState::Reverted;
                                 let mut label = egui::RichText::new(change.label()).small();
                                 label = if reverted {
-                                    label.strikethrough().color(tokens.text_faint)
+                                    label.strikethrough().color(tokens.faint)
                                 } else {
                                     label.color(tokens.text)
                                 };

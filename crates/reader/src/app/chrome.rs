@@ -225,11 +225,11 @@ impl ReaderApp {
                         .fill(if is_focused {
                             tokens.accent_soft
                         } else {
-                            tokens.card
+                            tokens.raised
                         })
-                        .stroke(Stroke::new(1.0, tokens.border))
+                        .stroke(Stroke::new(1.0, tokens.rule_strong))
                         .corner_radius(CornerRadius::same(8))
-                        .shadow(tokens.card_shadow())
+                        .shadow(egui::Shadow::NONE)
                         .inner_margin(egui::Margin {
                             left: 8,
                             right: 2,
@@ -243,7 +243,7 @@ impl ReaderApp {
                                 let color = if is_focused {
                                     tokens.accent_text
                                 } else {
-                                    tokens.text_muted
+                                    tokens.muted
                                 };
                                 ui.add(icons::image(icon, 14.0, color));
                                 ui.label(
@@ -365,7 +365,7 @@ impl ReaderApp {
                 .effect_params
                 .contains_key(glyphst_effects::SOLID)
         {
-            let [r, g, b] = tokens.pasteboard_rgb();
+            let [r, g, b] = tokens.bg_rgb();
             background.params = [r, g, b, 1.0];
         }
         background
@@ -512,7 +512,7 @@ impl ReaderApp {
                             ui.painter().vline(
                                 rect.left(),
                                 (panel.top() + 1.0)..=(panel.bottom() - 1.0),
-                                Stroke::new(1.0, tokens.divider),
+                                Stroke::new(1.0, tokens.rule),
                             );
                             let current = Some(self.prefs.sidebar);
                             let mut rail = ui.new_child(
@@ -772,11 +772,7 @@ impl ReaderApp {
                 );
                 let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - height), rect.max);
                 let painter = ui.painter();
-                painter.rect_filled(
-                    bar,
-                    CornerRadius::ZERO,
-                    tokens.text_faint.gamma_multiply(0.3),
-                );
+                painter.rect_filled(bar, CornerRadius::ZERO, tokens.faint.gamma_multiply(0.3));
                 let read = Rect::from_min_size(
                     bar.min,
                     vec2(
@@ -789,7 +785,7 @@ impl ReaderApp {
                 if height > stage::PROGRESS + 1.0 {
                     for tick in &ticks {
                         let x = bar.left() + bar.width() * tick;
-                        painter.vline(x, bar.y_range(), Stroke::new(1.5, tokens.pasteboard));
+                        painter.vline(x, bar.y_range(), Stroke::new(1.5, tokens.bg));
                     }
                 }
                 if let Some(pos) = response.hover_pos() {
@@ -908,7 +904,7 @@ impl ReaderApp {
                 }
                 self.page_input.clear();
             }
-            ui.label(egui::RichText::new(format!("/ {pages}")).color(tokens.text_muted));
+            ui.label(egui::RichText::new(format!("/ {pages}")).color(tokens.muted));
             let tip = self.keymap.tip("Next page", Command::NextPage);
             if icons::button(ui, "chevron-right", 30.0, false, &tip).clicked() {
                 actions.push(ViewAction::NextPage);
@@ -1086,10 +1082,10 @@ const DOCK_COMPACT: f32 = 560.0;
 /// The frame of the stage's floating cards.
 fn floating_frame(tokens: &Tokens, radius: u8) -> egui::Frame {
     egui::Frame::new()
-        .fill(tokens.card)
-        .stroke(Stroke::new(1.0, tokens.border))
+        .fill(tokens.raised)
+        .stroke(Stroke::new(1.0, tokens.rule_strong))
         .corner_radius(CornerRadius::same(radius))
-        .shadow(tokens.card_shadow())
+        .shadow(egui::Shadow::NONE)
         .inner_margin(egui::Margin::same(12))
 }
 
@@ -1124,7 +1120,7 @@ fn paint_badge(ui: &egui::Ui, tokens: &Tokens, button: Rect, count: usize) {
     let galley = ui.painter().layout_no_wrap(
         sidebar::badge_label(count),
         theme::semibold(9.5),
-        tokens.card,
+        tokens.raised,
     );
     let size = vec2((galley.size().x + 8.0).max(15.0), 15.0);
     let badge = Align2::RIGHT_TOP.anchor_size(pos2(button.right() + 3.0, button.top() - 1.0), size);
@@ -1132,11 +1128,11 @@ fn paint_badge(ui: &egui::Ui, tokens: &Tokens, button: Rect, count: usize) {
         badge,
         CornerRadius::same(8),
         tokens.text,
-        Stroke::new(1.5, tokens.card),
+        Stroke::new(1.5, tokens.raised),
         egui::StrokeKind::Outside,
     );
     ui.painter()
-        .galley(badge.center() - galley.size() / 2.0, galley, tokens.card);
+        .galley(badge.center() - galley.size() / 2.0, galley, tokens.raised);
 }
 
 /// A thin upright line between groups of dock buttons.
@@ -1145,7 +1141,7 @@ fn dock_divider(ui: &mut egui::Ui, tokens: &Tokens) {
     ui.painter().vline(
         rect.center().x,
         rect.y_range(),
-        Stroke::new(1.0, tokens.divider),
+        Stroke::new(1.0, tokens.rule),
     );
 }
 

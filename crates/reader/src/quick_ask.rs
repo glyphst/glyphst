@@ -88,7 +88,7 @@ impl QuickAsk {
         // The theme's chrome is see-through already; the setting alone
         // decides how much the page shows through.
         let fill = tokens
-            .chrome
+            .raised
             .to_opaque()
             .gamma_multiply(1.0 - settings.transparency.clamp(0.0, 0.9));
         egui::Area::new(egui::Id::new("quick-ask"))
@@ -98,7 +98,7 @@ impl QuickAsk {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(fill)
-                    .stroke(egui::Stroke::new(1.0, tokens.border))
+                    .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
                     .corner_radius(14)
                     .shadow(egui::Shadow {
                         offset: [0, 6],
@@ -130,7 +130,7 @@ impl QuickAsk {
                 ui.label(
                     egui::RichText::new(format!("· {}", short(selection, 56)))
                         .small()
-                        .color(tokens.text_muted),
+                        .color(tokens.muted),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -186,13 +186,13 @@ impl QuickAsk {
                     _ if running => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(egui::RichText::new("Thinking…").color(tokens.text_muted));
+                            ui.label(egui::RichText::new("Thinking…").color(tokens.muted));
                         });
                     }
                     _ => {}
                 });
             if let Some(error) = &self.assistant.error {
-                ui.label(egui::RichText::new(error).color(tokens.danger));
+                ui.label(egui::RichText::new(error).color(tokens.err));
             }
             if !running && answer.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -177,7 +177,8 @@ struct NoteEditor {
 pub struct ReaderApp {
     pub(crate) prefs: Prefs,
     /// The theme and window opacity applied to egui.
-    theme_applied: Option<(ThemeKind, f32)>,
+    theme_applied: Option<theme::Appearance>,
+    fonts_applied: Option<glyphst_ui::fonts::FontChoice>,
     /// Watches the desktop's light or dark choice for the System theme.
     desktop_theme: DesktopTheme,
     /// The desktop's latest answer: dark or light, `None` for no
@@ -314,7 +315,6 @@ impl ReaderApp {
             .as_deref()
             .map(glyphst_effects::user_stamp)
             .unwrap_or_default();
-        crate::fonts::install(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let persist = launch.harness.is_none();
         let mut prefs = Prefs::load(cc.storage);
@@ -362,6 +362,7 @@ impl ReaderApp {
         let mut app = Self {
             prefs,
             theme_applied: None,
+            fonts_applied: None,
             desktop_theme: {
                 let ctx = cc.egui_ctx.clone();
                 DesktopTheme::start(move || ctx.request_repaint())
@@ -1089,11 +1090,7 @@ impl ReaderApp {
                         });
                     });
                     let source: String = card.source.chars().take(160).collect();
-                    ui.label(
-                        egui::RichText::new(source)
-                            .italics()
-                            .color(tokens.text_muted),
-                    );
+                    ui.label(egui::RichText::new(source).italics().color(tokens.muted));
                     ui.add_space(4.0);
                     match &card.state {
                         CardState::Loading => {
@@ -1117,7 +1114,7 @@ impl ReaderApp {
                             });
                         }
                         CardState::Failed(error) => {
-                            ui.label(egui::RichText::new(error).color(tokens.danger));
+                            ui.label(egui::RichText::new(error).color(tokens.err));
                         }
                     }
                 });
@@ -1601,10 +1598,27 @@ impl ReaderApp {
             });
         }
         let kind = self.prefs.theme.resolve(system, self.system_theme);
-        let applied = (kind, self.window_opacity());
-        if self.theme_applied != Some(applied) {
-            theme::apply(ctx, applied.0, applied.1);
+        let applied = self.appearance(kind);
+        if self.theme_applied.as_ref() != Some(&applied) {
+            theme::apply(ctx, &applied);
             self.theme_applied = Some(applied);
+        }
+        if self.fonts_applied.as_ref() != Some(&self.prefs.fonts) {
+            crate::fonts::install(ctx, &self.prefs.fonts);
+            self.fonts_applied = Some(self.prefs.fonts.clone());
+        }
+    }
+
+    /// Settings → Appearance for the colours of `kind`.
+    pub(crate) fn appearance(&self, kind: ThemeKind) -> theme::Appearance {
+        theme::Appearance {
+            kind,
+            accent: self.prefs.accent,
+            opacity: self.window_opacity(),
+            density: self.prefs.density,
+            ui_scale: self.prefs.ui_scale,
+            ornaments: self.prefs.glyph_ornaments,
+            fonts: self.prefs.fonts.clone(),
         }
     }
 
@@ -2298,8 +2312,8 @@ impl ReaderApp {
                             ui.painter().rect(
                                 rect,
                                 8.0,
-                                tokens.chrome,
-                                egui::Stroke::new(1.0, tokens.border),
+                                tokens.surface,
+                                egui::Stroke::new(1.0, tokens.rule_strong),
                                 egui::StrokeKind::Inside,
                             );
                         } else if response.hovered() || on_stage {
@@ -2316,7 +2330,7 @@ impl ReaderApp {
                             if is_selected {
                                 tokens.accent
                             } else {
-                                tokens.text_muted
+                                tokens.muted
                             },
                         );
                         widgets::row_text(
@@ -2327,7 +2341,7 @@ impl ReaderApp {
                             if is_selected {
                                 tokens.text
                             } else {
-                                tokens.text_muted
+                                tokens.muted
                             },
                             rect.width() - TAB_CHROME,
                         );
@@ -2360,10 +2374,11 @@ impl ReaderApp {
                 );
                 let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
                 if close_button.hovered() {
-                    ui.painter().rect_filled(close_rect, 4.0, tokens.pressed);
+                    ui.painter()
+                        .rect_filled(close_rect, 4.0, tokens.rule_strong);
                 }
                 if is_selected || response.hovered() || close_button.hovered() {
-                    icons::paint(ui, close_rect, "x", 13.0, tokens.text_muted);
+                    icons::paint(ui, close_rect, "x", 13.0, tokens.muted);
                 }
                 if close_button.on_hover_text("Close").clicked() {
                     close = Some(index);
@@ -2480,8 +2495,8 @@ impl ReaderApp {
                     ui.painter().rect(
                         rect,
                         8.0,
-                        tokens.chrome,
-                        egui::Stroke::new(1.0, tokens.border),
+                        tokens.surface,
+                        egui::Stroke::new(1.0, tokens.rule_strong),
                         egui::StrokeKind::Inside,
                     );
                 } else if response.hovered() {
@@ -2498,7 +2513,7 @@ impl ReaderApp {
                     if selected {
                         tokens.accent
                     } else {
-                        tokens.text_muted
+                        tokens.muted
                     },
                 );
                 widgets::row_text(
@@ -2506,11 +2521,7 @@ impl ReaderApp {
                     egui::pos2(rect.left() + 30.0, rect.center().y),
                     KEYMAP_TAB_LABEL,
                     font.clone(),
-                    if selected {
-                        tokens.text
-                    } else {
-                        tokens.text_muted
-                    },
+                    if selected { tokens.text } else { tokens.muted },
                     rect.width() - TAB_CHROME,
                 );
             });
@@ -2520,10 +2531,11 @@ impl ReaderApp {
         );
         let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
         if close_button.hovered() {
-            ui.painter().rect_filled(close_rect, 4.0, tokens.pressed);
+            ui.painter()
+                .rect_filled(close_rect, 4.0, tokens.rule_strong);
         }
         if selected || response.hovered() || close_button.hovered() {
-            icons::paint(ui, close_rect, "x", 13.0, tokens.text_muted);
+            icons::paint(ui, close_rect, "x", 13.0, tokens.muted);
         }
         if close_button.on_hover_text("Close").clicked() || response.middle_clicked() {
             Some(true)
@@ -2745,25 +2757,7 @@ impl ReaderApp {
                 capture_from: transition.take_capture(),
             });
         let page_color = tokens.page.to_normalized_gamma_f32();
-        // Shadows under the pages, between the backdrop and the pages; a
-        // transition's outgoing pages sit elsewhere, so none then.
-        if transition.is_none() {
-            let shadow = egui::Shadow {
-                offset: [0, 3],
-                blur: 18,
-                spread: 0,
-                color: tokens.page_shadow,
-            };
-            let painter = ui.painter_at(rect);
-            for draw in &frame.draws {
-                let [x0, y0, x1, y1] = draw.paper;
-                let paper = egui::Rect::from_min_max(
-                    rect.min + egui::vec2(x0, y0) / ppp,
-                    rect.min + egui::vec2(x1, y1) / ppp,
-                );
-                painter.add(shadow.as_shape(paper, 2));
-            }
-        }
+        // Pages sit flat on the base layer: the design has no shadows.
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             ViewCallback {
@@ -2890,11 +2884,7 @@ impl ReaderApp {
             );
             response.clone().on_hover_ui_at_pointer(|ui| {
                 ui.set_max_width(360.0);
-                ui.label(
-                    egui::RichText::new("Original")
-                        .small()
-                        .color(tokens.text_muted),
-                );
+                ui.label(egui::RichText::new("Original").small().color(tokens.muted));
                 ui.label(original);
             });
         }
@@ -3110,7 +3100,7 @@ impl ReaderApp {
         }
         if let Some(text) = selected.as_ref().filter(|_| !translated) {
             ui.separator();
-            ui.label(egui::RichText::new("Highlight").color(Tokens::get(ctx).text_faint));
+            ui.label(egui::RichText::new("Highlight").color(Tokens::get(ctx).faint));
             ui.horizontal(|ui| {
                 for color in HighlightColor::ALL {
                     let (rect, response) =
@@ -3519,8 +3509,8 @@ impl eframe::App for ReaderApp {
                 .exact_size(40.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(tokens.titlebar)
-                        .stroke(egui::Stroke::new(1.0, tokens.divider))
+                        .fill(tokens.bg)
+                        .stroke(egui::Stroke::new(1.0, tokens.rule))
                         .inner_margin(egui::Margin::symmetric(8, 0)),
                 )
                 .show(ui, |ui| self.tab_strip(ui));
@@ -3537,7 +3527,7 @@ impl eframe::App for ReaderApp {
             .frame(egui::Frame::new().fill(if self.active.is_some() {
                 egui::Color32::TRANSPARENT
             } else {
-                tokens.pasteboard
+                tokens.bg
             }))
             .show(ui, |ui| {
                 if self.active.is_some() {
@@ -3727,8 +3717,8 @@ impl ReaderApp {
 /// A menu entry with an icon, a label and a key at the right.
 fn menu_entry(ui: &egui::Ui, icon: &str, text: &str, key: &str) -> egui::Button<'static> {
     let tokens = Tokens::get(ui.ctx());
-    egui::Button::image_and_text(icons::image(icon, 15.0, tokens.icon), text.to_string())
-        .shortcut_text(egui::RichText::new(key.to_string()).color(tokens.text_faint))
+    egui::Button::image_and_text(icons::image(icon, 15.0, tokens.text_2), text.to_string())
+        .shortcut_text(egui::RichText::new(key.to_string()).color(tokens.faint))
 }
 
 /// What a tab's context menu does.
