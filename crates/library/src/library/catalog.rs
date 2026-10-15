@@ -1097,6 +1097,10 @@ impl LibraryStore {
         self.catalog_revision
     }
 
+    pub fn library_attachments(&self) -> &[LibraryAttachment] {
+        &self.library.library_attachments
+    }
+
     pub fn library_items(&self) -> &[LibraryItem] {
         &self.library.library_items
     }

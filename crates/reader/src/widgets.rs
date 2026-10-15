@@ -4,7 +4,7 @@
 use egui::{Rect, Response};
 
 use glyphst_ui::{
-    button::Button, field::TextField, key, motif, pane, segmented as segment, settings, text,
+    button::Button, field::TextField, key, pane, segmented as segment, settings, text,
     theme::Tokens, toggle::Switch,
 };
 
@@ -105,13 +105,6 @@ pub fn ghost_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
 /// A search field.
 pub fn filter_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> Response {
     TextField::search(text, hint).show(ui)
-}
-
-/// A rule title over a group of controls or rows.
-pub fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(8.0);
-    motif::rule_title(ui, &text.to_lowercase(), None);
-    ui.add_space(2.0);
 }
 
 /// One line of `text`, left-aligned and vertically centred on `pos`, cut

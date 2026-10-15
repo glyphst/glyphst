@@ -50,6 +50,7 @@ mod panes;
 mod pickers;
 mod prefs;
 mod quick_ask;
+mod reading_clock;
 mod region;
 mod settings_providers;
 mod settings_window;

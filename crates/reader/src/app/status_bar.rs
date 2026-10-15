@@ -41,7 +41,30 @@ impl ReaderApp {
     }
 
     fn home_status(&mut self, ui: &mut egui::Ui) {
-        let count = self.library.library_items().len();
+        // The documents and their size on disk, read again when the count
+        // changes.
+        let mut paths: std::collections::HashSet<&std::path::Path> = self
+            .library
+            .history_entries()
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
+        paths.extend(
+            self.library
+                .library_attachments()
+                .iter()
+                .map(|attachment| attachment.path.as_path()),
+        );
+        let count = paths.len();
+        if self.library_size.is_none_or(|(known, _)| known != count) {
+            let bytes = paths
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .sum();
+            self.library_size = Some((count, bytes));
+        }
+        let bytes = self.library_size.map_or(0, |(_, bytes)| bytes);
         let highlights = self.library.highlight_count();
         let segments = vec![
             Segment::label(
@@ -51,6 +74,9 @@ impl ReaderApp {
                 format!("library · {count} docs"),
             )
             .static_text(),
+            Segment::label("size", Side::Left, None, sidebar::format_size(bytes))
+                .static_text()
+                .priority(2),
             Segment::label(
                 "highlights",
                 Side::Left,

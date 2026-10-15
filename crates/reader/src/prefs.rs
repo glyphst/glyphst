@@ -19,6 +19,8 @@ use glyphst_ui::fonts::FontChoice;
 const STORAGE_KEY: &str = "glyphst-reader-egui";
 /// More files than anyone keeps open; storage is untrusted.
 pub const MAX_SESSION_FILES: usize = 64;
+/// Page counts remembered for home.
+pub const MAX_PAGE_COUNTS: usize = 2_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,6 +57,9 @@ pub struct Prefs {
     pub assistant_width: f32,
     /// Language to translate into; `None` follows the translation settings.
     pub target_language: Option<String>,
+    /// Page counts of documents opened before, by path, for home's
+    /// progress.
+    pub page_counts: BTreeMap<String, usize>,
     /// While translated pages show, the original shows under the pointer.
     pub original_on_hover: bool,
     /// Opening a PDF starts translating it.
@@ -88,6 +93,7 @@ impl Default for Prefs {
             drawer_width: crate::shell::SIDEBAR_WIDTH,
             assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,
+            page_counts: BTreeMap::new(),
             original_on_hover: true,
             translate_as_read: false,
             shortcuts: Overrides::new(),
@@ -133,6 +139,13 @@ impl Prefs {
             prefs.last_session.active = None;
         }
         prefs.background_fps = prefs.background_fps.clamp(1, 120);
+        // Storage is untrusted: keep the newest few hundred counts.
+        while prefs.page_counts.len() > MAX_PAGE_COUNTS {
+            let first = prefs.page_counts.keys().next().cloned();
+            if let Some(first) = first {
+                prefs.page_counts.remove(&first);
+            }
+        }
         let scale = glyphst_ui::theme::UI_SCALE_RANGE;
         prefs.ui_scale = if prefs.ui_scale.is_finite() {
             prefs.ui_scale.clamp(*scale.start(), *scale.end())

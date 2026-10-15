@@ -14,7 +14,7 @@ use glyphst_core::{
     DocumentFormat, DocumentLayout, DocumentPageLayout, DocumentRotation, EpubLayout,
 };
 use glyphst_effects::EffectDef;
-use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore};
+use glyphst_library::{ActivityKind, DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
 use glyphst_ui::Tip;
 
@@ -292,6 +292,10 @@ pub struct ReaderApp {
     /// The window had the keyboard focus last frame (files changed while
     /// it was away are reloaded when it comes back).
     was_focused: bool,
+    /// Home's document count and their size on disk.
+    library_size: Option<(usize, u64)>,
+    /// The span of reading running, for the activity log.
+    reading: crate::reading_clock::ReadingClock,
     pub(crate) keymap: Keymap,
     /// The start of a key sequence and a count typed so far.
     pub(crate) pending_keys: keys::Pending,
@@ -448,6 +452,8 @@ impl ReaderApp {
             wallpaper_loading: None,
             wallpaper_shown: None,
             was_focused: true,
+            library_size: None,
+            reading: Default::default(),
             keymap: Keymap::default(),
             pending_keys: keys::Pending::default(),
             palette: Palette::default(),
@@ -562,6 +568,12 @@ impl ReaderApp {
                     let _ = self.library.mark_library_item_opened(path);
                 }
                 self.activate(Some(self.tabs.len() - 1));
+                let tab = &self.tabs[self.tabs.len() - 1];
+                let (page, pages) = (tab.current_page(), tab.layout.len());
+                self.prefs
+                    .page_counts
+                    .insert(path.display().to_string(), pages);
+                self.log_activity(ActivityKind::Open, path, format!("p.{}", page + 1), 0);
                 // Translate as I read: a PDF starts translating as it opens.
                 let is_pdf = path
                     .extension()
@@ -884,8 +896,15 @@ impl ReaderApp {
                 .add_note(&path, color, rects, quote, "")
                 .map(|n| AnnotationId::Note(n.id)),
         };
+        let page = selection.pages().next().unwrap_or(0);
         match created {
             Ok(id) => {
+                let kind = if note {
+                    ActivityKind::Note
+                } else {
+                    ActivityKind::Highlight
+                };
+                self.log_activity(kind, &path, format!("p.{}", page + 1), 0);
                 self.tabs[active].selection = None;
                 self.reload_annotations(active);
                 if note {
@@ -967,7 +986,11 @@ impl ReaderApp {
         };
         let tab = &self.tabs[active];
         let (path, position, title) = (tab.path.clone(), tab.position(), tab.words_at_top(8));
+        let page = position.page.max(1);
         let result = self.library.add_bookmark(&path, title, position);
+        if result.is_ok() {
+            self.log_activity(ActivityKind::Bookmark, &path, format!("p.{page}"), 0);
+        }
         self.after_edit(result.map(|_| true));
         self.prefs.show_sidebar = true;
         self.prefs.sidebar = SidebarTab::Bookmarks;
@@ -1094,6 +1117,23 @@ impl ReaderApp {
         }
     }
 
+    /// Adds an event to the activity log; a failure is only reported.
+    /// Scripted runs leave the log alone.
+    pub(crate) fn log_activity(
+        &mut self,
+        kind: ActivityKind,
+        path: &std::path::Path,
+        detail: String,
+        seconds: u64,
+    ) {
+        if !self.persist {
+            return;
+        }
+        if let Err(error) = self.library.record_activity(kind, path, detail, seconds) {
+            log::warn!("could not log activity: {error:#}");
+        }
+    }
+
     /// When the document of tab `active` was last opened, as the
     /// document card writes it.
     pub(crate) fn opened_label(&self, active: usize) -> Option<String> {
@@ -1167,7 +1207,10 @@ impl ReaderApp {
                 .start_session(&self.tabs[active].path, target.as_deref(), ctx);
         match started {
             Ok(session) => {
+                let detail = format!("→ {}", session.target.to_lowercase());
+                let path = self.tabs[active].path.clone();
                 self.tabs[active].translation = Some(session);
+                self.log_activity(ActivityKind::Translate, &path, detail, 0);
                 self.prefs.show_sidebar = true;
                 self.prefs.sidebar = SidebarTab::Translation;
             }
@@ -1255,6 +1298,11 @@ impl ReaderApp {
         let Some(ask) = self.ask_context() else {
             return;
         };
+        if let Some(active) = self.active {
+            let question: String = draft.prompt().0.chars().take(48).collect();
+            let path = self.tabs[active].path.clone();
+            self.log_activity(ActivityKind::Ask, &path, question, 0);
+        }
         let Some(settings) = self.user_settings.get().cloned() else {
             self.assistant.error =
                 Some("Your AI settings are still loading; try again in a moment.".into());
@@ -3297,6 +3345,12 @@ impl eframe::App for ReaderApp {
             self.reload_changed(&ctx);
         }
         self.was_focused = focused;
+        // Reading time for the activity log.
+        let input = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || !i.events.is_empty());
+        let document = self.active.map(|active| self.tabs[active].path.clone());
+        if let Some((path, seconds)) = self.reading.tick(now, document.as_deref(), input, focused) {
+            self.log_activity(ActivityKind::Read, &path, String::new(), seconds);
+        }
         self.user_settings.poll(now);
         self.translator.set_settings(self.user_settings.get());
         self.translator.poll();
@@ -3400,12 +3454,23 @@ impl eframe::App for ReaderApp {
                     if page.show(ui, &mut self.prefs, &self.keymap) {
                         self.rebuild_keymap();
                     }
-                } else if let Some(action) =
-                    self.home.ui(ui, &self.library, self.pickers.is_showing())
-                {
+                } else if let Some(action) = self.home.ui(
+                    ui,
+                    crate::home::HomeContext {
+                        library: &self.library,
+                        page_counts: &self.prefs.page_counts,
+                        picking: self.pickers.is_showing(),
+                    },
+                ) {
                     match action {
                         HomeAction::Open(path) => self.open(&path, &ctx, None),
                         HomeAction::OpenDialog => self.pickers.open_documents(&ctx),
+                        HomeAction::AskAbout(path) => {
+                            self.open(&path, &ctx, None);
+                            if !self.assistant.open {
+                                self.toggle_assistant();
+                            }
+                        }
                     }
                 }
             });
@@ -3463,6 +3528,9 @@ impl eframe::App for ReaderApp {
     }
 
     fn on_exit(&mut self) {
+        if let Some((path, seconds)) = self.reading.finish() {
+            self.log_activity(ActivityKind::Read, &path, String::new(), seconds);
+        }
         self.window_blur.detach();
     }
 
