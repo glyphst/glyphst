@@ -56,6 +56,8 @@ use crate::{
 
 pub(crate) mod agent;
 mod chrome;
+mod status_bar;
+mod tab_bar;
 
 /// How often the effects folder is looked at for changes.
 const EFFECTS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -64,8 +66,6 @@ const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const TAB_MIN_WIDTH: f32 = 90.0;
 const TAB_MAX_LABEL: usize = 32;
 const TAB_OVERFLOW_WIDTH: f32 = 28.0;
-/// Room a tab needs besides its title: icon, padding and close button.
-const TAB_CHROME: f32 = 62.0;
 /// The Keyboard shortcuts tab's label.
 const KEYMAP_TAB_LABEL: &str = "Keyboard shortcuts";
 /// Margin on each side of a reflowed column, in points.
@@ -95,9 +95,6 @@ pub struct Launch {
     /// The wallpaper image.
     pub wallpaper: Option<String>,
     pub theme: Option<ThemePreference>,
-    /// Keeps the dock and the rail shown (`true`) or faded (`false`)
-    /// instead of fading them after a pause.
-    pub controls: Option<bool>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
     /// Shows the second document beside the first, on this side.
@@ -276,8 +273,6 @@ pub struct ReaderApp {
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
     chrome: chrome::StageChrome,
-    /// See [`Launch::controls`].
-    controls: Option<bool>,
     /// Present mode was on last frame (to say how to leave it).
     was_presenting: bool,
     /// The user's effects folder, what it held when last loaded, and when
@@ -438,7 +433,6 @@ impl ReaderApp {
             upload_complete_ms: Vec::new(),
             pending_actions: Vec::new(),
             chrome: Default::default(),
-            // Scripted runs show the controls unless told otherwise.
             was_presenting: false,
             effects_dir: user_effects,
             effects_stamp,
@@ -446,7 +440,6 @@ impl ReaderApp {
             wallpaper_loading: None,
             wallpaper_shown: None,
             was_focused: true,
-            controls: launch.controls.or((!persist).then_some(true)),
             keymap: Keymap::default(),
             pending_keys: keys::Pending::default(),
             palette: Palette::default(),
@@ -2244,316 +2237,6 @@ impl ReaderApp {
             .collect()
     }
 
-    /// The top bar, after pdfcraft's tab strip: Home, the document tabs,
-    /// Open, then the palette's search box, theme, settings and the menu.
-    fn tab_strip(&mut self, ui: &mut egui::Ui) {
-        let tokens = Tokens::get(ui.ctx());
-        let ctx = ui.ctx().clone();
-        let font = theme::regular(13.0);
-        let labels: Vec<String> = self
-            .tabs
-            .iter()
-            .map(|tab| truncate(&tab.title, TAB_MAX_LABEL))
-            .collect();
-        let natural: Vec<f32> = labels
-            .iter()
-            .map(|label| {
-                ui.painter()
-                    .layout_no_wrap(label.clone(), font.clone(), tokens.text)
-                    .size()
-                    .x
-                    + TAB_CHROME
-            })
-            .collect();
-        let strip = ui.available_rect_before_wrap();
-        let search_width = if strip.width() > 900.0 { 280.0 } else { 0.0 };
-        // Home and Open on the left; search, theme, settings and the menu
-        // on the right.
-        let keymap_tab = self.keymap_page.is_some().then(|| {
-            ui.painter()
-                .layout_no_wrap(KEYMAP_TAB_LABEL.into(), font.clone(), tokens.text)
-                .size()
-                .x
-                + TAB_CHROME
-        });
-        let controls = 2.0 * 32.0
-            + search_width
-            + 4.0 * 32.0
-            + 16.0
-            + keymap_tab.map_or(0.0, |width| width + 4.0);
-        let fit = craft_ui::tabs::fit(
-            &natural,
-            self.active.unwrap_or(0),
-            (strip.width() - controls).max(0.0),
-            TAB_MIN_WIDTH,
-            TAB_OVERFLOW_WIDTH,
-        );
-        let mut select = None;
-        let mut close = None;
-        let mut run = None;
-        let mut tab_menu = None;
-        let (mut open_keymap, mut close_keymap) = (false, false);
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let home = self.active.is_none() && !self.keymap_focused;
-            if icons::button(ui, "house", 28.0, home, "Home").clicked() {
-                select = Some(None);
-            }
-            for &(index, width) in &fit.shown {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
-                let id = ui.id().with(("tab", self.tabs[index].id));
-                let is_selected = self.active == Some(index);
-                let label = &labels[index];
-                let icon = if self.tabs[index].is_reflowed() {
-                    "book-open"
-                } else {
-                    "file-text"
-                };
-                // Shown in another pane: a faint fill.
-                let on_stage = self.panes.count() > 1 && self.panes.contains(self.tabs[index].id);
-                let response = craft_ui::tabs::Tab::new(id, label, is_selected)
-                    .sense(egui::Sense::click_and_drag())
-                    .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
-                    .show_at(ui, rect, |ui, response| {
-                        if is_selected {
-                            ui.painter().rect(
-                                rect,
-                                8.0,
-                                tokens.surface,
-                                egui::Stroke::new(1.0, tokens.rule_strong),
-                                egui::StrokeKind::Inside,
-                            );
-                        } else if response.hovered() || on_stage {
-                            ui.painter().rect_filled(rect, 8.0, tokens.hover);
-                        }
-                        icons::paint(
-                            ui,
-                            egui::Rect::from_center_size(
-                                egui::pos2(rect.left() + 16.0, rect.center().y),
-                                egui::vec2(16.0, 16.0),
-                            ),
-                            icon,
-                            15.0,
-                            if is_selected {
-                                tokens.accent
-                            } else {
-                                tokens.muted
-                            },
-                        );
-                        widgets::row_text(
-                            ui,
-                            egui::pos2(rect.left() + 30.0, rect.center().y),
-                            label.as_str(),
-                            font.clone(),
-                            if is_selected {
-                                tokens.text
-                            } else {
-                                tokens.muted
-                            },
-                            rect.width() - TAB_CHROME,
-                        );
-                    })
-                    .on_hover_text(&self.tabs[index].title);
-                if response.clicked() {
-                    select = Some(Some(index));
-                }
-                // Dragged onto the stage, it opens beside a pane.
-                if response.drag_started() {
-                    self.chrome.tab_drag = Some(self.tabs[index].id);
-                }
-                if response.dragged() {
-                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                }
-                if response.middle_clicked() {
-                    close = Some(index);
-                }
-                let shown = self.panes.contains(self.tabs[index].id);
-                let count = self.tabs.len();
-                response.context_menu(|ui| {
-                    if let Some(action) = tab_menu_entries(ui, index, count, shown) {
-                        tab_menu = Some((index, action));
-                        ui.close();
-                    }
-                });
-                let close_rect = egui::Rect::from_center_size(
-                    egui::pos2(rect.right() - 15.0, rect.center().y),
-                    egui::vec2(20.0, 20.0),
-                );
-                let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
-                if close_button.hovered() {
-                    ui.painter()
-                        .rect_filled(close_rect, 4.0, tokens.rule_strong);
-                }
-                if is_selected || response.hovered() || close_button.hovered() {
-                    icons::paint(ui, close_rect, "x", 13.0, tokens.muted);
-                }
-                if close_button.on_hover_text("Close").clicked() {
-                    close = Some(index);
-                }
-            }
-            if let Some(width) = keymap_tab {
-                match self.keymap_tab(ui, width, &tokens, &font) {
-                    Some(true) => close_keymap = true,
-                    Some(false) => open_keymap = true,
-                    None => {}
-                }
-            }
-            if !fit.overflow.is_empty() {
-                let response =
-                    icons::button(ui, "chevron-down", TAB_OVERFLOW_WIDTH, false, "More tabs");
-                egui::Popup::menu(&response).show(|ui| {
-                    for &index in &fit.overflow {
-                        if ui.button(&labels[index]).clicked() {
-                            select = Some(Some(index));
-                        }
-                    }
-                });
-            }
-            let tip = self
-                .keymap
-                .tip("Open with system dialog", Command::OpenWithDialog);
-            if ui
-                .add_enabled_ui(!self.pickers.is_showing(), |ui| {
-                    icons::button(ui, "plus", 28.0, false, &tip)
-                })
-                .inner
-                .clicked()
-            {
-                run = Some(Command::OpenWithDialog);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let response = icons::button(ui, "ellipsis", 28.0, false, "Menu");
-                egui::Popup::menu(&response).show(|ui| self.menu(ui));
-                let tip = self.keymap.tip("Settings", Command::Settings);
-                if icons::button(ui, "settings", 28.0, self.settings_window.open, &tip).clicked() {
-                    run = Some(Command::Settings);
-                }
-                let (icon, label) = match self.prefs.theme {
-                    ThemePreference::System => ("monitor", "System"),
-                    ThemePreference::Light => ("sun", "Light"),
-                    ThemePreference::Dark => ("moon", "Dark"),
-                };
-                let response = icons::button(ui, icon, 28.0, false, &format!("Theme: {label}"));
-                egui::Popup::menu(&response).show(|ui| {
-                    for (command, preference) in [
-                        (Command::ThemeSystem, ThemePreference::System),
-                        (Command::ThemeLight, ThemePreference::Light),
-                        (Command::ThemeDark, ThemePreference::Dark),
-                    ] {
-                        if ui
-                            .add(egui::Button::selectable(
-                                self.prefs.theme == preference,
-                                preference.label(),
-                            ))
-                            .clicked()
-                        {
-                            run = Some(command);
-                        }
-                    }
-                });
-                let key = self.keymap.label(Command::Palette).unwrap_or_default();
-                if search_width > 0.0 {
-                    if widgets::search_box(ui, "Search commands, pages, books…", &key, search_width)
-                        .clicked()
-                    {
-                        run = Some(Command::Palette);
-                    }
-                } else {
-                    let tip = self.keymap.tip("Command palette", Command::Palette);
-                    if icons::button(ui, "search", 28.0, self.palette.open, &tip).clicked() {
-                        run = Some(Command::Palette);
-                    }
-                }
-            });
-        });
-        if let Some(command) = run {
-            self.run_or_notify(command, &ctx);
-        }
-        if close_keymap {
-            self.close_keymap_tab();
-        } else if open_keymap {
-            self.open_keymap_tab();
-        }
-        if let Some((index, action)) = tab_menu {
-            self.tab_menu_action(index, action, &ctx);
-        } else if let Some(index) = close {
-            self.close(index);
-        } else if let Some(index) = select {
-            self.activate(index);
-        }
-    }
-
-    /// The Keyboard shortcuts tab in the strip, `width` wide: `Some(true)`
-    /// when it is to close, `Some(false)` when it was chosen.
-    fn keymap_tab(
-        &self,
-        ui: &mut egui::Ui,
-        width: f32,
-        tokens: &Tokens,
-        font: &egui::FontId,
-    ) -> Option<bool> {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
-        let id = ui.id().with("keymap-tab");
-        let selected = self.keymap_focused;
-        let response = craft_ui::tabs::Tab::new(id, KEYMAP_TAB_LABEL, selected)
-            .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
-            .show_at(ui, rect, |ui, response| {
-                if selected {
-                    ui.painter().rect(
-                        rect,
-                        8.0,
-                        tokens.surface,
-                        egui::Stroke::new(1.0, tokens.rule_strong),
-                        egui::StrokeKind::Inside,
-                    );
-                } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 8.0, tokens.hover);
-                }
-                icons::paint(
-                    ui,
-                    egui::Rect::from_center_size(
-                        egui::pos2(rect.left() + 16.0, rect.center().y),
-                        egui::vec2(16.0, 16.0),
-                    ),
-                    "keyboard",
-                    15.0,
-                    if selected {
-                        tokens.accent
-                    } else {
-                        tokens.muted
-                    },
-                );
-                widgets::row_text(
-                    ui,
-                    egui::pos2(rect.left() + 30.0, rect.center().y),
-                    KEYMAP_TAB_LABEL,
-                    font.clone(),
-                    if selected { tokens.text } else { tokens.muted },
-                    rect.width() - TAB_CHROME,
-                );
-            });
-        let close_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 15.0, rect.center().y),
-            egui::vec2(20.0, 20.0),
-        );
-        let close_button = ui.interact(close_rect, id.with("close"), egui::Sense::click());
-        if close_button.hovered() {
-            ui.painter()
-                .rect_filled(close_rect, 4.0, tokens.rule_strong);
-        }
-        if selected || response.hovered() || close_button.hovered() {
-            icons::paint(ui, close_rect, "x", 13.0, tokens.muted);
-        }
-        if close_button.on_hover_text("Close").clicked() || response.middle_clicked() {
-            Some(true)
-        } else if response.clicked() {
-            Some(false)
-        } else {
-            None
-        }
-    }
-
     /// Does what a tab's context menu chose for tab `index`.
     fn tab_menu_action(&mut self, index: usize, action: TabMenu, ctx: &egui::Context) {
         let id = self.tabs[index].id;
@@ -3514,14 +3197,13 @@ impl eframe::App for ReaderApp {
         self.zen &= self.active.is_some();
         if !presenting && !self.zen {
             egui::Panel::top("tabs")
-                .exact_size(40.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(tokens.bg)
-                        .stroke(egui::Stroke::new(1.0, tokens.rule))
-                        .inner_margin(egui::Margin::symmetric(8, 0)),
-                )
+                .exact_size(glyphst_ui::tab::BAR_HEIGHT)
+                .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.tab_strip(ui));
+            egui::Panel::bottom("status")
+                .exact_size(glyphst_ui::status::HEIGHT)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| self.status_bar(ui));
         }
 
         let mut animating = false;
@@ -3562,11 +3244,11 @@ impl eframe::App for ReaderApp {
             self.chrome.tab_drag = None;
         }
         self.overlays(&ctx);
-        // Above the dock while it shows.
-        let lift = if self.active.is_some() && !presenting && !self.zen {
-            84.0
-        } else {
+        // Above the status bar while it shows.
+        let lift = if presenting || self.zen {
             28.0
+        } else {
+            glyphst_ui::status::HEIGHT + 16.0
         };
         self.notices.show(&ctx, lift);
         self.pending_keys_chip(&ctx, lift);

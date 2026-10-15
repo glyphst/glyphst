@@ -4,11 +4,8 @@
 use egui::{Rect, Response};
 
 use glyphst_ui::{
-    button::Button,
-    field::{SearchButton, TextField},
-    key, motif, pane, row, segmented as segment, settings, text,
-    theme::Tokens,
-    toggle::Switch,
+    button::Button, field::TextField, key, motif, pane, row, segmented as segment, settings, text,
+    theme::Tokens, toggle::Switch,
 };
 
 pub use glyphst_ui::overlay::Toasts;
@@ -103,15 +100,6 @@ pub fn pill_button(ui: &mut egui::Ui, icon: Option<&str>, label: &str, primary: 
 /// Icon and label, transparent until hovered.
 pub fn ghost_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
     Button::plain(label).icon(icon).show(ui)
-}
-
-/// The search-field lookalike that opens the command palette.
-pub fn search_box(ui: &mut egui::Ui, placeholder: &str, shortcut: &str, width: f32) -> Response {
-    ui.add(SearchButton {
-        placeholder,
-        shortcut,
-        width,
-    })
 }
 
 /// A search field.

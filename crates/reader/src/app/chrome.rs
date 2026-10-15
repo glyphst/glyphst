@@ -1,9 +1,11 @@
-//! The reading stage's chrome: the backdrop, the rail, the drawers, the
-//! dock and the progress line. `stage.rs` has the geometry; this draws it.
-//! Floating parts are egui Areas above the document view, so the pointer
-//! over them never reaches the pages.
+//! The docked shell around a document (frame 02a): the icon rail, the
+//! sidebar, the breadcrumb or split panes' headers over the pages, and the
+//! assistant, split by hairlines. `shell.rs` has the geometry; this draws
+//! it. Below `shell::NARROW` the sidebar and the assistant float over the
+//! pages as Areas, so the pointer over them never reaches the pages.
 
-use egui::{Align2, CornerRadius, Id, Order, Rect, Stroke, pos2, vec2};
+use egui::{Align2, Id, Order, Rect, pos2, vec2};
+use glyphst_ui::{overlay, rail as ui_rail, text as ui_text};
 
 use super::*;
 use crate::{
@@ -11,28 +13,31 @@ use crate::{
     gpu::BackdropCallback,
     overview,
     panes::{self, Divider},
-    stage::{self, ChromeFade, StageInput, StageLayout},
+    shell::{self, ShellInput, ShellLayout},
 };
 
 /// The chrome's state between frames.
 #[derive(Default)]
 pub(super) struct StageChrome {
-    pub fade: ChromeFade,
-    /// Where the rail and the dock were drawn last frame.
-    rail: Option<Rect>,
-    dock: Option<Rect>,
-    /// The page last asked for while scrubbing the progress line.
-    scrub: Option<usize>,
+    /// The page last asked for while scrubbing the progress meter.
+    pub scrub: Option<usize>,
     /// Where the panes were drawn last frame, for dropping a tab dragged
-    /// from the top bar.
+    /// from the tab bar.
     pub panes: Vec<(u64, Rect)>,
-    /// The tab being dragged from the top bar.
+    /// The tab being dragged from the tab bar.
     pub tab_drag: Option<u64>,
 }
 
+/// What a split pane's header asked for.
+enum PaneHeaderAction {
+    Focus(u64),
+    Close(u64),
+}
+
 impl ReaderApp {
-    /// The stage of the active document: backdrop, pages and chrome.
-    /// Returns whether the view animates and whether every page is drawn.
+    /// The active document's shell: rail, sidebar, breadcrumb, pages and
+    /// assistant. Returns whether the view animates and whether every page
+    /// is drawn.
     pub(super) fn stage(
         &mut self,
         ui: &mut egui::Ui,
@@ -46,72 +51,85 @@ impl ReaderApp {
         };
         let ctx = ui.ctx().clone();
         let tokens = Tokens::get(&ctx);
-        let rect = ui.max_rect();
         let presenting = self.tabs[active].present.is_some();
-        let layout = StageLayout::compute(StageInput {
-            stage: rect,
-            rail_buttons: SidebarTab::ALL.len(),
-            drawer: self.prefs.show_sidebar.then_some(self.prefs.drawer_width),
+        let layout = ShellLayout::compute(ShellInput {
+            area: ui.max_rect(),
+            sidebar: self.prefs.show_sidebar.then_some(self.prefs.drawer_width),
             assistant: self.assistant.open.then_some(self.prefs.assistant_width),
             present: presenting || self.zen,
         });
+        // The focused pane's tab is always shown.
+        let focused_id = self.tabs[active].id;
+        if !self.panes.contains(focused_id) {
+            self.panes.show(focused_id);
+        }
+        // Split panes take the breadcrumb's row for their own headers.
+        let column = match layout.breadcrumb {
+            Some(breadcrumb) => layout.reading.union(breadcrumb),
+            None => layout.reading,
+        };
+        let (panes, dividers) = if presenting {
+            (vec![(focused_id, layout.reading)], Vec::new())
+        } else {
+            let split = self.panes.count() > 1 && !self.zen;
+            self.panes
+                .rects(if split { column } else { layout.reading })
+        };
+        let split = panes.len() > 1 && !self.zen;
         let ppp = ctx.pixels_per_point();
+        let backdrop = if split { column } else { layout.reading };
         let pointer = ctx
             .pointer_hover_pos()
-            .filter(|pos| rect.contains(*pos))
-            .map(|pos| [(pos.x - rect.min.x) * ppp, (pos.y - rect.min.y) * ppp]);
+            .filter(|pos| backdrop.contains(*pos))
+            .map(|pos| {
+                [
+                    (pos.x - backdrop.min.x) * ppp,
+                    (pos.y - backdrop.min.y) * ppp,
+                ]
+            });
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
+            backdrop,
             BackdropCallback {
-                rect,
+                rect: backdrop,
                 background: self.background_effect(&tokens),
                 time: self.started.elapsed().as_secs_f32(),
                 pointer,
                 opacity: tokens.opacity,
             },
         ));
-        // The focused pane's tab is always on the stage.
-        let focused_id = self.tabs[active].id;
-        if !self.panes.contains(focused_id) {
-            self.panes.show(focused_id);
-        }
-        let (panes, dividers) = if presenting {
-            (vec![(focused_id, layout.reading)], Vec::new())
-        } else {
-            self.panes.rects(layout.reading)
-        };
         let mut actions = Some(actions);
         let (mut animating, mut drawn) = (false, true);
         let mut keep = Vec::new();
-        let split = panes.len() > 1 && !self.zen;
         let reduce_motion = self
             .user_settings
             .get()
             .is_some_and(|settings| settings.behavior.reduce_motion);
         self.generations.begin_frame(reduce_motion);
+        let mut header_action = None;
         for &(id, pane) in &panes {
-            // Split panes keep a strip at the top for their title chip.
-            let rect = if split {
-                pane.with_min_y((pane.top() + PANE_HEADER).min(pane.bottom()))
-            } else {
-                pane
-            };
             let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
                 continue;
             };
             let focused = index == active;
-            // The panes at the reading area's edges are drawn on under an
-            // open drawer and assistant, which float over them.
-            let mut draw = rect;
-            if (pane.left() - layout.reading.left()).abs() < 0.5 {
-                draw.min.x = draw.min.x.min(layout.pages.left());
-            }
-            if (pane.right() - layout.reading.right()).abs() < 0.5 {
-                draw.max.x = draw.max.x.max(layout.pages.right());
-            }
+            // Split panes start with their own header.
+            let rect = if split {
+                let header = Rect::from_min_max(
+                    pane.min,
+                    pos2(
+                        pane.right(),
+                        (pane.top() + shell::BREADCRUMB_HEIGHT).min(pane.bottom()),
+                    ),
+                );
+                if let Some(action) = self.pane_header(ui, header, index, focused) {
+                    header_action = Some(action);
+                }
+                pane.with_min_y(header.bottom())
+            } else {
+                pane
+            };
             let mut view = PaneView {
                 rect,
-                draw,
+                draw: rect,
                 index,
                 focused,
                 actions: if focused {
@@ -157,129 +175,296 @@ impl ReaderApp {
         if presenting || self.zen {
             return (animating, drawn);
         }
-        if panes.len() > 1 {
-            self.pane_chrome(ui, &panes, &dividers, layout.rail);
+        if !split && let Some(breadcrumb) = layout.breadcrumb {
+            self.breadcrumb(ui, breadcrumb, active);
+        }
+        if split {
+            self.pane_dividers(ui, &dividers);
+        }
+        match header_action {
+            Some(PaneHeaderAction::Close(id)) => {
+                if self.panes.close_pane(id)
+                    && let Some(focused) = self.panes.focused()
+                {
+                    self.focus_tab(focused);
+                }
+            }
+            Some(PaneHeaderAction::Focus(id)) => self.focus_tab(id),
+            None => {}
         }
         self.tab_drop(&ctx);
         let active = self.active.unwrap_or(active);
-        let visible = self.controls_visible(&ctx, active);
-        let opacity = ctx.animate_bool_with_time(Id::new("stage-controls"), visible, 0.25);
-        // An open drawer draws the rail as its own left strip.
-        if layout.drawer.is_none() {
-            self.rail(&ctx, &layout, active, opacity);
-        } else {
-            self.chrome.rail = None;
+        if let Some(rail) = layout.rail {
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rail)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            self.rail(&mut child, rail, active);
         }
-        self.drawers(&ctx, &layout, active, now);
-        self.progress_line(&ctx, &layout, active);
-        self.dock(&ctx, &layout, active, opacity);
+        if let Some(rect) = layout.sidebar {
+            self.docked(
+                ui,
+                "stage-sidebar",
+                rect,
+                layout.overlay,
+                Edge::Right,
+                |app, ui| {
+                    app.sidebar_pane(ui, rect, active, now);
+                },
+            );
+        }
+        if let Some(rect) = layout.assistant {
+            self.docked(
+                ui,
+                "stage-assistant",
+                rect,
+                layout.overlay,
+                Edge::Left,
+                |app, ui| {
+                    app.assistant_pane(ui, rect, active);
+                },
+            );
+        }
         (animating, drawn)
     }
 
-    /// With two or more panes: each pane's title chip (with a button that
-    /// closes the pane), the focused pane's outline, and the dividers.
-    fn pane_chrome(
+    /// Draws `add` in a pane at `rect`: in place when docked, or floating
+    /// over the pages in a narrow window. `edge` is the side facing the
+    /// pages, where the hairline and the resize handle go.
+    fn docked(
         &mut self,
         ui: &mut egui::Ui,
-        panes: &[(u64, Rect)],
-        dividers: &[Divider],
-        rail: Option<Rect>,
+        id: &str,
+        rect: Rect,
+        overlay: bool,
+        edge: Edge,
+        add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
-        let ctx = ui.ctx().clone();
-        let tokens = Tokens::get(&ctx);
-        let focused = self.active.map(|active| self.tabs[active].id);
-        let mut close = None;
-        let mut focus = None;
-        for &(id, rect) in panes {
-            let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
-                continue;
+        let tokens = Tokens::get(ui.ctx());
+        let paint = |ui: &mut egui::Ui, app: &mut Self| {
+            ui.painter()
+                .rect_filled(rect, 0, tokens.surface.to_opaque());
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.set_clip_rect(rect);
+            add(app, &mut child);
+            let x = match edge {
+                Edge::Left => rect.left() + 0.5,
+                Edge::Right => rect.right() - 0.5,
             };
-            let is_focused = focused == Some(id);
-            if is_focused {
-                ui.painter().rect_stroke(
-                    rect.shrink(1.0),
-                    CornerRadius::same(10),
-                    Stroke::new(1.5, tokens.accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let icon = if tab.is_reflowed() {
-                "book-open"
-            } else {
-                "file-text"
-            };
-            let title = truncate(&tab.title, 40);
-            // The chip steps aside for the rail floating over the pane.
-            let mut chip = rect.min + vec2(4.0, 5.0);
-            if let Some(rail) = rail
-                && rect.left() < rail.right()
-                && rail.y_range().intersects((chip.y..=chip.y + 30.0).into())
-            {
-                chip.x = rail.right() + stage::GAP / 2.0;
-            }
-            egui::Area::new(Id::new(("pane-chip", id)))
+            ui.painter().vline(x, rect.y_range(), tokens.hairline());
+        };
+        if overlay {
+            egui::Area::new(Id::new(id))
                 .order(Order::Middle)
-                .fixed_pos(chip)
-                .show(&ctx, |ui| {
-                    let frame = egui::Frame::new()
-                        .fill(if is_focused {
-                            tokens.accent_soft
-                        } else {
-                            tokens.raised
-                        })
-                        .stroke(Stroke::new(1.0, tokens.rule_strong))
-                        .corner_radius(CornerRadius::same(8))
-                        .shadow(egui::Shadow::NONE)
-                        .inner_margin(egui::Margin {
-                            left: 8,
-                            right: 2,
-                            top: 2,
-                            bottom: 2,
-                        });
-                    let response = frame
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.horizontal(|ui| {
-                                let color = if is_focused {
-                                    tokens.accent_text
-                                } else {
-                                    tokens.muted
-                                };
-                                ui.add(icons::image(icon, 14.0, color));
-                                ui.label(
-                                    egui::RichText::new(title)
-                                        .font(theme::medium(12.5))
-                                        .color(color),
-                                );
-                                if icons::button(ui, "x", 22.0, false, "Close the pane").clicked() {
-                                    close = Some(id);
-                                }
-                            });
-                        })
-                        .response
-                        .interact(egui::Sense::click());
-                    if response.clicked() {
-                        focus = Some(id);
-                    }
+                .fixed_pos(rect.min)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_size(rect.size());
+                    paint(ui, self);
                 });
+        } else {
+            paint(ui, self);
         }
+        let (width, min) = match edge {
+            Edge::Right => (self.prefs.drawer_width, shell::SIDEBAR_MIN),
+            Edge::Left => (self.prefs.assistant_width, shell::ASSISTANT_MIN),
+        };
+        let x = match edge {
+            Edge::Left => rect.left(),
+            Edge::Right => rect.right(),
+        };
+        let delta = resize_handle(ui, &tokens, id, x, rect, width, min);
+        if delta != 0.0 {
+            match edge {
+                Edge::Right => {
+                    self.prefs.drawer_width =
+                        (self.prefs.drawer_width + delta).clamp(shell::SIDEBAR_MIN, 900.0);
+                }
+                // Dragging the assistant's left edge left widens it.
+                Edge::Left => {
+                    self.prefs.assistant_width =
+                        (self.prefs.assistant_width - delta).clamp(shell::ASSISTANT_MIN, 1200.0);
+                }
+            }
+        }
+    }
+
+    /// The breadcrumb over the pages: the file and the outline path to the
+    /// current page, and at the right the render time and zoom (or the
+    /// find counts while finding).
+    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) {
+        let tokens = Tokens::get(ui.ctx());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0, tokens.surface.to_opaque());
+        painter.hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
+        let tab = &self.tabs[active];
+        let meta = if tab.find.open && !tab.find.query.is_empty() {
+            let pages = tab.find.matched_pages();
+            format!("{} matches · {pages} pages", tab.find.matches.len())
+        } else {
+            format!(
+                "gpu · {:.1} ms · {:.0}%",
+                self.frames.percentile_ms(0.5),
+                tab.view.scale / tab.fit_scale() * 100.0
+            )
+        };
+        let font = theme::mono(11.0);
+        let y = rect.center().y;
+        let meta_rect = ui_text::line(
+            ui,
+            pos2(rect.right() - 12.0, y),
+            Align2::RIGHT_CENTER,
+            meta,
+            font.clone(),
+            tokens.faint,
+            rect.width() * 0.4,
+        );
+        let file = tab
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| tab.title.clone());
+        let page = tab.current_page();
+        let sections = shell::section_path(
+            tab.outline
+                .iter()
+                .map(|entry| (entry.depth, entry.page, entry.title.as_str())),
+            page,
+        );
+        let mut x = rect.left() + 12.0;
+        let right = meta_rect.left() - 16.0;
+        let last = sections.len();
+        for (index, part) in std::iter::once(file.as_str())
+            .chain(sections.iter().copied())
+            .enumerate()
+        {
+            if x >= right {
+                break;
+            }
+            if index > 0 {
+                let sep = ui_text::line(
+                    ui,
+                    pos2(x, y),
+                    Align2::LEFT_CENTER,
+                    "›",
+                    font.clone(),
+                    tokens.faint,
+                    right - x,
+                );
+                x = sep.right() + 8.0;
+            }
+            let color = if index == last {
+                tokens.text
+            } else {
+                tokens.muted
+            };
+            let part_rect = ui_text::line(
+                ui,
+                pos2(x, y),
+                Align2::LEFT_CENTER,
+                part.to_lowercase(),
+                font.clone(),
+                color,
+                right - x,
+            );
+            x = part_rect.right() + 8.0;
+        }
+    }
+
+    /// A split pane's header: `▌ file — p.4 / 15 — 100%` and a close
+    /// button. Clicking it focuses the pane.
+    fn pane_header(
+        &self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        index: usize,
+        focused: bool,
+    ) -> Option<PaneHeaderAction> {
+        let tokens = Tokens::get(ui.ctx());
+        let tab = &self.tabs[index];
+        let id = tab.id;
+        let response = ui.interact(rect, Id::new(("pane-header", id)), egui::Sense::click());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0, tokens.surface.to_opaque());
+        painter.hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
+        let y = rect.center().y;
+        let mut x = rect.left() + 12.0;
+        if focused {
+            painter.rect_filled(
+                Rect::from_center_size(pos2(x + 2.0, y), vec2(4.0, 13.0)),
+                0,
+                tokens.accent,
+            );
+            x += 14.0;
+        }
+        let file = tab
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| tab.title.clone());
+        let title = ui_text::line(
+            ui,
+            pos2(x, y),
+            Align2::LEFT_CENTER,
+            file,
+            theme::mono(12.0),
+            if focused { tokens.text } else { tokens.muted },
+            rect.width() * 0.5,
+        );
+        let meta = format!(
+            "— p.{} / {} — {:.0}%",
+            tab.current_page() + 1,
+            tab.layout.len(),
+            tab.view.scale / tab.fit_scale() * 100.0
+        );
+        ui_text::line(
+            ui,
+            pos2(title.right() + 8.0, y),
+            Align2::LEFT_CENTER,
+            meta,
+            theme::mono(11.0),
+            tokens.faint,
+            (rect.right() - 40.0 - title.right()).max(0.0),
+        );
+        let close = Rect::from_center_size(pos2(rect.right() - 16.0, y), vec2(20.0, 20.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(close));
+        if icons::button(&mut child, "x", 20.0, false, "Close the pane").clicked() {
+            return Some(PaneHeaderAction::Close(id));
+        }
+        response.clicked().then_some(PaneHeaderAction::Focus(id))
+    }
+
+    /// The hairlines between split panes, with their resize handles.
+    fn pane_dividers(&mut self, ui: &mut egui::Ui, dividers: &[Divider]) {
+        let tokens = Tokens::get(ui.ctx());
         for divider in dividers {
             let horizontal = divider.axis == craft_ui::layout::SplitAxis::Horizontal;
+            if horizontal {
+                ui.painter().vline(
+                    divider.rect.center().x,
+                    divider.rect.y_range(),
+                    tokens.hairline(),
+                );
+            } else {
+                ui.painter().hline(
+                    divider.rect.x_range(),
+                    divider.rect.center().y,
+                    tokens.hairline(),
+                );
+            }
             let style = craft_ui::layout::ResizeHandleStyle {
-                hovered: tokens.accent.gamma_multiply(0.5),
+                hovered: tokens.rule_strong,
                 dragged: tokens.accent,
                 focused: tokens.accent,
             };
             let handle = if horizontal {
-                Rect::from_center_size(
-                    divider.rect.center(),
-                    vec2(4.0, divider.rect.height() - 28.0),
-                )
+                Rect::from_center_size(divider.rect.center(), vec2(4.0, divider.rect.height()))
             } else {
-                Rect::from_center_size(
-                    divider.rect.center(),
-                    vec2(divider.rect.width() - 28.0, 4.0),
-                )
+                Rect::from_center_size(divider.rect.center(), vec2(divider.rect.width(), 4.0))
             };
             let delta = craft_ui::layout::ResizeHandle::new(
                 Id::new(("pane-divider", divider.path_bits, divider.depth)),
@@ -302,17 +487,9 @@ impl ReaderApp {
                 );
             }
         }
-        if let Some(id) = close
-            && self.panes.close_pane(id)
-            && let Some(focused) = self.panes.focused()
-        {
-            self.focus_tab(focused);
-        } else if let Some(id) = focus {
-            self.focus_tab(id);
-        }
     }
 
-    /// While a tab is dragged from the top bar over the stage: where it
+    /// While a tab is dragged from the tab bar over the pages: where it
     /// would go (beside a pane, or in it), and putting it there on release.
     fn tab_drop(&mut self, ctx: &egui::Context) {
         let Some(tab) = self.chrome.tab_drag else {
@@ -336,7 +513,7 @@ impl ReaderApp {
             }
             return;
         }
-        if let Some((pane, _, preview)) = target
+        if let Some((pane, zone, preview)) = target
             && pane != tab
         {
             let tokens = Tokens::get(ctx);
@@ -344,12 +521,29 @@ impl ReaderApp {
                 Order::Foreground,
                 Id::new("tab-drop-preview"),
             ));
-            painter.rect(
-                preview.shrink(4.0),
-                CornerRadius::same(12),
-                tokens.accent.gamma_multiply(0.18),
-                Stroke::new(2.0, tokens.accent),
-                egui::StrokeKind::Inside,
+            // A dotted accent outline on an accent wash, and where it goes.
+            painter.rect_filled(preview, 0, Tokens::fade(tokens.accent_soft, 0.6));
+            let dots = |a: egui::Pos2, b: egui::Pos2| {
+                painter.add(egui::Shape::dotted_line(&[a, b], tokens.accent, 4.0, 1.0));
+            };
+            let r = preview.shrink(2.0);
+            dots(r.left_top(), r.right_top());
+            dots(r.right_top(), r.right_bottom());
+            dots(r.right_bottom(), r.left_bottom());
+            dots(r.left_bottom(), r.left_top());
+            let label = match zone {
+                craft_ui::docking::Zone::Left => "split left",
+                craft_ui::docking::Zone::Right => "split right",
+                craft_ui::docking::Zone::Top => "split up",
+                craft_ui::docking::Zone::Bottom => "split down",
+                _ => "open here",
+            };
+            painter.text(
+                preview.center(),
+                Align2::CENTER_CENTER,
+                label,
+                theme::mono(12.0),
+                tokens.accent_text,
             );
         }
         ctx.request_repaint();
@@ -390,57 +584,30 @@ impl ReaderApp {
             .unwrap_or_else(|| resolve(book, defaults, |_| None))
     }
 
-    /// Whether the dock and the rail show this frame: after pointer
-    /// movement, and while something needs them.
-    fn controls_visible(&mut self, ctx: &egui::Context, active: usize) -> bool {
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let over = |rect: Option<Rect>| {
-            pointer.is_some_and(|pos| rect.is_some_and(|rect| rect.expand(8.0).contains(pos)))
-        };
-        let keep = !self.prefs.autohide_controls
-            || ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_down())
-            || ctx.memory(|memory| memory.focused().is_some())
-            || egui::Popup::is_any_open(ctx)
-            || self.tabs[active].find.open
-            || self.palette.open
-            || self.settings_window.open
-            || over(self.chrome.rail)
-            || over(self.chrome.dock);
-        if let Some(shown) = self.controls {
-            return shown;
-        }
-        let now = ctx.input(|i| i.time);
-        let visible = self.chrome.fade.visible(now, keep);
-        if let Some(left) = self.chrome.fade.remaining(now) {
-            ctx.request_repaint_after(Duration::from_secs_f64(left + 0.05));
-        }
-        visible
-    }
-
-    /// The floating rail of drawer buttons, while no drawer is open.
-    fn rail(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize, opacity: f32) {
-        let Some(rect) = layout.rail else {
-            return;
-        };
-        let tokens = Tokens::get(ctx);
+    /// The icon rail: one button per sidebar tab, the open one active;
+    /// clicking the open one closes the sidebar.
+    fn rail(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize) {
+        let tokens = Tokens::get(ui.ctx());
+        ui.painter()
+            .rect_filled(rect, 0, tokens.surface.to_opaque());
+        ui.painter()
+            .vline(rect.right() - 0.5, rect.y_range(), tokens.hairline());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let open = self.prefs.show_sidebar.then_some(self.prefs.sidebar);
         let mut toggled = None;
-        let area = egui::Area::new(Id::new("stage-rail"))
-            .order(Order::Middle)
-            .fixed_pos(rect.min)
-            .interactable(opacity > 0.05)
-            .show(ctx, |ui| {
-                ui.multiply_opacity(opacity);
-                floating_frame(&tokens, 12)
-                    .inner_margin(egui::Margin::same(RAIL_MARGIN as i8))
-                    .show(ui, |ui| {
-                        toggled = rail_buttons(ui, &tokens, &self.tabs[active], None);
-                    });
-            });
-        self.chrome.rail = Some(area.response.rect);
+        for which in SidebarTab::ALL {
+            let selected = open == Some(which);
+            let badge = sidebar::badge(&self.tabs[active], which).map(sidebar::badge_label);
+            let tip = which.label().to_lowercase();
+            if ui_rail::button(ui, which.icon(), selected, &tip, badge.as_deref()).clicked() {
+                toggled = Some((which, selected));
+            }
+        }
         self.toggle_drawer(toggled);
     }
 
-    /// Opens the drawer of a rail button, or closes it when it is open.
+    /// Opens the sidebar on a rail button's tab, or closes it when that tab
+    /// is open.
     fn toggle_drawer(&mut self, toggled: Option<(SidebarTab, bool)>) {
         match toggled {
             Some((_, true)) => self.prefs.show_sidebar = false,
@@ -452,700 +619,206 @@ impl ReaderApp {
         }
     }
 
-    /// The left drawer (outline, pages, bookmarks, notes, search,
-    /// translation) and the assistant on the right.
-    fn drawers(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize, now: Instant) {
-        let tokens = Tokens::get(ctx);
-        if let Some(rect) = layout.drawer {
-            let warnings: Vec<String> = self
-                .user_settings
-                .warnings
-                .iter()
-                .chain(&self.translator.warnings)
-                .cloned()
-                .collect();
-            let info = TranslationInfo {
-                target: self
-                    .translator
-                    .target_language(self.prefs.target_language.as_deref()),
-                pinned: &self.translator.pinned,
-                warnings: &warnings,
-                ready: self.user_settings.get().is_some(),
-            };
-            let mut requests = Vec::new();
-            let mut close = false;
-            let mut resize = 0.0;
-            // The Effects drawer edits a copy of this book's choices.
-            let showing_effects = self.prefs.sidebar == SidebarTab::Effects;
-            let effects = if showing_effects {
-                self.effect_defs()
-            } else {
-                Vec::new()
-            };
-            let key = self.book_key(active);
-            let mut book = self.prefs.books.get(&key).cloned().unwrap_or_default();
-            let mut book_changed = false;
-            let title = self.tabs[active].title.clone();
-            let time = self.started.elapsed().as_secs_f32();
-            // One card: the rail's strip, a hairline, then the drawer.
-            let panel = layout.panel().unwrap_or(rect);
-            let strip = layout
-                .rail
-                .unwrap_or(Rect::NOTHING)
-                .shrink(1.0 + RAIL_MARGIN);
-            // The header's 28-point row centres on the first rail button.
-            let content = Rect::from_min_max(
-                pos2(rect.left() + 12.0, strip.top() + 2.0),
-                rect.max - vec2(13.0, 13.0),
+    /// The sidebar: outline, pages, bookmarks, notes, search, translation
+    /// or effects.
+    fn sidebar_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize, now: Instant) {
+        let ctx = ui.ctx().clone();
+        let warnings: Vec<String> = self
+            .user_settings
+            .warnings
+            .iter()
+            .chain(&self.translator.warnings)
+            .cloned()
+            .collect();
+        let info = TranslationInfo {
+            target: self
+                .translator
+                .target_language(self.prefs.target_language.as_deref()),
+            pinned: &self.translator.pinned,
+            warnings: &warnings,
+            ready: self.user_settings.get().is_some(),
+        };
+        // The Effects tab edits a copy of this book's choices.
+        let showing_effects = self.prefs.sidebar == SidebarTab::Effects;
+        let effects = if showing_effects {
+            self.effect_defs()
+        } else {
+            Vec::new()
+        };
+        let key = self.book_key(active);
+        let mut book = self.prefs.books.get(&key).cloned().unwrap_or_default();
+        let mut book_changed = false;
+        let title = self.tabs[active].title.clone();
+        let time = self.started.elapsed().as_secs_f32();
+        let mut requests = sidebar::header(ui, &self.tabs[active], self.prefs.sidebar);
+        let content = Rect::from_min_max(
+            pos2(rect.left() + 12.0, ui.cursor().top()),
+            pos2(rect.right() - 12.0, rect.bottom() - 8.0),
+        );
+        let mut body = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        if showing_effects {
+            // The previews are animated.
+            ctx.request_repaint();
+            let find = |id: Option<&str>| id.and_then(|id| effects.iter().find(|def| def.id == id));
+            book_changed = crate::effects_page::book_page(
+                &mut body,
+                crate::effects_page::BookPage {
+                    title: &title,
+                    book: &mut book,
+                    default_background: find(Some(&self.prefs.background)),
+                    default_transition: find(self.prefs.transition.as_deref()),
+                    default_overlay: find(self.prefs.overlay.as_deref()),
+                    effects: &effects,
+                    params: &self.prefs.effect_params,
+                    has_wallpaper: self.prefs.wallpaper.is_some(),
+                    time,
+                },
             );
-            let mut toggled = None;
-            egui::Area::new(Id::new("stage-drawer"))
-                .order(Order::Middle)
-                .fixed_pos(panel.min)
-                .show(ctx, |ui| {
-                    floating_frame(&tokens, 12)
-                        .inner_margin(egui::Margin::ZERO)
-                        .show(ui, |ui| {
-                            let inner = panel.size() - vec2(2.0, 2.0);
-                            ui.set_min_size(inner);
-                            ui.set_max_size(inner);
-                            ui.painter().vline(
-                                rect.left(),
-                                (panel.top() + 1.0)..=(panel.bottom() - 1.0),
-                                Stroke::new(1.0, tokens.rule),
-                            );
-                            let current = Some(self.prefs.sidebar);
-                            let mut rail = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(strip)
-                                    .layout(egui::Layout::top_down(egui::Align::Center)),
-                            );
-                            toggled = rail_buttons(&mut rail, &tokens, &self.tabs[active], current);
-                            let mut foot = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(strip)
-                                    .layout(egui::Layout::bottom_up(egui::Align::Center)),
-                            );
-                            let tip = self.keymap.tip("Hide the sidebar", Command::ToggleSidebar);
-                            if icons::button(&mut foot, "panel-left", 32.0, false, &tip).clicked() {
-                                close = true;
-                            }
-                            let ui = &mut ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(content)
-                                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                            );
-                            ui.set_min_size(content.size());
-                            requests = sidebar::header(ui, &self.tabs[active], self.prefs.sidebar);
-                            if showing_effects {
-                                // The previews are animated.
-                                ui.ctx().request_repaint();
-                                let find = |id: Option<&str>| {
-                                    id.and_then(|id| effects.iter().find(|def| def.id == id))
-                                };
-                                book_changed = crate::effects_page::book_page(
-                                    ui,
-                                    crate::effects_page::BookPage {
-                                        title: &title,
-                                        book: &mut book,
-                                        default_background: find(Some(&self.prefs.background)),
-                                        default_transition: find(self.prefs.transition.as_deref()),
-                                        default_overlay: find(self.prefs.overlay.as_deref()),
-                                        effects: &effects,
-                                        params: &self.prefs.effect_params,
-                                        has_wallpaper: self.prefs.wallpaper.is_some(),
-                                        time,
-                                    },
-                                );
-                            } else {
-                                requests.extend(sidebar::show(
-                                    ui,
-                                    &mut self.tabs[active],
-                                    &mut self.prefs.sidebar,
-                                    &mut self.sidebar_state,
-                                    &info,
-                                    now,
-                                ));
-                            }
-                        });
-                    resize = resize_handle(
-                        ui,
-                        &tokens,
-                        "drawer-resize",
-                        rect.right(),
-                        rect,
-                        self.prefs.drawer_width,
-                    );
-                });
-            self.toggle_drawer(toggled);
-            if close {
-                self.prefs.show_sidebar = false;
-            }
-            if book_changed {
-                book.used = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |since| since.as_secs());
-                self.prefs.books.insert(key, book);
-                crate::book_effects::trim(&mut self.prefs.books);
-            }
-            if resize != 0.0 {
-                self.prefs.drawer_width =
-                    (self.prefs.drawer_width + resize).clamp(stage::DRAWER_MIN, 900.0);
-            }
-            let mut actions = Vec::new();
-            for request in requests {
-                self.apply_sidebar(request, &mut actions, ctx);
-            }
-            self.pending_actions.extend(actions);
+        } else {
+            requests.extend(sidebar::show(
+                &mut body,
+                &mut self.tabs[active],
+                &mut self.prefs.sidebar,
+                &mut self.sidebar_state,
+                &info,
+                now,
+            ));
         }
-        if let Some(rect) = layout.assistant {
-            let tab = &self.tabs[active];
-            let page = tab
-                .text
-                .get(tab.current_page())
-                .is_some()
-                .then(|| tab.current_page());
-            let selection_words = tab
-                .selection
-                .is_some()
-                .then(|| tab.selected_text())
-                .flatten()
-                .map(|text| text.split_whitespace().count())
-                .filter(|words| *words > 0);
-            let document = Some(tab.title.clone());
-            let (models, model) = match self.user_settings.get() {
-                Some(settings) => {
-                    let main = settings.ai.resolved_main();
-                    (
-                        crate::settings_providers::model_choices(settings),
-                        Some(glyphst_settings::ModelRef::new(main.provider, main.model)),
-                    )
-                }
-                None => (Vec::new(), None),
-            };
-            let mut request = None;
-            let mut resize = 0.0;
-            egui::Area::new(Id::new("stage-assistant"))
-                .order(Order::Middle)
-                .fixed_pos(rect.min)
-                .show(ctx, |ui| {
-                    floating_frame(&tokens, 12).show(ui, |ui| {
-                        let inner = rect.size() - vec2(26.0, 26.0);
-                        ui.set_min_size(inner);
-                        ui.set_max_size(inner);
-                        let (tabs, active, library) = (&self.tabs, self.active, &self.library);
-                        let agents = self.agent_specs();
-                        request = self.assistant.ui(
-                            ui,
-                            crate::ai::Panel {
-                                document,
-                                page,
-                                selection_words,
-                                models: &models,
-                                model: model.clone(),
-                                changes: &mut self.agent_changes,
-                                sources: &mut || {
-                                    super::agent::mention_sources(tabs, active, library)
-                                },
-                                agents: &agents,
-                            },
-                        );
-                    });
-                    // Dragging the left edge left widens it.
-                    resize = -resize_handle(
-                        ui,
-                        &tokens,
-                        "assistant-resize",
-                        rect.left(),
-                        rect,
-                        self.prefs.assistant_width,
-                    );
-                });
-            if resize != 0.0 {
-                self.prefs.assistant_width =
-                    (self.prefs.assistant_width + resize).clamp(stage::ASSISTANT_MIN, 1200.0);
+        if book_changed {
+            book.used = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            self.prefs.books.insert(key, book);
+            crate::book_effects::trim(&mut self.prefs.books);
+        }
+        let mut actions = Vec::new();
+        for request in requests {
+            self.apply_sidebar(request, &mut actions, &ctx);
+        }
+        self.pending_actions.extend(actions);
+    }
+
+    /// The assistant docked at the right.
+    fn assistant_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize) {
+        let ctx = ui.ctx().clone();
+        let tab = &self.tabs[active];
+        let page = tab
+            .text
+            .get(tab.current_page())
+            .is_some()
+            .then(|| tab.current_page());
+        let selection_words = tab
+            .selection
+            .is_some()
+            .then(|| tab.selected_text())
+            .flatten()
+            .map(|text| text.split_whitespace().count())
+            .filter(|words| *words > 0);
+        let document = Some(tab.title.clone());
+        let (models, model) = match self.user_settings.get() {
+            Some(settings) => {
+                let main = settings.ai.resolved_main();
+                (
+                    crate::settings_providers::model_choices(settings),
+                    Some(glyphst_settings::ModelRef::new(main.provider, main.model)),
+                )
             }
-            match request {
-                Some(PanelAction::Send(draft)) => self.ask(draft, ctx),
-                Some(PanelAction::NewSession) => self.assistant.new_session(),
-                Some(PanelAction::LoadSession(id)) => {
-                    self.assistant.load_session(id, &self.library);
-                }
-                Some(PanelAction::DeleteSession(id)) => {
-                    if let Err(error) = self.library.delete_ai_session(id) {
-                        self.notices
-                            .push(format!("Could not delete the chat: {error:#}"));
-                    }
-                    self.assistant.refresh_sessions(&self.library);
-                }
-                Some(PanelAction::SetModel(model)) => {
-                    // Choosing a model leaves a coding agent's chat.
-                    if self.assistant.agent.is_some() {
-                        self.assistant.new_session();
-                        self.assistant.agent = None;
-                    }
-                    self.user_settings
-                        .edit(|settings| settings.ai.main_model = Some(model));
-                }
-                Some(PanelAction::Change(action)) => self.apply_change_action(action, ctx),
-                Some(PanelAction::Restore(index, draft)) => {
-                    self.restore_assistant(index, draft, ctx);
-                }
-                Some(PanelAction::SetAgent(agent)) => {
-                    self.assistant.new_session();
-                    self.assistant.agent = agent;
-                }
-                Some(PanelAction::ChoosePicture) => self.pickers.choose_picture(ctx),
-                Some(PanelAction::SelectRegion) => {
-                    self.region_for_assistant = true;
-                    self.region_tool = true;
+            None => (Vec::new(), None),
+        };
+        let inner = rect.shrink2(vec2(12.0, 0.0));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_min_size(inner.size());
+        let (tabs, active_tab, library) = (&self.tabs, self.active, &self.library);
+        let agents = self.agent_specs();
+        let request = self.assistant.ui(
+            &mut child,
+            crate::ai::Panel {
+                document,
+                page,
+                selection_words,
+                models: &models,
+                model: model.clone(),
+                changes: &mut self.agent_changes,
+                sources: &mut || super::agent::mention_sources(tabs, active_tab, library),
+                agents: &agents,
+            },
+        );
+        match request {
+            Some(PanelAction::Send(draft)) => self.ask(draft, &ctx),
+            Some(PanelAction::NewSession) => self.assistant.new_session(),
+            Some(PanelAction::LoadSession(id)) => {
+                self.assistant.load_session(id, &self.library);
+            }
+            Some(PanelAction::DeleteSession(id)) => {
+                if let Err(error) = self.library.delete_ai_session(id) {
                     self.notices
-                        .push("Drag a rectangle on the page for the assistant. Esc cancels.");
+                        .push(format!("Could not delete the chat: {error:#}"));
                 }
-                Some(PanelAction::Command(command)) => {
-                    if let Err(reason) = self.run(command, ctx) {
-                        self.notices.push(reason.to_string());
-                    }
-                }
-                Some(PanelAction::OpenAiSettings) => {
-                    self.settings_window
-                        .show_section(crate::settings_window::Section::Ai);
-                }
-                None => {}
+                self.assistant.refresh_sessions(&self.library);
             }
+            Some(PanelAction::SetModel(model)) => {
+                // Choosing a model leaves a coding agent's chat.
+                if self.assistant.agent.is_some() {
+                    self.assistant.new_session();
+                    self.assistant.agent = None;
+                }
+                self.user_settings
+                    .edit(|settings| settings.ai.main_model = Some(model));
+            }
+            Some(PanelAction::Change(action)) => self.apply_change_action(action, &ctx),
+            Some(PanelAction::Restore(index, draft)) => {
+                self.restore_assistant(index, draft, &ctx);
+            }
+            Some(PanelAction::SetAgent(agent)) => {
+                self.assistant.new_session();
+                self.assistant.agent = agent;
+            }
+            Some(PanelAction::ChoosePicture) => self.pickers.choose_picture(&ctx),
+            Some(PanelAction::SelectRegion) => {
+                self.region_for_assistant = true;
+                self.region_tool = true;
+                self.notices
+                    .push("Drag a rectangle on the page for the assistant. Esc cancels.");
+            }
+            Some(PanelAction::Command(command)) => {
+                if let Err(reason) = self.run(command, &ctx) {
+                    self.notices.push(reason.to_string());
+                }
+            }
+            Some(PanelAction::OpenAiSettings) => {
+                self.settings_window
+                    .show_section(crate::settings_window::Section::Ai);
+            }
+            None => {}
         }
     }
 
-    /// The reading progress along the stage's bottom: the part read, ticks
-    /// at chapters, and scrubbing to a page.
-    /// The start of a key sequence and its count (vim's showcmd), at the
-    /// bottom right, `lift` above the window's bottom.
+    /// The keys of a sequence typed so far and its count (vim's showcmd),
+    /// at the bottom, `lift` above the window's bottom.
     pub(super) fn pending_keys_chip(&self, ctx: &egui::Context, lift: f32) {
         let Some(label) = self.pending_keys.indicator() else {
             return;
         };
-        let corner = ctx.content_rect().right_bottom() - vec2(16.0, lift);
-        egui::Area::new(Id::new("pending-keys"))
-            .order(Order::Foreground)
-            .pivot(egui::Align2::RIGHT_BOTTOM)
-            .fixed_pos(corner)
-            .interactable(false)
-            .show(ctx, |ui| {
-                let size = widgets::kbd_size(ui, &label);
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                widgets::paint_kbd(ui, rect, &label);
-            });
-    }
-
-    fn progress_line(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize) {
-        let Some(line) = layout.progress else {
-            return;
-        };
-        let tab = &self.tabs[active];
-        let pages = tab.layout.len();
-        if pages < 2 {
-            return;
-        }
-        let tokens = Tokens::get(ctx);
-        let current = tab.current_page();
-        let ticks = stage::chapter_ticks(
-            tab.outline.iter().map(|entry| (entry.depth, entry.page)),
-            pages,
-        );
-        let hit = Rect::from_min_max(pos2(line.left(), line.bottom() - 12.0), line.max);
-        let mut scrub = None;
-        egui::Area::new(Id::new("stage-progress"))
-            .order(Order::Middle)
-            .fixed_pos(hit.min)
-            .show(ctx, |ui| {
-                let (rect, response) =
-                    ui.allocate_exact_size(hit.size(), egui::Sense::click_and_drag());
-                let active_line = response.hovered() || response.dragged();
-                let height = ui.ctx().animate_value_with_time(
-                    Id::new("stage-progress-height"),
-                    if active_line {
-                        stage::PROGRESS_HOVER
-                    } else {
-                        stage::PROGRESS
-                    },
-                    0.15,
-                );
-                let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - height), rect.max);
-                let painter = ui.painter();
-                painter.rect_filled(bar, CornerRadius::ZERO, tokens.faint.gamma_multiply(0.3));
-                let read = Rect::from_min_size(
-                    bar.min,
-                    vec2(
-                        bar.width() * stage::read_fraction(current, pages),
-                        bar.height(),
-                    ),
-                );
-                painter.rect_filled(read, CornerRadius::ZERO, tokens.accent);
-                // Chapter ticks while the line is open for scrubbing.
-                if height > stage::PROGRESS + 1.0 {
-                    for tick in &ticks {
-                        let x = bar.left() + bar.width() * tick;
-                        painter.vline(x, bar.y_range(), Stroke::new(1.5, tokens.bg));
-                    }
-                }
-                if let Some(pos) = response.hover_pos() {
-                    let page = stage::page_at(pos.x, bar.left(), bar.right(), pages);
-                    painter.circle_filled(pos2(pos.x, bar.center().y), height * 0.9, tokens.accent);
-                    let chapter = tab
-                        .outline
-                        .iter()
-                        .rfind(|entry| entry.page.is_some_and(|start| start <= page))
-                        .map(|entry| format!("{} · ", entry.title))
-                        .unwrap_or_default();
-                    response
-                        .clone()
-                        .on_hover_text_at_pointer(format!("{chapter}page {} of {pages}", page + 1));
-                }
-                if (response.clicked() || response.dragged())
-                    && let Some(pos) = response.interact_pointer_pos()
-                {
-                    scrub = Some(stage::page_at(pos.x, bar.left(), bar.right(), pages));
-                }
-                if response.drag_stopped() {
-                    self.chrome.scrub = None;
-                }
-            });
-        if let Some(page) = scrub
-            && self.chrome.scrub != Some(page)
-        {
-            self.chrome.scrub = Some(page);
-            self.pending_actions.push(ViewAction::GoToPage(page));
-        }
-    }
-
-    /// The floating dock of reading controls.
-    fn dock(&mut self, ctx: &egui::Context, layout: &StageLayout, active: usize, opacity: f32) {
-        let Some(anchor) = layout.dock_anchor else {
-            return;
-        };
-        let tokens = Tokens::get(ctx);
-        let area = egui::Area::new(Id::new("stage-dock"))
-            .order(Order::Middle)
-            .pivot(Align2::CENTER_BOTTOM)
-            .fixed_pos(anchor)
-            .interactable(opacity > 0.05)
-            .show(ctx, |ui| {
-                ui.multiply_opacity(opacity);
-                floating_frame(&tokens, 22)
-                    .inner_margin(egui::Margin::symmetric(8, 5))
-                    .show(ui, |ui| {
-                        self.dock_controls(ui, active, layout.reading.width())
-                    });
-            });
-        self.chrome.dock = Some(area.response.rect);
-    }
-
-    /// The dock's buttons; with less `room`, the less used ones go (they
-    /// stay in the palette and on their keys).
-    fn dock_controls(&mut self, ui: &mut egui::Ui, active: usize, room: f32) {
-        let full = room >= DOCK_FULL;
-        let compact = room >= DOCK_COMPACT;
-        let tokens = Tokens::get(ui.ctx());
-        let tab = &self.tabs[active];
-        let pages = tab.layout.len();
-        let mut actions = Vec::new();
-        let mut find = false;
-        let mut font_step = 0.0;
-        let mut translate_document = false;
-        let mut translation_shown = None;
-        let mut assistant = false;
-        let mut run = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let tip = self.keymap.tip("Back", Command::Back);
-            if full
-                && ui
-                    .add_enabled_ui(tab.can_go_back(), |ui| {
-                        icons::button(ui, "arrow-left", 30.0, false, &tip)
-                    })
-                    .inner
-                    .clicked()
-            {
-                actions.push(ViewAction::Back);
-            }
-            let tip = self.keymap.tip("Forward", Command::Forward);
-            if full
-                && ui
-                    .add_enabled_ui(tab.can_go_forward(), |ui| {
-                        icons::button(ui, "arrow-right", 30.0, false, &tip)
-                    })
-                    .inner
-                    .clicked()
-            {
-                actions.push(ViewAction::Forward);
-            }
-            if full {
-                dock_divider(ui, &tokens);
-            }
-            let tip = self.keymap.tip("Previous page", Command::PreviousPage);
-            if icons::button(ui, "chevron-left", 30.0, false, &tip).clicked() {
-                actions.push(ViewAction::PreviousPage);
-            }
-            let current = tab.current_page() + 1;
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.page_input)
-                    .desired_width(44.0)
-                    .horizontal_align(egui::Align::Center)
-                    .font(theme::medium(13.0))
-                    .hint_text(
-                        egui::RichText::new(current.to_string())
-                            .font(theme::medium(13.0))
-                            .color(tokens.text),
-                    ),
-            );
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Ok(page) = self.page_input.trim().parse::<usize>() {
-                    actions.push(ViewAction::GoToPage(page.saturating_sub(1)));
-                }
-                self.page_input.clear();
-            }
-            ui.label(egui::RichText::new(format!("/ {pages}")).color(tokens.muted));
-            let tip = self.keymap.tip("Next page", Command::NextPage);
-            if icons::button(ui, "chevron-right", 30.0, false, &tip).clicked() {
-                actions.push(ViewAction::NextPage);
-            }
-            dock_divider(ui, &tokens);
-            if !compact {
-                // Only the panels' toggles besides the pages.
-                let tip = self
-                    .keymap
-                    .tip("Ask about this document", Command::Assistant);
-                if icons::button(ui, "sparkles", 30.0, self.assistant.open, &tip).clicked() {
-                    assistant = true;
-                }
-                let tip = self.keymap.tip("Find", Command::Find);
-                if icons::button(ui, "search", 30.0, tab.find.open, &tip).clicked() {
-                    find = true;
-                }
-                return;
-            }
-            let tip = self.keymap.tip("Zoom out", Command::ZoomOut);
-            if icons::button(ui, "zoom-out", 30.0, false, &tip).clicked() {
-                actions.push(ViewAction::ZoomOut);
-            }
-            ui.add_sized(
-                [44.0, 30.0],
-                egui::Label::new(
-                    egui::RichText::new(format!(
-                        "{:.0}%",
-                        tab.view.scale / tab.fit_scale() * 100.0
-                    ))
-                    .font(theme::medium(12.5)),
-                ),
-            );
-            let tip = self.keymap.tip("Zoom in", Command::ZoomIn);
-            if icons::button(ui, "zoom-in", 30.0, false, &tip).clicked() {
-                actions.push(ViewAction::ZoomIn);
-            }
-            let tip = self.keymap.tip("Fit width", Command::FitWidth);
-            if icons::button(ui, "scan", 30.0, false, &tip).clicked() {
-                actions.push(ViewAction::FitWidth);
-            }
-            if full && !tab.is_reflowed() {
-                let tip = self
-                    .keymap
-                    .tip("Rotate clockwise", Command::RotateClockwise);
-                if icons::button(ui, "rotate-cw", 30.0, false, &tip).clicked() {
-                    run = Some(Command::RotateClockwise);
-                }
-                let tip = self.keymap.tip("Two-page spread", Command::ToggleSpread);
-                let spread = tab.layout.arrangement.spread;
-                if icons::button(ui, "book-open", 30.0, spread, &tip).clicked() {
-                    run = Some(Command::ToggleSpread);
-                }
-            }
-            if let DocumentLayout::Reflow(layout) = tab.document_layout {
-                dock_divider(ui, &tokens);
-                let tip = self.keymap.tip("Smaller text", Command::SmallerText);
-                if icons::button(ui, "a-arrow-down", 30.0, false, &tip).clicked() {
-                    font_step = -1.0;
-                }
-                ui.label(
-                    egui::RichText::new(format!("{:.0} pt", layout.font_size))
-                        .font(theme::medium(12.5)),
-                );
-                let tip = self.keymap.tip("Larger text", Command::LargerText);
-                if icons::button(ui, "a-arrow-up", 30.0, false, &tip).clicked() {
-                    font_step = 1.0;
-                }
-            }
-            dock_divider(ui, &tokens);
-            let tip = self.keymap.tip("Present", Command::Present);
-            if icons::button(ui, "presentation", 30.0, tab.present.is_some(), &tip).clicked() {
-                actions.push(ViewAction::TogglePresent);
-            }
-            dock_divider(ui, &tokens);
-            let current = self
-                .translator
-                .target_language(self.prefs.target_language.as_deref());
-            let label = current
-                .as_deref()
-                .map(sidebar::language_label)
-                .unwrap_or("Language")
-                .to_string();
-            let picker = if full {
-                widgets::pill_button(ui, Some("languages"), &label, false)
-            } else {
-                icons::button(ui, "languages", 30.0, false, &label)
-            }
-            .on_hover_text(format!("Language to translate into: {label}"));
-            egui::Popup::menu(&picker).show(|ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        for language in glyphst_translation::TARGET_LANGUAGES {
-                            let chosen = current.as_deref() == Some(language.code);
-                            if ui
-                                .add(egui::Button::selectable(chosen, language.label))
-                                .clicked()
-                            {
-                                self.prefs.target_language = Some(language.code.to_string());
-                            }
-                        }
-                    });
-            });
-            match &tab.translation {
-                Some(session) => {
-                    let tip = self
-                        .keymap
-                        .tip("Show translated pages", Command::ShowTranslated);
-                    if icons::button(ui, "globe", 30.0, session.show_translated, &tip).clicked() {
-                        translation_shown = Some(!session.show_translated);
-                    }
-                }
-                None => {
-                    let tip = self
-                        .keymap
-                        .tip("Translate this document", Command::TranslateDocument);
-                    if icons::button(ui, "globe", 30.0, false, &tip).clicked() {
-                        translate_document = true;
-                    }
-                }
-            }
-            dock_divider(ui, &tokens);
-            let tip = self
-                .keymap
-                .tip("Ask about this document", Command::Assistant);
-            if icons::button(ui, "sparkles", 30.0, self.assistant.open, &tip).clicked() {
-                assistant = true;
-            }
-            let tip = self.keymap.tip("Find", Command::Find);
-            if icons::button(ui, "search", 30.0, tab.find.open, &tip).clicked() {
-                find = true;
-            }
-        });
-        self.pending_actions.extend(actions);
-        if find {
-            let tab = &mut self.tabs[active];
-            if tab.find.open {
-                tab.find.close();
-            } else {
-                let page = tab.current_page();
-                tab.find.show(page);
-            }
-        }
-        if font_step != 0.0 {
-            self.change_font_size(font_step);
-        }
-        if translate_document {
-            let ctx = ui.ctx().clone();
-            self.start_document_translation(&ctx);
-        }
-        if assistant {
-            self.toggle_assistant();
-        }
-        if let Some(command) = run {
-            let ctx = ui.ctx().clone();
-            self.run_or_notify(command, &ctx);
-        }
-        if let Some(shown) = translation_shown
-            && let Some(session) = self.tabs[active].translation.as_mut()
-        {
-            session.show_translated = shown;
-        }
+        overlay::pending_keys(ctx, &label, lift);
     }
 }
 
-/// The strip at the top of each split pane, for its title chip.
-const PANE_HEADER: f32 = 40.0;
-
-/// Reading widths from which the dock shows all its buttons, or the
-/// zoom, text, present and translation groups.
-const DOCK_FULL: f32 = 820.0;
-const DOCK_COMPACT: f32 = 560.0;
-
-/// The frame of the stage's floating cards.
-fn floating_frame(tokens: &Tokens, radius: u8) -> egui::Frame {
-    egui::Frame::new()
-        .fill(tokens.raised)
-        .stroke(Stroke::new(1.0, tokens.rule_strong))
-        .corner_radius(CornerRadius::same(radius))
-        .shadow(egui::Shadow::NONE)
-        .inner_margin(egui::Margin::same(12))
+/// The side of a docked pane facing the pages.
+#[derive(Clone, Copy)]
+enum Edge {
+    Left,
+    Right,
 }
 
-/// The space between the rail's card and its buttons.
-const RAIL_MARGIN: f32 = 4.0;
-
-/// The rail's buttons, each with its count; returns the one clicked and
-/// whether its drawer was the `open` one.
-fn rail_buttons(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    tab: &DocumentTab,
-    open: Option<SidebarTab>,
-) -> Option<(SidebarTab, bool)> {
-    let mut toggled = None;
-    ui.spacing_mut().item_spacing.y = stage::RAIL_STEP - 32.0;
-    for which in SidebarTab::ALL {
-        let selected = open == Some(which);
-        let response = icons::button(ui, which.icon(), 32.0, selected, which.label());
-        if let Some(count) = sidebar::badge(tab, which) {
-            paint_badge(ui, tokens, response.rect, count);
-        }
-        if response.clicked() {
-            toggled = Some((which, selected));
-        }
-    }
-    toggled
-}
-
-/// A count at the top right of a rail button.
-fn paint_badge(ui: &egui::Ui, tokens: &Tokens, button: Rect, count: usize) {
-    let galley = ui.painter().layout_no_wrap(
-        sidebar::badge_label(count),
-        theme::semibold(9.5),
-        tokens.raised,
-    );
-    let size = vec2((galley.size().x + 8.0).max(15.0), 15.0);
-    let badge = Align2::RIGHT_TOP.anchor_size(pos2(button.right() + 3.0, button.top() - 1.0), size);
-    ui.painter().rect(
-        badge,
-        CornerRadius::same(8),
-        tokens.text,
-        Stroke::new(1.5, tokens.raised),
-        egui::StrokeKind::Outside,
-    );
-    ui.painter()
-        .galley(badge.center() - galley.size() / 2.0, galley, tokens.raised);
-}
-
-/// A thin upright line between groups of dock buttons.
-fn dock_divider(ui: &mut egui::Ui, tokens: &Tokens) {
-    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 20.0), egui::Sense::hover());
-    ui.painter().vline(
-        rect.center().x,
-        rect.y_range(),
-        Stroke::new(1.0, tokens.rule),
-    );
-}
-
-/// A resize handle along `x` of a drawer `rect`; returns how far it was
+/// A resize handle along `x` of a pane `rect`; returns how far it was
 /// dragged to the right.
 fn resize_handle(
     ui: &mut egui::Ui,
@@ -1154,24 +827,22 @@ fn resize_handle(
     x: f32,
     rect: Rect,
     width: f32,
+    min: f32,
 ) -> f32 {
-    let handle = Rect::from_min_max(
-        pos2(x - 2.0, rect.top() + 14.0),
-        pos2(x + 2.0, rect.bottom() - 14.0),
-    );
+    let handle = Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom()));
     let style = craft_ui::layout::ResizeHandleStyle {
-        hovered: tokens.accent.gamma_multiply(0.5),
+        hovered: tokens.rule_strong,
         dragged: tokens.accent,
         focused: tokens.accent,
     };
     craft_ui::layout::ResizeHandle::new(
-        Id::new(id),
+        Id::new((id, "resize")),
         craft_ui::layout::SplitAxis::Horizontal,
         handle,
         "Resize",
         style,
     )
-    .value(width, stage::DRAWER_MIN..=1200.0)
+    .value(width, min..=1200.0)
     .show(ui)
     .delta
 }

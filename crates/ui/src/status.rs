@@ -38,11 +38,11 @@ pub enum Content<'a> {
 
 /// One segment; `priority` decides which stay when narrow (higher stays).
 pub struct Segment<'a> {
-    pub id: &'a str,
+    pub id: &'static str,
     pub side: Side,
     pub priority: u8,
     pub content: Content<'a>,
-    pub tooltip: &'a str,
+    pub tooltip: String,
     /// Clickable: hover fill and a click response.
     pub clickable: bool,
     /// No hairline after it, to group with its neighbour.
@@ -50,7 +50,12 @@ pub struct Segment<'a> {
 }
 
 impl<'a> Segment<'a> {
-    pub fn label(id: &'a str, side: Side, icon: Option<&'a str>, text: impl Into<String>) -> Self {
+    pub fn label(
+        id: &'static str,
+        side: Side,
+        icon: Option<&'a str>,
+        text: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             side,
@@ -60,14 +65,14 @@ impl<'a> Segment<'a> {
                 text: text.into(),
                 accent: false,
             },
-            tooltip: "",
+            tooltip: String::new(),
             clickable: true,
             joined: false,
         }
     }
 
     pub fn custom(
-        id: &'a str,
+        id: &'static str,
         side: Side,
         width: f32,
         draw: impl FnOnce(&mut Ui, Rect) + 'a,
@@ -80,7 +85,7 @@ impl<'a> Segment<'a> {
                 width,
                 draw: Box::new(draw),
             },
-            tooltip: "",
+            tooltip: String::new(),
             clickable: false,
             joined: false,
         }
@@ -91,8 +96,8 @@ impl<'a> Segment<'a> {
         self
     }
 
-    pub fn tooltip(mut self, tooltip: &'a str) -> Self {
-        self.tooltip = tooltip;
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = tooltip.into();
         self
     }
 
@@ -153,7 +158,7 @@ pub fn fit(widths: &[f32], priorities: &[u8], available: f32) -> Vec<bool> {
 
 /// Draws `segments` across `ui`'s full width and returns each clickable
 /// segment's response by id.
-pub fn bar<'a>(ui: &mut Ui, segments: Vec<Segment<'a>>) -> Vec<(&'a str, Response)> {
+pub fn bar(ui: &mut Ui, segments: Vec<Segment<'_>>) -> Vec<(&'static str, Response)> {
     let t = Tokens::get(ui.ctx());
     let rect = ui.max_rect();
     ui.painter().rect_filled(rect, 0, t.surface);
@@ -200,7 +205,7 @@ pub fn bar<'a>(ui: &mut Ui, segments: Vec<Segment<'a>>) -> Vec<(&'a str, Respons
         };
         let mut response = ui.interact(cell, id, sense);
         if !segment.tooltip.is_empty() {
-            response = response.on_hover_text(segment.tooltip);
+            response = crate::overlay::tooltip(response, &segment.tooltip, None);
         }
         match segment.content {
             Content::Label { icon, text, accent } => {

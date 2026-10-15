@@ -443,11 +443,6 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
             Some("The outline, pages, bookmarks, notes and search beside the pages."),
             |ui| widgets::toggle(ui, &mut prefs.show_sidebar),
         );
-        group.row(
-            "Hide the reading controls",
-            Some("After a few seconds without moving the pointer."),
-            |ui| widgets::toggle(ui, &mut prefs.autohide_controls),
-        );
     });
 }
 

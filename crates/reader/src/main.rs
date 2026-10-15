@@ -53,8 +53,8 @@ mod quick_ask;
 mod region;
 mod settings_providers;
 mod settings_window;
+mod shell;
 mod sidebar;
-mod stage;
 mod text_overlay;
 mod transition;
 mod translation;
@@ -71,7 +71,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -84,7 +84,6 @@ fn parse_args() -> Result<Launch> {
         background: None,
         transition: None,
         theme: None,
-        controls: None,
         zoom: None,
         split: None,
         overlay: None,
@@ -147,13 +146,6 @@ fn parse_args() -> Result<Launch> {
                     "right" => Some(craft_ui::docking::Zone::Right),
                     "down" => Some(craft_ui::docking::Zone::Bottom),
                     other => bail!("--split takes right or down, not {other}"),
-                };
-            }
-            "--controls" => {
-                launch.controls = match value()?.as_str() {
-                    "shown" => Some(true),
-                    "hidden" => Some(false),
-                    other => bail!("--controls takes shown or hidden, not {other}"),
                 };
             }
             "--theme" => {

@@ -53,8 +53,6 @@ pub struct Prefs {
     /// Widths of the left drawer and the assistant, in points.
     pub drawer_width: f32,
     pub assistant_width: f32,
-    /// Fade the dock and the rail while reading.
-    pub autohide_controls: bool,
     /// Language to translate into; `None` follows the translation settings.
     pub target_language: Option<String>,
     /// Keyboard shortcuts the user changed: command id to keys.
@@ -83,9 +81,8 @@ impl Default for Prefs {
             books: BTreeMap::new(),
             show_sidebar: true,
             sidebar: SidebarTab::default(),
-            drawer_width: 300.0,
-            assistant_width: 380.0,
-            autohide_controls: true,
+            drawer_width: crate::shell::SIDEBAR_WIDTH,
+            assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,
             shortcuts: Overrides::new(),
             keymap: KeymapPreset::Standard,
@@ -136,7 +133,7 @@ impl Prefs {
             (&mut prefs.assistant_width, defaults.assistant_width),
         ] {
             *width = if width.is_finite() {
-                width.clamp(crate::stage::DRAWER_MIN, 2000.0)
+                width.clamp(crate::shell::SIDEBAR_MIN, 2000.0)
             } else {
                 default
             };
@@ -190,7 +187,6 @@ mod tests {
             sidebar: SidebarTab::Notes,
             drawer_width: 340.0,
             assistant_width: 420.0,
-            autohide_controls: false,
             target_language: Some("ja".into()),
             shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
             keymap: KeymapPreset::Vim,

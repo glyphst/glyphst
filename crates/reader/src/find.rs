@@ -60,6 +60,13 @@ impl Find {
         self.applied.is_some()
     }
 
+    /// How many pages have matches.
+    pub fn matched_pages(&self) -> usize {
+        let mut pages: Vec<usize> = self.matches.iter().map(|found| found.page).collect();
+        pages.dedup();
+        pages.len()
+    }
+
     pub fn searched_pages(&self) -> usize {
         self.searched.iter().filter(|done| **done).count()
     }

@@ -2,6 +2,16 @@ use super::edits::*;
 use super::*;
 
 impl LibraryStore {
+    /// Highlights across the library.
+    pub fn highlight_count(&self) -> usize {
+        self.library.highlights.len()
+    }
+
+    /// Notes across the library.
+    pub fn note_count(&self) -> usize {
+        self.library.notes.len()
+    }
+
     pub fn highlights_for(&self, path: &Path) -> Vec<Highlight> {
         let path = normalize_path(path);
         self.library
