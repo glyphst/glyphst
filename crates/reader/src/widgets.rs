@@ -10,7 +10,7 @@ use glyphst_ui::{
 
 pub use glyphst_ui::overlay::Toasts;
 pub use glyphst_ui::paint::{
-    chevron, loading_dots, motion, paint_turned_image, progress_ring, pulse, shimmer_text,
+    chevron, loading_dots, motion, paint_turned_image, pulse, shimmer_text,
 };
 pub use glyphst_ui::settings::Group;
 

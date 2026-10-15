@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-use egui::{Align2, CornerRadius, Rect, Stroke, vec2};
+use egui::{Align2, Rect, Stroke, vec2};
 use glyphst_ai::agent::AgentCancellationToken;
 
 use crate::{
@@ -279,11 +279,8 @@ impl Previews {
         // An area offers last frame's size; a card that was loading would
         // stay that small without room to grow into.
         ui.set_max_height(max_height + 160.0);
-        egui::Frame::new()
-            .fill(tokens.raised)
-            .stroke(Stroke::new(1.0, tokens.rule))
-            .corner_radius(CornerRadius::same(10))
-            .shadow(egui::Shadow::NONE)
+        glyphst_ui::pane::popover(ui.ctx())
+            .inner_margin(egui::Margin::ZERO)
             .show(ui, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -298,7 +295,11 @@ impl Previews {
                         egui::Frame::new()
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new(error).size(12.0).color(tokens.err));
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .font(theme::mono(11.0))
+                                        .color(tokens.err),
+                                );
                             });
                         return;
                     }
@@ -339,9 +340,9 @@ impl Previews {
                                 .show(ui, |ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "Preview limited to {PREVIEW_CHARS} characters. The full text is still sent."
+                                            "preview limited to {PREVIEW_CHARS} characters. the full text is still sent."
                                         ))
-                                        .size(10.5)
+                                        .font(theme::mono(9.0))
                                         .color(tokens.faint),
                                     );
                                 });
@@ -367,7 +368,7 @@ impl Previews {
                                                     ui.add(
                                                         egui::Image::new(image)
                                                             .fit_to_exact_size(size)
-                                                            .corner_radius(4),
+                                                            .corner_radius(0),
                                                     );
                                                 }
                                             });
@@ -384,24 +385,17 @@ impl Previews {
 fn header(ui: &mut egui::Ui, kind: &ChipKind, tokens: &Tokens) {
     let (title, detail) = describe(kind);
     egui::Frame::new()
-        .fill(tokens.ink(0.03))
-        .corner_radius(CornerRadius {
-            nw: 10,
-            ne: 10,
-            sw: 0,
-            se: 0,
-        })
         .inner_margin(egui::Margin::symmetric(12, 7))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.add(crate::icons::image(kind.icon(), 13.0, tokens.muted));
+                ui.add(crate::icons::image(kind.icon(), 12.0, tokens.faint));
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(title)
-                            .font(theme::medium(12.0))
-                            .color(tokens.text),
+                        egui::RichText::new(format!("preview ── {}", title.to_lowercase()))
+                            .font(theme::mono(11.0))
+                            .color(tokens.text_2),
                     )
                     .truncate(),
                 );
@@ -409,7 +403,9 @@ fn header(ui: &mut egui::Ui, kind: &ChipKind, tokens: &Tokens) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(detail).size(11.0).color(tokens.faint),
+                                egui::RichText::new(detail.to_lowercase())
+                                    .font(theme::mono(10.0))
+                                    .color(tokens.faint),
                             )
                             .truncate(),
                         );

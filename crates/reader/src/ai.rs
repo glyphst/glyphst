@@ -1164,6 +1164,18 @@ impl Assistant {
     pub fn ui(&mut self, ui: &mut egui::Ui, panel: Panel<'_>) -> Option<PanelAction> {
         self.previews.poll(ui.ctx());
         let mut action = self.header_ui(ui, &panel);
+        // Under the full-width header, the body keeps the pane's padding.
+        let body = ui
+            .available_rect_before_wrap()
+            .shrink2(egui::vec2(12.0, 0.0))
+            .with_max_y(ui.max_rect().bottom() - 12.0);
+        let mut body_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(body)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        body_ui.set_min_size(body.size());
+        let ui = &mut body_ui;
         if self.show_sessions {
             if let Some(chosen) = self.history_ui(ui) {
                 action = Some(chosen);

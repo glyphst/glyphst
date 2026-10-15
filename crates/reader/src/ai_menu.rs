@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use egui::{Align2, CornerRadius, Rect, Sense, Stroke, text::LayoutJob, vec2};
+use egui::{Align2, Rect, Sense, text::LayoutJob, vec2};
 
 use crate::{
     ai_editor::{ChipKind, MentionEditor},
@@ -290,60 +290,66 @@ impl Menu {
             .fixed_pos(anchor.left_top() + vec2(0.0, -6.0 + 6.0 * (1.0 - opened)))
             .show(ui.ctx(), |ui| {
                 ui.set_opacity(opened);
-                egui::Frame::new()
-                    .fill(tokens.raised)
-                    .stroke(Stroke::new(1.0, tokens.rule))
-                    .corner_radius(CornerRadius::same(12))
-                    .shadow(egui::Shadow::NONE)
-                    .inner_margin(egui::Margin::same(5))
-                    .show(ui, |ui| {
-                        ui.set_width(width - 10.0);
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        if entries.is_empty() {
-                            ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new("Nothing matches")
-                                    .size(12.5)
-                                    .color(tokens.faint),
-                            );
-                            ui.add_space(6.0);
-                            return;
-                        }
-                        egui::ScrollArea::vertical()
-                            .id_salt("assistant-menu-scroll")
-                            .max_height(ROW * VISIBLE_ROWS)
-                            .show(ui, |ui| {
-                                let mut group = "";
-                                for (index, entry) in entries.iter().enumerate() {
-                                    if headers && entry.group() != group {
-                                        group = entry.group();
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            vec2(ui.available_width(), HEADER),
-                                            Sense::hover(),
-                                        );
-                                        ui.painter().text(
-                                            rect.left_bottom() + vec2(10.0, -6.0),
-                                            Align2::LEFT_BOTTOM,
-                                            group,
-                                            theme::medium(11.0),
-                                            tokens.faint,
-                                        );
-                                    }
-                                    let selected = index == self.selected;
-                                    let response =
-                                        row(ui, entry, selected, query, headers, &tokens);
-                                    if selected && !moved {
-                                        response.scroll_to_me(None);
-                                    }
-                                    if moved && response.hovered() {
-                                        self.selected = index;
-                                    }
-                                    if response.clicked() {
-                                        clicked = Some(index);
-                                    }
+                glyphst_ui::pane::popover(ui.ctx()).show(ui, |ui| {
+                    ui.set_width(width - 10.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    if entries.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("nothing matches")
+                                .font(theme::mono(11.0))
+                                .color(tokens.faint),
+                        );
+                        ui.add_space(6.0);
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("assistant-menu-scroll")
+                        .max_height(ROW * VISIBLE_ROWS)
+                        .show(ui, |ui| {
+                            let mut group = "";
+                            for (index, entry) in entries.iter().enumerate() {
+                                if headers && entry.group() != group {
+                                    group = entry.group();
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), HEADER),
+                                        Sense::hover(),
+                                    );
+                                    glyphst_ui::motif::paint_rule_title(
+                                        ui,
+                                        rect.shrink2(vec2(8.0, 0.0)),
+                                        &group.to_lowercase(),
+                                        None,
+                                        true,
+                                    );
                                 }
-                            });
-                    });
+                                let selected = index == self.selected;
+                                let response = row(ui, entry, selected, query, headers, &tokens);
+                                if selected && !moved {
+                                    response.scroll_to_me(None);
+                                }
+                                if moved && response.hovered() {
+                                    self.selected = index;
+                                }
+                                if response.clicked() {
+                                    clicked = Some(index);
+                                }
+                            }
+                        });
+                    // How to drive it.
+                    ui.add_space(2.0);
+                    ui.painter().hline(
+                        ui.max_rect().x_range(),
+                        ui.cursor().top(),
+                        tokens.hairline(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("↑↓ move   ↵ insert   esc close")
+                            .font(theme::mono(9.0))
+                            .color(tokens.faint),
+                    );
+                });
             });
         let menu = area.response.rect;
         if let Some(entry) = entries.get(self.selected) {
@@ -366,14 +372,18 @@ fn row(
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
     if selected {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(7), tokens.ink(0.07));
+            .rect_filled(rect, tokens.ctl_radius(), tokens.accent_soft);
     }
     crate::icons::paint(
         ui,
-        Rect::from_center_size(rect.left_center() + vec2(18.0, 0.0), vec2(14.0, 14.0)),
+        Rect::from_center_size(rect.left_center() + vec2(16.0, 0.0), vec2(13.0, 13.0)),
         entry.icon(),
-        14.0,
-        if selected { tokens.text } else { tokens.muted },
+        13.0,
+        if selected {
+            tokens.accent_text
+        } else {
+            tokens.faint
+        },
     );
     let title = entry.title();
     let typed = query.rsplit(' ').next().unwrap_or(query);
@@ -391,15 +401,16 @@ fn row(
     let mut job = LayoutJob::default();
     for (index, ch) in title.chars().enumerate() {
         let font = if matched.contains(&index) {
-            theme::semibold(13.0)
+            theme::mono_strong(12.0)
         } else {
-            theme::regular(13.0)
+            theme::mono(12.0)
         };
-        job.append(
-            &ch.to_string(),
-            0.0,
-            egui::TextFormat::simple(font, tokens.text),
-        );
+        let color = if selected {
+            tokens.accent_text
+        } else {
+            tokens.text_2
+        };
+        job.append(&ch.to_string(), 0.0, egui::TextFormat::simple(font, color));
     }
     let detail = if grouped || !matches!(entry, MenuEntry::Mention(_)) {
         entry.detail()
@@ -422,7 +433,8 @@ fn row(
         tokens.text,
     );
     if detail_width > 0.0 {
-        let mut job = LayoutJob::simple_singleline(detail, theme::regular(11.5), tokens.faint);
+        let mut job =
+            LayoutJob::simple_singleline(detail.to_lowercase(), theme::mono(10.0), tokens.faint);
         job.wrap.max_width = detail_width;
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
@@ -487,15 +499,18 @@ fn aside(
                     }
                     MenuEntry::Mention(_) => String::new(),
                 };
-                egui::Frame::new()
-                    .fill(tokens.raised)
-                    .stroke(Stroke::new(1.0, tokens.rule))
-                    .corner_radius(CornerRadius::same(10))
-                    .shadow(egui::Shadow::NONE)
+                glyphst_ui::pane::popover(ui.ctx())
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_max_width(width.min(260.0));
-                        ui.label(egui::RichText::new(text).size(12.0).color(tokens.muted));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .font(theme::regular(12.0))
+                                    .color(tokens.muted),
+                            )
+                            .wrap(),
+                        );
                     });
             }
         });

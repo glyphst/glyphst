@@ -4,9 +4,10 @@
 //! messages queued while an answer runs, and the agent's changes stacked
 //! on top as one sheet.
 
-use egui::{Align2, CornerRadius, Rect, Sense, Stroke, StrokeKind, vec2};
+use egui::{Align2, Rect, Sense, Stroke, vec2};
 use glyphst_agent_host::external::AgentSpec;
 use glyphst_settings::{ModelLimits, ModelRef};
+use glyphst_ui::{Tip, badge::Chip, button::Button, menu as ui_menu, meter::Meter};
 
 use super::{Assistant, PanelAction};
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
     theme::{self, Tokens},
 };
 
-const SEND: f32 = 28.0;
+const SEND: f32 = 24.0;
 /// The editor's font.
 pub(super) const TEXT_SIZE: f32 = 13.5;
 
@@ -105,22 +106,12 @@ impl Assistant {
         let sheet = !self.queue.is_empty() || changes.has_changes();
         if sheet {
             egui::Frame::new()
-                .fill(tokens.ink(0.03))
-                .stroke(Stroke::new(1.0, tokens.rule))
-                .corner_radius(CornerRadius {
-                    nw: 12,
-                    ne: 12,
-                    sw: 0,
-                    se: 0,
-                })
-                .inner_margin(egui::Margin {
-                    left: 10,
-                    right: 8,
-                    top: 6,
-                    bottom: 18,
-                })
+                .fill(tokens.raised)
+                .stroke(tokens.hairline())
+                .corner_radius(tokens.ctl_radius())
+                .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    ui.set_width(width - 36.0);
+                    ui.set_width(width - 22.0);
                     if let Some(change) = changes.ui(ui, &tokens) {
                         action = Some(PanelAction::Change(change));
                     }
@@ -128,23 +119,22 @@ impl Assistant {
                         action = Some(chosen);
                     }
                 });
-            ui.add_space(-14.0);
+            ui.add_space(6.0);
         }
+        let focused_edge = if focused {
+            Stroke::new(1.0, tokens.accent)
+        } else {
+            tokens.edge()
+        };
         let card = egui::Frame::new()
             .fill(tokens.raised)
-            .stroke(Stroke::new(1.0, tokens.rule))
-            .corner_radius(CornerRadius::same(14))
-            .shadow(egui::Shadow {
-                offset: [0, 2],
-                blur: 10,
-                spread: 0,
-                color: egui::Color32::from_black_alpha(if tokens.dark() { 60 } else { 14 }),
-            })
+            .stroke(focused_edge)
+            .corner_radius(tokens.pop_radius())
             .inner_margin(egui::Margin {
-                left: 12,
+                left: 10,
                 right: 8,
-                top: 10,
-                bottom: 8,
+                top: 9,
+                bottom: 7,
             })
             .show(ui, |ui| {
                 ui.set_width(width - 22.0);
@@ -155,9 +145,9 @@ impl Assistant {
                             .iter()
                             .find(|agent| agent.id() == id)
                             .map_or(id, |agent| agent.name.as_str());
-                        format!("Message {name} — @ for context")
+                        format!("message {name} · @ to mention")
                     }
-                    None => "Ask anything — @ for context, / for commands".into(),
+                    None => "ask anything · @ to mention".into(),
                 };
                 let max_height = if self.expanded {
                     (ui.ctx().content_rect().height() * 0.55).max(200.0)
@@ -208,7 +198,7 @@ impl Assistant {
                             icon,
                             22.0,
                             false,
-                            if self.expanded { "Shrink" } else { "Expand" },
+                            if self.expanded { "shrink" } else { "expand" },
                         )
                     });
                     if response.clicked() {
@@ -307,7 +297,8 @@ impl Assistant {
         }
     }
 
-    /// The row under the text.
+    /// The row under the text: `+ / @` and a suggestion at the left; the
+    /// context meter, the model and the send button at the right.
     fn toolbar(
         &mut self,
         ui: &mut egui::Ui,
@@ -319,34 +310,45 @@ impl Assistant {
         let ctx = ui.ctx().clone();
         let mut action = None;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            if crate::icons::button(ui, "plus", 26.0, self.menu.forced, "Add context (Ctrl+;)")
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if crate::icons::button(ui, "plus", 22.0, self.menu.forced, "add context (ctrl ;)")
                 .clicked()
             {
                 self.menu.forced = !self.menu.forced;
                 ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
             }
-            if let Some((label, title)) = self.suggestion(composer)
-                && suggestion_chip(ui, &label, &tokens).clicked()
-                && let Some(candidate) = ai_mentions::candidates(&sources(), "")
-                    .into_iter()
-                    .find(|candidate| candidate.title == title)
-            {
-                self.editor
-                    .insert_chip(&ctx, None, ChipKind::Mention(candidate.mention));
-                ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
+            // `/` and `@` start a command or a mention in the text.
+            for (glyph, tip) in [("/", "run a command"), ("@", "mention context")] {
+                if ui.add(Button::plain(glyph).small()).tip(tip).clicked() {
+                    let caret = self.editor.caret(&ctx);
+                    self.editor.replace_text(&ctx, caret..caret, glyph);
+                    ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
+                }
+            }
+            if let Some((label, title)) = self.suggestion(composer) {
+                ui.add_space(4.0);
+                let chip = Chip::new(&label).icon("plus").muted(true).show(ui);
+                if chip.response.tip("attach it to the message").clicked()
+                    && let Some(candidate) = ai_mentions::candidates(&sources(), "")
+                        .into_iter()
+                        .find(|candidate| candidate.title == title)
+                {
+                    self.editor
+                        .insert_chip(&ctx, None, ChipKind::Mention(candidate.mention));
+                    ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = 8.0;
                 let running = self.run.is_some();
                 let empty = self.editor.is_empty();
                 let (icon, tooltip) = match (running, empty) {
-                    (true, true) => ("square", "Stop (Esc)"),
-                    (true, false) => ("arrow-up", "Queue: send when this answer ends"),
-                    (false, _) => ("arrow-up", "Send (Enter)"),
+                    (true, true) => ("square", "stop (esc)"),
+                    (true, false) => ("arrow-up", "queue: send when this answer ends"),
+                    (false, _) => ("arrow-up", "send (enter)"),
                 };
                 let enabled = running || !empty;
-                let button = round_button(ui, icon, enabled, &tokens).on_hover_text(tooltip);
+                let button = send_button(ui, icon, enabled, &tokens).tip(tooltip);
                 if button.clicked() && enabled {
                     if running && empty {
                         self.stop();
@@ -357,7 +359,7 @@ impl Assistant {
                 if let Some(chosen) = self.selector(ui, composer) {
                     action = Some(chosen);
                 }
-                self.context_ring(ui, &tokens);
+                self.context_meter(ui, &tokens);
             });
         });
         action
@@ -384,7 +386,7 @@ impl Assistant {
         {
             return Some((
                 format!(
-                    "Selection · {words} word{}",
+                    "selection · {words} word{}",
                     if words == 1 { "" } else { "s" }
                 ),
                 "Selection",
@@ -394,33 +396,32 @@ impl Assistant {
         (!has(&|mention| {
             matches!(mention, Mention::Pages { first, last, .. } if *first <= page && page <= *last)
         }))
-        .then(|| (format!("Page {}", page + 1), "This page"))
+        .then(|| (format!("p.{}", page + 1), "This page"))
     }
 
-    /// How much of the model's context the chat uses, as a ring.
-    fn context_ring(&self, ui: &mut egui::Ui, tokens: &Tokens) {
+    /// How much of the model's context the chat uses, as a meter.
+    fn context_meter(&self, ui: &mut egui::Ui, tokens: &Tokens) {
         let (used, model) = &self.context_tokens;
         if *used == 0 || self.agent.is_some() {
             return;
         }
         let window = ModelLimits::for_model(model).context_window.max(1);
         let fraction = *used as f32 / window as f32;
-        let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
         let color = if fraction >= 0.85 {
             tokens.warn
         } else {
             tokens.muted
         };
-        crate::widgets::progress_ring(
-            ui.painter(),
-            rect.center(),
-            6.5,
-            fraction,
-            color,
-            tokens.rule,
+        let label = format!("{:.0}%", fraction * 100.0);
+        let response = ui.add(
+            Meter::new(fraction)
+                .bar()
+                .width(64.0)
+                .color(color)
+                .label(&label),
         );
-        response.on_hover_text(format!(
-            "{:.0}% of the context used ({} of {} tokens). Long chats are summarized when it fills.",
+        response.tip(&format!(
+            "{:.0}% of the context used ({} of {} tokens). long chats are summarized when it fills.",
             fraction * 100.0,
             short_count(*used),
             short_count(window)
@@ -441,10 +442,10 @@ impl Assistant {
                 .model
                 .as_ref()
                 .and_then(|chosen| composer.models.iter().find(|(model, _)| model == chosen))
-                .map(|(_, label)| model_name(label).to_string())
-                .unwrap_or_else(|| "Choose a model".into()),
+                .map(|(_, label)| model_name(label).to_lowercase())
+                .unwrap_or_else(|| "choose a model".into()),
         };
-        let font = theme::regular(12.5);
+        let font = theme::mono(11.0);
         let galley = ui.painter().layout_no_wrap(
             current,
             font,
@@ -454,41 +455,29 @@ impl Assistant {
                 tokens.muted
             },
         );
-        let width = (galley.size().x + 40.0).min(ui.available_width().max(60.0));
-        let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+        let width = (galley.size().x + 22.0).min(ui.available_width().max(60.0));
+        let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
         if response.hovered() || self.selector_open {
             ui.painter()
-                .rect_filled(rect, CornerRadius::same(7), tokens.ink(0.06));
+                .rect_filled(rect, tokens.ctl_radius(), tokens.hover);
         }
-        let icon = if self.agent.is_some() {
-            "terminal"
-        } else {
-            "sparkles"
-        };
-        crate::icons::paint(
-            ui,
-            Rect::from_center_size(rect.left_center() + vec2(12.0, 0.0), vec2(13.0, 13.0)),
-            icon,
-            13.0,
-            tokens.muted,
-        );
         let text_rect = Rect::from_min_max(
-            rect.left_top() + vec2(22.0, 0.0),
-            rect.right_bottom() - vec2(16.0, 0.0),
+            rect.left_top() + vec2(4.0, 0.0),
+            rect.right_bottom() - vec2(14.0, 0.0),
         );
         ui.painter().with_clip_rect(text_rect).galley(
             egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0),
             galley,
             tokens.muted,
         );
-        crate::widgets::chevron(
-            ui.painter(),
-            rect.right_center() - vec2(9.0, 0.0),
-            8.0,
-            if self.selector_open { 3.0 } else { 1.0 },
+        ui.painter().text(
+            rect.right_center() - vec2(6.0, 0.0),
+            Align2::RIGHT_CENTER,
+            if self.selector_open { "▴" } else { "▾" },
+            theme::mono(10.0),
             tokens.faint,
         );
-        let response = response.on_hover_text("Model or coding agent");
+        let response = response.tip("model or coding agent");
         if response.clicked() {
             self.selector_open = !self.selector_open;
         }
@@ -500,15 +489,10 @@ impl Assistant {
             .pivot(Align2::RIGHT_BOTTOM)
             .fixed_pos(rect.right_top() + vec2(0.0, -6.0))
             .show(ui.ctx(), |ui| {
-                egui::Frame::new()
-                    .fill(tokens.raised)
-                    .stroke(Stroke::new(1.0, tokens.rule))
-                    .corner_radius(CornerRadius::same(12))
-                    .shadow(egui::Shadow::NONE)
-                    .inner_margin(egui::Margin::same(5))
+                glyphst_ui::pane::popover(ui.ctx())
                     .show(ui, |ui| {
                         ui.set_width(280.0);
-                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui_menu::style(ui);
                         egui::ScrollArea::vertical()
                             .id_salt("assistant-selector-scroll")
                             .max_height(360.0)
@@ -518,10 +502,10 @@ impl Assistant {
                                     let (group, name) = label.split_once(" · ").unwrap_or(("Models", label));
                                     if group != provider {
                                         provider = group;
-                                        group_title(ui, group, &tokens);
+                                        ui_menu::group(ui, &group.to_lowercase());
                                     }
                                     let selected = self.agent.is_none() && composer.model.as_ref() == Some(model);
-                                    if selector_row(ui, "sparkles", name, "", selected, &tokens).clicked() {
+                                    if ui_menu::Item::new(&name.to_lowercase()).icon("sparkles").checked(selected).show(ui).clicked() {
                                         if !selected {
                                             action = Some(PanelAction::SetModel(model.clone()));
                                         }
@@ -529,20 +513,23 @@ impl Assistant {
                                     }
                                 }
                                 if composer.models.is_empty() {
-                                    group_title(ui, "Built-in", &tokens);
-                                    if selector_row(ui, "settings", "Set up a model…", "Settings", false, &tokens).clicked() {
+                                    ui_menu::group(ui, "built-in");
+                                    if ui_menu::Item::new("set up a model…").icon("settings").show(ui).clicked() {
                                         action = Some(PanelAction::OpenAiSettings);
                                         self.selector_open = false;
                                     }
                                 }
                                 if !composer.agents.is_empty() {
-                                    group_title(ui, "Coding agents", &tokens);
+                                    ui_menu::group(ui, "coding agents");
                                     for agent in composer.agents {
                                         let id = agent.id();
                                         let selected = self.agent.as_deref() == Some(id.as_str());
                                         let icon = if id.starts_with("acp:") { "bot" } else { "terminal" };
-                                        if selector_row(ui, icon, &agent.name, "new chat", selected, &tokens)
-                                            .on_hover_text("A coding agent on this computer, with its own model and sign-in. It works in a folder for this document and reaches the Reader through MCP.")
+                                        if ui_menu::Item::new(&agent.name.to_lowercase())
+                                            .icon(icon)
+                                            .checked(selected)
+                                            .show(ui)
+                                            .tip("a coding agent on this computer, with its own model and sign-in. it works in a folder for this document and reaches the reader through mcp.")
                                             .clicked()
                                         {
                                             if !selected {
@@ -580,13 +567,20 @@ impl Assistant {
                 },
             );
             let (text, _) = draft.prompt();
+            let label = ui.painter().text(
+                rect.left_center() + vec2(20.0, 0.0),
+                Align2::LEFT_CENTER,
+                "queued",
+                theme::mono(10.0),
+                tokens.accent_text,
+            );
             crate::widgets::row_text(
                 ui,
-                rect.left_center() + vec2(20.0, 0.0),
-                format!("Queued · {}", text.replace('\n', " ")),
-                theme::regular(12.0),
-                tokens.muted,
-                rect.width() - 80.0,
+                egui::pos2(label.right() + 8.0, rect.center().y),
+                text.replace('\n', " "),
+                theme::mono(11.0),
+                tokens.text_2,
+                rect.right() - label.right() - 64.0,
             );
             if response.contains_pointer() {
                 let at = |offset: f32| {
@@ -597,7 +591,7 @@ impl Assistant {
                 };
                 if ui
                     .put(at(12.0), |ui: &mut egui::Ui| {
-                        crate::icons::button(ui, "x", 22.0, false, "Remove")
+                        crate::icons::button(ui, "x", 22.0, false, "remove")
                     })
                     .clicked()
                 {
@@ -605,7 +599,7 @@ impl Assistant {
                 }
                 if ui
                     .put(at(36.0), |ui: &mut egui::Ui| {
-                        crate::icons::button(ui, "pencil", 22.0, false, "Edit")
+                        crate::icons::button(ui, "pencil", 22.0, false, "edit")
                     })
                     .clicked()
                 {
@@ -625,129 +619,31 @@ impl Assistant {
     }
 }
 
-/// The send/queue/stop button: a filled circle in the text colour.
-fn round_button(ui: &mut egui::Ui, icon: &str, enabled: bool, tokens: &Tokens) -> egui::Response {
+/// The send, queue or stop button: an accent square with its glyph on
+/// the accent.
+fn send_button(ui: &mut egui::Ui, icon: &str, enabled: bool, tokens: &Tokens) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(SEND, SEND), Sense::click());
-    let fill = if response.hovered() && enabled {
-        Tokens::fade(tokens.text, 0.85)
+    let fill = if !enabled {
+        tokens.hover
+    } else if response.hovered() {
+        tokens.accent_text
     } else {
-        tokens.text
+        tokens.accent
     };
-    let alpha = if enabled { 1.0 } else { 0.3 };
-    ui.painter()
-        .circle_filled(rect.center(), SEND / 2.0, Tokens::fade(fill, alpha));
+    ui.painter().rect_filled(rect, tokens.ctl_radius(), fill);
+    let ink = if enabled {
+        tokens.on_accent
+    } else {
+        tokens.faint
+    };
     if icon == "square" {
         ui.painter().rect_filled(
-            Rect::from_center_size(rect.center(), vec2(10.0, 10.0)),
-            CornerRadius::same(2),
-            tokens.raised,
+            Rect::from_center_size(rect.center(), vec2(9.0, 9.0)),
+            1,
+            ink,
         );
     } else {
-        crate::icons::paint(ui, rect, icon, 15.0, tokens.raised);
-    }
-    response
-}
-
-/// A faint pill offering context to attach.
-fn suggestion_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Response {
-    let font = theme::regular(12.0);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), font, tokens.muted);
-    let width = (galley.size().x + 30.0)
-        .min(ui.available_width() - 120.0)
-        .max(40.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
-    let fill = if response.hovered() {
-        tokens.ink(0.07)
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        fill,
-        Stroke::new(1.0, tokens.rule),
-        StrokeKind::Inside,
-    );
-    crate::icons::paint(
-        ui,
-        Rect::from_center_size(rect.left_center() + vec2(12.0, 0.0), vec2(11.0, 11.0)),
-        "plus",
-        11.0,
-        tokens.muted,
-    );
-    let text = Rect::from_min_max(
-        rect.left_top() + vec2(22.0, 0.0),
-        rect.right_bottom() - vec2(8.0, 0.0),
-    );
-    ui.painter().with_clip_rect(text).galley(
-        egui::pos2(text.left(), rect.center().y - galley.size().y / 2.0),
-        galley,
-        tokens.muted,
-    );
-    response.on_hover_text("Attach it to the message")
-}
-
-fn group_title(ui: &mut egui::Ui, title: &str, tokens: &Tokens) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-    ui.painter().text(
-        rect.left_bottom() + vec2(10.0, -6.0),
-        Align2::LEFT_BOTTOM,
-        title,
-        theme::medium(11.0),
-        tokens.faint,
-    );
-}
-
-fn selector_row(
-    ui: &mut egui::Ui,
-    icon: &str,
-    label: &str,
-    detail: &str,
-    selected: bool,
-    tokens: &Tokens,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(7), tokens.ink(0.07));
-    }
-    crate::icons::paint(
-        ui,
-        Rect::from_center_size(rect.left_center() + vec2(16.0, 0.0), vec2(14.0, 14.0)),
-        icon,
-        14.0,
-        if selected {
-            tokens.accent
-        } else {
-            tokens.muted
-        },
-    );
-    crate::widgets::row_text(
-        ui,
-        rect.left_center() + vec2(32.0, 0.0),
-        label,
-        theme::regular(13.0),
-        tokens.text,
-        rect.width() - 70.0,
-    );
-    if selected {
-        crate::icons::paint(
-            ui,
-            Rect::from_center_size(rect.right_center() - vec2(16.0, 0.0), vec2(14.0, 14.0)),
-            "check",
-            14.0,
-            tokens.accent,
-        );
-    } else if !detail.is_empty() && response.hovered() {
-        ui.painter().text(
-            rect.right_center() - vec2(10.0, 0.0),
-            Align2::RIGHT_CENTER,
-            detail,
-            theme::regular(11.0),
-            tokens.faint,
-        );
+        crate::icons::paint(ui, rect, icon, 14.0, ink);
     }
     response
 }

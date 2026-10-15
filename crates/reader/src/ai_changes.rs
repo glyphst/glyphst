@@ -212,75 +212,103 @@ impl ChangeLog {
 
     /// The bar above the assistant's composer: how many changes agents
     /// made, with review, keep and undo all.
+    /// The agent's changes (frame 05): `agent changes ── 4  [ undo all ]
+    /// [ keep ]` over one line per change, each with go-to and undo or
+    /// redo.
     pub fn ui(&mut self, ui: &mut egui::Ui, tokens: &Tokens) -> Option<ChangeAction> {
+        use glyphst_ui::{Tip, button::Button};
         if self.changes.is_empty() {
             return None;
         }
         let mut action = None;
-        egui::Frame::new()
-            .fill(tokens.surface)
-            .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let applied = self.applied();
-                    let text = match applied {
-                        1 => "1 change by the agent".to_string(),
-                        count => format!("{count} changes by the agent"),
-                    };
-                    ui.label(egui::RichText::new(text).small().color(tokens.muted));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(applied > 0, egui::Button::new("Undo all").small())
-                            .clicked()
-                        {
-                            action = Some(ChangeAction::UndoAll);
-                        }
-                        if ui.small_button("Keep").clicked() {
-                            action = Some(ChangeAction::Keep);
-                        }
-                        let review = if self.show { "Hide" } else { "Review" };
-                        if ui.small_button(review).clicked() {
-                            self.show = !self.show;
-                        }
-                    });
-                });
-                if !self.show {
-                    return;
+        let applied = self.applied();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                egui::RichText::new("agent changes")
+                    .font(crate::theme::mono(11.0))
+                    .color(tokens.text_2),
+            );
+            ui.label(
+                egui::RichText::new(format!("── {}", self.changes.len()))
+                    .font(crate::theme::mono(11.0))
+                    .color(tokens.faint),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(Button::bracket("keep")).clicked() {
+                    action = Some(ChangeAction::Keep);
                 }
-                egui::ScrollArea::vertical()
-                    .max_height(160.0)
-                    .id_salt("agent-changes")
-                    .show(ui, |ui| {
-                        for change in self.changes.iter().rev() {
-                            ui.horizontal(|ui| {
-                                let reverted = change.state == ChangeState::Reverted;
-                                let mut label = egui::RichText::new(change.label()).small();
-                                label = if reverted {
-                                    label.strikethrough().color(tokens.faint)
-                                } else {
-                                    label.color(tokens.text)
-                                };
-                                ui.label(label);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if reverted {
-                                            if ui.small_button("Redo").clicked() {
-                                                action = Some(ChangeAction::Redo(change.id));
-                                            }
-                                        } else if ui.small_button("Undo").clicked() {
-                                            action = Some(ChangeAction::Undo(change.id));
-                                        }
-                                        if ui.small_button("Show").clicked() {
-                                            action = Some(ChangeAction::GoTo(change.id));
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                    });
+                if ui
+                    .add_enabled(applied > 0, Button::bracket_muted("undo all"))
+                    .clicked()
+                {
+                    action = Some(ChangeAction::UndoAll);
+                }
+            });
+        });
+        egui::ScrollArea::vertical()
+            .max_height(120.0)
+            .id_salt("agent-changes")
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for change in self.changes.iter().rev() {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.painter().rect_filled(rect, 0, tokens.hover);
+                    }
+                    let reverted = change.state == ChangeState::Reverted;
+                    let y = rect.center().y;
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 2.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        if reverted { "−" } else { "+" },
+                        crate::theme::mono(11.0),
+                        if reverted { tokens.faint } else { tokens.ok },
+                    );
+                    let undo = egui::Rect::from_center_size(
+                        egui::pos2(rect.right() - 10.0, y),
+                        egui::vec2(18.0, 18.0),
+                    );
+                    let mut job = egui::text::LayoutJob::simple_singleline(
+                        change.label().to_lowercase(),
+                        crate::theme::mono(11.0),
+                        if reverted {
+                            tokens.faint
+                        } else {
+                            tokens.text_2
+                        },
+                    );
+                    if reverted && let Some(section) = job.sections.first_mut() {
+                        section.format.strikethrough = egui::Stroke::new(1.0, tokens.faint);
+                    }
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(
+                        undo.left() - rect.left() - 20.0,
+                    );
+                    let galley = ui.painter().layout_job(job);
+                    ui.painter().galley(
+                        egui::pos2(rect.left() + 16.0, y - galley.size().y / 2.0),
+                        galley,
+                        tokens.text_2,
+                    );
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(undo));
+                    let (icon, tip) = if reverted {
+                        ("redo-2", "redo")
+                    } else {
+                        ("undo-2", "undo")
+                    };
+                    if crate::icons::button(&mut child, icon, 18.0, false, tip).clicked() {
+                        action = Some(if reverted {
+                            ChangeAction::Redo(change.id)
+                        } else {
+                            ChangeAction::Undo(change.id)
+                        });
+                    } else if response.tip("show it").clicked() {
+                        action = Some(ChangeAction::GoTo(change.id));
+                    }
+                }
             });
         action
     }
