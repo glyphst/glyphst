@@ -182,13 +182,26 @@ impl Gpu {
     }
 
     pub fn render(&self, renderer: &Renderer, page: &GpuPage, camera: &Camera) -> DrawStats {
+        self.render_timed(renderer, page, camera).0
+    }
+
+    /// Renders and returns how long [`Renderer::draw`] took on the CPU
+    /// (selecting and recording the draws).
+    pub fn render_timed(
+        &self,
+        renderer: &Renderer,
+        page: &GpuPage,
+        camera: &Camera,
+    ) -> (DrawStats, std::time::Duration) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let stats = {
+        let (stats, encode) = {
             let mut pass = self.target.begin_pass(&mut encoder, wgpu::Color::WHITE);
-            renderer.draw(&self.queue, page, camera, &mut pass)
+            let started = std::time::Instant::now();
+            let stats = renderer.draw(&self.queue, page, camera, &mut pass);
+            (stats, started.elapsed())
         };
         self.queue.submit([encoder.finish()]);
-        stats
+        (stats, encode)
     }
 
     /// The target's pixels as RGB8 rows.

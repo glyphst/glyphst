@@ -1,4 +1,8 @@
-use std::{borrow::Borrow, ops::Range};
+use std::{
+    borrow::Borrow,
+    ops::Range,
+    sync::{Mutex, PoisonError},
+};
 
 use bytemuck::{Pod, Zeroable};
 use glyphst_pdf::vector::PageRect;
@@ -265,7 +269,60 @@ pub struct GpuPage {
     /// Levels written so far, coarsest first: while a page uploads it draws
     /// the finest of them, and nothing until the coarsest is written.
     ready_levels: usize,
+    /// The visible work of the last frames, reused while the view stays
+    /// inside it.
+    selection: Mutex<Option<Selection>>,
     pub gpu_bytes: u64,
+}
+
+/// Device pixels around the view whose primitives a [`Selection`] keeps, so
+/// pans and zooms within them reuse it (HEPR selects with a 256-pixel
+/// margin for the same reason).
+const SELECTION_MARGIN_PX: f32 = 256.0;
+
+/// A selection is made again once the view zooms in this far past it, so a
+/// wide one does not keep drawing what lies far off screen.
+const SELECTION_MAX_ZOOM_IN: f32 = 2.0;
+
+/// The chunks of one level's fill, stroke and clip batches that overlap
+/// `rect`, the view with a margin, at `scale`.
+struct Selection {
+    level: usize,
+    rect: PageRect,
+    scale: f32,
+    /// Per batch; raster and image batches are tested every frame.
+    ranges: Vec<Vec<Range<u32>>>,
+}
+
+impl Selection {
+    fn new(level_index: usize, level: &GpuLevel, camera: &Camera) -> Self {
+        let rect = camera.visible_page_rect(SELECTION_MARGIN_PX);
+        let ranges = level
+            .batches
+            .iter()
+            .map(|batch| match &batch.kind {
+                BatchKind::Fills(range)
+                | BatchKind::Strokes(range)
+                | BatchKind::ClipPush(range, _)
+                | BatchKind::ClipPop(range) => visible_ranges(&batch.chunks, range, rect),
+                BatchKind::Raster(_) | BatchKind::Image(_) => Vec::new(),
+            })
+            .collect();
+        Self {
+            level: level_index,
+            rect,
+            scale: camera.scale,
+            ranges,
+        }
+    }
+
+    /// Whether it still serves `level` seen through `camera`.
+    fn serves(&self, level_index: usize, level: &GpuLevel, camera: &Camera) -> bool {
+        self.level == level_index
+            && self.ranges.len() == level.batches.len()
+            && camera.scale <= self.scale * SELECTION_MAX_ZOOM_IN
+            && covers(self.rect, camera.visible_page_rect(2.0))
+    }
 }
 
 impl GpuPage {
@@ -660,6 +717,7 @@ impl Renderer {
             segments: prepared.exact().segments.len(),
             triangles: prepared.exact().fill_indices.len() / 3,
             ready_levels: 0,
+            selection: Mutex::new(None),
             gpu_bytes,
         };
         PageUpload {
@@ -1065,37 +1123,42 @@ impl Renderer {
         let Some(full) = camera.scissor(page.bounds) else {
             return;
         };
-        let level = &page.levels[page.level_for_scale(camera.scale)];
+        let level_index = page.level_for_scale(camera.scale);
+        let level = &page.levels[level_index];
         let visible = camera.visible_page_rect(2.0);
+        let mut selection = page
+            .selection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let selection = match selection.take() {
+            Some(kept) if kept.serves(level_index, level, camera) => selection.insert(kept),
+            _ => selection.insert(Selection::new(level_index, level, camera)),
+        };
 
         // Visible work per batch, then a running count of batches that draw
         // content, so a clip whose contents are all off screen is skipped.
-        let work: Vec<Option<BatchWork>> = level
+        const WHOLE: &[Range<u32>] = std::slice::from_ref(&(0..1));
+        let work: Vec<Option<BatchWork<'_>>> = level
             .batches
             .iter()
-            .map(|batch| {
+            .zip(&selection.ranges)
+            .map(|(batch, selected)| {
                 let scissor = match batch.clip {
                     Some(clip) => camera.scissor(clip_to(clip, page.bounds))?,
                     None => full,
                 };
-                let ranges = match &batch.kind {
-                    BatchKind::Fills(range) | BatchKind::Strokes(range) => {
-                        visible_ranges(&batch.chunks, range, visible)
-                    }
-                    BatchKind::ClipPush(range, _) | BatchKind::ClipPop(range) => {
-                        visible_ranges(&batch.chunks, range, visible)
-                    }
+                let ranges: &[Range<u32>] = match &batch.kind {
+                    BatchKind::Fills(_)
+                    | BatchKind::Strokes(_)
+                    | BatchKind::ClipPush(..)
+                    | BatchKind::ClipPop(_) => selected,
                     BatchKind::Raster(index) => match page.layers.get(*index) {
-                        Some(Some(layer)) if intersects(layer.rect, visible) => {
-                            std::iter::once(0..1).collect()
-                        }
-                        _ => Vec::new(),
+                        Some(Some(layer)) if intersects(layer.rect, visible) => WHOLE,
+                        _ => &[],
                     },
                     BatchKind::Image(index) => match page.images.get(*index) {
-                        Some(Some(image)) if intersects(image.rect, visible) => {
-                            std::iter::once(0..1).collect()
-                        }
-                        _ => Vec::new(),
+                        Some(Some(image)) if intersects(image.rect, visible) => WHOLE,
+                        _ => &[],
                     },
                 };
                 (!ranges.is_empty()).then_some((scissor, ranges))
@@ -1146,7 +1209,7 @@ impl Renderer {
                     pass.set_pipeline(&self.fill);
                     pass.set_vertex_buffer(0, vertices.slice(..));
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for range in ranges {
+                    for range in ranges.iter() {
                         stats.draw_calls += 1;
                         stats.triangles += range.len() / 3;
                         pass.draw_indexed(range.clone(), 0, 0..1);
@@ -1159,7 +1222,7 @@ impl Renderer {
                     pass.set_stencil_reference(batch.depth);
                     pass.set_pipeline(&self.stroke);
                     pass.set_vertex_buffer(0, segments.slice(..));
-                    for range in ranges {
+                    for range in ranges.iter() {
                         stats.draw_calls += 1;
                         stats.segments += range.len();
                         pass.draw(0..4, range.clone());
@@ -1203,7 +1266,7 @@ impl Renderer {
 }
 
 /// Scissor rectangle and visible primitive ranges of one batch.
-type BatchWork = ([u32; 4], Vec<Range<u32>>);
+type BatchWork<'a> = ([u32; 4], &'a [Range<u32>]);
 
 /// `rect` limited to `bounds`; empty (and so skipped) when they do not meet.
 fn clip_to(rect: PageRect, bounds: PageRect) -> PageRect {
@@ -1213,6 +1276,11 @@ fn clip_to(rect: PageRect, bounds: PageRect) -> PageRect {
         rect[2].min(bounds[2]),
         rect[3].min(bounds[3]),
     ]
+}
+
+/// Whether `outer` holds all of `inner`.
+fn covers(outer: PageRect, inner: PageRect) -> bool {
+    outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
 }
 
 fn intersects(a: PageRect, b: PageRect) -> bool {
@@ -1665,6 +1733,43 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selection_serves_small_moves_and_zooms_in() {
+        // Two strokes far apart: one by the view, one 900 pt away.
+        let level = GpuLevel {
+            max_scale: f32::INFINITY,
+            fill_vertices: None,
+            fill_indices: None,
+            segments: None,
+            batches: vec![Batch {
+                kind: BatchKind::Strokes(0..2),
+                clip: None,
+                depth: 0,
+                chunks: vec![
+                    crate::prepare::Chunk {
+                        range: 0..1,
+                        bounds: [90.0, 90.0, 110.0, 110.0],
+                    },
+                    crate::prepare::Chunk {
+                        range: 1..2,
+                        bounds: [1000.0, 1000.0, 1010.0, 1010.0],
+                    },
+                ],
+            }],
+        };
+        let at = |focus: [f32; 2], scale: f32| Camera::centered(focus, scale, [200, 200]);
+        let camera = at([100.0, 100.0], 1.0);
+        let selection = Selection::new(0, &level, &camera);
+        assert_eq!(selection.ranges, vec![vec![0..1]]);
+        assert!(selection.serves(0, &level, &at([150.0, 120.0], 1.0)));
+        assert!(selection.serves(0, &level, &at([100.0, 100.0], 2.0)));
+        // Past the margin, zoomed in further, out, or at another level.
+        assert!(!selection.serves(0, &level, &at([500.0, 100.0], 1.0)));
+        assert!(!selection.serves(0, &level, &at([100.0, 100.0], 2.5)));
+        assert!(!selection.serves(0, &level, &at([100.0, 100.0], 0.25)));
+        assert!(!selection.serves(1, &level, &camera));
+    }
 
     #[test]
     fn scissors_keep_drawing_inside_the_page() {

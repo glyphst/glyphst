@@ -112,6 +112,7 @@ fn main() -> Result<()> {
     let first_frame = started.elapsed();
 
     let mut frames = Vec::with_capacity(options.frames);
+    let mut encodes = Vec::with_capacity(options.frames);
     let half = options.frames.max(2) / 2;
     let ratio = (MAX_ZOOM / MIN_ZOOM).ln();
     for frame in 0..options.frames {
@@ -122,9 +123,10 @@ fn main() -> Result<()> {
         };
         let zoom = options.zoom.unwrap_or(MIN_ZOOM * (ratio * t).exp());
         let started = Instant::now();
-        let stats = gpu.render(&renderer, gpu_page, &camera(zoom));
+        let (stats, encode) = gpu.render_timed(&renderer, gpu_page, &camera(zoom));
         gpu.wait()?;
         frames.push((zoom, started.elapsed(), stats));
+        encodes.push((zoom, encode));
     }
     let mut sorted: Vec<Duration> = frames.iter().map(|(_, time, _)| *time).collect();
     sorted.sort();
@@ -154,10 +156,18 @@ fn main() -> Result<()> {
                 .map(|(_, time, _)| *time)
                 .collect();
             times.sort();
+            let mut encode: Vec<Duration> = encodes
+                .iter()
+                .filter(|(zoom, _)| *zoom >= low && *zoom < high)
+                .map(|(_, time)| *time)
+                .collect();
+            encode.sort();
             json!({
                 "zoom": [low, high],
                 "p50_ms": percentile(&times, 0.5),
                 "max_ms": percentile(&times, 1.0),
+                "encode_p50_ms": percentile(&encode, 0.5),
+                "encode_max_ms": percentile(&encode, 1.0),
             })
         })
         .collect();

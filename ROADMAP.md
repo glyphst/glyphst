@@ -120,7 +120,36 @@ dominates).
 **Done when:** the chosen milestone works with tests, `check.sh quick`
 passes, and the bench still shows no frames over 25 ms.
 
-## 2. Dependency audit follow-up
+## 2. pdf-gpu: follow HEPR's renderer
+
+**Owner:** `pdf-gpu`.
+
+**Current evidence:** Highly-Efficient-PDF-Renderer (the workspace's
+`../references/Highly-Efficient-PDF-Renderer`, read at v0.1.65, 3c2dbd1) is
+the model for `pdf-gpu`'s zoom. Of its 0.1.61-0.1.65 renderer work,
+`pdf-gpu` took the margin selection (ff69ebb): visible chunks are chosen
+with 256 px around the view and reused while the view stays inside, which
+cut Murietta's draw encoding at 4-64x from about 0.2 to 0.05-0.07 ms
+(`zoom_bench` now reports `encode_p50_ms`). Not ported:
+- Ordered mixed vector batches (9debd42, 1206adc): runs of fills and
+  strokes drawn in paint order through one instanced pipeline. `pdf-gpu`
+  switches pipeline per `Fills`/`Strokes` batch; Murietta has 6,701 batches
+  per level.
+- Analytic fill coverage (8d41b7b, 39848f9): fills shaded by coverage,
+  subpixel paths from their signed area. `pdf-gpu` tessellates with lyon
+  under 4x MSAA, the cause of the coarse small-text gap above.
+- The thumbnail pipeline (50b34ac, 5ed9d60, c9580b0, 178588b): thumbnails
+  drawn from prepared pages with smoothed stroke coverage. The Reader's
+  sidebar thumbnails and overview cells are MuPDF rasters from the indexer.
+- Reusable stencil patterns and grid-tiled stencils (b6a755c, 0.1.63).
+
+**Next step:** count pipeline switches and draw calls per frame on the
+corpus to decide between mixed batches and analytic coverage.
+
+**Done when:** the chosen change lowers `zoom_bench` frame or encode times
+on Murietta and Lower Level and the corpus tier shows no new differences.
+
+## 3. Dependency audit follow-up
 
 **Owner:** Workspace dependency maintenance.
 
