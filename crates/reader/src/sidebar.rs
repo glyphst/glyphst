@@ -28,7 +28,6 @@ use crate::{
     find, icons,
     theme::{self, Tokens},
     translation::{Export, SessionStatus},
-    widgets,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -255,7 +254,7 @@ pub fn show(
         Some(hint) => {
             let text = state.filters.entry(*which).or_default();
             ui.add_space(8.0);
-            widgets::filter_field(ui, text, hint);
+            glyphst_ui::field::TextField::search(text, hint).show(ui);
             ui.add_space(4.0);
             text.trim().to_lowercase()
         }
@@ -685,7 +684,7 @@ fn select_row(ui: &mut egui::Ui, label: &str, value: &str) -> Option<egui::Respo
         theme::mono(11.0),
         tokens.faint,
     );
-    widgets::row_text(
+    glyphst_ui::text::row(
         ui,
         egui::pos2(rect.left() + 60.0, y),
         value,
@@ -949,7 +948,7 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     } else {
         tokens.row(28.0)
     };
-    let (rect, response) = widgets::list_row(ui, height, row.selected);
+    let (rect, response) = glyphst_ui::row::list_row(ui, height, row.selected);
     let hovered = response.contains_pointer() && !row.actions.is_empty();
     let mut right = rect.right() - 12.0;
     let mut clicked = None;
@@ -1043,7 +1042,7 @@ fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     } else {
         tokens.text_2
     };
-    widgets::row_text(
+    glyphst_ui::text::row(
         ui,
         egui::pos2(left, y),
         row.title,
@@ -1477,7 +1476,7 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                 let painter = ui.painter();
                 painter.rect_filled(paper, 0, tokens.page);
                 if let Some(texture) = tab.thumbnail(page) {
-                    widgets::paint_turned_image(
+                    glyphst_ui::paint::paint_turned_image(
                         painter,
                         texture.id(),
                         paper,

@@ -10,6 +10,21 @@ use crate::{
     theme::{self, Tokens},
 };
 
+/// A row that fills the width, on the hover fill when hovered and on
+/// `accent-soft` when `selected`, for rows a caller draws itself.
+/// Returns its rect and response.
+pub fn list_row(ui: &mut Ui, height: f32, selected: bool) -> (Rect, Response) {
+    let t = Tokens::get(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 0, t.accent_soft);
+    } else if response.contains_pointer() {
+        ui.painter().rect_filled(rect, 0, t.hover);
+    }
+    (rect, response)
+}
+
 /// A list row the width of the pane.
 #[must_use = "call `.show(ui)`"]
 pub struct ListRow<'a> {

@@ -24,8 +24,8 @@ use crate::{
     icons,
     theme::{self, Tokens},
     user_settings::{SecretStatus, UserSettings},
-    widgets::{self, Group},
 };
+use glyphst_ui::settings::Group;
 
 /// One AI provider's row: which it is, where it is in the order, and the
 /// settings it edits.
@@ -194,7 +194,7 @@ impl ProviderPages {
         };
         let mut draft = Settings::clone(&current);
         let translation = &mut draft.translation;
-        widgets::settings_group(ui, "Service", |group| {
+        glyphst_ui::settings::group(ui, "Service", |group| {
             group.row("Service", None, |ui| {
                 egui::ComboBox::from_id_salt("translation-provider")
                     .selected_text(translation.active_provider.label())
@@ -227,7 +227,7 @@ impl ProviderPages {
                 optional_field(group, "Region", &mut config.region, "global");
             }
         });
-        widgets::settings_group(ui, "Language", |group| {
+        glyphst_ui::settings::group(ui, "Language", |group| {
             let chosen = match &translation.target_language {
                 TranslationTargetLanguage::UiLanguage => "The interface language".to_string(),
                 TranslationTargetLanguage::Explicit(code) => language_label(code),
@@ -267,12 +267,12 @@ impl ProviderPages {
         };
         let mut draft = Settings::clone(&current);
         let ocr = &mut draft.ocr;
-        widgets::settings_group(ui, "Recognition", |group| {
+        glyphst_ui::settings::group(ui, "Recognition", |group| {
             group.row(
                 "Recognize text",
                 Some("In scanned pages, for selection, search and translation."),
                 |ui| {
-                    widgets::segmented(
+                    glyphst_ui::segmented::labels(
                         ui,
                         &mut ocr.mode,
                         &[
@@ -284,9 +284,9 @@ impl ProviderPages {
                 },
             );
         });
-        widgets::settings_group(ui, "Service", |group| {
+        glyphst_ui::settings::group(ui, "Service", |group| {
             group.row("Service", None, |ui| {
-                widgets::segmented(
+                glyphst_ui::segmented::labels(
                     ui,
                     &mut ocr.provider,
                     &[
@@ -364,7 +364,7 @@ impl ProviderPages {
             }
         }
         let choices = model_choices(&draft);
-        widgets::settings_group(ui, "Models", |group| {
+        glyphst_ui::settings::group(ui, "Models", |group| {
             group.row("Assistant", None, |ui| {
                 model_picker(ui, "main-model", &mut draft.ai.main_model, &choices, None);
             });
@@ -384,7 +384,7 @@ impl ProviderPages {
         let mut remove = None;
         let mut reorder = None;
         let order = draft.ai.provider_order.clone();
-        widgets::settings_group(ui, "Providers", |group| {
+        glyphst_ui::settings::group(ui, "Providers", |group| {
             group.note("The first provider turned on answers when a model is not chosen.");
             for (index, provider) in order.iter().copied().enumerate() {
                 group.full(|ui| {
@@ -415,7 +415,7 @@ impl ProviderPages {
         if let Some((from, to)) = reorder {
             draft.ai.provider_order.swap(from, to);
         }
-        widgets::settings_group(ui, "Add a provider", |group| {
+        glyphst_ui::settings::group(ui, "Add a provider", |group| {
             group.row(
                 "OpenAI-compatible",
                 Some("Any service with an OpenAI-style API: a name and its host."),
@@ -482,7 +482,7 @@ impl ProviderPages {
             .show(ui, |ui| {
                 let mut enabled = config.enabled;
                 ui.horizontal(|ui| {
-                    if widgets::toggle(ui, &mut enabled).changed() {
+                    if ui.add(glyphst_ui::toggle::Switch(&mut enabled)).changed() {
                         draft.ai.set_provider_enabled(provider, enabled);
                     }
                     ui.label(if enabled { "On" } else { "Off" });
@@ -519,7 +519,7 @@ impl ProviderPages {
                 let id = ProviderSecretId::AiApiKey(provider);
                 let status = user.status(id);
                 let config = draft.ai.provider_config_mut(provider);
-                widgets::settings_group(ui, "", |group| {
+                glyphst_ui::settings::group(ui, "", |group| {
                     self.secret(group, "API key", &mut config.api_key, id, status);
                     if provider.is_custom() {
                         text_field(group, "Name", &mut config.name, "");
@@ -641,10 +641,14 @@ impl ProviderPages {
                 ui.label(RichText::new("Finish signing in in your browser…").color(tokens.muted));
             } else if let Some(email) = &auth.email {
                 ui.label(format!("Signed in as {email}"));
-                if crate::widgets::ghost_button(ui, "log-out", "Sign out").clicked() {
+                if ui
+                    .add(glyphst_ui::button::Button::plain("sign out").icon("log-out"))
+                    .clicked()
+                {
                     chatgpt.sign_out();
                 }
-            } else if crate::widgets::pill_button(ui, Some("log-in"), "Sign in with ChatGPT", true)
+            } else if ui
+                .add(glyphst_ui::button::Button::primary("sign in with chatgpt").icon("log-in"))
                 .clicked()
             {
                 match chatgpt.begin_sign_in() {

@@ -38,7 +38,9 @@ pub fn show<T: PartialEq + Copy>(
     let widths: Vec<f32> = options
         .iter()
         .map(|(_, icon, label)| {
-            text::width(ui, label, &font) + 20.0 + if icon.is_some() { 18.0 } else { 0.0 }
+            text::width(ui, &label.to_lowercase(), &font)
+                + 20.0
+                + if icon.is_some() { 18.0 } else { 0.0 }
         })
         .collect();
     let inner: f32 = widths.iter().sum::<f32>() + 2.0 * (options.len().saturating_sub(1)) as f32;
@@ -72,7 +74,7 @@ pub fn show<T: PartialEq + Copy>(
         }
         let mut center = cell.center();
         if let Some(icon) = icon {
-            let label_width = text::width(ui, label, &font);
+            let label_width = text::width(ui, &label.to_lowercase(), &font);
             let left = cell.center().x - (label_width + 18.0) / 2.0;
             icons::paint(
                 ui,
@@ -83,8 +85,14 @@ pub fn show<T: PartialEq + Copy>(
             );
             center.x = left + 18.0 + label_width / 2.0;
         }
-        ui.painter()
-            .text(center, Align2::CENTER_CENTER, *label, font.clone(), color);
+        // Choices are written in lower case, as the design does.
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            label.to_lowercase(),
+            font.clone(),
+            color,
+        );
         if response.clicked() && !selected {
             *value = *option;
             changed = true;

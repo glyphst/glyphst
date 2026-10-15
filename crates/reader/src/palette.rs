@@ -18,7 +18,6 @@ use crate::{
     pickers::is_document,
     settings_window::Section,
     theme::{self, Tokens},
-    widgets,
 };
 
 /// Results shown at most.
@@ -544,15 +543,17 @@ impl Palette {
                             } else if !hit.detail.is_empty() {
                                 let is_key = matches!(hit.item, Item::Command(_));
                                 if is_key {
-                                    let size = widgets::kbd_size(ui, &hit.detail);
+                                    let label = glyphst_ui::key::display(&hit.detail);
+                                    let size = glyphst_ui::key::size(ui, &label);
                                     right -= size.x;
-                                    widgets::paint_kbd(
+                                    glyphst_ui::key::paint(
                                         ui,
                                         egui::Rect::from_min_size(
                                             egui::pos2(right, rect.center().y - size.y / 2.0),
                                             size,
                                         ),
-                                        &hit.detail,
+                                        &label,
+                                        None,
                                     );
                                 } else {
                                     let galley = ui.painter().layout_no_wrap(

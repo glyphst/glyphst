@@ -13,7 +13,6 @@ use crate::{
     keys::{self, Keymap, KeymapPreset, Keys, Overrides, Shortcut},
     prefs::Prefs,
     theme::{self, Tokens},
-    widgets,
 };
 
 /// Keys recorded for `command` that other bindings have, start, or are
@@ -123,7 +122,7 @@ impl KeymapPage {
             vec2(width, (area.height() - 24.0).max(0.0)),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
-            widgets::form_style(ui);
+            glyphst_ui::settings::form_style(ui);
             glyphst_ui::settings::heading(
                 ui,
                 "Keyboard shortcuts",
@@ -187,12 +186,16 @@ impl KeymapPage {
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.allocate_ui(vec2(300.0, 30.0), |ui| {
-                widgets::filter_field(ui, &mut self.filter, "Search commands, keys or categories");
+                glyphst_ui::field::TextField::search(
+                    &mut self.filter,
+                    "Search commands, keys or categories",
+                )
+                .show(ui);
             });
             ui.add_space(8.0);
             ui.label(RichText::new("Keymap").color(tokens.muted));
             let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
-            changed |= widgets::segmented(ui, &mut prefs.keymap, &options);
+            changed |= glyphst_ui::segmented::labels(ui, &mut prefs.keymap, &options);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled_ui(!prefs.shortcuts.is_empty(), |ui| {
@@ -258,13 +261,12 @@ impl KeymapPage {
                         {
                             self.resolve_conflict(prefs, keymap, false);
                         }
-                        if widgets::pill_button(
-                            ui,
-                            None,
-                            &format!("Use it for “{}”", conflict.command.label()),
-                            true,
-                        )
-                        .clicked()
+                        if ui
+                            .add(glyphst_ui::button::Button::primary(&format!(
+                                "use it for “{}”",
+                                conflict.command.label().to_lowercase()
+                            )))
+                            .clicked()
                         {
                             changed |= self.resolve_conflict(prefs, keymap, true);
                         }
@@ -395,7 +397,7 @@ impl KeymapPage {
             .recording
             .as_ref()
             .is_some_and(|recording| recording.command == command);
-        let (rect, response) = widgets::list_row(ui, ROW_HEIGHT, recording_here);
+        let (rect, response) = glyphst_ui::row::list_row(ui, ROW_HEIGHT, recording_here);
         let columns = Columns::new(rect.x_range());
         let y = rect.center().y;
         icons::paint(
@@ -408,7 +410,7 @@ impl KeymapPage {
             13.0,
             tokens.faint,
         );
-        widgets::row_text(
+        glyphst_ui::text::row(
             ui,
             egui::pos2(columns.command.min + 34.0, y),
             command.label().to_lowercase(),
@@ -420,7 +422,7 @@ impl KeymapPage {
             },
             columns.command.span() - 40.0,
         );
-        widgets::row_text(
+        glyphst_ui::text::row(
             ui,
             egui::pos2(columns.category.min + 10.0, y),
             command.category().label().to_lowercase(),
@@ -429,7 +431,7 @@ impl KeymapPage {
             columns.category.span() - 14.0,
         );
         let custom = prefs.shortcuts.contains_key(command.id());
-        widgets::row_text(
+        glyphst_ui::text::row(
             ui,
             egui::pos2(columns.source.min + 10.0, y),
             if custom { "changed" } else { "default" },

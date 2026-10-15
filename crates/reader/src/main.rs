@@ -61,7 +61,6 @@ mod transition;
 mod translation;
 mod user_settings;
 mod wallpaper;
-mod widgets;
 mod window_blur;
 
 use std::path::PathBuf;

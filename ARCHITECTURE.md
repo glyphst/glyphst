@@ -5,6 +5,7 @@
 | Owner | Responsibility |
 | --- | --- |
 | `reader` | The Reader (egui): tabs and split panes, home, GPU document view, page overview, text and region selection, find, links, annotations, EPUB reflow, translation, assistant and quick ask, commands and settings |
+| `ui` | The glyph design system on egui: tokens, type, icons and one component per component of `design/main.pen` |
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
@@ -70,8 +71,9 @@ window's transparency: a save re-reads the file and replaces just those, so
 the file's other sections survive; keys the file held stay in it and other
 keys go to the keychain.
 Scripted runs and fake providers keep settings and keys in memory. Its own
-preferences (theme, transition, background, keyboard shortcuts, last
-session with its panes) live in eframe storage under the config directory
+preferences (theme and the rest of Settings › Appearance, transition,
+background, keyboard shortcuts, last session with its panes, page counts
+for home) live in eframe storage under the config directory
 (`glyphst/reader-egui/app.ron`, the path from before the switch); scripted
 runs (`--bench`, `--screenshot…`) save nothing and leave the library
 unwritten.
@@ -92,38 +94,45 @@ the Reader's preferences by document path, not in the library, whose
 formats are compatibility contracts. Preview cards are paint callbacks
 drawing each effect over two sample pages (or the wallpaper).
 
-Its components take pdfcraft's style: the design tokens (`theme.rs`, light
-and dark, white pages in both), Inter and JetBrains Mono embedded ahead of
-egui's faces and a system CJK fallback, Lucide SVG icons through craft-ui's
-icon set and buttons (`icons.rs`), and pdfcraft's widgets (`widgets.rs`:
-pills, search box, section titles, segmented choices, switches, settings
-groups and rows, cards, toasts). The fonts and icons ship in
-`crates/reader/assets` with their licences. The System theme follows the
-desktop: winit reports no theme on Linux, so `desktop_theme.rs` polls the XDG
-portal's `color-scheme` (after pdfcraft); without an answer System is light.
+The look is the glyph design in `design/main.pen` (monospace chrome, prose
+in Inter, hairline panes, one accent, radius 0/2/4 and no shadows; see
+[design/README.md](../design/README.md)). Its tokens, type, icons and
+components live in [`ui`](crates/ui) (`glyphst-ui`), one module per pen
+component (buttons, keys, chips, toggles, sliders, meters, fields,
+segmented choices, tooltips and toasts, tabs, the rail, pane headers, the
+status bar, list and tree rows, menus, covers, chat pieces, page
+thumbnails, settings rows) plus the glyph motifs (rule titles, tree
+branches, meter glyphs, corner ticks, dot fields). Components read
+`Tokens::get` only; screens pick no colours, radii or fonts of their own.
+`theme::apply` takes an `Appearance` (theme, accent, opacity, density, ui
+scale, ornaments, fonts) and `fonts::install` puts the chosen chrome and
+prose families (bundled JetBrains Mono and Inter, or installed ones found
+through fontconfig) ahead of egui's faces and a system CJK fallback; with
+ornaments off the motifs draw plain labels. `--gallery` draws every
+component (frame 01) for comparing with the design. The fonts and Lucide
+icons ship in `crates/ui/assets` with their licences. The System theme
+follows the desktop: winit reports no theme on Linux, so
+`desktop_theme.rs` polls the XDG portal's `color-scheme` (after pdfcraft);
+without an answer System is light.
 The window is always created transparent-capable and drawn opaque until
-transparency is on (off by default). Then only the base layer (the title
-bar, the home page, the stage's background effect around the pages) takes
-the window's opacity. Everything over the pages (the drawers, the assistant,
-the dock, the palette, menus and dialogs) stays opaque, floating over the
-document as it does without transparency: egui draws in one pass and can't
-blur what is beneath it, so a translucent panel would show page text, or a
-hole down to the desktop where no page is drawn. Blur behind the window is the compositor's, asked for through
-`ext-background-effect-v1` on winit's Wayland connection (`window_blur.rs`,
-the workspace's one allowance of `unsafe`, for its two FFI calls).
-The layout is its own: below the top bar (tabs, the palette's search box,
-theme, settings) a document's stage draws the background effect over the
-whole stage in one GPU callback and then the pages of each pane in its own,
-with egui page shadows between them. The rail, the drawers, the
-dock and the progress line are egui Areas above the stage; `stage.rs` lays
-them out (the drawer and the assistant lay the pages out beside them but
-float over them, the pages drawn on underneath; in a narrow window they
-float over the laid-out pages too) and fades the dock and rail after a
-pause in pointer movement.
-Split panes (`panes.rs`) divide the reading rectangle with craft-ui's
-docking model, one document per pane: its tree has tab ids as panels and
+transparency is on (off by default). Then the base layer and the docked
+panes take the window's opacity; everything raised over them (popovers,
+menus, dialogs, fields) and the pages stay opaque. Blur behind the window
+is the compositor's, asked for through `ext-background-effect-v1` on
+winit's Wayland connection (`window_blur.rs`, the workspace's one allowance
+of `unsafe`, for its two FFI calls).
+The layout is a docked shell (`shell.rs`, plain geometry): a 36pt tab bar,
+a 24pt status bar, and between them a 40pt icon rail, the sidebar, the
+reading column (a 28pt breadcrumb over the pages) and the assistant, side
+by side and split by hairlines; below 900pt the sidebar and the assistant
+float over the pages. The background effect fills the reading column only.
+The status bar carries the reading controls and a progress meter to scrub;
+the page being read gets corner ticks and a meta line, and each pane a
+column of page ticks at its right edge.
+Split panes (`panes.rs`) divide the reading column with craft-ui's
+docking model, one document per pane, each with its own header: its tree has tab ids as panels and
 one panel per group, and the last session keeps it. The focused pane's tab
-is the active tab, so commands, the dock and the drawers follow it; keys
+is the active tab, so commands, the status bar and the sidebar follow it; keys
 and the gamepad reach only it, and pressing in another pane focuses that
 one. Each tab has its own GPU view (target, transition snapshot, prepared
 effects), kept for a few seconds after it was last drawn, and a document
@@ -275,7 +284,12 @@ keys, schema metadata, managed-library layout, and current-format decode
 fallbacks are compatibility contracts.
 
 Glyphst carries no database migrations; there are no external users to
-preserve data for. When redb reports a file from an older file format
+preserve data for. The activity log (`activity_v1`, `library/activity.rs`) is an additive
+table of events (open, reading spans with their seconds, highlight, note,
+bookmark, ask, translate), the newest 5,000 kept; home lists them and sums
+the reading time. The Reader records them only when it persists.
+
+When redb reports a file from an older file format
 (`UpgradeRequired`), the library and the translation cache rename it aside as
 `<name>.redb<version>-format` (never deleting it) and start a fresh database.
 

@@ -51,7 +51,6 @@ use crate::{
     transition::ViewTransition,
     translation::{CardState, Translator},
     user_settings::UserSettings,
-    widgets,
     window_blur::WindowBlur,
 };
 
@@ -210,7 +209,7 @@ pub struct ReaderApp {
     continuous: bool,
     pub(crate) repaints: u64,
     last_update: Instant,
-    notices: crate::widgets::Toasts,
+    notices: glyphst_ui::overlay::Toasts,
     show_stats: bool,
     /// Zen mode: the pages alone, without the tabs, rail, drawers, dock or
     /// title chips.
@@ -1229,44 +1228,55 @@ impl ReaderApp {
             .order(egui::Order::Foreground)
             .fixed_pos(card.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
-                widgets::card_frame(ctx).show(ui, |ui| {
-                    ui.set_max_width(360.0);
-                    ui.horizontal(|ui| {
-                        ui.add(icons::image("languages", 15.0, tokens.accent));
-                        ui.label(egui::RichText::new("Translation").font(theme::semibold(13.0)));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            close |= icons::button(ui, "x", 24.0, false, "Close").clicked();
+                glyphst_ui::pane::popover(ctx)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        ui.horizontal(|ui| {
+                            ui.add(icons::image("languages", 15.0, tokens.accent));
+                            ui.label(
+                                egui::RichText::new("Translation").font(theme::semibold(13.0)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    close |= icons::button(ui, "x", 24.0, false, "Close").clicked();
+                                },
+                            );
                         });
+                        let source: String = card.source.chars().take(160).collect();
+                        ui.label(egui::RichText::new(source).italics().color(tokens.muted));
+                        ui.add_space(4.0);
+                        match &card.state {
+                            CardState::Loading => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("Translating…");
+                                });
+                            }
+                            CardState::Done(text) => {
+                                egui::ScrollArea::vertical()
+                                    .max_height(320.0)
+                                    .show(ui, |ui| ui.label(text));
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(glyphst_ui::button::Button::ghost("copy").icon("copy"))
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(text.clone());
+                                    }
+                                    pin = ui
+                                        .add(glyphst_ui::button::Button::ghost("pin").icon("pin"))
+                                        .on_hover_text("Keep in the Translation panel")
+                                        .clicked();
+                                });
+                            }
+                            CardState::Failed(error) => {
+                                ui.label(egui::RichText::new(error).color(tokens.err));
+                            }
+                        }
                     });
-                    let source: String = card.source.chars().take(160).collect();
-                    ui.label(egui::RichText::new(source).italics().color(tokens.muted));
-                    ui.add_space(4.0);
-                    match &card.state {
-                        CardState::Loading => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Translating…");
-                            });
-                        }
-                        CardState::Done(text) => {
-                            egui::ScrollArea::vertical()
-                                .max_height(320.0)
-                                .show(ui, |ui| ui.label(text));
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                if widgets::pill_button(ui, Some("copy"), "Copy", false).clicked() {
-                                    ui.ctx().copy_text(text.clone());
-                                }
-                                pin = widgets::pill_button(ui, Some("pin"), "Pin", false)
-                                    .on_hover_text("Keep in the Translation panel")
-                                    .clicked();
-                            });
-                        }
-                        CardState::Failed(error) => {
-                            ui.label(egui::RichText::new(error).color(tokens.err));
-                        }
-                    }
-                });
             });
         if pin {
             self.translator.pin_card();
@@ -2658,7 +2668,7 @@ impl ReaderApp {
                 rect.min + egui::vec2(paper[2], paper[3]) / ppp,
             );
             if let Some(texture) = thumbnail {
-                widgets::paint_turned_image(&painter, *texture, paper, turns);
+                glyphst_ui::paint::paint_turned_image(&painter, *texture, paper, turns);
             }
         }
         let papers: Vec<egui::Rect> = maps.iter().map(|map| map.paper).collect();
@@ -3151,54 +3161,63 @@ impl ReaderApp {
             .order(egui::Order::Foreground)
             .fixed_pos(editor.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
-                widgets::card_frame(ctx).show(ui, |ui| {
-                    ui.set_max_width(280.0);
-                    ui.horizontal(|ui| {
-                        for candidate in HighlightColor::ALL {
-                            let (rect, response) = ui
-                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-                            let chosen = candidate == editor.color;
-                            if chosen {
-                                ui.painter().circle_stroke(
-                                    rect.center(),
-                                    10.0,
-                                    egui::Stroke::new(2.0, tokens.accent),
+                glyphst_ui::pane::popover(ctx)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_max_width(280.0);
+                        ui.horizontal(|ui| {
+                            for candidate in HighlightColor::ALL {
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(22.0, 22.0),
+                                    egui::Sense::click(),
                                 );
+                                let chosen = candidate == editor.color;
+                                if chosen {
+                                    ui.painter().circle_stroke(
+                                        rect.center(),
+                                        10.0,
+                                        egui::Stroke::new(2.0, tokens.accent),
+                                    );
+                                }
+                                ui.painter().circle_filled(
+                                    rect.center(),
+                                    if chosen || response.hovered() {
+                                        7.5
+                                    } else {
+                                        7.0
+                                    },
+                                    annotations::color(candidate),
+                                );
+                                if response.clicked() {
+                                    color = Some(candidate);
+                                }
                             }
-                            ui.painter().circle_filled(
-                                rect.center(),
-                                if chosen || response.hovered() {
-                                    7.5
-                                } else {
-                                    7.0
-                                },
-                                annotations::color(candidate),
+                        });
+                        if is_note {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut editor.body)
+                                    .hint_text("Note")
+                                    .desired_rows(3)
+                                    .desired_width(260.0),
                             );
-                            if response.clicked() {
-                                color = Some(candidate);
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if is_note
+                                && ui
+                                    .add(glyphst_ui::button::Button::primary("save").icon("check"))
+                                    .clicked()
+                            {
+                                save = true;
                             }
-                        }
+                            if ui
+                                .add(glyphst_ui::button::Button::ghost("delete").icon("trash-2"))
+                                .clicked()
+                            {
+                                delete = true;
+                            }
+                        });
                     });
-                    if is_note {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut editor.body)
-                                .hint_text("Note")
-                                .desired_rows(3)
-                                .desired_width(260.0),
-                        );
-                    }
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if is_note
-                            && widgets::pill_button(ui, Some("check"), "Save", true).clicked()
-                        {
-                            save = true;
-                        }
-                        if widgets::pill_button(ui, Some("trash-2"), "Delete", false).clicked() {
-                            delete = true;
-                        }
-                    });
-                });
             });
         let outside = area.response.clicked_elsewhere() && !editor.fresh;
         editor.fresh = false;

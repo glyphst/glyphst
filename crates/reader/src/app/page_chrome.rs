@@ -39,7 +39,26 @@ impl ReaderApp {
         if let Some(map) = maps.iter().find(|map| map.page == current)
             && map.paper.width() > 160.0
         {
-            motif::corner_ticks(ui, map.paper, 10.0, 12.0, tokens.accent);
+            // The room around the page: neighbours close by leave less.
+            let room = |side: f32| {
+                maps.iter()
+                    .filter(|other| other.page != current)
+                    .filter(|other| other.paper.x_range().intersects(map.paper.x_range()))
+                    .map(|other| {
+                        if side < 0.0 {
+                            map.paper.top() - other.paper.bottom()
+                        } else {
+                            other.paper.top() - map.paper.bottom()
+                        }
+                    })
+                    .filter(|gap| *gap >= 0.0)
+                    .fold(f32::INFINITY, f32::min)
+            };
+            let (above, below) = (room(-1.0), room(1.0));
+            let offset = (above.min(below) / 2.0 - 1.0).min(10.0);
+            if offset >= 3.0 {
+                motif::corner_ticks(ui, map.paper, offset, 12.0, tokens.accent);
+            }
             let meta = match tab.translation.as_ref().filter(|session| {
                 session.show_translated && session.previews.contains_key(&current)
             }) {
@@ -64,7 +83,7 @@ impl ReaderApp {
                 }
             };
             let top = map.paper.top() - 13.0;
-            if top - 6.0 > rect.top() {
+            if top - 6.0 > rect.top() && above >= 26.0 {
                 let line = Rect::from_min_max(
                     pos2(map.paper.left() + 18.0, top - 7.0),
                     pos2(map.paper.right() - 18.0, top + 7.0),

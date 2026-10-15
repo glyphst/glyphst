@@ -195,7 +195,7 @@ impl QuickAsk {
                         ui.horizontal(|ui| {
                             let (rect, _) = ui
                                 .allocate_exact_size(egui::vec2(24.0, 14.0), egui::Sense::hover());
-                            crate::widgets::loading_dots(ui, rect, tokens.accent);
+                            glyphst_ui::paint::loading_dots(ui, rect, tokens.accent);
                             ui.label(
                                 egui::RichText::new("thinking")
                                     .font(crate::theme::mono(11.0))

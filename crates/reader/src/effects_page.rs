@@ -17,7 +17,6 @@ use crate::{
     icons,
     prefs::Prefs,
     theme::{self, Tokens},
-    widgets,
 };
 
 /// What the page asks the app to do.
@@ -142,7 +141,7 @@ fn card_ui(
     } else {
         card.label.to_lowercase()
     };
-    widgets::row_text(
+    glyphst_ui::text::row(
         ui,
         label_at,
         label,
@@ -274,7 +273,7 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
     let find = |id: &str| effects.iter().find(|def| def.id == id);
     let has_wallpaper = prefs.wallpaper.is_some();
 
-    widgets::settings_group(ui, "Background", |group| {
+    glyphst_ui::settings::group(ui, "Background", |group| {
         group.full(|ui| {
             let cards = cards_for(
                 effects,
@@ -309,10 +308,17 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
             None => "None. Wallpaper backgrounds draw it; others ignore it.".into(),
         };
         group.row("Wallpaper", Some(&description), |ui| {
-            if name.is_some() && widgets::ghost_button(ui, "x", "Clear").clicked() {
+            if name.is_some()
+                && ui
+                    .add(glyphst_ui::button::Button::plain("clear").icon("x"))
+                    .clicked()
+            {
                 prefs.wallpaper = None;
             }
-            if widgets::ghost_button(ui, "folder-open", "Choose…").clicked() {
+            if ui
+                .add(glyphst_ui::button::Button::plain("choose…").icon("folder-open"))
+                .clicked()
+            {
                 actions.push(Action::ChooseWallpaper);
             }
         });
@@ -320,15 +326,24 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
             "Animation rate",
             Some("Frames per second for animated backgrounds."),
             |ui| {
-                widgets::slider(
-                    ui,
-                    egui::Slider::new(&mut prefs.background_fps, 1..=120).suffix(" fps"),
-                );
+                let mut fps = prefs.background_fps as f32;
+                if ui
+                    .add(
+                        Slider::new(&mut fps, 1.0..=120.0)
+                            .step(1.0)
+                            .width(180.0)
+                            .label("animation rate")
+                            .format(Some(Box::new(|value| format!("{value:.0} fps")))),
+                    )
+                    .changed()
+                {
+                    prefs.background_fps = fps.round() as u32;
+                }
             },
         );
     });
 
-    widgets::settings_group(ui, "Page transition", |group| {
+    glyphst_ui::settings::group(ui, "Page transition", |group| {
         group.full(|ui| {
             let cards = cards_for(
                 effects,
@@ -357,7 +372,7 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
         });
     });
 
-    widgets::settings_group(ui, "Page tint", |group| {
+    glyphst_ui::settings::group(ui, "Page tint", |group| {
         group.full(|ui| {
             let cards = cards_for(
                 effects,
@@ -386,7 +401,7 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
         });
     });
 
-    widgets::settings_group(ui, "Your effects", |group| {
+    glyphst_ui::settings::group(ui, "Your effects", |group| {
         let folder_text = folder.map(|folder| folder.display().to_string());
         group.row(
             "Effects folder",
@@ -395,10 +410,16 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                  A book can have its own choices in the Effects drawer.",
             ),
             |ui| {
-                if widgets::ghost_button(ui, "file-plus", "New effect").clicked() {
+                if ui
+                    .add(glyphst_ui::button::Button::plain("new effect").icon("file-plus"))
+                    .clicked()
+                {
                     actions.push(Action::NewEffect);
                 }
-                if widgets::ghost_button(ui, "folder-open", "Open folder").clicked() {
+                if ui
+                    .add(glyphst_ui::button::Button::plain("open folder").icon("folder-open"))
+                    .clicked()
+                {
                     actions.push(Action::OpenFolder);
                 }
             },

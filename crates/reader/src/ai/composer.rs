@@ -574,7 +574,7 @@ impl Assistant {
                 theme::mono(10.0),
                 tokens.accent_text,
             );
-            crate::widgets::row_text(
+            glyphst_ui::text::row(
                 ui,
                 egui::pos2(label.right() + 8.0, rect.center().y),
                 text.replace('\n', " "),

@@ -25,7 +25,6 @@ use crate::{
     settings_providers::ProviderPages,
     theme::{self, ThemeKind, ThemePreference, Tokens},
     user_settings::{Persistence, UserSettings},
-    widgets,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,7 +408,7 @@ impl SettingsWindow {
             .id_salt(("settings-page", current.label()))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                widgets::form_style(ui);
+                glyphst_ui::settings::form_style(ui);
                 ui.set_width(ui.available_width() - 4.0);
                 match current {
                     Section::Appearance => {

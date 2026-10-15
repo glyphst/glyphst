@@ -50,6 +50,7 @@ logs and timings under `target/check-reports/`:
 script/check.sh quick          # fmt, clippy, tests
 script/check.sh gate           # + doctests, cargo audit, release Reader build
 script/check.sh corpus         # GPU page rendering against MuPDF on sample PDFs
+script/check.sh screens        # every design frame in both themes, as PNGs
 ```
 
 The `corpus` tier renders page 1 of up to `GLYPHST_PDF_CORPUS_LIMIT` (100) PDFs
@@ -71,8 +72,8 @@ halfway through a transition; `--screenshot-generating PATH` and
 pages and capture it while the page's parts are traced, and halfway
 through the reveal. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run, `--theme system|light|dark` its
-colours, `--controls shown|hidden` the reading dock (scripted runs keep
-it shown), `--split right|down` shows the second document beside the
+colours, `--gallery` shows every component of the design instead of home,
+`--split right|down` shows the second document beside the
 first, `--rotate 90|180|270` and `--spread` turn and spread the pages
 (without remembering it), and `--overlay ID|none` and `--wallpaper PATH`
 set the page tint and the wallpaper; `--find TEXT`, `--select-page N`

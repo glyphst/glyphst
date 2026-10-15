@@ -8,7 +8,6 @@ use std::ops::{Range, RangeInclusive};
 use crate::{
     document_tab::{DocumentTab, ViewAction},
     theme::{self, Tokens},
-    widgets,
 };
 
 /// The grid's zoom range and the step of its keys, as in pdfcraft.
@@ -257,7 +256,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                     .or_else(|| tab.grid_image(page).map(|(_, texture)| texture.id()))
                     .or_else(|| tab.thumbnail(page).map(|texture| texture.id()));
                 if let Some(texture) = texture {
-                    widgets::paint_turned_image(
+                    glyphst_ui::paint::paint_turned_image(
                         painter,
                         texture,
                         paper,

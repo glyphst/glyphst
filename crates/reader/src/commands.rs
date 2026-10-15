@@ -628,8 +628,92 @@ impl Command {
     }
 }
 
+/// Icons the app names directly rather than through a command, section or
+/// sidebar tab; a test checks that each exists.
+#[cfg(test)]
+pub const ICONS_IN_USE: &[&str] = &[
+    "house",
+    "monitor",
+    "sun",
+    "moon",
+    "keyboard",
+    "arrow-right",
+    "file-text",
+    "book-open",
+    "book-open-text",
+    "plus",
+    "x",
+    "chevron-down",
+    "chevron-left",
+    "chevron-right",
+    "ellipsis",
+    "search",
+    "send",
+    "message-square-plus",
+    "clock",
+    "copy",
+    "trash-2",
+    "check",
+    "eye",
+    "eye-off",
+    "rotate-ccw",
+    "refresh-cw",
+    "download",
+    "file-down",
+    "pin",
+    "triangle-alert",
+    "info",
+    "gamepad-2",
+    "library",
+    "pen-line",
+    "highlighter",
+    "sticky-note",
+    "arrow-up",
+    "arrow-down",
+    "log-in",
+    "log-out",
+    "columns-2",
+    "wand-sparkles",
+    "image",
+    "folder-open",
+    "file-plus",
+    "at-sign",
+    "paperclip",
+    "brain",
+    "maximize-2",
+    "minimize-2",
+    "pencil",
+    "circle-stop",
+    "list-todo",
+    "bot",
+    "terminal",
+    "search-check",
+    "corner-down-left",
+    "text-cursor",
+    "undo-2",
+    "redo-2",
+    "circle-alert",
+    "wrench",
+    "chevrons-up-down",
+    "file-search",
+];
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_icon_in_use_exists() {
+        use crate::{settings_window::Section, sidebar::SidebarTab};
+        let names = super::Command::ALL
+            .iter()
+            .map(|command| command.icon())
+            .chain(Section::ALL.iter().map(|section| section.icon()))
+            .chain(SidebarTab::ALL.iter().map(|tab| tab.icon()))
+            .chain(super::ICONS_IN_USE.iter().copied());
+        for name in names {
+            assert!(crate::icons::exists(name), "missing icon {name}");
+        }
+    }
+
     use super::*;
 
     #[test]

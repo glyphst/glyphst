@@ -24,12 +24,11 @@ and the abandoned Files app in M5). It has:
   assistant (streaming answers, document tools, sessions in the library), a
   command registry and palette, configurable shortcuts and a settings
   window; [effects](crates/effects) for transitions and backgrounds.
-- **Styling:** pdfcraft's components (tokens, Inter, Lucide icons, pills,
-  cards, toasts) and a reading layout of its own, the stage: the
-  background effect behind the whole window, floating drawers opened from
-  a rail, a dock of reading controls that fades while reading, a progress
-  line with chapter scrubbing, page shadows, and a home page with the
-  book to continue and cover cards.
+- **Styling:** the glyph design (`design/main.pen`) on the `ui` crate's
+  components: mono chrome, hairline panes docked beside the pages, a
+  status bar in place of the dock and progress line, rule titles and tree
+  branches, ASCII covers, an activity log on home, and new appearance
+  settings (accent, fonts, ui scale, density, ornaments).
 - **M5:** page uploads spread across frames; split panes (a tab dragged
   onto a pane's edge, or Split right/down, opens beside it; each pane has a
   title chip, the focused one an outline, dividers resize them, and the

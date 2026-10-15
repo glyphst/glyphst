@@ -34,7 +34,7 @@ pub fn heading(ui: &mut Ui, title: &str, description: &str) {
 pub fn group<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Group<'_>) -> R) -> R {
     if !title.is_empty() {
         ui.add_space(10.0);
-        crate::motif::rule_title(ui, title, None);
+        crate::motif::rule_title(ui, &title.to_lowercase(), None);
         ui.add_space(2.0);
     }
     ui.scope(|ui| {

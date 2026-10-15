@@ -16,8 +16,8 @@ use crate::{
     ai_mentions::{self, Sources},
     ai_tools::summarize_steps,
     theme::{self, Tokens},
-    widgets::motion,
 };
+use glyphst_ui::paint::motion;
 
 /// The reserved lane under a message for its actions.
 const LANE: f32 = 22.0;
@@ -684,7 +684,7 @@ impl Assistant {
         };
         ui.add_space(4.0);
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), STEP), Sense::hover());
-        crate::widgets::loading_dots(
+        glyphst_ui::paint::loading_dots(
             ui,
             Rect::from_center_size(
                 rect.left_center() + vec2(RAIL_X + 6.0, 0.0),
@@ -696,7 +696,7 @@ impl Assistant {
             .painter()
             .layout_no_wrap(label, theme::mono(11.0), tokens.muted);
         let pos = egui::pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0);
-        crate::widgets::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
+        glyphst_ui::paint::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
@@ -747,7 +747,7 @@ impl Assistant {
             } else if running {
                 (
                     "◐",
-                    Tokens::fade(tokens.accent, crate::widgets::pulse(ui, 0.5, 1.0, 1.2)),
+                    Tokens::fade(tokens.accent, glyphst_ui::paint::pulse(ui, 0.5, 1.0, 1.2)),
                 )
             } else {
                 ("✓", tokens.ok)
@@ -766,7 +766,7 @@ impl Assistant {
             if running {
                 let galley = ui.painter().layout_no_wrap(label, font, color);
                 let pos = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
-                crate::widgets::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
+                glyphst_ui::paint::shimmer_text(ui, pos, galley, tokens.faint, tokens.text);
             } else {
                 let mut job = egui::text::LayoutJob::default();
                 let label_color = if color == tokens.err {
@@ -805,7 +805,7 @@ impl Assistant {
                 Segment::Text(text) => text.lines().count() > 1 || text.len() > 80,
             };
             if expandable && (hovered || open) {
-                crate::widgets::chevron(
+                glyphst_ui::paint::chevron(
                     ui.painter(),
                     rect.right_center() - vec2(10.0, 0.0),
                     9.0,

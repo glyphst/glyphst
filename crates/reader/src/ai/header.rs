@@ -206,7 +206,7 @@ impl Assistant {
                         80.0,
                     );
                     let width = time_rect.left() - rect.left() - 16.0;
-                    crate::widgets::row_text(
+                    glyphst_ui::text::row(
                         ui,
                         egui::pos2(rect.left() + 8.0, rect.top() + 13.0),
                         session.title.to_lowercase(),
@@ -223,7 +223,7 @@ impl Assistant {
                             .unwrap_or_default(),
                         session.messages.len(),
                     );
-                    crate::widgets::row_text(
+                    glyphst_ui::text::row(
                         ui,
                         egui::pos2(rect.left() + 8.0, rect.top() + 29.0),
                         &detail,

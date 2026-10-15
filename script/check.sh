@@ -8,6 +8,11 @@
 #                           (GLYPHST_PDF_CORPUS, default: ../bak pdf.js corpus;
 #                           GLYPHST_PDF_CORPUS_LIMIT files, default 100), and
 #                           20 of them turned 90 degrees
+#   script/check.sh screens screenshots of every frame of design/main.pen in
+#                           both themes, from a running Reader (needs the
+#                           desktop session); GLYPHST_SCREENS_DOC and
+#                           GLYPHST_SCREENS_DOC2 are the PDFs shown (default:
+#                           the first two of ../pdf-samples)
 #
 # Options:
 #   --keep-going  run every step and report all failures
@@ -32,8 +37,8 @@ for argument in "$@"; do
     esac
 done
 case ${tier} in
-    quick | gate | corpus) ;;
-    *) sed -n '2,13p' "$0" >&2; exit 2 ;;
+    quick | gate | corpus | screens) ;;
+    *) sed -n '2,18p' "$0" >&2; exit 2 ;;
 esac
 
 cd "${repo}"
@@ -102,6 +107,61 @@ if [[ ${tier} == corpus ]]; then
         --limit "${GLYPHST_PDF_CORPUS_LIMIT:-100}" --out "${run_dir}/corpus"
     step corpus-rotated "${repo}/target/release/examples/corpus" "${corpus}" \
         --limit 20 --rotate 90 --out "${run_dir}/corpus-rotated"
+    finish
+fi
+if [[ ${tier} == screens ]]; then
+    document=${GLYPHST_SCREENS_DOC:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 1p)}
+    second=${GLYPHST_SCREENS_DOC2:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 2p)}
+    shots="${run_dir}/screens"
+    mkdir -p "${shots}"
+    step reader-build cargo build --locked -p glyphst-reader
+    reader="${repo}/target/debug/glyphst-reader"
+    # name, then the Reader's arguments (`@` stands for the document, `#`
+    # for the second one).
+    states=(
+        "01-gallery --gallery"
+        "02a-reader @ --sidebar outline --assistant-demo done"
+        "02d-find @ --find the"
+        "02e-overview @ --command view.page_overview"
+        "02f-split @ # --split right"
+        "02g-present @ --command view.present"
+        "03-outline @ --sidebar outline"
+        "03-pages @ --sidebar pages"
+        "03-bookmarks @ --sidebar bookmarks"
+        "03-notes @ --sidebar notes"
+        "03-search @ --sidebar search --find the"
+        "03-translation @ --sidebar translation --translate-fake"
+        "03-effects @ --sidebar effects"
+        "04-home"
+        "05-empty @ --assistant-demo empty"
+        "05-menu @ --assistant-demo menu"
+        "05-running @ --assistant-demo running"
+        "05-error @ --assistant-demo error"
+        "05-history @ --assistant-demo history"
+        "05-edit @ --assistant-demo edit"
+        "06a-palette @ --palette tra"
+        "07a-appearance @ --settings appearance"
+        "07-reading @ --settings reading"
+        "07-effects @ --settings effects"
+        "07-translation @ --settings translation"
+        "07-ai @ --settings ai"
+        "07-shortcuts --settings shortcuts"
+    )
+    for theme in dark light; do
+        for state in "${states[@]}"; do
+            read -r name rest <<< "${state}"
+            args=()
+            for arg in ${rest}; do
+                case ${arg} in
+                    @) args+=("${document}") ;;
+                    \#) args+=("${second}") ;;
+                    *) args+=("${arg}") ;;
+                esac
+            done
+            step "${theme}-${name}" "${reader}" "${args[@]}" --theme "${theme}" \
+                --screenshot "${shots}/${theme}-${name}.png"
+        done
+    done
     finish
 fi
 step fmt cargo fmt --all -- --check

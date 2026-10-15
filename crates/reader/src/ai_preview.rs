@@ -308,7 +308,7 @@ impl Previews {
                     None => {
                         let (rect, _) =
                             ui.allocate_exact_size(vec2(width, 72.0), egui::Sense::hover());
-                        crate::widgets::loading_dots(ui, rect, tokens.muted);
+                        glyphst_ui::paint::loading_dots(ui, rect, tokens.muted);
                     }
                     Some(Ok((text, cut))) => {
                         egui::ScrollArea::vertical()
