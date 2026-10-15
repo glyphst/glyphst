@@ -78,7 +78,6 @@ Known gaps:
   about 10.5 s before its upload starts (MuPDF's display list 7.0 s,
   capture 1.9 s, preparing levels 1.4 s). Once uploading it shows its
   coarsest level after 49 ms and sharpens over 1.6 s of 4 MiB frames.
-- 4x MSAA gives small text coarser edges than MuPDF.
 - Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
@@ -126,28 +125,36 @@ passes, and the bench still shows no frames over 25 ms.
 
 **Current evidence:** Highly-Efficient-PDF-Renderer (the workspace's
 `../references/Highly-Efficient-PDF-Renderer`, read at v0.1.65, 3c2dbd1) is
-the model for `pdf-gpu`'s zoom. Of its 0.1.61-0.1.65 renderer work,
-`pdf-gpu` took the margin selection (ff69ebb): visible chunks are chosen
-with 256 px around the view and reused while the view stays inside, which
-cut Murietta's draw encoding at 4-64x from about 0.2 to 0.05-0.07 ms
-(`zoom_bench` now reports `encode_p50_ms`). Not ported:
-- Ordered mixed vector batches (9debd42, 1206adc): runs of fills and
-  strokes drawn in paint order through one instanced pipeline. `pdf-gpu`
-  switches pipeline per `Fills`/`Strokes` batch; Murietta has 6,701 batches
-  per level.
-- Analytic fill coverage (8d41b7b, 39848f9): fills shaded by coverage,
-  subpixel paths from their signed area. `pdf-gpu` tessellates with lyon
-  under 4x MSAA, the cause of the coarse small-text gap above.
-- The thumbnail pipeline (50b34ac, 5ed9d60, c9580b0, 178588b): thumbnails
-  drawn from prepared pages with smoothed stroke coverage. The Reader's
-  sidebar thumbnails and overview cells are MuPDF rasters from the indexer.
-- Reusable stencil patterns and grid-tiled stencils (b6a755c, 0.1.63).
+the model for `pdf-gpu`'s zoom. Ported so far: the margin selection
+(ff69ebb), thumbnails drawn from GPU pages, analytic fill coverage
+(8d41b7b, 39848f9; bands as in `vectorFillBands.ts`) and fills and strokes
+in one ordered stream and pipeline (9debd42). Coverage brought the pdf.js
+corpus closer to MuPDF (mean difference at 1x, 90th percentile, 1.83 to
+1.71) and cut text-page preparation (tracemonkey 79 to 29 ms), but costs
+GPU time on two pages (`zoom_bench`, median of three runs, p95):
+- Murietta 3.4 to 4.1 ms: at 8x a fill shader returning a constant costs
+  the same, so the cost is the quads covering whole bounding boxes.
+- tracemonkey 1.5 to 2.1 ms: about 0.25 ms of per-pixel edge loops for
+  small text.
 
-**Next step:** count pipeline switches and draw calls per frame on the
-corpus to decide between mixed batches and analytic coverage.
+Still to port:
+- Tighter fill quads: HEPR intersects each fill quad with its clip's
+  bounds; quads could also follow the ink (split tall paths by band).
+- HEPR's cell index (`vectorCellIndex.ts`, `vectorCellShaders.ts`): edges
+  right of a pixel's cell summarized as closure pairs, so a pixel sums a
+  few edges.
+- Per-pixel clip tests instead of stencil push/pop (`vectorClipShaders.ts`):
+  Murietta's remaining draws are 1,644 stencil clip pairs per level.
+  Coverage clips would also allow dropping MSAA.
+- Reordering paints that commute (`vectorPageDrawScheduler.ts`), reusable
+  stencil patterns (b6a755c), and smoothed one-pixel stroke coverage for
+  thumbnails (178588b): GPU thumbnails of Murietta are darker than MuPDF's.
 
-**Done when:** the chosen change lowers `zoom_bench` frame or encode times
-on Murietta and Lower Level and the corpus tier shows no new differences.
+**Next step:** tighter fill quads, then the cell index, measured with
+`zoom_bench` (three runs) on Murietta, Lower Level and tracemonkey.
+
+**Done when:** Murietta and tracemonkey are within 10% of their p95 before
+coverage fills (3.4 and 1.5 ms) and the corpus keeps its mean differences.
 
 ## 3. Dependency audit follow-up
 

@@ -9,6 +9,9 @@
 //! cargo run --release -p glyphst-pdf-gpu --example corpus -- <dir> \
 //!     [--limit N] [--timeout SECONDS] [--size WxH] [--rotate 0|90|180|270] [--out DIR]
 //!
+//! `--one FILE --images DIR` checks one file in this process and saves each
+//! view's GPU render, MuPDF raster and difference as PNGs.
+//!
 //! Exits non-zero when a child crashes or times out after parsing.
 
 mod common;
@@ -22,7 +25,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use common::{FORMAT, Gpu, LoadedPage, diff, ms, mupdf_view};
+use common::{FORMAT, Gpu, LoadedPage, diff, ms, mupdf_view, save_png};
 use glyphst_pdf_gpu::{Camera, Renderer};
 use serde_json::{Value, json};
 
@@ -41,6 +44,8 @@ struct Options {
     /// Quarter turns clockwise of every compared view.
     rotation: u8,
     out: Option<PathBuf>,
+    /// With `--one`: where to save the views.
+    images: Option<PathBuf>,
 }
 
 fn parse_options() -> Result<Options> {
@@ -53,6 +58,7 @@ fn parse_options() -> Result<Options> {
         size: [1024, 768],
         rotation: 0,
         out: None,
+        images: None,
     };
     while let Some(arg) = args.next() {
         let mut value = || args.next().context("missing option value");
@@ -75,6 +81,7 @@ fn parse_options() -> Result<Options> {
                 };
             }
             "--out" => options.out = Some(value()?.into()),
+            "--images" => options.images = Some(value()?.into()),
             _ if arg.starts_with("--") => bail!("unknown option {arg}"),
             _ => options.dir = arg.into(),
         }
@@ -88,7 +95,7 @@ fn parse_options() -> Result<Options> {
 }
 
 /// Child mode: one file, one JSON line on stdout.
-fn check_one(path: &Path, size: [u32; 2], rotation: u8) -> Value {
+fn check_one(path: &Path, size: [u32; 2], rotation: u8, images: Option<&Path>) -> Value {
     let loaded = match LoadedPage::open_with(path, 0, || {
         println!("{PARSED_MARKER}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -96,7 +103,7 @@ fn check_one(path: &Path, size: [u32; 2], rotation: u8) -> Value {
         Ok(loaded) => loaded,
         Err(error) => return json!({ "status": "unreadable", "error": format!("{error:#}") }),
     };
-    match render_and_compare(&loaded, size, rotation) {
+    match render_and_compare(&loaded, size, rotation, images) {
         Ok(mut result) => {
             let stats = &loaded.vector.stats;
             result["status"] = json!("ok");
@@ -120,7 +127,12 @@ fn check_one(path: &Path, size: [u32; 2], rotation: u8) -> Value {
     }
 }
 
-fn render_and_compare(loaded: &LoadedPage, size: [u32; 2], rotation: u8) -> Result<Value> {
+fn render_and_compare(
+    loaded: &LoadedPage,
+    size: [u32; 2],
+    rotation: u8,
+    images: Option<&Path>,
+) -> Result<Value> {
     let gpu = Gpu::new(size)?;
     let renderer = Renderer::new(&gpu.device, FORMAT);
     let fit = loaded.fit_scale(size, rotation);
@@ -145,6 +157,13 @@ fn render_and_compare(loaded: &LoadedPage, size: [u32; 2], rotation: u8) -> Resu
         let vector = gpu.read_target()?;
         let reference = mupdf_view(&loaded.list, &camera)?;
         let result = diff(&vector, &reference, size);
+        if let Some(dir) = images {
+            std::fs::create_dir_all(dir)?;
+            let stem = format!("{}x", zoom);
+            save_png(&dir.join(format!("{stem}-gpu.png")), vector, size)?;
+            save_png(&dir.join(format!("{stem}-mupdf.png")), reference, size)?;
+            save_png(&dir.join(format!("{stem}-diff.png")), result.image, size)?;
+        }
         views.push(json!({
             "zoom": zoom,
             "frame_ms": ms(frame),
@@ -227,7 +246,15 @@ fn run_child(exe: &Path, file: &Path, options: &Options) -> Value {
 fn main() -> Result<()> {
     let options = parse_options()?;
     if let Some(file) = &options.one {
-        println!("{}", check_one(file, options.size, options.rotation));
+        println!(
+            "{}",
+            check_one(
+                file,
+                options.size,
+                options.rotation,
+                options.images.as_deref()
+            )
+        );
         return Ok(());
     }
 
@@ -280,6 +307,29 @@ fn main() -> Result<()> {
         }
     }
     differing.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // How far the rendered files are from MuPDF at each zoom, per channel
+    // value: a lower median means closer edges (antialiasing) overall.
+    let mean_abs_diff: BTreeMap<String, Value> = ZOOMS
+        .iter()
+        .map(|&zoom| {
+            let mut values: Vec<f64> = results
+                .iter()
+                .flat_map(|result| result["views"].as_array().into_iter().flatten())
+                .filter(|view| view["zoom"].as_f64() == Some(f64::from(zoom)))
+                .filter_map(|view| view["mean_abs_diff"].as_f64())
+                .collect();
+            values.sort_by(f64::total_cmp);
+            let at = |share: f64| {
+                values
+                    .get(((values.len() as f64 - 1.0) * share).round() as usize)
+                    .copied()
+            };
+            (
+                format!("zoom_{zoom}"),
+                json!({ "median": at(0.5), "p90": at(0.9) }),
+            )
+        })
+        .collect();
     let failures =
         statuses.get("crash").copied().unwrap_or(0) + statuses.get("timeout").copied().unwrap_or(0);
     let summary = json!({
@@ -290,6 +340,7 @@ fn main() -> Result<()> {
         "statuses": statuses,
         "pages_with_raster_layers": pages_with_raster,
         "raster_ops": raster_ops,
+        "mean_abs_diff": mean_abs_diff,
         "differing_over_1_percent": differing
             .iter()
             .map(|(share, file)| json!({ "file": file, "differing_pixels": share }))

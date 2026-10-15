@@ -35,8 +35,12 @@ space. Rectangular clips become scissors and other path clips stencil clips.
 Shadings, images, soft masks, non-normal blend groups, patterns and text or
 stroke clips stay ranges of display-list operations that MuPDF rasterizes as
 ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
-tessellates each page once per level of detail and draws it with a camera
-uniform (pan, zoom and quarter turns); dense pages also get a mipmapped overview rendered from their own
+prepares each page once per level of detail and draws it with a camera
+uniform (pan, zoom and quarter turns): fills are quads whose pixels integrate
+the path's coverage from its edges (HEPR's analytic fills, banded when long)
+and strokes are capsule quads, drawn in paint order by one pipeline; fills
+too dense for bands and clip paths are tessellated with lyon. Dense pages
+also get a mipmapped overview rendered from their own
 vectors and drawn while it is at least as sharp as the screen. `pdf-gpu`
 uses wgpu 30, egui's version.
 

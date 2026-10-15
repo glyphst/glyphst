@@ -10,7 +10,9 @@ use wgpu::util::DeviceExt as _;
 
 use crate::{
     OffscreenTarget,
-    prepare::{Batch, BatchKind, FillVertex, PreparedImage, PreparedPage, StrokeSegment},
+    prepare::{
+        Batch, BatchKind, CoveragePath, FillVertex, PreparedImage, PreparedPage, StrokeSegment,
+    },
 };
 
 pub const SAMPLE_COUNT: u32 = 4;
@@ -204,13 +206,17 @@ pub struct Renderer {
     format: wgpu::TextureFormat,
     camera_layout: wgpu::BindGroupLayout,
     layer_layout: wgpu::BindGroupLayout,
+    coverage_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     mip_sampler: wgpu::Sampler,
     /// Images without /Interpolate: square pixels when enlarged, mipmaps
     /// when reduced.
     pixel_sampler: wgpu::Sampler,
     fill: wgpu::RenderPipeline,
-    stroke: wgpu::RenderPipeline,
+    /// Stroke segments and coverage fills.
+    vectors: wgpu::RenderPipeline,
+    /// The coverage bind group of levels without coverage fills.
+    no_coverage: wgpu::BindGroup,
     layer: wgpu::RenderPipeline,
     clip_push: wgpu::RenderPipeline,
     clip_pop: wgpu::RenderPipeline,
@@ -258,6 +264,9 @@ struct GpuLevel {
     fill_vertices: Option<wgpu::Buffer>,
     fill_indices: Option<wgpu::Buffer>,
     segments: Option<wgpu::Buffer>,
+    /// The coverage fills' paths, edges, bands and band entries, and their
+    /// bind group.
+    coverage: Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>,
     batches: Vec<Batch>,
 }
 
@@ -310,7 +319,7 @@ impl Selection {
             .iter()
             .map(|batch| match &batch.kind {
                 BatchKind::Fills(range)
-                | BatchKind::Strokes(range)
+                | BatchKind::Vectors(range)
                 | BatchKind::ClipPush(range, _)
                 | BatchKind::ClipPop(range) => visible_ranges(&batch.chunks, range, rect),
                 BatchKind::Raster(_) | BatchKind::Image(_) => Vec::new(),
@@ -402,6 +411,20 @@ impl Renderer {
                 },
             ],
         });
+        let storage = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let coverage_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pdf_gpu_coverage"),
+            entries: &[storage(0), storage(1), storage(2), storage(3)],
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pdf_gpu_layer"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -484,11 +507,11 @@ impl Renderer {
             stencil_state(wgpu::StencilOperation::Keep, 0),
             wgpu::ColorWrites::ALL,
         );
-        let stroke = pipeline(
-            "pdf_gpu_stroke",
-            "vs_stroke",
-            "fs_stroke",
-            &[Some(&camera_layout)],
+        let vectors = pipeline(
+            "pdf_gpu_vectors",
+            "vs_vector",
+            "fs_vector",
+            &[Some(&camera_layout), Some(&coverage_layout)],
             &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<StrokeSegment>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
@@ -498,6 +521,7 @@ impl Renderer {
                     2 => Float32,
                     3 => Unorm8x4,
                     4 => Uint32,
+                    5 => Uint32,
                 ],
             })],
             wgpu::PrimitiveTopology::TriangleStrip,
@@ -545,15 +569,18 @@ impl Renderer {
             wgpu::ColorWrites::empty(),
         );
 
+        let no_coverage = coverage_bind_group(device, &coverage_layout, &[0; 4]).1;
         Self {
             format,
             camera_layout,
             layer_layout,
+            coverage_layout,
             sampler,
             mip_sampler,
             pixel_sampler,
             fill,
-            stroke,
+            vectors,
+            no_coverage,
             layer,
             clip_push,
             clip_pop,
@@ -611,6 +638,10 @@ impl Renderer {
                     size_of_val(level.fill_vertices.as_slice()),
                     size_of_val(level.fill_indices.as_slice()),
                     size_of_val(level.segments.as_slice()),
+                    size_of_val(level.coverage_paths.as_slice()),
+                    size_of_val(level.coverage_segments.as_slice()),
+                    size_of_val(level.bands.as_slice()),
+                    size_of_val(level.band_entries.as_slice()),
                 ];
                 for (part, len) in sizes.into_iter().enumerate() {
                     if len > 0 {
@@ -636,6 +667,8 @@ impl Renderer {
                         wgpu::BufferUsages::INDEX,
                     ),
                     segments: buffer("pdf_gpu_segments", sizes[2], wgpu::BufferUsages::VERTEX),
+                    coverage: (sizes[3] > 0)
+                        .then(|| coverage_bind_group(device, &self.coverage_layout, &sizes[3..])),
                     batches: level.batches.clone(),
                 }
             })
@@ -708,8 +741,12 @@ impl Renderer {
         });
         let gpu_bytes = levels
             .iter()
-            .flat_map(|level| [&level.fill_vertices, &level.fill_indices, &level.segments])
-            .flatten()
+            .flat_map(|level| {
+                [&level.fill_vertices, &level.fill_indices, &level.segments]
+                    .into_iter()
+                    .flatten()
+                    .chain(level.coverage.iter().flat_map(|(buffers, _)| buffers))
+            })
             .map(wgpu::Buffer::size)
             .sum::<u64>()
             + image_bytes;
@@ -723,7 +760,8 @@ impl Renderer {
             images,
             overview: None,
             segments: prepared.exact().segments.len(),
-            triangles: prepared.exact().fill_indices.len() / 3,
+            triangles: prepared.exact().fill_indices.len() / 3
+                + prepared.exact().coverage_segments.len(),
             ready_levels: 0,
             selection: Mutex::new(None),
             gpu_bytes,
@@ -1048,6 +1086,7 @@ impl Renderer {
         // Levels serving only scales the overview covers are never drawn.
         for level in &mut page.levels {
             if level.max_scale <= job.scale {
+                let coverage = level.coverage.take().map(|(buffers, _)| buffers);
                 for buffer in [
                     level.fill_vertices.take(),
                     level.fill_indices.take(),
@@ -1055,6 +1094,7 @@ impl Renderer {
                 ]
                 .into_iter()
                 .flatten()
+                .chain(coverage.into_iter().flatten())
                 {
                     page.gpu_bytes -= buffer.size();
                     buffer.destroy();
@@ -1192,7 +1232,7 @@ impl Renderer {
                 };
                 let ranges: &[Range<u32>] = match &batch.kind {
                     BatchKind::Fills(_)
-                    | BatchKind::Strokes(_)
+                    | BatchKind::Vectors(_)
                     | BatchKind::ClipPush(..)
                     | BatchKind::ClipPop(_) => selected,
                     BatchKind::Raster(index) => match page.layers.get(*index) {
@@ -1217,6 +1257,8 @@ impl Renderer {
 
         pass.set_bind_group(0, &page.camera_bind_group, &[]);
         let mut skipped_pops = Vec::new();
+        // Layers and images bind their textures to group 1 in its place.
+        let mut coverage_bound = false;
         for (index, (batch, work)) in level.batches.iter().zip(&work).enumerate() {
             let Some((scissor, ranges)) = work else {
                 continue;
@@ -1258,12 +1300,17 @@ impl Renderer {
                         pass.draw_indexed(range.clone(), 0, 0..1);
                     }
                 }
-                BatchKind::Strokes(_) => {
+                BatchKind::Vectors(_) => {
                     let Some(segments) = &level.segments else {
                         continue;
                     };
                     pass.set_stencil_reference(batch.depth);
-                    pass.set_pipeline(&self.stroke);
+                    pass.set_pipeline(&self.vectors);
+                    if !coverage_bound {
+                        let coverage = level.coverage.as_ref().map(|(_, group)| group);
+                        pass.set_bind_group(1, coverage.unwrap_or(&self.no_coverage), &[]);
+                        coverage_bound = true;
+                    }
                     pass.set_vertex_buffer(0, segments.slice(..));
                     for range in ranges.iter() {
                         stats.draw_calls += 1;
@@ -1276,6 +1323,7 @@ impl Renderer {
                         pass.set_stencil_reference(batch.depth);
                         stats.draw_calls += 1;
                         self.draw_layer(layer, pass);
+                        coverage_bound = false;
                     }
                 }
                 BatchKind::Image(image) => {
@@ -1283,6 +1331,7 @@ impl Renderer {
                         pass.set_stencil_reference(batch.depth);
                         stats.draw_calls += 1;
                         self.draw_layer(image, pass);
+                        coverage_bound = false;
                     }
                 }
             }
@@ -1306,6 +1355,43 @@ impl Renderer {
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(range.clone(), 0, 0..1);
     }
+}
+
+/// Storage buffers of `sizes` bytes for a level's coverage fills (paths,
+/// edges, bands, band entries) and their bind group. Each holds at least
+/// one of the largest element, a `CoveragePath`, as bindings must.
+fn coverage_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sizes: &[usize],
+) -> (Vec<wgpu::Buffer>, wgpu::BindGroup) {
+    let buffers: Vec<wgpu::Buffer> = sizes
+        .iter()
+        .map(|&len| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pdf_gpu_coverage"),
+                size: (len as u64)
+                    .max(size_of::<CoveragePath>() as u64)
+                    .next_multiple_of(4),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .collect();
+    let entries: Vec<wgpu::BindGroupEntry> = buffers
+        .iter()
+        .enumerate()
+        .map(|(binding, buffer)| wgpu::BindGroupEntry {
+            binding: binding as u32,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect();
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("pdf_gpu_coverage"),
+        layout,
+        entries: &entries,
+    });
+    (buffers, bind_group)
 }
 
 /// Scissor rectangle and visible primitive ranges of one batch.
@@ -1495,13 +1581,27 @@ impl<P: Borrow<PreparedPage>> PageUpload<P> {
                     let (source, buffer): (&[u8], _) = match part {
                         0 => (
                             bytemuck::cast_slice(&prepared.fill_vertices),
-                            &gpu.fill_vertices,
+                            gpu.fill_vertices.as_ref(),
                         ),
                         1 => (
                             bytemuck::cast_slice(&prepared.fill_indices),
-                            &gpu.fill_indices,
+                            gpu.fill_indices.as_ref(),
                         ),
-                        _ => (bytemuck::cast_slice(&prepared.segments), &gpu.segments),
+                        2 => (
+                            bytemuck::cast_slice(&prepared.segments),
+                            gpu.segments.as_ref(),
+                        ),
+                        part => {
+                            let source: &[u8] = match part {
+                                3 => bytemuck::cast_slice(&prepared.coverage_paths),
+                                4 => bytemuck::cast_slice(&prepared.coverage_segments),
+                                5 => bytemuck::cast_slice(&prepared.bands),
+                                _ => bytemuck::cast_slice(&prepared.band_entries),
+                            };
+                            let buffer =
+                                gpu.coverage.as_ref().map(|(buffers, _)| &buffers[part - 3]);
+                            (source, buffer)
+                        }
                     };
                     if let (Some(buffer), Some(size)) =
                         (buffer, wgpu::BufferSize::new(range.len() as u64))
@@ -1794,8 +1894,9 @@ mod tests {
             fill_vertices: None,
             fill_indices: None,
             segments: None,
+            coverage: None,
             batches: vec![Batch {
-                kind: BatchKind::Strokes(0..2),
+                kind: BatchKind::Vectors(0..2),
                 clip: None,
                 depth: 0,
                 chunks: vec![

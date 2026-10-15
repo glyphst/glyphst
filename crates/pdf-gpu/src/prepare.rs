@@ -1,8 +1,11 @@
 //! CPU preparation of a captured page into GPU-ready buffers.
 //!
-//! Geometry stays in page space so zooming only changes a uniform. Fills are
-//! tessellated once per level of detail; strokes become analytic segment
-//! instances whose width the shader widens to at least one device pixel.
+//! Geometry stays in page space so zooming only changes a uniform. Fills
+//! become one quad per path whose pixels integrate the path's coverage from
+//! its flattened edges (as HEPR draws them), indexed by horizontal bands when
+//! long; fills too dense for that, and clip paths, are tessellated once per
+//! level of detail. Strokes become analytic segment instances whose width
+//! the shader widens to at least one device pixel.
 //! Coarser levels flatten and simplify geometry so that, at the largest scale
 //! each level serves, it differs from the exact shape by at most
 //! [`LOD_ERROR_PX`]. Every level also drops opaque strokes that repaint what
@@ -39,6 +42,9 @@ const LOD_MIN_REDUCTION: f64 = 0.9;
 
 pub const SEGMENT_BUTT_START: u32 = 1;
 pub const SEGMENT_BUTT_END: u32 = 2;
+/// The record is no segment but the coverage fill [`StrokeSegment::path`],
+/// drawn in its place in paint order.
+pub const SEGMENT_FILL: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
@@ -58,13 +64,86 @@ pub struct StrokeSegment {
     /// Straight-alpha RGBA8.
     pub color: [u8; 4],
     pub flags: u32,
+    /// With [`SEGMENT_FILL`]: the index into
+    /// [`PreparedLevel::coverage_paths`].
+    pub path: u32,
+}
+
+impl StrokeSegment {
+    /// The record drawing coverage fill `path`.
+    fn fill(path: u32) -> Self {
+        Self {
+            flags: SEGMENT_FILL,
+            path,
+            ..Self::zeroed()
+        }
+    }
+}
+
+/// A fill drawn as one quad whose pixels average the path's winding over
+/// their footprint (see `fs_coverage`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct CoveragePath {
+    /// Page-space bounds of its edges.
+    pub bounds: [f32; 4],
+    /// First edge in [`PreparedLevel::coverage_segments`] and their count.
+    pub segments: [u32; 2],
+    /// First band in [`PreparedLevel::bands`] and their count; without bands
+    /// a pixel sums every edge.
+    pub bands: [u32; 2],
+    /// Straight-alpha RGBA8.
+    pub color: [u8; 4],
+    /// 1 for the even-odd rule, 0 for nonzero.
+    pub even_odd: u32,
+    /// Signed area enclosed by the edges, in square points, for pixels
+    /// larger than the whole path.
+    pub area: f32,
     pub _padding: u32,
 }
+
+/// What became of a fill offered as a coverage fill.
+enum Coverage {
+    /// Added as this path.
+    Path(u32),
+    /// It encloses nothing.
+    Empty,
+    /// Too dense or sparse for coverage: tessellate it.
+    Tessellate,
+}
+
+/// A flattened fill edge; horizontal edges add nothing and are left out.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct CoverageSegment {
+    pub p0: [f32; 2],
+    pub p1: [f32; 2],
+}
+
+/// Fills with more edges than this get bands, so a pixel sums only the
+/// edges crossing its rows.
+const BANDED_SEGMENTS: usize = 8;
+/// Edges a band aims to hold, and the most bands a fill gets.
+const SEGMENTS_PER_BAND: usize = 4;
+const MAX_BANDS: usize = 512;
+/// A fill whose fullest band would hold more edges is tessellated instead:
+/// each of its pixels would sum too many.
+const MAX_BAND_SEGMENTS: usize = 32;
+/// Fills larger than this (in points) covering less than `SPARSE_SHARE` of
+/// their bounds are tessellated instead.
+const SPARSE_MIN_SIDE: f32 = 20.0;
+const SPARSE_SHARE: f64 = 0.2;
+/// Coverage data a level keeps under one storage binding (wgpu's default
+/// limit is 128 MiB); later fills are tessellated.
+const MAX_COVERAGE_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchKind {
     Fills(Range<u32>),
-    Strokes(Range<u32>),
+    /// Records of [`PreparedLevel::segments`] in paint order: stroke
+    /// segments and coverage fills ([`SEGMENT_FILL`]), drawn by one
+    /// pipeline.
+    Vectors(Range<u32>),
     /// Index into [`PreparedPage::raster_layers`].
     Raster(usize),
     /// Index into [`PreparedPage::images`].
@@ -145,6 +224,12 @@ pub struct PreparedLevel {
     pub fill_vertices: Vec<FillVertex>,
     pub fill_indices: Vec<u32>,
     pub segments: Vec<StrokeSegment>,
+    pub coverage_paths: Vec<CoveragePath>,
+    pub coverage_segments: Vec<CoverageSegment>,
+    /// Per band: first entry in `band_entries` and their count.
+    pub bands: Vec<[u32; 2]>,
+    /// Indices into `coverage_segments`.
+    pub band_entries: Vec<u32>,
     pub batches: Vec<Batch>,
     pub failed_fills: usize,
     /// Stencil depth while building batches.
@@ -258,6 +343,16 @@ impl PreparedLevel {
                     even_odd,
                     color,
                 } => {
+                    match level.push_coverage(path, *even_odd, *color, &mut polylines) {
+                        Coverage::Path(index) => {
+                            let start = level.segments.len() as u32;
+                            level.segments.push(StrokeSegment::fill(index));
+                            level.push_batch(BatchKind::Vectors(start..start + 1), draw.clip);
+                            continue;
+                        }
+                        Coverage::Empty => continue,
+                        Coverage::Tessellate => {}
+                    }
                     let start = level.fill_indices.len() as u32;
                     if level
                         .tessellate_fill(&mut tessellator, path, *even_odd, *color)
@@ -278,7 +373,7 @@ impl PreparedLevel {
                         level.push_stroke(polyline, style, *color);
                     }
                     let end = level.segments.len() as u32;
-                    level.push_batch(BatchKind::Strokes(start..end), draw.clip);
+                    level.push_batch(BatchKind::Vectors(start..end), draw.clip);
                 }
                 VectorItem::Raster { .. } => {
                     level.batches.push(Batch {
@@ -353,12 +448,19 @@ impl PreparedLevel {
             None => i64::from(value.to_bits()),
         };
         for batch in &mut self.batches {
-            let BatchKind::Strokes(range) = &mut batch.kind else {
+            let BatchKind::Vectors(range) = &mut batch.kind else {
                 continue;
             };
             seen.clear();
             let start = kept.len() as u32;
             for segment in &self.segments[range.start as usize..range.end as usize] {
+                // A fill may paint over earlier marks: one after it repeats
+                // none of them.
+                if segment.flags & SEGMENT_FILL != 0 {
+                    seen.clear();
+                    kept.push(*segment);
+                    continue;
+                }
                 // Overlapping translucent marks darken, so they all stay.
                 if segment.color[3] < u8::MAX {
                     kept.push(*segment);
@@ -385,7 +487,111 @@ impl PreparedLevel {
     }
 
     fn primitives(&self) -> usize {
-        self.fill_indices.len() / 3 + self.segments.len()
+        self.fill_indices.len() / 3 + self.segments.len() + self.coverage_segments.len()
+    }
+
+    /// Adds `path` as a coverage fill, unless it encloses nothing or is
+    /// better tessellated.
+    fn push_coverage(
+        &mut self,
+        path: &PagePath,
+        even_odd: bool,
+        color: [u8; 4],
+        polylines: &mut Vec<Polyline>,
+    ) -> Coverage {
+        flatten(path, self.tolerance, polylines);
+        let first = self.coverage_segments.len();
+        let mut bounds: Option<PageRect> = None;
+        let mut area = 0.0f64;
+        let mut edges = Vec::new();
+        for polyline in polylines.iter() {
+            let points = &polyline.points;
+            if points.len() < 2 {
+                continue;
+            }
+            // Fills close every subpath.
+            for (index, &p0) in points.iter().enumerate() {
+                let p1 = points[(index + 1) % points.len()];
+                edges.push((p0, p1));
+            }
+        }
+        for &(p0, p1) in &edges {
+            bounds = Some(union(
+                bounds.unwrap_or([p0[0], p0[1], p0[0], p0[1]]),
+                [
+                    p0[0].min(p1[0]),
+                    p0[1].min(p1[1]),
+                    p0[0].max(p1[0]),
+                    p0[1].max(p1[1]),
+                ],
+            ));
+        }
+        let Some(bounds) = bounds else {
+            return Coverage::Empty;
+        };
+        // Green's theorem, relative to the corner for precision.
+        let [ox, oy] = [f64::from(bounds[0]), f64::from(bounds[1])];
+        for &(p0, p1) in &edges {
+            let (x0, y0) = (f64::from(p0[0]) - ox, f64::from(p0[1]) - oy);
+            let (x1, y1) = (f64::from(p1[0]) - ox, f64::from(p1[1]) - oy);
+            area += (x0 * y1 - x1 * y0) / 2.0;
+            if p0[1] != p1[1] {
+                self.coverage_segments.push(CoverageSegment { p0, p1 });
+            }
+        }
+        let count = self.coverage_segments.len() - first;
+        if count == 0 {
+            return Coverage::Empty;
+        }
+        // A large fill covering little of its bounds (a long diagonal
+        // wall) would shade mostly empty pixels of its quad.
+        let box_area = f64::from(bounds[2] - bounds[0]) * f64::from(bounds[3] - bounds[1]);
+        let large = (bounds[2] - bounds[0]).max(bounds[3] - bounds[1]) > SPARSE_MIN_SIDE;
+        if large && area.abs() < box_area * SPARSE_SHARE {
+            self.coverage_segments.truncate(first);
+            return Coverage::Tessellate;
+        }
+        let bands = if count > BANDED_SEGMENTS {
+            match band(&self.coverage_segments[first..], first as u32, bounds) {
+                Some(bands) => bands,
+                None => {
+                    self.coverage_segments.truncate(first);
+                    return Coverage::Tessellate;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let band_start = self.bands.len() as u32;
+        for entries in &bands {
+            self.bands
+                .push([self.band_entries.len() as u32, entries.len() as u32]);
+            self.band_entries.extend_from_slice(entries);
+        }
+        self.coverage_paths.push(CoveragePath {
+            bounds,
+            segments: [first as u32, count as u32],
+            bands: [band_start, bands.len() as u32],
+            color,
+            even_odd: u32::from(even_odd),
+            area: area as f32,
+            _padding: 0,
+        });
+        if self.coverage_bytes() > MAX_COVERAGE_BYTES {
+            self.coverage_paths.pop();
+            self.coverage_segments.truncate(first);
+            self.bands.truncate(band_start as usize);
+            let entries = self.bands.last().map_or(0, |[start, count]| start + count);
+            self.band_entries.truncate(entries as usize);
+            return Coverage::Tessellate;
+        }
+        Coverage::Path(self.coverage_paths.len() as u32 - 1)
+    }
+
+    fn coverage_bytes(&self) -> usize {
+        size_of_val(self.coverage_paths.as_slice())
+            .max(size_of_val(self.coverage_segments.as_slice()))
+            .max(size_of_val(self.band_entries.as_slice()))
     }
 
     fn chunks(&self, kind: &BatchKind) -> Vec<Chunk> {
@@ -408,12 +614,15 @@ impl PreparedLevel {
                     });
                 }
             }
-            BatchKind::Strokes(range) => {
+            BatchKind::Vectors(range) => {
                 for start in (range.start..range.end).step_by(CHUNK_PRIMITIVES as usize) {
                     let end = (start + CHUNK_PRIMITIVES).min(range.end);
                     let bounds = self.segments[start as usize..end as usize]
                         .iter()
                         .map(|segment| {
+                            if segment.flags & SEGMENT_FILL != 0 {
+                                return self.coverage_paths[segment.path as usize].bounds;
+                            }
                             let w = segment.half_width;
                             [
                                 segment.p0[0].min(segment.p1[0]) - w,
@@ -453,7 +662,7 @@ impl PreparedLevel {
     /// same primitive under the same clip with contiguous ranges.
     fn push_batch(&mut self, kind: BatchKind, clip: Option<PageRect>) {
         let empty = match &kind {
-            BatchKind::Fills(range) | BatchKind::Strokes(range) => range.is_empty(),
+            BatchKind::Fills(range) | BatchKind::Vectors(range) => range.is_empty(),
             BatchKind::Raster(_)
             | BatchKind::Image(_)
             | BatchKind::ClipPush(..)
@@ -468,7 +677,7 @@ impl PreparedLevel {
         {
             match (&mut last.kind, &kind) {
                 (BatchKind::Fills(previous), BatchKind::Fills(next))
-                | (BatchKind::Strokes(previous), BatchKind::Strokes(next))
+                | (BatchKind::Vectors(previous), BatchKind::Vectors(next))
                     if previous.end == next.start =>
                 {
                     previous.end = next.end;
@@ -578,6 +787,41 @@ impl PreparedLevel {
     }
 }
 
+/// Splits a fill's edges (indices from `first`) into horizontal bands of
+/// `bounds`, each listing the edges crossing its rows; `None` when a band
+/// would hold more than [`MAX_BAND_SEGMENTS`]. The shader finds a pixel's
+/// bands with the same arithmetic, in `f32`.
+fn band(segments: &[CoverageSegment], first: u32, bounds: PageRect) -> Option<Vec<Vec<u32>>> {
+    let count = segments
+        .len()
+        .div_ceil(SEGMENTS_PER_BAND)
+        .clamp(1, MAX_BANDS);
+    let height = (bounds[3] - bounds[1]) / count as f32;
+    let mut bands = vec![Vec::new(); count];
+    if height <= 0.0 {
+        return None;
+    }
+    // A little slack, so rounding never leaves an edge out of a band whose
+    // rows it touches.
+    let slack = height * 1e-3;
+    let index = |y: f32| {
+        ((y - bounds[1]) / height)
+            .floor()
+            .clamp(0.0, (count - 1) as f32) as usize
+    };
+    for (offset, segment) in segments.iter().enumerate() {
+        let low = segment.p0[1].min(segment.p1[1]) - slack;
+        let high = segment.p0[1].max(segment.p1[1]) + slack;
+        for entries in &mut bands[index(low)..=index(high)] {
+            if entries.len() == MAX_BAND_SEGMENTS {
+                return None;
+            }
+            entries.push(first + offset as u32);
+        }
+    }
+    Some(bands)
+}
+
 fn union(a: PageRect, b: PageRect) -> PageRect {
     [
         a[0].min(b[0]),
@@ -600,7 +844,7 @@ fn segment(
         half_width,
         color,
         flags,
-        _padding: 0,
+        path: 0,
     }
 }
 
@@ -1017,11 +1261,184 @@ mod tests {
                 .map(|batch| &batch.kind)
                 .collect::<Vec<_>>(),
             [
-                &BatchKind::Fills(0..6),
+                &BatchKind::Vectors(0..2),
                 &BatchKind::Raster(0),
-                &BatchKind::Fills(6..9),
+                &BatchKind::Vectors(2..3),
             ]
         );
+    }
+
+    fn line(x: f32) -> VectorItem {
+        VectorItem::Stroke {
+            path: path(
+                &[PathVerb::MoveTo, PathVerb::LineTo],
+                &[[x, 0.0], [x, 10.0]],
+            ),
+            style: StrokeStyle {
+                width: 1.0,
+                start_cap: LineCap::Butt,
+                end_cap: LineCap::Butt,
+                dash_cap: LineCap::Butt,
+                dashes: Vec::new(),
+                dash_phase: 0.0,
+            },
+            color: [0, 0, 0, 255],
+        }
+    }
+
+    #[test]
+    fn strokes_and_fills_share_a_batch_in_paint_order_until_the_clip_changes() {
+        use glyphst_pdf::vector::VectorDraw;
+        let square = VectorItem::Fill {
+            path: polygon(&[[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 5.0]]),
+            even_odd: false,
+            color: [255, 0, 0, 255],
+        };
+        let clip = Some([0.0, 0.0, 3.0, 3.0]);
+        let draws = vec![
+            VectorDraw {
+                item: line(1.0),
+                clip: None,
+            },
+            VectorDraw {
+                item: square.clone(),
+                clip: None,
+            },
+            VectorDraw {
+                item: line(2.0),
+                clip: None,
+            },
+            VectorDraw { item: square, clip },
+        ];
+        let prepared = PreparedPage::new(&VectorPage {
+            draws,
+            ..VectorPage::default()
+        });
+        let level = prepared.exact();
+        let kinds: Vec<_> = level.batches.iter().map(|batch| &batch.kind).collect();
+        assert_eq!(
+            kinds,
+            [&BatchKind::Vectors(0..3), &BatchKind::Vectors(3..4)]
+        );
+        let fills: Vec<bool> = level
+            .segments
+            .iter()
+            .map(|segment| segment.flags & SEGMENT_FILL != 0)
+            .collect();
+        assert_eq!(fills, [false, true, false, true]);
+        assert_eq!(level.segments[3].path, 1);
+    }
+
+    #[test]
+    fn a_mark_repeated_over_a_fill_is_kept() {
+        use glyphst_pdf::vector::VectorDraw;
+        let cover = VectorItem::Fill {
+            path: polygon(&[[0.0, 0.0], [5.0, 0.0], [5.0, 10.0], [0.0, 10.0]]),
+            even_odd: false,
+            color: [255, 255, 255, 255],
+        };
+        let draws = [line(1.0), line(1.0), cover, line(1.0)]
+            .into_iter()
+            .map(|item| VectorDraw { item, clip: None })
+            .collect();
+        let prepared = PreparedPage::new(&VectorPage {
+            draws,
+            ..VectorPage::default()
+        });
+        // The second line repeats the first; the third is painted again
+        // over the fill.
+        assert_eq!(prepared.exact().segments.len(), 3);
+    }
+
+    fn fill(path: PagePath) -> VectorPage {
+        VectorPage {
+            draws: vec![glyphst_pdf::vector::VectorDraw {
+                item: VectorItem::Fill {
+                    path,
+                    even_odd: false,
+                    color: [0, 0, 0, 255],
+                },
+                clip: None,
+            }],
+            ..VectorPage::default()
+        }
+    }
+
+    fn polygon(points: &[[f32; 2]]) -> PagePath {
+        let mut verbs = vec![PathVerb::LineTo; points.len()];
+        verbs[0] = PathVerb::MoveTo;
+        verbs.push(PathVerb::Close);
+        path(&verbs, points)
+    }
+
+    #[test]
+    fn coverage_fills_keep_their_sloped_edges_and_signed_area() {
+        let square = PreparedPage::new(&fill(polygon(&[
+            [10.0, 10.0],
+            [30.0, 10.0],
+            [30.0, 20.0],
+            [10.0, 20.0],
+        ])));
+        let level = square.exact();
+        assert_eq!(level.fill_indices.len(), 0, "not tessellated");
+        let path = level.coverage_paths[0];
+        assert_eq!(path.bounds, [10.0, 10.0, 30.0, 20.0]);
+        // The horizontal edges add nothing to any pixel's winding.
+        assert_eq!(path.segments, [0, 2]);
+        assert_eq!(path.bands, [0, 0]);
+        assert_eq!(path.area.abs(), 200.0);
+
+        let triangle = PreparedPage::new(&fill(polygon(&[[0.0, 0.0], [4.0, 0.0], [0.0, 3.0]])));
+        assert_eq!(triangle.exact().coverage_paths[0].area.abs(), 6.0);
+    }
+
+    #[test]
+    fn long_fills_get_bands_that_list_the_edges_crossing_them() {
+        // A zigzag: 100 sloped edges down the left, one edge back up.
+        let mut points: Vec<[f32; 2]> = (0..=100)
+            .map(|i| [if i % 2 == 0 { 0.0 } else { 5.0 }, i as f32])
+            .collect();
+        points.push([50.0, 100.0]);
+        points.push([50.0, 0.0]);
+        let prepared = PreparedPage::new(&fill(polygon(&points)));
+        let level = prepared.exact();
+        let path = level.coverage_paths[0];
+        let [first, count] = path.bands;
+        assert!(count > 1, "{count} bands");
+        let height = (path.bounds[3] - path.bounds[1]) / count as f32;
+        for (index, &[start, entries]) in level.bands[first as usize..][..count as usize]
+            .iter()
+            .enumerate()
+        {
+            let (low, high) = (index as f32 * height, (index + 1) as f32 * height);
+            let listed = &level.band_entries[start as usize..][..entries as usize];
+            assert!(listed.len() <= MAX_BAND_SEGMENTS);
+            for (offset, edge) in level.coverage_segments.iter().enumerate() {
+                let (y0, y1) = (edge.p0[1].min(edge.p1[1]), edge.p0[1].max(edge.p1[1]));
+                if y0 < high && y1 > low {
+                    assert!(
+                        listed.contains(&(offset as u32)),
+                        "band {index} misses {offset}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fills_too_dense_for_bands_are_tessellated() {
+        // A comb of 200 teeth: every band would hold 400 edges.
+        let mut points = Vec::new();
+        for tooth in 0..200 {
+            let x = tooth as f32 * 2.0;
+            points.extend([[x, 0.0], [x, 10.0], [x + 1.0, 10.0], [x + 1.0, 0.0]]);
+        }
+        let prepared = PreparedPage::new(&fill(polygon(&points)));
+        let level = prepared.exact();
+        assert!(level.coverage_paths.is_empty());
+        assert!(level.coverage_segments.is_empty());
+        assert!(!level.fill_indices.is_empty());
+        assert!(matches!(level.batches[0].kind, BatchKind::Fills(_)));
     }
 
     #[test]
