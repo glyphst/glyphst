@@ -292,7 +292,29 @@ fn wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
     }
 }
 
+/// Prints the file dialogs' warnings and errors, which otherwise vanish:
+/// rfd says only through `log` why a dialog didn't open (no libdbus, no
+/// portal, no zenity).
+struct DialogLog;
+
+impl log::Log for DialogLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn && metadata.target().starts_with("rfd")
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}: {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 fn main() -> Result<()> {
+    if log::set_logger(&DialogLog).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
     // Translation typesets pages with Typst in a worker process that runs
     // this executable.
     if let Some(exit_code) = glyphst_pdf_translation_service::run_typst_worker_if_requested() {

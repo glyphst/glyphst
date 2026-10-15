@@ -5,6 +5,7 @@
   rustPlatform,
   pkg-config,
   clang,
+  dbus,
   libclang,
   perl,
   gnumake,
@@ -35,6 +36,8 @@
 }: let
   workspaceCargo = builtins.fromTOML (builtins.readFile ../Cargo.toml);
   runtimeLibraries = [
+    # rfd's file dialogs dlopen libdbus to reach the xdg portal.
+    dbus
     vulkan-loader
     wayland
     libva

@@ -70,6 +70,8 @@
             udev
           ];
           runtimeLibraries = with pkgs; [
+            # rfd's file dialogs dlopen libdbus to reach the xdg portal.
+            dbus
             libglvnd
             # winit (pdf-gpu's zoom_view example) loads it at run time.
             libxkbcommon

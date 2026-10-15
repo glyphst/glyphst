@@ -46,6 +46,7 @@ image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"
 kdl = "6"
+log = "0.4"
 lyon_tessellation = "1"
 mupdf = "0.8"
 redb = "4"
