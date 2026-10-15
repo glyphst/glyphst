@@ -2031,6 +2031,10 @@ impl ReaderApp {
                 self.show_stats = !self.show_stats;
                 None
             }
+            Command::PageColumns => {
+                self.prefs.page_columns = self.prefs.page_columns.toggled();
+                None
+            }
             Command::PageOverview => {
                 if let Some(active) = self.active {
                     let tab = &mut self.tabs[active];
@@ -2040,6 +2044,8 @@ impl ReaderApp {
                             if tab.present.is_some() {
                                 tab.apply(ViewAction::TogglePresent, false);
                             }
+                            // The grid takes the room the sidebar had.
+                            self.prefs.show_sidebar = false;
                             Some(Overview::new(tab.current_page()))
                         }
                     };

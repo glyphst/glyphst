@@ -129,6 +129,7 @@ if [[ ${tier} == screens ]]; then
         "02g-present @ --command view.present"
         "03-outline @ --sidebar outline"
         "03-pages @ --sidebar pages"
+        "03-pages-one @ --sidebar pages --command view.page_columns"
         "03-bookmarks @ --sidebar bookmarks"
         "03-notes @ --sidebar notes"
         "03-search @ --sidebar search --find the"

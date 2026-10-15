@@ -26,6 +26,7 @@ use crate::{
     document::OutlineEntry,
     document_tab::{DocumentTab, ViewAction},
     find, icons,
+    prefs::PageColumns,
     theme::{self, Tokens},
     translation::{Export, SessionStatus},
 };
@@ -133,6 +134,7 @@ pub struct SidebarInfo<'a> {
     pub bookmark_key: String,
     /// When the document was opened (`today 09:42`), for its card.
     pub opened: Option<String>,
+    pub page_columns: PageColumns,
 }
 
 /// A bookmark in another document.
@@ -187,6 +189,8 @@ pub struct OutlineView {
     pages: ListState,
     /// The page the thumbnails last followed.
     page: Option<usize>,
+    /// Their columns then; a change re-centres the current page.
+    page_columns: usize,
 }
 
 impl OutlineView {
@@ -281,7 +285,7 @@ pub fn show(
             );
             document_card(&mut card_ui, tab, info.opened.as_deref());
         }
-        SidebarTab::Pages => pages(ui, tab, &mut actions),
+        SidebarTab::Pages => pages(ui, tab, info.page_columns, &mut actions),
         SidebarTab::Bookmarks => bookmarks(ui, tab, state, info, &filter, &mut actions),
         SidebarTab::Notes => notes(ui, tab, state, &filter, &mut actions),
         // Choosing a match makes it current; the view brings it in.
@@ -854,7 +858,12 @@ pub fn badge_label(count: usize) -> String {
 }
 
 /// The open section's pane header, `outline ──── 24`, and its actions.
-pub fn header(ui: &mut egui::Ui, tab: &DocumentTab, which: SidebarTab) -> Vec<SidebarAction> {
+pub fn header(
+    ui: &mut egui::Ui,
+    tab: &DocumentTab,
+    which: SidebarTab,
+    columns: PageColumns,
+) -> Vec<SidebarAction> {
     let trailing = match which {
         SidebarTab::Translation => tab
             .translation
@@ -878,6 +887,12 @@ pub fn header(ui: &mut egui::Ui, tab: &DocumentTab, which: SidebarTab) -> Vec<Si
             chosen.push(SidebarAction::LocateOutline);
         }
         SidebarTab::Pages => {
+            let (icon, tip) = match columns {
+                PageColumns::Two => ("rows-2", "one column"),
+                PageColumns::One => ("layout-grid", "two columns"),
+            };
+            header = header.action(Action::new(icon, tip));
+            chosen.push(SidebarAction::Command(Command::PageColumns));
             header = header.action(Action::new("maximize-2", "page overview"));
             chosen.push(SidebarAction::Command(Command::PageOverview));
         }
@@ -918,6 +933,8 @@ struct Row<'a> {
     enabled: bool,
     /// Icon buttons (icon, tooltip) shown over the detail while hovered.
     actions: &'a [(&'a str, &'a str)],
+    /// The height of the list's slots, when it sets one (the outline's).
+    height: Option<f32>,
 }
 
 /// Whether a nested outline entry is open.
@@ -933,21 +950,33 @@ enum Disclosure {
 
 /// Where a row's disclosure toggle is: over its tree branches.
 fn disclosure_rect(ui: &egui::Ui, rect: egui::Rect, prefix: &str) -> egui::Rect {
-    let width = glyphst_ui::text::width(ui, prefix, &theme::mono(12.0)) + 10.0;
+    let font = theme::mono(12.0);
+    let (ancestors, branch) = own_branch(prefix);
+    let start = glyphst_ui::text::width(ui, ancestors, &font);
+    // The branch and the `+` after it.
+    let width = glyphst_ui::text::width(ui, branch, &font) + 10.0;
     egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 12.0, rect.top()),
+        egui::pos2(rect.left() + 12.0 + start, rect.top()),
         egui::vec2(width, rect.height()),
     )
+}
+
+/// A tree prefix split into its ancestors' lines and the row's own branch
+/// (`├─ ` or `└─ `), which alone toggles the entry: the rest of the row
+/// opens it.
+fn own_branch(prefix: &str) -> (&str, &str) {
+    let start = prefix
+        .char_indices()
+        .rev()
+        .nth(2)
+        .map_or(0, |(index, _)| index);
+    prefix.split_at(start)
 }
 
 /// Draws `row`; returns its response and the action button clicked.
 fn row(ui: &mut egui::Ui, row: Row<'_>) -> (egui::Response, Option<usize>) {
     let tokens = Tokens::get(ui.ctx());
-    let height = if row.prefix.is_some() {
-        OUTLINE_ROW
-    } else {
-        tokens.row(28.0)
-    };
+    let height = row.height.unwrap_or_else(|| tokens.row(28.0));
     let (rect, response) = glyphst_ui::row::list_row(ui, height, row.selected);
     let hovered = response.contains_pointer() && !row.actions.is_empty();
     let mut right = rect.right() - 12.0;
@@ -1183,6 +1212,7 @@ fn outline(
                     selected: current == Some(index),
                     enabled: entry.page.is_some(),
                     actions: &[],
+                    height: Some(OUTLINE_ROW),
                 },
             );
             // A toggle drawn over its row takes its clicks.
@@ -1242,13 +1272,8 @@ fn outline(
     {
         view.collapsed.insert(index);
     }
-    if let Some(index) = chosen
-        && let Some(page) = entries[index].page
-    {
-        actions.push(SidebarAction::View(ViewAction::GoTo {
-            page,
-            y: entries[index].y,
-        }));
+    if let Some(index) = chosen {
+        actions.push(SidebarAction::View(ViewAction::GoToEntry(index)));
         view.current = Some(index);
         view.locate();
     }
@@ -1410,24 +1435,40 @@ fn reveal_offset(
     Some((top - covered - (free - height) / 2.0).max(0.0))
 }
 
-fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarAction>) {
+fn pages(
+    ui: &mut egui::Ui,
+    tab: &mut DocumentTab,
+    columns: PageColumns,
+    actions: &mut Vec<SidebarAction>,
+) {
     let tokens = Tokens::get(ui.ctx());
-    // Two columns of thumbnails, their numbers under them.
-    const COLUMNS: usize = 2;
+    let ppp = ui.ctx().pixels_per_point();
+    // Columns of thumbnails, their numbers under them; one column fills
+    // the drawer with sharp renders (the overview's, so not while it
+    // shows and asks for its own).
+    let sharp = columns == PageColumns::One && tab.overview.is_none();
+    let widest = if columns == PageColumns::One {
+        280.0
+    } else {
+        160.0
+    };
+    let columns = columns.count();
     let gap = 16.0;
-    let width =
-        ((ui.available_width() - gap * (COLUMNS as f32 + 1.0)) / COLUMNS as f32).clamp(48.0, 160.0);
+    let width = ((ui.available_width() - gap * (columns as f32 + 1.0)) / columns as f32)
+        .clamp(48.0, widest);
     let [page_width, page_height] = tab.layout.page_size(0);
     let box_height = width * (page_height / page_width.max(1.0)) as f32;
     let row_height = box_height + 34.0;
     let current = tab.current_page();
     let count = tab.layout.len();
-    let rows = count.div_ceil(COLUMNS);
+    let rows = count.div_ceil(columns);
+    let mut wanted = Vec::new();
     let mut shown = 0..0;
     // The current page's thumbnail is brought into view when the page
     // changes, centred when the list opens.
     let view = &mut tab.outline_view;
-    let fresh = view.pages.shown(ui.ctx());
+    let regrid = std::mem::replace(&mut view.page_columns, columns) != columns;
+    let fresh = view.pages.shown(ui.ctx()) || regrid;
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("pages", tab.id))
         .auto_shrink(false);
@@ -1435,7 +1476,7 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
         view.page = Some(current);
         let viewport = view.pages.viewport_or(ui);
         if let Some(offset) = reveal_offset(
-            current / COLUMNS,
+            current / columns,
             0,
             row_height,
             viewport,
@@ -1447,14 +1488,14 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
     }
     let output = scroll.show_rows(ui, row_height, rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        shown = range.start * COLUMNS..(range.end * COLUMNS).min(count);
+        shown = range.start * columns..(range.end * columns).min(count);
         for row_index in range {
             let (row_rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), row_height),
                 egui::Sense::hover(),
             );
-            for column in 0..COLUMNS {
-                let page = row_index * COLUMNS + column;
+            for column in 0..columns {
+                let page = row_index * columns + column;
                 if page >= count {
                     break;
                 }
@@ -1475,10 +1516,15 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
                     ui.interact(paper, ui.id().with(("thumb", page)), egui::Sense::click());
                 let painter = ui.painter();
                 painter.rect_filled(paper, 0, tokens.page);
-                if let Some(texture) = tab.thumbnail(page) {
+                let texture = if sharp {
+                    crate::overview::page_texture(tab, page, paper, ppp, &mut wanted)
+                } else {
+                    tab.thumbnail(page).map(|texture| texture.id())
+                };
+                if let Some(texture) = texture {
                     glyphst_ui::paint::paint_turned_image(
                         painter,
-                        texture.id(),
+                        texture,
                         paper,
                         tab.layout.arrangement.rotation,
                     );
@@ -1530,6 +1576,9 @@ fn pages(ui: &mut egui::Ui, tab: &mut DocumentTab, actions: &mut Vec<SidebarActi
     tab.outline_view.pages.viewport = output.inner_rect.height();
     let ahead = shown.start.saturating_sub(4)..(shown.end + 4).min(count);
     tab.want_thumbnails(ahead);
+    if sharp {
+        tab.want_grid_images(wanted);
+    }
 }
 
 fn bookmarks(
@@ -1599,6 +1648,7 @@ fn bookmarks(
                                 selected: active,
                                 enabled: true,
                                 actions: &[("pen-line", "rename"), ("trash-2", "delete")],
+                                height: None,
                             },
                         )
                     })
@@ -1847,6 +1897,13 @@ fn note_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_branch_of_a_row_toggles_it() {
+        let prefix = motif::tree_prefix(&[false, true, false], false);
+        assert_eq!(own_branch(&prefix), ("│     │  ", "├─ "));
+        assert_eq!(own_branch("└─ "), ("", "└─ "));
+    }
 
     #[test]
     fn filters_match_ignoring_case() {

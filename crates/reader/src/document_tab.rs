@@ -63,6 +63,9 @@ const MAX_THUMBNAILS: usize = 400;
 /// Sharp overview renders kept before those out of view go.
 const MAX_GRID_IMAGES: usize = 48;
 
+/// Where the view is: origin, target scale and presented page.
+type PickedView = ([f64; 2], f64, Option<usize>);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewAction {
     PreviousPage,
@@ -85,6 +88,9 @@ pub enum ViewAction {
         page: usize,
         y: Option<f32>,
     },
+    /// Goes to an outline entry, which stays the current one until the
+    /// view moves (entries can share a page and point).
+    GoToEntry(usize),
     Back,
     Forward,
     /// Scrolls a page rectangle into view if it is not (a search match).
@@ -199,6 +205,9 @@ pub struct DocumentTab {
     /// The sidebar's outline and thumbnail lists: collapsed entries and
     /// what they follow.
     pub outline_view: OutlineView,
+    /// The outline entry chosen last, and the view it left (taken after
+    /// the frame clamps it); it is current until the view changes.
+    outline_pick: Option<(usize, Option<PickedView>)>,
     pub present: Option<usize>,
     pub load_seconds: Vec<f64>,
     pub text: DocText,
@@ -280,6 +289,7 @@ impl DocumentTab {
             outline: info.outline,
             metadata: info.metadata,
             outline_view: OutlineView::default(),
+            outline_pick: None,
             present: None,
             load_seconds: Vec::new(),
             text: DocText::new(pages),
@@ -334,6 +344,7 @@ impl DocumentTab {
         self.outline = info.outline;
         self.metadata = info.metadata;
         self.outline_view = OutlineView::default();
+        self.outline_pick = None;
         self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
         self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
         self.thumbnails.clear();
@@ -1018,6 +1029,9 @@ impl DocumentTab {
     /// The outline entry being read: the last one whose destination is at
     /// or above the middle of the view (of the page, presenting).
     pub fn current_outline_entry(&self) -> Option<usize> {
+        if let Some((entry, _)) = self.outline_pick {
+            return Some(entry);
+        }
         let anchor = match self.present {
             Some(page) => self.layout.offsets[page][1] + self.layout.page_size(page)[1] / 2.0,
             None => self.view.origin[1] + self.viewport[1] / 2.0 / self.view.scale,
@@ -1033,6 +1047,10 @@ impl DocumentTab {
                     .unwrap_or(self.layout.offsets[page][1]),
             )
         })
+    }
+
+    fn picked_view(&self) -> PickedView {
+        (self.view.origin, self.view.target_scale, self.present)
     }
 
     pub fn go_to_page(&mut self, page: usize) {
@@ -1215,6 +1233,16 @@ impl DocumentTab {
                 self.remember();
                 self.go_to_point(page, y);
             }
+            ViewAction::GoToEntry(index) => {
+                if let Some(entry) = self.outline.get(index)
+                    && let Some(page) = entry.page
+                {
+                    let y = entry.y;
+                    self.remember();
+                    self.go_to_point(page, y);
+                    self.outline_pick = Some((index, None));
+                }
+            }
             ViewAction::Back => {
                 if let Some(place) = self.back.pop() {
                     self.forward.push(self.place());
@@ -1284,6 +1312,12 @@ impl DocumentTab {
         }
         let animating = self.view.animate(input.seconds);
         self.view.clamp(&self.layout, self.viewport);
+        let shown = self.picked_view();
+        match &mut self.outline_pick {
+            Some((_, left @ None)) => *left = Some(shown),
+            Some((_, Some(left))) if *left != shown => self.outline_pick = None,
+            _ => {}
+        }
 
         let (draws, wanted) = self.draws_and_wanted(viewport);
         if let Some(now) = input.now {
@@ -1457,6 +1491,7 @@ mod tests {
             outline: Vec::new(),
             metadata: Vec::new(),
             outline_view: OutlineView::default(),
+            outline_pick: None,
             present: None,
             load_seconds: Vec::new(),
             text: DocText::new(pages),
@@ -1898,6 +1933,32 @@ mod tests {
             current_entry_for_anchor(&entries, 5.0, destination),
             Some(0)
         );
+    }
+
+    #[test]
+    fn a_chosen_entry_stays_current_until_the_view_moves() {
+        let mut tab = tab(30);
+        settle(&mut tab);
+        let entry = |page: usize| OutlineEntry {
+            title: String::new(),
+            page: Some(page),
+            y: None,
+            depth: 0,
+            parent: None,
+        };
+        // Three sections start on page 5, as a `/Fit` outline gives them.
+        tab.outline = vec![entry(0), entry(5), entry(5), entry(5), entry(9)];
+        tab.apply(ViewAction::GoToEntry(1), false);
+        settle(&mut tab);
+        assert_eq!(tab.current_outline_entry(), Some(1));
+        tab.apply(ViewAction::GoToEntry(2), false);
+        settle(&mut tab);
+        assert_eq!(tab.current_outline_entry(), Some(2));
+        // Scrolling hands the choice back to the view: a tie goes to the
+        // later entry.
+        tab.apply(ViewAction::Step(1), false);
+        settle(&mut tab);
+        assert_eq!(tab.current_outline_entry(), Some(3));
     }
 
     #[test]

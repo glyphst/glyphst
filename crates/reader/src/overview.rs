@@ -95,6 +95,7 @@ impl Overview {
             // Presenting and the document's own moves leave the grid.
             ViewAction::TogglePresent
             | ViewAction::GoTo { .. }
+            | ViewAction::GoToEntry(_)
             | ViewAction::Back
             | ViewAction::Forward
             | ViewAction::Reveal { .. } => return Some(action),
@@ -156,6 +157,34 @@ pub fn rows_in_view(top: f32, height: f32, row: f32, rows: usize) -> Range<usize
     let first = ((top / row).floor().max(0.0) as usize).min(rows);
     let last = (((top + height) / row).ceil().max(0.0) as usize).min(rows);
     first..last
+}
+
+/// The sharpest texture of `page` drawn as `paper` at `ppp` pixels per
+/// point: its sharp render, else its thumbnail. When neither is sharp
+/// enough, a render at the paper's size is added to `wanted`.
+pub fn page_texture(
+    tab: &DocumentTab,
+    page: usize,
+    paper: egui::Rect,
+    ppp: f32,
+    wanted: &mut Vec<(usize, f32)>,
+) -> Option<egui::TextureId> {
+    let [w, h] = tab.layout.page_size(page);
+    // Pixels per page point the paper is drawn at.
+    let want = (paper.width() / w as f32 * ppp).min(MAX_RENDER / w.max(h) as f32);
+    let sharp = tab
+        .grid_image(page)
+        .filter(|(have, _)| sharp_enough(*have, want))
+        .map(|(_, texture)| texture.id());
+    let thumbnail_sharp = tab
+        .thumbnail(page)
+        .is_some_and(|texture| texture.size()[0] as f32 >= paper.width() * ppp * 0.9);
+    if sharp.is_none() && !thumbnail_sharp && !tab.dense_pages.contains(&page) {
+        wanted.push((page, want));
+    }
+    sharp
+        .or_else(|| tab.grid_image(page).map(|(_, texture)| texture.id()))
+        .or_else(|| tab.thumbnail(page).map(|texture| texture.id()))
 }
 
 /// Draws tab's overview in `rect`; returns the page clicked to open.
@@ -240,22 +269,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                 );
                 let painter = ui.painter();
                 painter.rect_filled(paper, 0, tokens.page);
-                // Pixels per page point the cell is drawn at.
-                let want = (scale * ppp).min(MAX_RENDER / w.max(h) as f32);
-                let sharp = tab
-                    .grid_image(page)
-                    .filter(|(have, _)| sharp_enough(*have, want))
-                    .map(|(_, texture)| texture.id());
-                let thumbnail_sharp = tab
-                    .thumbnail(page)
-                    .is_some_and(|texture| texture.size()[0] as f32 >= paper.width() * ppp * 0.9);
-                if sharp.is_none() && !thumbnail_sharp && !tab.dense_pages.contains(&page) {
-                    wanted.push((page, want));
-                }
-                let texture = sharp
-                    .or_else(|| tab.grid_image(page).map(|(_, texture)| texture.id()))
-                    .or_else(|| tab.thumbnail(page).map(|texture| texture.id()));
-                if let Some(texture) = texture {
+                if let Some(texture) = page_texture(tab, page, paper, ppp, &mut wanted) {
                     glyphst_ui::paint::paint_turned_image(
                         painter,
                         texture,

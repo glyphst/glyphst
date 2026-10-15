@@ -669,6 +669,7 @@ impl ReaderApp {
             other_bookmarks: &other_bookmarks,
             bookmark_key: self.keymap.label(Command::Bookmark).unwrap_or_default(),
             opened: self.opened_label(active),
+            page_columns: self.prefs.page_columns,
         };
         // The Effects tab edits a copy of this book's choices.
         let showing_effects = self.prefs.sidebar == SidebarTab::Effects;
@@ -682,7 +683,12 @@ impl ReaderApp {
         let mut book_changed = false;
         let title = self.tabs[active].title.clone();
         let time = self.started.elapsed().as_secs_f32();
-        let mut requests = sidebar::header(ui, &self.tabs[active], self.prefs.sidebar);
+        let mut requests = sidebar::header(
+            ui,
+            &self.tabs[active],
+            self.prefs.sidebar,
+            self.prefs.page_columns,
+        );
         let content = Rect::from_min_max(
             pos2(rect.left() + 12.0, ui.cursor().top()),
             pos2(rect.right() - 12.0, rect.bottom() - 8.0),

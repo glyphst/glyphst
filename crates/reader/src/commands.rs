@@ -57,6 +57,8 @@ pub enum Command {
     Present,
     Zen,
     PageOverview,
+    /// One or two columns of thumbnails in the Pages sidebar.
+    PageColumns,
     SplitRight,
     SplitDown,
     FocusNextPane,
@@ -143,7 +145,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 60] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -185,6 +187,7 @@ impl Command {
         Self::Present,
         Self::Zen,
         Self::PageOverview,
+        Self::PageColumns,
         Self::SplitRight,
         Self::SplitDown,
         Self::FocusNextPane,
@@ -249,6 +252,7 @@ impl Command {
             Self::Present => "view.present",
             Self::Zen => "view.zen",
             Self::PageOverview => "view.page_overview",
+            Self::PageColumns => "view.page_columns",
             Self::SplitRight => "view.split_right",
             Self::SplitDown => "view.split_down",
             Self::FocusNextPane => "view.focus_next_pane",
@@ -317,6 +321,7 @@ impl Command {
             Self::Present => "Present",
             Self::Zen => "Zen mode: hide everything but the pages",
             Self::PageOverview => "Page overview",
+            Self::PageColumns => "Pages in one or two columns",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
             Self::FocusNextPane => "Focus the next pane",
@@ -381,6 +386,7 @@ impl Command {
             Self::Present => "presentation",
             Self::Zen => "eye-off",
             Self::PageOverview => "layout-grid",
+            Self::PageColumns => "rows-2",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
             Self::FocusNextPane => "panels-top-left",
@@ -442,6 +448,7 @@ impl Command {
             | Self::Present
             | Self::Zen
             | Self::PageOverview
+            | Self::PageColumns
             | Self::SplitRight
             | Self::SplitDown
             | Self::FocusNextPane
@@ -530,6 +537,7 @@ impl Command {
             | Self::SplitDown
             | Self::ClosePane
             | Self::ToggleSpread
+            | Self::PageColumns
             | Self::McpConfig => &[],
         }
     }
@@ -610,6 +618,7 @@ impl Command {
             | Self::UiScaleReset
             | Self::KeysStandard
             | Self::KeysVim
+            | Self::PageColumns
             | Self::McpConfig => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,

@@ -22,6 +22,30 @@ pub const MAX_SESSION_FILES: usize = 64;
 /// Page counts remembered for home.
 pub const MAX_PAGE_COUNTS: usize = 2_000;
 
+/// How many columns of thumbnails the Pages sidebar shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PageColumns {
+    One,
+    #[default]
+    Two,
+}
+
+impl PageColumns {
+    pub fn count(self) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::One => Self::Two,
+            Self::Two => Self::One,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -52,6 +76,8 @@ pub struct Prefs {
     pub books: BTreeMap<String, BookEffects>,
     pub show_sidebar: bool,
     pub sidebar: SidebarTab,
+    /// Columns of thumbnails in the Pages sidebar.
+    pub page_columns: PageColumns,
     /// Widths of the left drawer and the assistant, in points.
     pub drawer_width: f32,
     pub assistant_width: f32,
@@ -90,6 +116,7 @@ impl Default for Prefs {
             books: BTreeMap::new(),
             show_sidebar: true,
             sidebar: SidebarTab::default(),
+            page_columns: PageColumns::default(),
             drawer_width: crate::shell::SIDEBAR_WIDTH,
             assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,

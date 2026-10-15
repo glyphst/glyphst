@@ -913,7 +913,7 @@ impl DocumentInfo {
         let mut outline = Vec::new();
         // A broken outline should not stop the document from opening.
         if let Ok(entries) = document.outlines() {
-            flatten_outline(&entries, 0, None, &mut outline);
+            flatten_outline(&entries, count as usize, 0, None, &mut outline);
         }
         let title = document
             .metadata(mupdf::MetadataName::Title)
@@ -946,8 +946,11 @@ impl DocumentInfo {
     }
 }
 
+/// Flattens `entries` of a document of `pages` pages. A destination MuPDF
+/// cannot number (it gives -1, wrapped) leaves its entry without a page.
 fn flatten_outline(
     entries: &[mupdf::Outline],
+    pages: usize,
     depth: usize,
     parent: Option<usize>,
     out: &mut Vec<OutlineEntry>,
@@ -959,7 +962,8 @@ fn flatten_outline(
             page: entry
                 .dest
                 .as_ref()
-                .map(|dest| dest.loc.page_number as usize),
+                .map(|dest| dest.loc.page_number as usize)
+                .filter(|&page| page < pages),
             y: entry
                 .dest
                 .as_ref()
@@ -967,7 +971,7 @@ fn flatten_outline(
             depth,
             parent,
         });
-        flatten_outline(&entry.down, depth + 1, Some(index), out);
+        flatten_outline(&entry.down, pages, depth + 1, Some(index), out);
     }
 }
 
