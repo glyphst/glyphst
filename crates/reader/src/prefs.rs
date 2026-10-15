@@ -133,6 +133,12 @@ impl Prefs {
             prefs.last_session.active = None;
         }
         prefs.background_fps = prefs.background_fps.clamp(1, 120);
+        let scale = glyphst_ui::theme::UI_SCALE_RANGE;
+        prefs.ui_scale = if prefs.ui_scale.is_finite() {
+            prefs.ui_scale.clamp(*scale.start(), *scale.end())
+        } else {
+            glyphst_ui::theme::BASE_SCALE
+        };
         let defaults = Prefs::default();
         for (width, default) in [
             (&mut prefs.drawer_width, defaults.drawer_width),
@@ -241,6 +247,35 @@ mod tests {
         };
         prefs.save(&mut storage);
         assert_eq!(Prefs::load(Some(&storage)), prefs);
+    }
+
+    #[test]
+    fn appearance_choices_round_trip_and_the_scale_stays_in_range() {
+        let mut storage = MemoryStorage::default();
+        let prefs = Prefs {
+            accent: Accent::Green,
+            density: Density::Compact,
+            ui_scale: 15.0,
+            glyph_ornaments: false,
+            fonts: FontChoice {
+                chrome: "Iosevka".into(),
+                prose: "Inter".into(),
+            },
+            original_on_hover: false,
+            translate_as_read: true,
+            ..Prefs::default()
+        };
+        prefs.save(&mut storage);
+        assert_eq!(Prefs::load(Some(&storage)), prefs);
+        let huge = Prefs {
+            ui_scale: 400.0,
+            ..Prefs::default()
+        };
+        huge.save(&mut storage);
+        assert_eq!(
+            Prefs::load(Some(&storage)).ui_scale,
+            *glyphst_ui::theme::UI_SCALE_RANGE.end()
+        );
     }
 
     #[test]

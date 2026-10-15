@@ -19,7 +19,7 @@ pub use settings::{
     TabBarVisibility, TranslationBoxCorner, TranslationProvider, TranslationProviderConfig,
     TranslationSettings, TranslationTargetLanguage, UnlimitedOcrSettings, WindowBackgroundMode,
     WindowSettings, keychain_secret_ids, load_user_settings, parse_settings, read_keychain_secrets,
-    user_themes_dir,
+    settings_file, user_themes_dir,
 };
 pub use settings::{
     CredentialStore, MemoryCredentials, SystemKeychain, config_owned_secret_ids,

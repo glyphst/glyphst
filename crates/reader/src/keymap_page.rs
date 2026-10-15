@@ -5,6 +5,8 @@
 
 use egui::{Key, RichText, Sense, vec2};
 
+use glyphst_ui::Tip;
+
 use crate::{
     commands::{Category, Command},
     icons,
@@ -122,18 +124,11 @@ impl KeymapPage {
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
             widgets::form_style(ui);
-            ui.horizontal(|ui| {
-                ui.add(icons::image("keyboard", 22.0, tokens.text_2));
-                ui.label(RichText::new("Keyboard shortcuts").font(theme::semibold(20.0)));
-            });
-            ui.label(
-                RichText::new(
-                    "Click + to record keys (a pause ends a sequence), \
-                     a key to remove it, or double-click a row.",
-                )
-                .color(tokens.muted),
+            glyphst_ui::settings::heading(
+                ui,
+                "Keyboard shortcuts",
+                "Click + to record keys (a pause ends a sequence), a key to remove it, or double-click a row.",
             );
-            ui.add_space(12.0);
             changed |= self.toolbar(ui, prefs, keymap, &tokens);
             ui.add_space(4.0);
             ui.label(
@@ -145,8 +140,8 @@ impl KeymapPage {
                          A number typed first repeats a move."
                     }
                 })
-                .small()
-                .color(tokens.muted),
+                .font(theme::mono(10.0))
+                .color(tokens.faint),
             );
             ui.add_space(8.0);
             if let Some(conflict) = self.conflict.clone() {
@@ -201,10 +196,10 @@ impl KeymapPage {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled_ui(!prefs.shortcuts.is_empty(), |ui| {
-                        widgets::ghost_button(ui, "rotate-ccw", "Reset all")
+                        ui.add(glyphst_ui::button::Button::bracket_muted("reset all"))
                     })
                     .inner
-                    .on_hover_text("Back to the preset's keys for every command")
+                    .tip("back to the preset's keys for every command")
                     .clicked()
                 {
                     prefs.shortcuts = Overrides::new();
@@ -217,10 +212,10 @@ impl KeymapPage {
                 let shown = self.rows(keymap).len();
                 ui.label(
                     RichText::new(format!(
-                        "{shown} of {} commands · {custom} customised",
+                        "{shown} of {} commands · {custom} changed",
                         Command::ALL.len()
                     ))
-                    .small()
+                    .font(theme::mono(10.0))
                     .color(tokens.faint),
                 );
             });
@@ -239,7 +234,8 @@ impl KeymapPage {
         let mut changed = false;
         egui::Frame::new()
             .fill(tokens.accent_soft)
-            .corner_radius(8)
+            .stroke(egui::Stroke::new(1.0, Tokens::fade(tokens.accent, 0.45)))
+            .corner_radius(tokens.ctl_radius())
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -256,7 +252,10 @@ impl KeymapPage {
                         others.join(", ")
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
+                        if ui
+                            .add(glyphst_ui::button::Button::ghost("cancel"))
+                            .clicked()
+                        {
                             self.resolve_conflict(prefs, keymap, false);
                         }
                         if widgets::pill_button(
@@ -307,10 +306,8 @@ impl KeymapPage {
         let rows_height =
             (ui.available_height() - HEADER_HEIGHT - BOTTOM_GAP).max(ROW_HEIGHT * 3.0);
         egui::Frame::new()
-            .fill(tokens.raised)
-            .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(6, 4))
+            .stroke(tokens.hairline())
+            .inner_margin(egui::Margin::symmetric(0, 0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let columns = Columns::new(ui.available_rect_before_wrap().x_range());
@@ -319,7 +316,9 @@ impl KeymapPage {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         ui.label(
-                            RichText::new("No command matches the search.").color(tokens.muted),
+                            RichText::new("no command matches the search")
+                                .font(theme::mono(11.0))
+                                .color(tokens.muted),
                         );
                     });
                     ui.add_space(24.0);
@@ -341,21 +340,21 @@ impl KeymapPage {
     fn header(&mut self, ui: &mut egui::Ui, columns: &Columns, tokens: &Tokens) {
         let (rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
-        let font = theme::semibold(11.5);
+        let font = theme::mono(10.0);
         let mut cell = |x: egui::Rangef, label: &str, sort: Option<Sort>| {
             let cell = egui::Rect::from_x_y_ranges(x, rect.y_range());
             let response = sort.map(|sort| {
                 ui.interact(cell, ui.id().with(("keymap-sort", label)), Sense::click())
-                    .on_hover_text(format!("Order by {}", label.to_lowercase()))
+                    .tip(&format!("order by {}", label.to_lowercase()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                     .then_some(sort)
             });
             let active = sort.is_some() && sort == Some(self.sort);
-            let color = if active { tokens.text } else { tokens.muted };
+            let color = if active { tokens.text_2 } else { tokens.faint };
             let galley = ui
                 .painter()
-                .layout_no_wrap(label.to_uppercase(), font.clone(), color);
+                .layout_no_wrap(label.to_lowercase(), font.clone(), color);
             let width = galley.size().x;
             let pos = egui::pos2(cell.left() + 10.0, cell.center().y - galley.size().y / 2.0);
             ui.painter().galley(pos, galley, color);
@@ -379,11 +378,8 @@ impl KeymapPage {
         cell(columns.keys, "Keys", None);
         cell(columns.category, "Category", Some(Sort::Category));
         cell(columns.source, "Source", None);
-        ui.painter().hline(
-            rect.x_range(),
-            rect.bottom(),
-            egui::Stroke::new(1.0, tokens.rule),
-        );
+        ui.painter()
+            .hline(rect.x_range(), rect.bottom(), tokens.hairline());
     }
 
     fn row(
@@ -409,58 +405,42 @@ impl KeymapPage {
                 vec2(16.0, 16.0),
             ),
             command.icon(),
-            15.0,
-            tokens.text_2,
+            13.0,
+            tokens.faint,
         );
         widgets::row_text(
             ui,
             egui::pos2(columns.command.min + 34.0, y),
-            command.label(),
-            theme::regular(13.0),
-            tokens.text,
+            command.label().to_lowercase(),
+            theme::mono(12.0),
+            if recording_here {
+                tokens.accent_text
+            } else {
+                tokens.text_2
+            },
             columns.command.span() - 40.0,
         );
         widgets::row_text(
             ui,
             egui::pos2(columns.category.min + 10.0, y),
-            command.category().label(),
-            theme::regular(12.5),
-            tokens.muted,
+            command.category().label().to_lowercase(),
+            theme::mono(11.0),
+            tokens.faint,
             columns.category.span() - 14.0,
         );
         let custom = prefs.shortcuts.contains_key(command.id());
-        if custom {
-            let label = "Custom";
-            let size = egui::vec2(
-                ui.painter()
-                    .layout_no_wrap(label.into(), theme::medium(11.0), tokens.accent_text)
-                    .size()
-                    .x
-                    + 14.0,
-                20.0,
-            );
-            let badge = egui::Rect::from_min_size(
-                egui::pos2(columns.source.min + 8.0, y - size.y / 2.0),
-                size,
-            );
-            ui.painter().rect_filled(badge, 10.0, tokens.accent_soft);
-            ui.painter().text(
-                badge.center(),
-                egui::Align2::CENTER_CENTER,
-                label,
-                theme::medium(11.0),
-                tokens.accent_text,
-            );
-        } else {
-            widgets::row_text(
-                ui,
-                egui::pos2(columns.source.min + 10.0, y),
-                "Default",
-                theme::regular(12.5),
-                tokens.faint,
-                columns.source.span() - 14.0,
-            );
-        }
+        widgets::row_text(
+            ui,
+            egui::pos2(columns.source.min + 10.0, y),
+            if custom { "changed" } else { "default" },
+            theme::mono(11.0),
+            if custom {
+                tokens.accent_text
+            } else {
+                tokens.faint
+            },
+            columns.source.span() - 14.0,
+        );
         // The keys, drawn over the row so their buttons take clicks.
         let keys_rect =
             egui::Rect::from_x_y_ranges(columns.keys, rect.y_range()).shrink2(vec2(8.0, 0.0));
@@ -474,9 +454,13 @@ impl KeymapPage {
                 if let Some(recording) = self.recording.as_ref().filter(|_| recording_here) {
                     let text = match Keys::new(recording.strokes.clone()) {
                         Some(so_far) => format!("{} …", so_far.label()),
-                        None => "Press keys… (Esc cancels)".to_string(),
+                        None => "press keys… (esc cancels)".to_string(),
                     };
-                    ui.label(RichText::new(text).color(tokens.accent_text));
+                    ui.label(
+                        RichText::new(text.to_lowercase())
+                            .font(theme::mono(11.0))
+                            .color(tokens.accent_text),
+                    );
                     return;
                 }
                 for bound in keymap.keys(command) {
@@ -485,7 +469,7 @@ impl KeymapPage {
                             shortcut_chip(ui, &bound.label(), tokens)
                         })
                         .inner
-                        .on_hover_text("Remove")
+                        .tip("remove")
                         .clicked()
                     {
                         keys::unbind(&mut prefs.shortcuts, keymap, command, bound);
@@ -494,7 +478,7 @@ impl KeymapPage {
                 }
                 if ui
                     .push_id(("add", command.id()), |ui| {
-                        icons::button(ui, "plus", 24.0, false, "Add a shortcut")
+                        icons::button(ui, "plus", 22.0, false, "add a shortcut")
                     })
                     .inner
                     .clicked()
@@ -513,7 +497,7 @@ impl KeymapPage {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
                         ui.push_id(("reset", command.id()), |ui| {
-                            icons::button(ui, "rotate-ccw", 24.0, false, "Back to the default keys")
+                            icons::button(ui, "rotate-ccw", 22.0, false, "back to the default keys")
                         })
                         .inner
                     },
@@ -613,39 +597,30 @@ fn take_recorded(
     Some((done.command, Keys::new(done.strokes)?))
 }
 
-/// A key chip with an × that removes it.
+/// A key chip that removes its key when clicked (it shows an × while
+/// hovered).
 fn shortcut_chip(ui: &mut egui::Ui, label: &str, tokens: &Tokens) -> egui::Response {
-    let size = widgets::kbd_size(ui, label) + egui::vec2(18.0, 4.0);
+    let label = glyphst_ui::key::display(label);
+    let size = glyphst_ui::key::size(ui, &label) + egui::vec2(4.0, 3.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let fill = if response.hovered() {
-        tokens.rule_strong
+    if response.hovered() {
+        ui.painter().rect(
+            rect,
+            tokens.ctl_radius(),
+            tokens.err_soft,
+            egui::Stroke::new(1.0, tokens.err),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            theme::mono(10.0),
+            tokens.err,
+        );
     } else {
-        tokens.hover
-    };
-    ui.painter().rect(
-        rect,
-        6.0,
-        fill,
-        egui::Stroke::new(1.0, tokens.rule_strong),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        theme::medium(11.5),
-        tokens.text,
-    );
-    icons::paint(
-        ui,
-        egui::Rect::from_center_size(
-            rect.right_center() - egui::vec2(11.0, 0.0),
-            egui::vec2(12.0, 12.0),
-        ),
-        "x",
-        11.0,
-        tokens.muted,
-    );
+        glyphst_ui::key::paint(ui, rect, &label, None);
+    }
     response
 }
 

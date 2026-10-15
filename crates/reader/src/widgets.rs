@@ -4,7 +4,7 @@
 use egui::{Rect, Response};
 
 use glyphst_ui::{
-    button::Button, field::TextField, key, motif, pane, row, segmented as segment, settings, text,
+    button::Button, field::TextField, key, motif, pane, segmented as segment, settings, text,
     theme::Tokens, toggle::Switch,
 };
 
@@ -171,23 +171,6 @@ pub fn segmented<T: PartialEq + Copy>(
     segment::labels(ui, value, &options)
 }
 
-/// [`segmented`] with an icon before each label.
-pub fn segmented_with_icons<T: PartialEq + Copy>(
-    ui: &mut egui::Ui,
-    value: &mut T,
-    options: &[(T, Option<&str>, &str)],
-) -> bool {
-    let options: Vec<(T, Option<&str>, String)> = options
-        .iter()
-        .map(|&(option, icon, label)| (option, icon, label.to_lowercase()))
-        .collect();
-    let options: Vec<(T, Option<&str>, &str)> = options
-        .iter()
-        .map(|(option, icon, label)| (*option, *icon, label.as_str()))
-        .collect();
-    segment::segmented(ui, value, &options)
-}
-
 /// An on/off switch; the response is changed when it flips.
 pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> Response {
     ui.add(Switch(on))
@@ -205,15 +188,6 @@ pub fn settings_group<R>(
     add: impl FnOnce(&mut Group<'_>) -> R,
 ) -> R {
     settings::group(ui, &title.to_lowercase(), add)
-}
-
-/// A full-width row with an icon, `label` and a trailing mark.
-pub fn link_row(ui: &mut egui::Ui, icon: &str, label: &str, _trailing: &str) -> Response {
-    row::ListRow::new(label)
-        .icon(icon)
-        .meta("→")
-        .height(36.0)
-        .show(ui)
 }
 
 /// The frame of popovers: the find bar, menus.

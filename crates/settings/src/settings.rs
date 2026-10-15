@@ -74,7 +74,7 @@ pub use general::{
 };
 pub use model::Settings;
 pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};
-pub use persistence::{parse_settings, user_themes_dir};
+pub use persistence::{parse_settings, settings_file, user_themes_dir};
 pub use provider_secrets::{ProviderSecretId, ProviderSecretPersistence, ProviderSecretStatus};
 pub use translation::{
     DocumentTranslationMode, PdfContentReviewMode, PdfContentReviewSettings,

@@ -15,6 +15,11 @@ pub(super) fn config_path() -> PathBuf {
     crate::app_paths::config_dir().join("config.kdl")
 }
 
+/// Where the settings file is, for showing and opening it.
+pub fn settings_file() -> PathBuf {
+    config_path()
+}
+
 pub fn user_themes_dir() -> PathBuf {
     crate::app_paths::config_dir().join("themes")
 }

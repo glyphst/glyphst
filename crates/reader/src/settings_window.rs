@@ -4,9 +4,20 @@
 //! with the preferences (or the settings file). Keyboard shortcuts have
 //! their own tab (`keymap_page.rs`).
 
-use egui::{CornerRadius, RichText, Sense, Stroke, vec2};
+use egui::{RichText, Sense, vec2};
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_effects::EffectDef;
+use glyphst_ui::{
+    Tip,
+    button::Button,
+    field::TextField,
+    motif,
+    row::ListRow,
+    settings as ui_settings,
+    slider::Slider,
+    theme::{Accent, Density},
+    toggle::Switch,
+};
 
 use crate::{
     icons,
@@ -29,15 +40,16 @@ pub enum Section {
 
 /// The section list's groups, top to bottom.
 const GROUPS: [(&str, &[Section]); 3] = [
-    ("General", &[Section::Appearance, Section::Reading]),
-    ("Look", &[Section::Effects]),
+    ("general", &[Section::Appearance, Section::Reading]),
+    ("look", &[Section::Effects]),
     (
-        "Services",
+        "services",
         &[Section::Translation, Section::Ocr, Section::Ai],
     ),
 ];
 
-const SIDEBAR_WIDTH: f32 = 212.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const HEADER_HEIGHT: f32 = 40.0;
 
 impl Section {
     pub const ALL: [Self; 6] = [
@@ -55,8 +67,7 @@ impl Section {
             section
                 .label()
                 .split_whitespace()
-                .last()
-                .is_some_and(|word| word.eq_ignore_ascii_case(name))
+                .any(|word| word.eq_ignore_ascii_case(name))
         })
     }
 
@@ -78,14 +89,29 @@ impl Section {
             Self::Effects => "Effects",
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
-            Self::Ai => "AI",
+            Self::Ai => "AI & agents",
+        }
+    }
+
+    /// Words its settings answer to, for the settings search.
+    fn keywords(self) -> &'static str {
+        match self {
+            Self::Appearance => {
+                "theme dark light system accent colour font chrome prose ui scale size density \
+                 transparency opacity blur glyph ornaments"
+            }
+            Self::Reading => "session reopen sidebar drawer vim keys motion",
+            Self::Effects => "background transition tint wallpaper animation folder",
+            Self::Translation => "translate deepl google microsoft language engine glossary",
+            Self::Ocr => "ocr scan recognize text",
+            Self::Ai => "ai model provider key agent claude codex mcp assistant",
         }
     }
 
     /// The line under the section's title.
     fn description(self) -> &'static str {
         match self {
-            Self::Appearance => "The theme, and how much of the desktop shows through the window.",
+            Self::Appearance => "How Glyphst looks. Changes apply to every window immediately.",
             Self::Reading => "What opens at start, and what shows while you read.",
             Self::Effects => "Backgrounds, page transitions and tints for every book.",
             Self::Translation => "The service that translates selections and documents.",
@@ -113,6 +139,10 @@ pub struct SettingsWindow {
     pub effects_actions: Vec<crate::effects_page::Action>,
     /// The Keyboard shortcuts row was clicked: the app opens their tab.
     pub open_shortcuts: bool,
+    /// The settings search.
+    query: String,
+    /// Installed families for the font pickers (chrome, prose), read once.
+    families: Option<(Vec<String>, Vec<String>)>,
 }
 
 /// What the window needs from the app.
@@ -149,7 +179,9 @@ impl SettingsWindow {
         self.providers.fetch_models(settings, provider, ctx);
     }
 
-    /// Draws the window.
+    /// Draws the window (frame 07): a header with the section and the
+    /// settings search, the sections grouped at the left with the file's
+    /// state at their foot, and the section's settings at the right.
     pub fn show(&mut self, ctx: &egui::Context, app: SettingsContext<'_>) {
         if !self.open {
             return;
@@ -162,31 +194,37 @@ impl SettingsWindow {
             (screen.height() - 80.0).clamp(280.0, 680.0),
         );
         let response = egui::Modal::new(egui::Id::new("settings"))
-            .frame(widgets::card_frame(ctx).inner_margin(egui::Margin::ZERO))
+            .backdrop_color(tokens.scrim)
+            .frame(glyphst_ui::pane::popover(ctx).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
                 let (full, _) = ui.allocate_exact_size(size, Sense::hover());
-                let sidebar = egui::Rect::from_min_size(full.min, vec2(SIDEBAR_WIDTH, size.y));
-                let content =
-                    egui::Rect::from_min_max(egui::pos2(sidebar.right(), full.top()), full.max);
-                ui.painter().rect_filled(
-                    sidebar,
-                    CornerRadius {
-                        nw: 10,
-                        sw: 10,
-                        ne: 0,
-                        se: 0,
-                    },
-                    tokens.hover,
+                let header = egui::Rect::from_min_size(full.min, vec2(size.x, HEADER_HEIGHT));
+                let sidebar = egui::Rect::from_min_max(
+                    egui::pos2(full.left(), header.bottom()),
+                    egui::pos2(full.left() + SIDEBAR_WIDTH, full.bottom()),
                 );
-                ui.painter().vline(
-                    sidebar.right(),
-                    sidebar.y_range(),
-                    Stroke::new(1.0, tokens.rule),
+                let content = egui::Rect::from_min_max(
+                    egui::pos2(sidebar.right(), header.bottom()),
+                    full.max,
+                );
+                ui.painter()
+                    .hline(header.x_range(), header.bottom() - 0.5, tokens.hairline());
+                ui.painter()
+                    .vline(sidebar.right() - 0.5, sidebar.y_range(), tokens.hairline());
+                ui.painter().rect_filled(
+                    sidebar
+                        .shrink2(vec2(0.5, 0.0))
+                        .with_min_x(sidebar.left() + 1.0),
+                    0,
+                    tokens.surface.to_opaque(),
                 );
                 let current = self.section.unwrap_or(Section::Appearance);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(header), |ui| {
+                    self.header(ui, current, &tokens)
+                });
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(sidebar.shrink2(vec2(10.0, 16.0))),
-                    |ui| self.sidebar(ui, current, &tokens),
+                    egui::UiBuilder::new().max_rect(sidebar.shrink2(vec2(0.0, 10.0))),
+                    |ui| self.sidebar(ui, current, app.user, &tokens),
                 );
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(content.shrink2(vec2(28.0, 20.0))),
@@ -198,47 +236,88 @@ impl SettingsWindow {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, current: Section, tokens: &Tokens) {
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Settings").font(theme::semibold(16.0)));
-        });
-        ui.add_space(6.0);
-        ui.spacing_mut().item_spacing.y = 2.0;
+    /// `settings — section`, the search and the close button.
+    fn header(&mut self, ui: &mut egui::Ui, current: Section, tokens: &Tokens) {
+        let rect = ui.max_rect();
+        let y = rect.center().y;
+        let title = ui.painter().text(
+            egui::pos2(rect.left() + 16.0, y),
+            egui::Align2::LEFT_CENTER,
+            "settings",
+            theme::mono_strong(13.0),
+            tokens.text,
+        );
+        let x = title.right() + 10.0;
+        ui.painter()
+            .hline(x..=x + 12.0, y, egui::Stroke::new(1.0, tokens.rule_strong));
+        ui.painter().text(
+            egui::pos2(x + 20.0, y),
+            egui::Align2::LEFT_CENTER,
+            current.label().to_lowercase(),
+            theme::mono(12.0),
+            tokens.faint,
+        );
+        let close =
+            egui::Rect::from_center_size(egui::pos2(rect.right() - 22.0, y), vec2(24.0, 24.0));
+        let mut close_ui = ui.new_child(egui::UiBuilder::new().max_rect(close));
+        if icons::button(&mut close_ui, "x", 24.0, false, "close (esc)").clicked() {
+            self.open = false;
+        }
+        let field = egui::Rect::from_min_size(
+            egui::pos2(close.left() - 12.0 - 220.0, y - 14.0),
+            vec2(220.0, 28.0),
+        );
+        let mut field_ui = ui.new_child(egui::UiBuilder::new().max_rect(field));
+        TextField::search(&mut self.query, "search settings")
+            .shortcut("/")
+            .width(220.0)
+            .id(egui::Id::new("settings-search"))
+            .show(&mut field_ui);
+        if ui.input(|i| i.key_pressed(egui::Key::Slash))
+            && ui.ctx().memory(|memory| memory.focused().is_none())
+        {
+            ui.ctx()
+                .memory_mut(|memory| memory.request_focus(egui::Id::new("settings-search")));
+        }
+    }
+
+    fn sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        current: Section,
+        user: &UserSettings,
+        tokens: &Tokens,
+    ) {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let query = self.query.trim().to_lowercase();
+        let matches = |section: Section| {
+            query.is_empty()
+                || section.label().to_lowercase().contains(&query)
+                || section.description().to_lowercase().contains(&query)
+                || section.keywords().contains(&query)
+        };
         for (title, sections) in GROUPS {
+            let shown: Vec<Section> = sections
+                .iter()
+                .copied()
+                .filter(|&section| matches(section))
+                .collect();
+            if shown.is_empty() {
+                continue;
+            }
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                widgets::section_title(ui, title);
+                ui.add_space(14.0);
+                ui.set_width(SIDEBAR_WIDTH - 28.0);
+                motif::rule_title(ui, title, None);
             });
-            for &section in sections {
-                let selected = current == section;
-                let (rect, response) = widgets::list_row(ui, 32.0, selected);
-                icons::paint(
-                    ui,
-                    egui::Rect::from_center_size(
-                        rect.left_center() + vec2(18.0, 0.0),
-                        vec2(16.0, 16.0),
-                    ),
-                    section.icon(),
-                    16.0,
-                    if selected {
-                        tokens.accent_text
-                    } else {
-                        tokens.text_2
-                    },
-                );
-                widgets::row_text(
-                    ui,
-                    rect.left_center() + vec2(36.0, 0.0),
-                    section.label(),
-                    if selected {
-                        theme::medium(13.0)
-                    } else {
-                        theme::regular(13.0)
-                    },
-                    if selected { tokens.text } else { tokens.muted },
-                    rect.width() - 40.0,
-                );
+            for section in shown {
+                let label = section.label().to_lowercase();
+                let response = ListRow::new(&label)
+                    .icon(section.icon())
+                    .active(current == section)
+                    .indent(14.0)
+                    .show(ui);
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
@@ -247,20 +326,60 @@ impl SettingsWindow {
                 }
             }
         }
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            if widgets::link_row(ui, "keyboard", "Keyboard shortcuts", "arrow-right")
-                .on_hover_text("Open the keyboard shortcuts in a tab")
+        if query.is_empty() || "keys keyboard shortcuts".contains(&query) {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.set_width(SIDEBAR_WIDTH - 28.0);
+                motif::rule_title(ui, "keys", None);
+            });
+            if ListRow::new("shortcuts")
+                .icon("keyboard")
+                .indent(14.0)
+                .show(ui)
+                .tip("open the keyboard shortcuts in a tab")
                 .clicked()
             {
                 self.open_shortcuts = true;
                 self.open = false;
             }
-            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
-            ui.painter().hline(
-                rect.x_range(),
-                rect.center().y,
-                Stroke::new(1.0, tokens.rule),
-            );
+        }
+        // The settings file's state at the foot.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let file = glyphst_settings::settings_file();
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                if ui.add(Button::bracket_muted("open file")).clicked() {
+                    let _ = std::process::Command::new("xdg-open").arg(&file).spawn();
+                }
+            });
+            let shown = match dirs::home_dir() {
+                Some(home) => file
+                    .strip_prefix(&home)
+                    .map(|rest| format!("~/{}", rest.display()))
+                    .unwrap_or_else(|_| file.display().to_string()),
+                None => file.display().to_string(),
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(shown)
+                            .font(theme::mono(10.0))
+                            .color(tokens.faint),
+                    )
+                    .truncate(),
+                );
+            });
+            let (state, color) = match user.persistence() {
+                Persistence::User => ("● saved · applies live", tokens.ok),
+                Persistence::Memory => ("● not saved · scripted run", tokens.warn),
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(RichText::new(state).font(theme::mono(10.0)).color(color));
+            });
         });
     }
 
@@ -269,31 +388,23 @@ impl SettingsWindow {
         ui: &mut egui::Ui,
         current: Section,
         app: SettingsContext<'_>,
-        tokens: &Tokens,
+        _tokens: &Tokens,
     ) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width((ui.available_width() - 40.0).max(0.0));
-                ui.label(RichText::new(current.label()).font(theme::semibold(20.0)));
-                let mut description = current.description().to_string();
-                if current.in_settings_file() {
-                    description.push(' ');
-                    description.push_str(match app.user.persistence() {
-                        Persistence::User => {
-                            "Saved in the settings file; keys in the system keychain."
-                        }
-                        Persistence::Memory => "Scripted run: changes are not saved.",
-                    });
-                }
-                ui.add(egui::Label::new(RichText::new(description).color(tokens.muted)).wrap());
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if icons::button(ui, "x", 28.0, false, "Close").clicked() {
-                    self.open = false;
-                }
-            });
+        let mut description = current.description().to_string();
+        if current.in_settings_file() && app.user.persistence() == Persistence::Memory {
+            description.push_str(" Scripted run: changes are not saved.");
+        }
+        let title = match current {
+            Section::Ai => "AI & agents",
+            other => other.label(),
+        };
+        ui_settings::heading(ui, title, &description);
+        let families = self.families.get_or_insert_with(|| {
+            (
+                glyphst_ui::fonts::installed_families(true),
+                glyphst_ui::fonts::installed_families(false),
+            )
         });
-        ui.add_space(6.0);
         egui::ScrollArea::vertical()
             .id_salt(("settings-page", current.label()))
             .auto_shrink([false, false])
@@ -308,11 +419,12 @@ impl SettingsWindow {
                             app.user,
                             app.system_theme,
                             app.blur_supported,
+                            families,
                         ) {
                             self.section = Some(Section::Effects);
                         }
                     }
-                    Section::Reading => reading(ui, app.prefs),
+                    Section::Reading => reading(ui, app.prefs, app.user),
                     Section::Effects => {
                         // The previews are animated.
                         ui.ctx().request_repaint();
@@ -337,112 +449,222 @@ impl SettingsWindow {
     }
 }
 
-/// The Appearance page; returns whether the Effects link was clicked.
+/// The Appearance page (frame 07a); returns whether the Effects link was
+/// clicked.
 fn appearance(
     ui: &mut egui::Ui,
     prefs: &mut Prefs,
     user: &mut UserSettings,
     system: Option<ThemeKind>,
     blur_supported: Option<bool>,
+    families: &(Vec<String>, Vec<String>),
 ) -> bool {
-    widgets::settings_group(ui, "Theme", |group| {
+    let tokens = Tokens::get(ui.ctx());
+    ui_settings::group(ui, "", |group| {
         let caption = match (prefs.theme, system) {
             (ThemePreference::System, Some(ThemeKind::Dark)) => {
-                Some("Following the desktop, which asks for dark.")
+                "follows the desktop, which asks for dark"
             }
             (ThemePreference::System, Some(ThemeKind::Light)) => {
-                Some("Following the desktop, which asks for light.")
+                "follows the desktop, which asks for light"
             }
-            (ThemePreference::System, None) => {
-                Some("The desktop states no preference, so the theme is light.")
-            }
-            _ => None,
+            (ThemePreference::System, None) => "the desktop states no preference: light",
+            _ => "follows the desktop when set to system",
         };
-        group.row("Colour scheme", caption, |ui| {
-            widgets::segmented_with_icons(
+        group.row("theme", Some(caption), |ui| {
+            glyphst_ui::segmented::labels(
                 ui,
                 &mut prefs.theme,
                 &[
-                    (ThemePreference::System, Some("monitor"), "System"),
-                    (ThemePreference::Light, Some("sun"), "Light"),
-                    (ThemePreference::Dark, Some("moon"), "Dark"),
+                    (ThemePreference::System, "system"),
+                    (ThemePreference::Light, "light"),
+                    (ThemePreference::Dark, "dark"),
                 ],
             );
         });
-    });
-    widgets::settings_group(ui, "Window", |group| {
-        let Some(mut window) = user.draft().map(|settings| settings.window) else {
-            group.note("Reading your settings…");
-            return;
-        };
-        let before = window;
-        let mut transparent = window.transparent();
         group.row(
-            "Transparent window",
-            Some(
-                "Shows the desktop through the title bar and the background around the \
-                 pages; panels, menus, dialogs and the palette stay opaque.",
-            ),
+            "accent",
+            Some("used for focus, selection and progress"),
             |ui| {
-                if widgets::toggle(ui, &mut transparent).changed() {
-                    window.set_transparent(transparent);
-                }
-            },
-        );
-        group.row(
-            "Opacity",
-            Some("How much of the window stays opaque."),
-            |ui| {
-                ui.add_enabled_ui(transparent, |ui| {
-                    let mut percent = (window.opacity * 100.0).round();
-                    let min = (glyphst_settings::WindowSettings::MIN_OPACITY * 100.0).round();
-                    let response = widgets::slider(
-                        ui,
-                        egui::Slider::new(&mut percent, min..=100.0)
-                            .step_by(1.0)
-                            .suffix(" %"),
+                ui.label(
+                    RichText::new(prefs.accent.label())
+                        .font(theme::mono(11.0))
+                        .color(tokens.muted),
+                );
+                for accent in Accent::ALL.into_iter().rev() {
+                    let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                    let chosen = prefs.accent == accent;
+                    ui.painter().rect(
+                        rect.shrink(2.0),
+                        tokens.ctl_radius(),
+                        accent.swatch(),
+                        if chosen {
+                            egui::Stroke::new(1.5, tokens.text)
+                        } else {
+                            tokens.edge()
+                        },
+                        egui::StrokeKind::Outside,
                     );
-                    if response.changed() {
-                        window.opacity = percent / 100.0;
+                    if response.tip(accent.label()).clicked() {
+                        prefs.accent = accent;
                     }
-                });
+                }
             },
         );
-        let mut blur = window.blur();
-        let blur_description = match blur_supported {
-            Some(false) => "Your compositor doesn't offer blur (ext-background-effect).",
-            _ => "Blurs the desktop behind the window, where the compositor can.",
-        };
-        group.row("Blur behind the window", Some(blur_description), |ui| {
-            ui.add_enabled_ui(transparent && blur_supported != Some(false), |ui| {
-                if widgets::toggle(ui, &mut blur).changed() {
-                    window.set_blur(blur);
-                }
-            });
+        group.row(
+            "chrome font",
+            Some("menus, tabs, labels and numbers"),
+            |ui| {
+                font_choice(ui, "chrome-font", &mut prefs.fonts.chrome, &families.0);
+            },
+        );
+        group.row(
+            "prose font",
+            Some("assistant answers and help text"),
+            |ui| {
+                font_choice(ui, "prose-font", &mut prefs.fonts.prose, &families.1);
+            },
+        );
+        group.row("ui scale", None, |ui| {
+            let (low, high) = (
+                *glyphst_ui::theme::UI_SCALE_RANGE.start(),
+                *glyphst_ui::theme::UI_SCALE_RANGE.end(),
+            );
+            ui.add(
+                Slider::new(&mut prefs.ui_scale, low..=high)
+                    .step(1.0)
+                    .width(196.0)
+                    .label("ui scale")
+                    .format(Some(Box::new(|value| format!("{value:.0} px")))),
+            );
         });
-        if window != before {
-            user.edit(|settings| settings.window = window);
+        group.row("density", Some("row height and padding"), |ui| {
+            glyphst_ui::segmented::labels(
+                ui,
+                &mut prefs.density,
+                &[
+                    (Density::Compact, "compact"),
+                    (Density::Default, "default"),
+                    (Density::Airy, "airy"),
+                ],
+            );
+        });
+        // The window's transparency, in the settings file.
+        match user.draft().map(|settings| settings.window) {
+            None => group.note("reading your settings…"),
+            Some(mut window) => {
+                let before = window;
+                let mut transparent = window.transparent();
+                let blur_hint = match blur_supported {
+                    Some(false) => "show the desktop through panes (no blur from this compositor)",
+                    _ => "show the desktop through panes (wayland blur when available)",
+                };
+                group.row("window transparency", Some(blur_hint), |ui| {
+                    if ui.add(Switch(&mut transparent)).changed() {
+                        window.set_transparent(transparent);
+                    }
+                    ui.add_enabled_ui(transparent, |ui| {
+                        let mut opacity = window.opacity;
+                        let min = glyphst_settings::WindowSettings::MIN_OPACITY;
+                        if ui
+                            .add(
+                                Slider::new(&mut opacity, min..=1.0)
+                                    .width(120.0)
+                                    .label("opacity"),
+                            )
+                            .changed()
+                        {
+                            window.opacity = opacity;
+                        }
+                    });
+                });
+                let mut blur = window.blur();
+                group.row("blur behind the window", None, |ui| {
+                    ui.add_enabled_ui(transparent && blur_supported != Some(false), |ui| {
+                        if ui.add(Switch(&mut blur)).changed() {
+                            window.set_blur(blur);
+                        }
+                    });
+                });
+                if window != before {
+                    user.edit(|settings| settings.window = window);
+                }
+            }
         }
+        group.row(
+            "glyph ornaments",
+            Some("rule titles, tree lines and dot fields; off = plain labels"),
+            |ui| {
+                ui.add(Switch(&mut prefs.glyph_ornaments));
+            },
+        );
     });
-    widgets::settings_group(ui, "", |group| {
-        group.link("wand-sparkles", "Backgrounds, page transitions and tints")
-    })
+    ui.add_space(8.0);
+    ui.add(Button::bracket("backgrounds, page transitions and tints →"))
+        .clicked()
 }
 
-fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
-    widgets::settings_group(ui, "Session", |group| {
+/// A family from `families` in a combo box.
+fn font_choice(ui: &mut egui::Ui, id: &str, chosen: &mut String, families: &[String]) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(RichText::new(chosen.as_str()).font(theme::mono(12.0)))
+        .width(200.0)
+        .height(320.0)
+        .show_ui(ui, |ui| {
+            glyphst_ui::menu::style(ui);
+            for family in families {
+                if glyphst_ui::menu::Item::new(family)
+                    .checked(family == chosen)
+                    .show(ui)
+                    .clicked()
+                {
+                    *chosen = family.clone();
+                }
+            }
+        });
+}
+
+fn reading(ui: &mut egui::Ui, prefs: &mut Prefs, user: &mut UserSettings) {
+    ui_settings::group(ui, "", |group| {
         group.row(
-            "Reopen the last session",
-            Some("Open the documents, pages and panes you had when the app closed."),
-            |ui| widgets::toggle(ui, &mut prefs.reopen_last_session),
+            "reopen the last session",
+            Some("the documents, pages and panes you had when the app closed"),
+            |ui| {
+                ui.add(Switch(&mut prefs.reopen_last_session));
+            },
         );
-    });
-    widgets::settings_group(ui, "While reading", |group| {
         group.row(
-            "Side drawer",
-            Some("The outline, pages, bookmarks, notes and search beside the pages."),
-            |ui| widgets::toggle(ui, &mut prefs.show_sidebar),
+            "sidebar",
+            Some("the outline, pages, bookmarks, notes and search beside the pages"),
+            |ui| {
+                ui.add(Switch(&mut prefs.show_sidebar));
+            },
         );
+        group.row(
+            "vim keys",
+            Some("j / k scroll, gg / G for pages; pending keys show in the corner"),
+            |ui| {
+                let mut vim = prefs.keymap == crate::keys::KeymapPreset::Vim;
+                if ui.add(Switch(&mut vim)).changed() {
+                    prefs.keymap = if vim {
+                        crate::keys::KeymapPreset::Vim
+                    } else {
+                        crate::keys::KeymapPreset::Standard
+                    };
+                }
+            },
+        );
+        if let Some(mut reduce) = user.draft().map(|settings| settings.behavior.reduce_motion) {
+            group.row(
+                "reduce motion",
+                Some("replace page transitions and generation with short fades"),
+                |ui| {
+                    if ui.add(Switch(&mut reduce)).changed() {
+                        user.edit(|settings| settings.behavior.reduce_motion = reduce);
+                    }
+                },
+            );
+        }
     });
 }
 

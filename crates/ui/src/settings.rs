@@ -119,7 +119,7 @@ impl Group<'_> {
         };
         let title = galley(
             ui,
-            egui::RichText::new(label)
+            egui::RichText::new(label.to_lowercase())
                 .font(theme::mono(12.0))
                 .color(t.text),
         );
