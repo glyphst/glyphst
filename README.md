@@ -66,7 +66,10 @@ The Reader runs the same checks unattended in its own window, saving
 nothing: `--bench` prints zoom, scroll and whole-document search frame
 times as JSON, and `--screenshot PATH`, `--screenshot-turn PATH` and
 `--screenshot-switch PATH` (two documents) capture the window, the latter two
-halfway through a transition. `--zoom Z`, `--page N`, `--background ID` and
+halfway through a transition; `--screenshot-generating PATH` and
+`--screenshot-revealing PATH` replay the loading animation over the drawn
+pages and capture it while the page's parts are traced, and halfway
+through the reveal. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run, `--theme system|light|dark` its
 colours, `--controls shown|hidden` the reading dock (scripted runs keep
 it shown), `--split right|down` shows the second document beside the

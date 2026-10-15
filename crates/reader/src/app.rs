@@ -26,6 +26,7 @@ use crate::{
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
     gamepad::{GamepadInput, Gamepads},
+    generation::{Generations, PageState},
     gpu::{
         EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse, UPLOAD_BYTES_PER_FRAME,
         ViewCallback, pixel_size,
@@ -199,6 +200,8 @@ pub struct ReaderApp {
     pickers: Pickers,
     pub(crate) render_state: egui_wgpu::RenderState,
     pub(crate) transition: Option<ViewTransition>,
+    /// The animations over pages that are slow to load.
+    pub(crate) generations: Generations,
     started: Instant,
     gamepads: Result<Gamepads, String>,
     pub(crate) frames: FrameTimes,
@@ -375,6 +378,7 @@ impl ReaderApp {
             pickers: Pickers::default(),
             render_state,
             transition: None,
+            generations: Generations::default(),
             started: Instant::now(),
             gamepads: Gamepads::new(),
             frames: FrameTimes::default(),
@@ -2659,6 +2663,21 @@ impl ReaderApp {
             })
             .collect();
         self.tabs[active].placeholders(&mut frame, |page| drawable.contains(&page));
+        for draw in &frame.draws {
+            let [x0, y0, x1, y1] = draw.paper;
+            let tab = &self.tabs[active];
+            let state = PageState {
+                loading: !drawable.contains(&draw.page),
+                thumbnail: tab.thumbnail(draw.page).is_some(),
+                size: egui::vec2(x1 - x0, y1 - y0) / ppp,
+            };
+            let key = PageKey {
+                tab: tab_id,
+                page: draw.page,
+            };
+            self.generations
+                .update(key, state, tab.sketch(draw.page), now);
+        }
 
         let tokens = Tokens::get(&ctx);
         let transition = self
@@ -2724,6 +2743,15 @@ impl ReaderApp {
             if let Some(texture) = thumbnail {
                 widgets::paint_turned_image(&painter, *texture, paper, turns);
             }
+        }
+        let papers: Vec<egui::Rect> = maps.iter().map(|map| map.paper).collect();
+        for map in &maps {
+            let key = PageKey {
+                tab: tab_id,
+                page: map.page,
+            };
+            self.generations
+                .paint(&painter, key, map, &papers, &tokens, now);
         }
         let focused = self.active == Some(active);
         if self.show_stats && focused {

@@ -39,6 +39,7 @@ mod fake_providers;
 mod find;
 mod fonts;
 mod gamepad;
+mod generation;
 mod gpu;
 mod harness;
 mod home;
@@ -76,7 +77,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -126,6 +127,8 @@ fn parse_args() -> Result<Launch> {
             "--screenshot" => launch.harness = shot(ShotKind::View, value()?),
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
+            "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
+            "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),
             "--background" => launch.background = Some(value()?),
             "--overlay" => launch.overlay = Some(value()?),
             "--wallpaper" => launch.wallpaper = Some(value()?),

@@ -28,6 +28,7 @@ use crate::{
     },
     find::Find,
     gamepad::GamepadInput,
+    generation::PageSketch,
     gpu::PageDraw,
     overview::Overview,
     sidebar::OutlineView,
@@ -174,6 +175,9 @@ pub struct DocumentTab {
     loader: Loader,
     indexer: Indexer,
     thumbnails: HashMap<usize, egui::TextureHandle>,
+    /// The structure the loading animation traces, by page, with the
+    /// source version it was read from.
+    sketches: HashMap<usize, (u64, Arc<PageSketch>)>,
     /// Sharp renders for the page overview, with their pixels per point.
     grid_images: HashMap<usize, (f32, egui::TextureHandle)>,
     /// The page overview, when it shows in place of the pages.
@@ -263,6 +267,7 @@ impl DocumentTab {
             loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
             indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
             thumbnails: HashMap::new(),
+            sketches: HashMap::new(),
             grid_images: HashMap::new(),
             overview: None,
             overview_zoom: 1.0,
@@ -332,6 +337,7 @@ impl DocumentTab {
         self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
         self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
         self.thumbnails.clear();
+        self.sketches.clear();
         self.dense_pages.clear();
         self.failed.clear();
         self.ready.clear();
@@ -361,6 +367,13 @@ impl DocumentTab {
     pub fn receive(&mut self, ctx: &egui::Context) {
         while let Some(loaded) = self.loader.try_recv().or_else(|| self.indexer.try_recv()) {
             match loaded {
+                Loaded::Sketch {
+                    page,
+                    version,
+                    sketch,
+                } => {
+                    self.sketches.insert(page, (version, sketch));
+                }
                 Loaded::Thumbnail { page, image } => {
                     let texture = ctx.load_texture(
                         format!("thumbnail-{}-{page}", self.id),
@@ -721,6 +734,14 @@ impl DocumentTab {
 
     pub fn thumbnail(&self, page: usize) -> Option<&egui::TextureHandle> {
         self.thumbnails.get(&page)
+    }
+
+    /// The loading animation's structure of a page as it is shown.
+    pub fn sketch(&self, page: usize) -> Option<&Arc<PageSketch>> {
+        self.sketches
+            .get(&page)
+            .filter(|(version, _)| *version == self.source(page).version())
+            .map(|(_, sketch)| sketch)
     }
 
     /// The link under a page point.
@@ -1423,6 +1444,7 @@ mod tests {
             loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
             indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
             thumbnails: HashMap::new(),
+            sketches: HashMap::new(),
             grid_images: HashMap::new(),
             overview: None,
             overview_zoom: 1.0,

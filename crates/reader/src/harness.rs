@@ -41,7 +41,19 @@ pub enum ShotKind {
     PageTurn,
     /// Halfway through switching from the first tab to the second.
     TabSwitch,
+    /// The loading animation replayed over the drawn pages, while its
+    /// parts are traced.
+    Generating,
+    /// The loading animation's reveal, halfway down the page.
+    Revealing,
 }
+
+/// Progress of a replayed loading animation at which `Generating` is
+/// taken, and at which the pages of `Revealing` become ready.
+const GENERATING_AT: f32 = 0.6;
+/// The reveal's progress (in the animation's ending) at which
+/// `Revealing` is taken: the scan line is about two thirds down.
+const REVEALING_AT: f32 = 0.84;
 
 pub struct Screenshot {
     path: PathBuf,
@@ -418,8 +430,26 @@ impl ReaderApp {
                 }
                 shot.started && halfway(self)
             }
+            ShotKind::Generating | ShotKind::Revealing => {
+                let revealing = shot.kind == ShotKind::Revealing;
+                if !shot.started {
+                    self.generations
+                        .replay(revealing.then_some(GENERATING_AT), now);
+                    shot.started = true;
+                }
+                self.generations
+                    .progress(now)
+                    .is_some_and(|(progress, ending)| {
+                        if revealing {
+                            ending >= REVEALING_AT
+                        } else {
+                            progress >= GENERATING_AT
+                        }
+                    })
+            }
         };
         if shot.requested {
+            self.generations.pause_replay();
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
         false

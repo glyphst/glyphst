@@ -84,6 +84,11 @@ impl ReaderApp {
         let (mut animating, mut drawn) = (false, true);
         let mut keep = Vec::new();
         let split = panes.len() > 1 && !self.zen;
+        let reduce_motion = self
+            .user_settings
+            .get()
+            .is_some_and(|settings| settings.behavior.reduce_motion);
+        self.generations.begin_frame(reduce_motion);
         for &(id, pane) in &panes {
             // Split panes keep a strip at the top for their title chip.
             let rect = if split {
@@ -136,6 +141,8 @@ impl ReaderApp {
             animating |= pane_animating;
             drawn &= pane_drawn;
         }
+        self.generations.end_frame();
+        animating |= self.generations.animating();
         if let Some(dropped) = self.with_gpu(|gpu| gpu.evict(&keep, PAGE_BUDGET_BYTES)) {
             for key in dropped {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == key.tab) {

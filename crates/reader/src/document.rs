@@ -23,6 +23,8 @@ use glyphst_pdf::{
 use glyphst_pdf_gpu::{Camera, PreparedPage, rotate, rotate_rect};
 use mupdf::{Colorspace, DisplayList, Matrix};
 
+use crate::generation::PageSketch;
+
 /// Gap between pages, in page points.
 pub const PAGE_GAP: f64 = 12.0;
 /// Device pixels per point of the loading and sidebar thumbnails.
@@ -310,6 +312,13 @@ impl PageSource {
 /// A page result from the loader. `version` is the [`PageSource`] it was
 /// made from.
 pub enum Loaded {
+    /// What the loading animation traces of a page, sent before its
+    /// thumbnail and vectors.
+    Sketch {
+        page: usize,
+        version: u64,
+        sketch: Arc<PageSketch>,
+    },
     Thumbnail {
         page: usize,
         image: egui::ColorImage,
@@ -553,6 +562,14 @@ fn load_page(
         let list = loaded_page.to_display_list(true)?;
         let links = page_links(&loaded_page);
         let vector = capture_display_list(&list)?;
+        let sketch = Arc::new(PageSketch::from_vector(&vector));
+        if !send(Loaded::Sketch {
+            page,
+            version,
+            sketch,
+        }) {
+            return Ok(None);
+        }
         if vector.stats.path_points <= THUMBNAIL_MAX_POINTS {
             let thumbnail = list.to_pixmap(
                 &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),

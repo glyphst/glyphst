@@ -240,6 +240,16 @@ used, so its sign-in carries over) on worker threads, and the app repaints
 when the state changes. Connection tests (AI, OCR) run on
 threads, and a result for settings that changed meanwhile shows as stale.
 
+A page still loading after 150 ms, with no thumbnail to show and at least
+120 points a side on screen, gets the loading animation
+([`generation.rs`](crates/reader/src/generation.rs), a port of
+transitions.dev's UI generation): a dotted wireframe of the page's
+structure, traced from a `PageSketch` the loader sends right after
+capturing the page (before the thumbnail and tessellation), holds until
+the page can be drawn and then reveals it behind a scan line. It is egui
+shapes over the GPU view, so it never delays a page; with Reduce motion
+the page fades in instead.
+
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, so glyph offsets in reflowed
 positions and highlight anchors saved by the GPUI Reader still resolve.
