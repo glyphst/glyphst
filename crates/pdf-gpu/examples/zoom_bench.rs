@@ -116,6 +116,8 @@ fn main() -> Result<()> {
 
     let mut frames = Vec::with_capacity(options.frames);
     let mut encodes = Vec::with_capacity(options.frames);
+    // GPU time of each frame's pass, when the adapter has timestamps.
+    let mut passes = Vec::with_capacity(options.frames);
     let half = options.frames.max(2) / 2;
     let ratio = (MAX_ZOOM / MIN_ZOOM).ln();
     for frame in 0..options.frames {
@@ -126,13 +128,16 @@ fn main() -> Result<()> {
         };
         let zoom = options.zoom.unwrap_or(MIN_ZOOM * (ratio * t).exp());
         let started = Instant::now();
-        let (stats, encode) = gpu.render_timed(&renderer, gpu_page, &camera(zoom));
+        let (stats, encode, pass) = gpu.render_timed(&renderer, gpu_page, &camera(zoom));
         gpu.wait()?;
         frames.push((zoom, started.elapsed(), stats));
         encodes.push((zoom, encode));
+        passes.extend(pass.map(|pass| (zoom, pass)));
     }
     let mut sorted: Vec<Duration> = frames.iter().map(|(_, time, _)| *time).collect();
     sorted.sort();
+    let mut gpu_sorted: Vec<Duration> = passes.iter().map(|(_, time)| *time).collect();
+    gpu_sorted.sort();
     let mut ranked: Vec<_> = frames.iter().enumerate().collect();
     ranked.sort_by_key(|(_, (_, time, _))| std::cmp::Reverse(*time));
     let slowest: Vec<_> = ranked
@@ -165,12 +170,20 @@ fn main() -> Result<()> {
                 .map(|(_, time)| *time)
                 .collect();
             encode.sort();
+            let mut gpu: Vec<Duration> = passes
+                .iter()
+                .filter(|(zoom, _)| *zoom >= low && *zoom < high)
+                .map(|(_, time)| *time)
+                .collect();
+            gpu.sort();
             json!({
                 "zoom": [low, high],
                 "p50_ms": percentile(&times, 0.5),
                 "max_ms": percentile(&times, 1.0),
                 "encode_p50_ms": percentile(&encode, 0.5),
                 "encode_max_ms": percentile(&encode, 1.0),
+                "gpu_p50_ms": percentile(&gpu, 0.5),
+                "gpu_max_ms": percentile(&gpu, 1.0),
             })
         })
         .collect();
@@ -288,6 +301,8 @@ fn main() -> Result<()> {
             "p50_ms": percentile(&sorted, 0.5),
             "p95_ms": percentile(&sorted, 0.95),
             "max_ms": percentile(&sorted, 1.0),
+            "gpu_p50_ms": percentile(&gpu_sorted, 0.5),
+            "gpu_p95_ms": percentile(&gpu_sorted, 0.95),
             "slowest": slowest,
             "by_zoom": by_zoom,
         },

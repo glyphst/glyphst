@@ -300,9 +300,8 @@ fn fs_vector(in: VectorOut) -> @location(0) vec4<f32> {
     } else {
         color = stroke_color(in);
     }
-    if color.a <= 0.0 {
-        discard;
-    }
+    // No discard: a shader that may discard runs before the stencil test
+    // on many GPUs; a transparent premultiplied color blends to nothing.
     return color;
 }
 

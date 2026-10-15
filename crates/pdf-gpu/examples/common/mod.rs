@@ -148,6 +148,9 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub adapter: String,
     pub target: OffscreenTarget,
+    /// Timestamps around each render's pass, when the adapter has them:
+    /// the queries, their resolved values and a buffer to read them.
+    timestamps: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer)>,
 }
 
 impl Gpu {
@@ -159,18 +162,41 @@ impl Gpu {
         }))
         .context("no GPU adapter")?;
         let info = adapter.get_info();
+        let timing =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("pdf_gpu_example"),
+                required_features: adapter.features() & timing,
                 required_limits: adapter.limits(),
                 ..Default::default()
             }))?;
         let target = OffscreenTarget::new(&device, FORMAT, size, wgpu::TextureUsages::COPY_SRC);
+        let timestamps = device.features().contains(timing).then(|| {
+            let buffer = |usage| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pdf_gpu_timestamps"),
+                    size: 16,
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            (
+                device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("pdf_gpu_timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                }),
+                buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
+                buffer(wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ),
+            )
+        });
         Ok(Self {
             device,
             queue,
             adapter: format!("{} ({:?})", info.name, info.backend),
             target,
+            timestamps,
         })
     }
 
@@ -186,22 +212,49 @@ impl Gpu {
     }
 
     /// Renders and returns how long [`Renderer::draw`] took on the CPU
-    /// (selecting and recording the draws).
+    /// (selecting and recording the draws) and, when the adapter has
+    /// timestamps, how long the pass took on the GPU (waiting for it).
     pub fn render_timed(
         &self,
         renderer: &Renderer,
         page: &GpuPage,
         camera: &Camera,
-    ) -> (DrawStats, std::time::Duration) {
+    ) -> (DrawStats, Duration, Option<Duration>) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        if let Some((queries, _, _)) = &self.timestamps {
+            encoder.write_timestamp(queries, 0);
+        }
         let (stats, encode) = {
             let mut pass = self.target.begin_pass(&mut encoder, wgpu::Color::WHITE);
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let stats = renderer.draw(&self.queue, page, camera, &mut pass);
             (stats, started.elapsed())
         };
+        let Some((queries, resolved, read)) = &self.timestamps else {
+            self.queue.submit([encoder.finish()]);
+            return (stats, encode, None);
+        };
+        encoder.write_timestamp(queries, 1);
+        encoder.resolve_query_set(queries, 0..2, resolved, 0);
+        encoder.copy_buffer_to_buffer(resolved, 0, read, 0, 16);
         self.queue.submit([encoder.finish()]);
-        (stats, encode)
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        read.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = sender.send(result);
+        });
+        let gpu = self
+            .wait()
+            .ok()
+            .and_then(|()| receiver.recv().ok()?.ok())
+            .and_then(|()| {
+                let ticks: [u64; 2] =
+                    bytemuck::pod_read_unaligned(&read.get_mapped_range(..).ok()?);
+                let nanos = ticks[1].saturating_sub(ticks[0]) as f64
+                    * f64::from(self.queue.get_timestamp_period());
+                Some(Duration::from_nanos(nanos as u64))
+            });
+        read.unmap();
+        (stats, encode, gpu)
     }
 
     /// The target's pixels as RGB8 rows.

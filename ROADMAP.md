@@ -130,16 +130,17 @@ the model for `pdf-gpu`'s zoom. Ported so far: the margin selection
 (8d41b7b, 39848f9; bands as in `vectorFillBands.ts`) and fills and strokes
 in one ordered stream and pipeline (9debd42). Coverage brought the pdf.js
 corpus closer to MuPDF (mean difference at 1x, 90th percentile, 1.83 to
-1.71) and cut text-page preparation (tracemonkey 79 to 29 ms), but costs
-GPU time on two pages (`zoom_bench`, median of three runs, p95):
-- Murietta 3.4 to 4.1 ms: at 8x a fill shader returning a constant costs
-  the same, so the cost is the quads covering whole bounding boxes.
-- tracemonkey 1.5 to 2.1 ms: about 0.25 ms of per-pixel edge loops for
-  small text.
+1.71) and cut text-page preparation (tracemonkey 79 to 29 ms). By GPU pass
+time (`zoom_bench` `gpu_*_ms`, timestamps, median of two 240-frame runs) it
+costs little on drawings (Murietta p95 1.85 to ~2.0 ms, Lower Level
+unchanged) but text: tracemonkey p50 0.38 to 0.60 ms, 0.33 to 0.68 ms
+between 0.25x and 1x, from per-pixel edge loops. Spreading the ink of paths
+under 2.5 px (HEPR's small-glyph rule) did not help: most glyphs at those
+zooms are larger.
 
 Still to port:
-- Tighter fill quads: HEPR intersects each fill quad with its clip's
-  bounds; quads could also follow the ink (split tall paths by band).
+- Tighter fill quads matter less than thought: Murietta's fills cover 51%
+  (glyphs) to 100% (large fills) of their quads.
 - HEPR's cell index (`vectorCellIndex.ts`, `vectorCellShaders.ts`): edges
   right of a pixel's cell summarized as closure pairs, so a pixel sums a
   few edges.
@@ -150,11 +151,12 @@ Still to port:
   stencil patterns (b6a755c), and smoothed one-pixel stroke coverage for
   thumbnails (178588b): GPU thumbnails of Murietta are darker than MuPDF's.
 
-**Next step:** tighter fill quads, then the cell index, measured with
-`zoom_bench` (three runs) on Murietta, Lower Level and tracemonkey.
+**Next step:** the cell index for text, measured by `zoom_bench` GPU time
+on tracemonkey, Murietta and Lower Level.
 
-**Done when:** Murietta and tracemonkey are within 10% of their p95 before
-coverage fills (3.4 and 1.5 ms) and the corpus keeps its mean differences.
+**Done when:** tracemonkey's GPU p50 is within 10% of its 0.38 ms before
+coverage fills, the drawings are no slower, and the corpus keeps its mean
+differences.
 
 ## 3. Dependency audit follow-up
 
