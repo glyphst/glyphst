@@ -1077,6 +1077,26 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_plus_and_minus_scale_the_interface_and_bare_keys_zoom_the_page() {
+        for preset in KeymapPreset::ALL {
+            let keymap = Keymap::new(preset, &Overrides::new());
+            for (key, modifiers, command) in [
+                (Key::Plus, Modifiers::COMMAND, Command::UiScaleUp),
+                (Key::Equals, Modifiers::COMMAND, Command::UiScaleUp),
+                (Key::Minus, Modifiers::COMMAND, Command::UiScaleDown),
+                (Key::Num0, Modifiers::COMMAND, Command::UiScaleReset),
+                (Key::Minus, Modifiers::NONE, Command::ZoomOut),
+            ] {
+                assert_eq!(
+                    press(&keymap, key, modifiers, false),
+                    [command],
+                    "{preset:?} {key:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn recorded_presses_ignore_modifiers_alone_and_shift_on_symbols() {
         assert_eq!(Shortcut::from_key(Key::ShiftLeft, Modifiers::SHIFT), None);
         assert_eq!(

@@ -22,6 +22,10 @@ use crate::{
 
 /// Results shown at most.
 const MAX_HITS: usize = 12;
+/// The path prompt's results at most: a whole folder, scrolled.
+const MAX_PATH_HITS: usize = 500;
+/// The results' list grows to this height before it scrolls.
+const MAX_LIST_HEIGHT: f32 = 440.0;
 /// Commands remembered as recently run.
 const MAX_USED: usize = 8;
 
@@ -250,7 +254,7 @@ pub fn path_hits(query: &str, home: &Path, entries: &[(String, bool)]) -> Vec<Hi
         })
         .collect();
     ranked.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
-    ranked.truncate(MAX_HITS);
+    ranked.truncate(MAX_PATH_HITS);
     ranked.into_iter().map(|(_, _, _, hit)| hit).collect()
 }
 
@@ -388,6 +392,7 @@ impl Palette {
             self.close();
             return None;
         }
+        let keyed = self.highlight;
         if down {
             self.highlight += 1;
         }
@@ -395,6 +400,8 @@ impl Palette {
             self.highlight = self.highlight.saturating_sub(1);
         }
         self.highlight = self.highlight.min(hits.len().saturating_sub(1));
+        // The list follows the highlight the keys moved.
+        let follow = (up || down) && self.highlight != keyed;
         if tab
             && let Some(query) = hits
                 .get(self.highlight)
@@ -476,130 +483,156 @@ impl Palette {
                             .hline(line.x_range(), line.top(), tokens.hairline());
                         ui.add_space(4.0);
                         let typed = self.query.trim().to_lowercase();
-                        for (index, hit) in hits.iter().enumerate() {
-                            // A rule title where a kind of result starts.
-                            let group = group_of(&hit.item);
-                            if index == 0 || group_of(&hits[index - 1].item) != group {
-                                let count = hits[index..]
-                                    .iter()
-                                    .take_while(|other| group_of(&other.item) == group)
-                                    .count();
-                                let (rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 24.0),
-                                    Sense::hover(),
-                                );
-                                glyphst_ui::motif::paint_rule_title(
-                                    ui,
-                                    rect.shrink2(vec2(14.0, 0.0)),
-                                    group,
-                                    Some(&count.to_string()),
-                                    true,
-                                );
-                            }
-                            let (rect, row) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 30.0),
-                                Sense::click(),
-                            );
-                            if row.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                            {
-                                self.highlight = index;
-                            }
-                            let highlighted = index == self.highlight;
-                            if highlighted {
-                                ui.painter().rect_filled(rect, 0, tokens.accent_soft);
-                            }
-                            let blocked = hit.blocked.is_some();
-                            let (color, icon_color) = if blocked {
-                                (tokens.faint, tokens.faint)
-                            } else if highlighted {
-                                (tokens.text, tokens.accent_text)
-                            } else {
-                                (tokens.text_2, tokens.muted)
-                            };
-                            icons::paint(
-                                ui,
-                                egui::Rect::from_center_size(
-                                    rect.left_center() + vec2(21.0, 0.0),
-                                    vec2(14.0, 14.0),
-                                ),
-                                hit.icon,
-                                14.0,
-                                icon_color,
-                            );
-                            // The key chip or the reason at the right.
-                            let mut right = rect.right() - 14.0;
-                            if let Some(reason) = hit.blocked {
-                                let galley = ui.painter().layout_no_wrap(
-                                    reason.to_lowercase(),
-                                    theme::mono(10.0),
-                                    tokens.faint,
-                                );
-                                right -= galley.size().x;
-                                ui.painter().galley(
-                                    egui::pos2(right, rect.center().y - galley.size().y / 2.0),
-                                    galley,
-                                    tokens.faint,
-                                );
-                            } else if !hit.detail.is_empty() {
-                                let is_key = matches!(hit.item, Item::Command(_));
-                                if is_key {
-                                    let label = glyphst_ui::key::display(&hit.detail);
-                                    let size = glyphst_ui::key::size(ui, &label);
-                                    right -= size.x;
-                                    glyphst_ui::key::paint(
+                        // The room under the field and over the foot. A new
+                        // query starts at the top, with its first hit.
+                        let room = screen.bottom() - ui.cursor().top() - 28.0 - 32.0;
+                        egui::ScrollArea::vertical()
+                            .id_salt(("palette-hits", &typed))
+                            .max_height(room.clamp(60.0, MAX_LIST_HEIGHT))
+                            .show(ui, |ui| {
+                                for (index, hit) in hits.iter().enumerate() {
+                                    // A rule title where a kind of result starts.
+                                    let group = group_of(&hit.item);
+                                    if index == 0 || group_of(&hits[index - 1].item) != group {
+                                        let count = hits[index..]
+                                            .iter()
+                                            .take_while(|other| group_of(&other.item) == group)
+                                            .count();
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            vec2(ui.available_width(), 24.0),
+                                            Sense::hover(),
+                                        );
+                                        glyphst_ui::motif::paint_rule_title(
+                                            ui,
+                                            rect.shrink2(vec2(14.0, 0.0)),
+                                            group,
+                                            Some(&count.to_string()),
+                                            true,
+                                        );
+                                    }
+                                    let (rect, row) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), 30.0),
+                                        Sense::click(),
+                                    );
+                                    if row.hovered()
+                                        && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                                    {
+                                        self.highlight = index;
+                                    }
+                                    let highlighted = index == self.highlight;
+                                    if highlighted && follow {
+                                        row.scroll_to_me(None);
+                                    }
+                                    if highlighted {
+                                        ui.painter().rect_filled(rect, 0, tokens.accent_soft);
+                                    }
+                                    let blocked = hit.blocked.is_some();
+                                    let (color, icon_color) = if blocked {
+                                        (tokens.faint, tokens.faint)
+                                    } else if highlighted {
+                                        (tokens.text, tokens.accent_text)
+                                    } else {
+                                        (tokens.text_2, tokens.muted)
+                                    };
+                                    icons::paint(
                                         ui,
-                                        egui::Rect::from_min_size(
-                                            egui::pos2(right, rect.center().y - size.y / 2.0),
-                                            size,
+                                        egui::Rect::from_center_size(
+                                            rect.left_center() + vec2(21.0, 0.0),
+                                            vec2(14.0, 14.0),
                                         ),
-                                        &label,
-                                        None,
+                                        hit.icon,
+                                        14.0,
+                                        icon_color,
                                     );
-                                } else {
-                                    let galley = ui.painter().layout_no_wrap(
-                                        hit.detail.to_lowercase(),
-                                        theme::mono(10.0),
-                                        tokens.faint,
+                                    // The key chip or the reason at the right.
+                                    let mut right = rect.right() - 14.0;
+                                    if let Some(reason) = hit.blocked {
+                                        let galley = ui.painter().layout_no_wrap(
+                                            reason.to_lowercase(),
+                                            theme::mono(10.0),
+                                            tokens.faint,
+                                        );
+                                        right -= galley.size().x;
+                                        ui.painter().galley(
+                                            egui::pos2(
+                                                right,
+                                                rect.center().y - galley.size().y / 2.0,
+                                            ),
+                                            galley,
+                                            tokens.faint,
+                                        );
+                                    } else if !hit.detail.is_empty() {
+                                        let is_key = matches!(hit.item, Item::Command(_));
+                                        if is_key {
+                                            let label = glyphst_ui::key::display(&hit.detail);
+                                            let size = glyphst_ui::key::size(ui, &label);
+                                            right -= size.x;
+                                            glyphst_ui::key::paint(
+                                                ui,
+                                                egui::Rect::from_min_size(
+                                                    egui::pos2(
+                                                        right,
+                                                        rect.center().y - size.y / 2.0,
+                                                    ),
+                                                    size,
+                                                ),
+                                                &label,
+                                                None,
+                                            );
+                                        } else {
+                                            let galley = ui.painter().layout_no_wrap(
+                                                hit.detail.to_lowercase(),
+                                                theme::mono(10.0),
+                                                tokens.faint,
+                                            );
+                                            right -= galley.size().x;
+                                            ui.painter().galley(
+                                                egui::pos2(
+                                                    right,
+                                                    rect.center().y - galley.size().y / 2.0,
+                                                ),
+                                                galley,
+                                                tokens.faint,
+                                            );
+                                        }
+                                    }
+                                    let left = rect.left() + 38.0;
+                                    let label = hit.label.to_lowercase();
+                                    let mut job = egui::text::LayoutJob::default();
+                                    let font = theme::mono(13.0);
+                                    let found =
+                                        (!typed.is_empty()).then(|| label.find(&typed)).flatten();
+                                    match found {
+                                        Some(start) => {
+                                            let end = start + typed.len();
+                                            let plain =
+                                                egui::TextFormat::simple(font.clone(), color);
+                                            let strong =
+                                                egui::TextFormat::simple(font, tokens.accent_text);
+                                            job.append(&label[..start], 0.0, plain.clone());
+                                            job.append(&label[start..end], 0.0, strong);
+                                            job.append(&label[end..], 0.0, plain);
+                                        }
+                                        None => job.append(
+                                            &label,
+                                            0.0,
+                                            egui::TextFormat::simple(font, color),
+                                        ),
+                                    }
+                                    job.wrap = egui::text::TextWrapping::truncate_at_width(
+                                        (right - left - 12.0).max(0.0),
                                     );
-                                    right -= galley.size().x;
+                                    let galley = ui.painter().layout_job(job);
                                     ui.painter().galley(
-                                        egui::pos2(right, rect.center().y - galley.size().y / 2.0),
+                                        egui::pos2(left, rect.center().y - galley.size().y / 2.0),
                                         galley,
-                                        tokens.faint,
+                                        color,
                                     );
+                                    if row.clicked() {
+                                        chosen = Some(hit.item.clone());
+                                    }
                                 }
-                            }
-                            let left = rect.left() + 38.0;
-                            let label = hit.label.to_lowercase();
-                            let mut job = egui::text::LayoutJob::default();
-                            let font = theme::mono(13.0);
-                            let found = (!typed.is_empty()).then(|| label.find(&typed)).flatten();
-                            match found {
-                                Some(start) => {
-                                    let end = start + typed.len();
-                                    let plain = egui::TextFormat::simple(font.clone(), color);
-                                    let strong = egui::TextFormat::simple(font, tokens.accent_text);
-                                    job.append(&label[..start], 0.0, plain.clone());
-                                    job.append(&label[start..end], 0.0, strong);
-                                    job.append(&label[end..], 0.0, plain);
-                                }
-                                None => {
-                                    job.append(&label, 0.0, egui::TextFormat::simple(font, color))
-                                }
-                            }
-                            job.wrap = egui::text::TextWrapping::truncate_at_width(
-                                (right - left - 12.0).max(0.0),
-                            );
-                            let galley = ui.painter().layout_job(job);
-                            ui.painter().galley(
-                                egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-                                galley,
-                                color,
-                            );
-                            if row.clicked() {
-                                chosen = Some(hit.item.clone());
-                            }
-                        }
+                            });
                         if hits.is_empty() {
                             ui.add_space(10.0);
                             let empty = if path_mode {
@@ -918,6 +951,29 @@ mod tests {
         assert_eq!(chosen, Some(documents[0].item.clone()));
         assert!(!palette.open);
         assert_eq!(palette.mode, Mode::Commands);
+    }
+
+    #[test]
+    fn a_large_folder_scrolls_and_every_document_is_reachable() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let listing: Listing = (0..40)
+            .map(|index| (format!("book-{index:02}.pdf"), false))
+            .collect();
+        let hits = path_hits("~/", Path::new("/home/reader"), &listing);
+        assert_eq!(hits.len(), 40);
+        let mut palette = Palette::default();
+        palette.open_path(&ctx, "~/".into());
+        for _ in 0..2 {
+            frame(&ctx, &mut palette, &hits, Vec::new());
+        }
+        // The list scrolls within the window instead of running past it.
+        assert!(palette.rect.unwrap().bottom() <= 700.0);
+        for _ in 0..30 {
+            frame(&ctx, &mut palette, &hits, vec![key(Key::ArrowDown)]);
+        }
+        let chosen = frame(&ctx, &mut palette, &hits, vec![key(Key::Enter)]);
+        assert_eq!(chosen, Some(hits[30].item.clone()));
     }
 
     /// One frame of the palette with `events`; returns the IME output.

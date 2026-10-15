@@ -28,6 +28,11 @@ pub enum Command {
     ThemeLight,
     ThemeDark,
     ToggleTransparency,
+    /// The chrome a point larger, smaller, or back to the design's size
+    /// (Settings › Appearance › ui scale).
+    UiScaleUp,
+    UiScaleDown,
+    UiScaleReset,
     KeysStandard,
     KeysVim,
     ScrollDown,
@@ -138,7 +143,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 59] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -153,6 +158,9 @@ impl Command {
         Self::ThemeLight,
         Self::ThemeDark,
         Self::ToggleTransparency,
+        Self::UiScaleUp,
+        Self::UiScaleDown,
+        Self::UiScaleReset,
         Self::KeysStandard,
         Self::KeysVim,
         Self::ScrollDown,
@@ -209,6 +217,9 @@ impl Command {
             Self::Settings => "app.settings",
             Self::KeyboardShortcuts => "app.keyboard_shortcuts",
             Self::ToggleTransparency => "app.toggle_transparency",
+            Self::UiScaleUp => "app.ui_scale_up",
+            Self::UiScaleDown => "app.ui_scale_down",
+            Self::UiScaleReset => "app.ui_scale_reset",
             Self::ToggleSidebar => "app.sidebar",
             Self::ToggleStats => "app.statistics",
             Self::ThemeSystem => "app.theme_system",
@@ -274,6 +285,9 @@ impl Command {
             Self::Settings => "Settings…",
             Self::KeyboardShortcuts => "Keyboard shortcuts",
             Self::ToggleTransparency => "Toggle transparency",
+            Self::UiScaleUp => "Larger interface",
+            Self::UiScaleDown => "Smaller interface",
+            Self::UiScaleReset => "Reset interface size",
             Self::ToggleSidebar => "Show or hide the sidebar",
             Self::ToggleStats => "Show or hide statistics",
             Self::ThemeSystem => "Theme: System",
@@ -336,6 +350,9 @@ impl Command {
             Self::Settings => "settings",
             Self::KeyboardShortcuts => "keyboard",
             Self::ToggleTransparency => "eye",
+            Self::UiScaleUp => "a-arrow-up",
+            Self::UiScaleDown => "a-arrow-down",
+            Self::UiScaleReset => "rotate-ccw",
             Self::ToggleSidebar => "panel-left",
             Self::ToggleStats => "gauge",
             Self::ThemeSystem => "monitor",
@@ -398,6 +415,9 @@ impl Command {
             | Self::ThemeLight
             | Self::ThemeDark
             | Self::ToggleTransparency
+            | Self::UiScaleUp
+            | Self::UiScaleDown
+            | Self::UiScaleReset
             | Self::KeysStandard
             | Self::KeysVim => Category::App,
             Self::ScrollDown
@@ -461,6 +481,9 @@ impl Command {
             Self::Settings => &["Ctrl+Comma"],
             Self::ToggleSidebar => &["F9"],
             Self::ToggleStats => &["F12"],
+            Self::UiScaleUp => &["Ctrl+Plus", "Ctrl+Equals"],
+            Self::UiScaleDown => &["Ctrl+Minus"],
+            Self::UiScaleReset => &["Ctrl+0"],
             Self::ScrollDown => &["Down"],
             Self::ScrollUp => &["Up"],
             Self::ScrollLeft => &["Left"],
@@ -582,6 +605,9 @@ impl Command {
             | Self::ThemeLight
             | Self::ThemeDark
             | Self::ToggleTransparency
+            | Self::UiScaleUp
+            | Self::UiScaleDown
+            | Self::UiScaleReset
             | Self::KeysStandard
             | Self::KeysVim
             | Self::McpConfig => Needs::Nothing,

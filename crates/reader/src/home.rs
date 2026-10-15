@@ -88,6 +88,8 @@ pub struct HomeContext<'a> {
     /// Page counts of documents opened before, by path.
     pub page_counts: &'a BTreeMap<String, usize>,
     pub picking: bool,
+    /// The key of "open with system dialog", as preferences keep it.
+    pub open_key: Option<String>,
 }
 
 /// A document as home lists it.
@@ -216,7 +218,13 @@ impl Home {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
-            if let Some(chosen) = self.activity(&mut pane_ui, &tokens, home.library, home.picking) {
+            if let Some(chosen) = self.activity(
+                &mut pane_ui,
+                &tokens,
+                home.library,
+                home.picking,
+                home.open_key.as_deref(),
+            ) {
                 action = Some(chosen);
             }
         }
@@ -418,6 +426,7 @@ impl Home {
         tokens: &Tokens,
         library: &LibraryStore,
         picking: bool,
+        open_key: Option<&str>,
     ) -> Option<HomeAction> {
         let rect = ui.max_rect();
         ui.painter()
@@ -562,7 +571,13 @@ impl Home {
             theme::mono(11.0),
             tokens.text_2,
         );
-        let row = Rect::from_center_size(zone.center() + vec2(0.0, 48.0), vec2(220.0, 24.0));
+        // Centred by the width it took last frame: the key differs by keymap.
+        let width_id = egui::Id::new("home-open-row");
+        let width = ui
+            .ctx()
+            .data(|data| data.get_temp::<f32>(width_id))
+            .unwrap_or(220.0);
+        let row = Rect::from_center_size(zone.center() + vec2(0.0, 48.0), vec2(width, 24.0));
         let mut row_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(row)
@@ -580,7 +595,14 @@ impl Home {
         {
             action = Some(HomeAction::OpenDialog);
         }
-        row_ui.add(Key("ctrl o"));
+        if let Some(key) = open_key {
+            row_ui.add(Key(&glyphst_ui::key::display(key)));
+        }
+        let taken = row_ui.min_rect().width();
+        if (taken - width).abs() > 0.5 {
+            ui.ctx().data_mut(|data| data.insert_temp(width_id, taken));
+            ui.ctx().request_repaint();
+        }
         action
     }
 }

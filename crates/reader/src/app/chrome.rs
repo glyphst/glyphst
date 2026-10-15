@@ -748,11 +748,9 @@ impl ReaderApp {
     fn assistant_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize) {
         let ctx = ui.ctx().clone();
         let tab = &self.tabs[active];
-        let page = tab
-            .text
-            .get(tab.current_page())
-            .is_some()
-            .then(|| tab.current_page());
+        // Not waiting for the page's text: the page mention reads the file,
+        // and the suggestions would flicker on every jump.
+        let page = (tab.layout.len() > 0).then(|| tab.current_page());
         let selection_words = tab
             .selection
             .is_some()

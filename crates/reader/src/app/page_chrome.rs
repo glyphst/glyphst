@@ -28,6 +28,7 @@ impl ReaderApp {
         rect: Rect,
         maps: &[PageMap],
         active: usize,
+        now: Instant,
     ) {
         let tokens = Tokens::get(ui.ctx());
         let tab = &self.tabs[active];
@@ -59,6 +60,14 @@ impl ReaderApp {
             if offset >= 3.0 {
                 motif::corner_ticks(ui, map.paper, offset, 12.0, tokens.accent);
             }
+            let [width, height] = tab.layout.page_size(current);
+            let loading = self.generations.loading(
+                PageKey {
+                    tab: tab.id,
+                    page: current,
+                },
+                now,
+            );
             let meta = match tab.translation.as_ref().filter(|session| {
                 session.show_translated && session.previews.contains_key(&current)
             }) {
@@ -71,16 +80,19 @@ impl ReaderApp {
                         .active_provider
                         .as_str()),
                 ),
-                None => {
-                    let [width, height] = tab.layout.page_size(current);
-                    format!(
-                        "p.{} — {:.0} × {:.0} pt — page {} of {pages}",
+                // While the page generates, the line says so in the accent
+                // (frame 02b).
+                None => match loading {
+                    Some(seconds) => format!(
+                        "p.{} — generating — {width:.0} × {height:.0} pt — {seconds:.2} s",
                         current + 1,
-                        width,
-                        height,
+                    ),
+                    None => format!(
+                        "p.{} — {width:.0} × {height:.0} pt — page {} of {pages}",
+                        current + 1,
                         current + 1
-                    )
-                }
+                    ),
+                },
             };
             let top = map.paper.top() - 13.0;
             if top - 6.0 > rect.top() && above >= 26.0 {
@@ -89,12 +101,17 @@ impl ReaderApp {
                     pos2(map.paper.right() - 18.0, top + 7.0),
                 );
                 let painter = painter.with_clip_rect(rect);
-                let galley = painter.layout_no_wrap(meta, theme::mono(11.0), tokens.faint);
+                let color = if loading.is_some() {
+                    tokens.accent_text
+                } else {
+                    tokens.faint
+                };
+                let galley = painter.layout_no_wrap(meta, theme::mono(11.0), color);
                 if galley.size().x <= line.width() {
                     painter.galley(
                         pos2(line.left(), line.center().y - galley.size().y / 2.0),
                         galley,
-                        tokens.faint,
+                        color,
                     );
                 }
             }

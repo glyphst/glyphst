@@ -370,7 +370,6 @@ const DURATION: f32 = 2.4;
 /// Phases as fractions of [`DURATION`] (the original's `PH`).
 const DOTS: [f32; 2] = [0.0, 0.3];
 const PROBE: [f32; 2] = [0.02, 0.24];
-const OUTLINE: [f32; 2] = [0.1, 0.42];
 const PARTS: [f32; 2] = [0.28, 0.74];
 const REVEAL: [f32; 2] = [0.74, 1.055];
 const CLEAN: [f32; 2] = [0.84, 1.04];
@@ -597,6 +596,14 @@ impl Generations {
                 (p, run.ending(p))
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// Seconds `key`'s page has been generating, while its animation runs;
+    /// the count stops where the reveal starts.
+    pub fn loading(&self, key: PageKey, now: Instant) -> Option<f32> {
+        let run = self.runs.get(&key)?;
+        let p = run.progress(self.clock(now));
+        Some(run.reveal().map_or(p, |reveal| p.min(reveal)) * DURATION)
     }
 
     /// Draws `map`'s page animation, if it has one, over the page.
@@ -930,11 +937,6 @@ impl<'a> Build<'a> {
         self.paper.min + vec2(x, y)
     }
 
-    /// Page points of a length on screen.
-    fn page_points(&self, screen: f32) -> f32 {
-        self.map.points(screen)
-    }
-
     fn paint(&self) {
         let (p, e, t) = (self.p, self.e, self.t);
         let (w, h) = (self.paper.width(), self.paper.height());
@@ -1085,33 +1087,6 @@ impl<'a> Build<'a> {
             );
         }
         guides.paint(&painter);
-        let oq = out(window(OUTLINE, p));
-        let label_on = if p > OUTLINE[0] {
-            (1.0 - smooth(0.66, 0.9, e)) * 0.9
-        } else {
-            0.0
-        };
-        if label_on > 0.0 {
-            let shown = self.run.reveal().map_or(p, |reveal| p.min(reveal));
-            let text = format!(
-                "{} × {}   t+{:.2}s",
-                (self.page_points(w) * oq).round(),
-                (self.page_points(h) * oq).round(),
-                shown * DURATION,
-            );
-            let (pos, anchor) = if mt >= 14.0 {
-                (self.at(0.0, -5.0), egui::Align2::LEFT_BOTTOM)
-            } else {
-                (self.at(6.0, 6.0), egui::Align2::LEFT_TOP)
-            };
-            painter.text(
-                pos,
-                anchor,
-                text,
-                egui::FontId::monospace(9.0),
-                line.gamma_multiply(label_on),
-            );
-        }
 
         // The wireframe, wiped away behind the scan line.
         let wire_painter = if revealing {

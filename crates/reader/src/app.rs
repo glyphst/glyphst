@@ -324,6 +324,10 @@ impl ReaderApp {
             .map(glyphst_effects::user_stamp)
             .unwrap_or_default();
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // Ctrl +/- and Ctrl+0 are commands that change the ui scale
+        // preference, not egui's own zoom, so Settings shows what they did.
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         let persist = launch.harness.is_none();
         let mut prefs = Prefs::load(cc.storage);
         // Before the first frame: every text style names these families.
@@ -2010,6 +2014,15 @@ impl ReaderApp {
                 self.toggle_transparency();
                 None
             }
+            Command::UiScaleUp | Command::UiScaleDown | Command::UiScaleReset => {
+                let range = theme::UI_SCALE_RANGE;
+                self.prefs.ui_scale = match command {
+                    Command::UiScaleUp => (self.prefs.ui_scale.round() + 1.0).min(*range.end()),
+                    Command::UiScaleDown => (self.prefs.ui_scale.round() - 1.0).max(*range.start()),
+                    _ => theme::BASE_SCALE,
+                };
+                None
+            }
             Command::ToggleSidebar => {
                 self.prefs.show_sidebar = !self.prefs.show_sidebar;
                 None
@@ -2680,7 +2693,7 @@ impl ReaderApp {
             self.generations
                 .paint(&painter, key, map, &papers, &tokens, now);
         }
-        self.page_chrome(ui, &painter, rect, &maps, active);
+        self.page_chrome(ui, &painter, rect, &maps, active, now);
         let focused = self.active == Some(active);
         if self.show_stats && focused {
             self.stats_overlay(&painter, rect, active);
@@ -3479,6 +3492,7 @@ impl eframe::App for ReaderApp {
                         library: &self.library,
                         page_counts: &self.prefs.page_counts,
                         picking: self.pickers.is_showing(),
+                        open_key: self.keymap.label(Command::OpenWithDialog),
                     },
                 ) {
                     match action {

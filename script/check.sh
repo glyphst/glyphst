@@ -117,10 +117,12 @@ if [[ ${tier} == screens ]]; then
     step reader-build cargo build --locked -p glyphst-reader
     reader="${repo}/target/debug/glyphst-reader"
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one).
+    # for the second one; a `--screenshot-*` argument picks the kind of
+    # shot instead of a plain one).
     states=(
         "01-gallery --gallery"
         "02a-reader @ --sidebar outline --assistant-demo done"
+        "02b-generating @ --screenshot-generating"
         "02d-find @ --find the"
         "02e-overview @ --command view.page_overview"
         "02f-split @ # --split right"
@@ -140,6 +142,7 @@ if [[ ${tier} == screens ]]; then
         "05-history @ --assistant-demo history"
         "05-edit @ --assistant-demo edit"
         "06a-palette @ --palette tra"
+        "06b-path-prompt @ --command app.open"
         "07a-appearance @ --settings appearance"
         "07-reading @ --settings reading"
         "07-effects @ --settings effects"
@@ -151,15 +154,17 @@ if [[ ${tier} == screens ]]; then
         for state in "${states[@]}"; do
             read -r name rest <<< "${state}"
             args=()
+            shot=--screenshot
             for arg in ${rest}; do
                 case ${arg} in
                     @) args+=("${document}") ;;
                     \#) args+=("${second}") ;;
+                    --screenshot-*) shot=${arg} ;;
                     *) args+=("${arg}") ;;
                 esac
             done
             step "${theme}-${name}" "${reader}" "${args[@]}" --theme "${theme}" \
-                --screenshot "${shots}/${theme}-${name}.png"
+                "${shot}" "${shots}/${theme}-${name}.png"
         done
     done
     finish

@@ -223,9 +223,16 @@ impl ReaderApp {
         })
         .priority(4);
         segments.push(nav);
+        // `p 23 / 623`: the field as wide as its digits, the segment as
+        // wide as the longest page number needs.
         let page_label = format!("/ {pages}");
+        let font = theme::mono(11.0);
+        let digit = glyphst_ui::text::width(ui, "0", &font);
+        let widest = digit * pages.max(1).to_string().len() as f32;
+        let page_width =
+            38.0 + widest + 8.0 + glyphst_ui::text::width(ui, &page_label, &font) + 10.0;
         segments.push(
-            Segment::custom("page", Side::Left, 96.0, move |ui, rect| {
+            Segment::custom("page", Side::Left, page_width, move |ui, rect| {
                 let y = rect.center().y;
                 icons::paint(
                     ui,
@@ -238,23 +245,30 @@ impl ReaderApp {
                     pos2(rect.left() + 28.0, y),
                     Align2::LEFT_CENTER,
                     "p",
-                    theme::mono(11.0),
+                    font.clone(),
                     tokens.muted,
                 );
+                let shown = if page_input.is_empty() {
+                    (current + 1).to_string()
+                } else {
+                    page_input.clone()
+                };
+                let width = glyphst_ui::text::width(ui, &shown, &font).clamp(digit, widest) + 2.0;
                 let field = Rect::from_min_size(
                     pos2(rect.left() + 38.0, rect.top() + 3.0),
-                    vec2(26.0, rect.height() - 6.0),
+                    vec2(width, rect.height() - 6.0),
                 );
                 let response = ui.put(
                     field,
                     egui::TextEdit::singleline(page_input)
-                        .font(theme::mono(11.0))
+                        .font(font.clone())
                         .frame(egui::Frame::NONE)
-                        .horizontal_align(egui::Align::Max)
+                        .margin(egui::Margin::ZERO)
+                        .desired_width(width)
                         .vertical_align(egui::Align::Center)
                         .hint_text(
                             egui::RichText::new((current + 1).to_string())
-                                .font(theme::mono(11.0))
+                                .font(font.clone())
                                 .color(tokens.text),
                         ),
                 );
@@ -275,7 +289,7 @@ impl ReaderApp {
                     pos2(field.right() + 6.0, y),
                     Align2::LEFT_CENTER,
                     page_label,
-                    theme::mono(11.0),
+                    font,
                     tokens.muted,
                 );
             })
