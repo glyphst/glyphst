@@ -34,6 +34,6 @@ overflow. Structural and searchable-text validation reject incomplete output.
 ## Design reference
 
 The implementation is informed by the layout-preserving approach in the
-`references/retain-pdf` submodule. Glyphst Reader keeps its own document model, protected-region
+`references/retain-pdf` clone in the workspace. Glyphst Reader keeps its own document model, protected-region
 policy, translation validation, and application adapter so its viewer workflow and sample-specific
 regressions remain first-class requirements.

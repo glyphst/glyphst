@@ -35,8 +35,8 @@ Without Nix, install the platform packages listed in
 
 Normal builds use the published Git revisions in `Cargo.toml` and `Cargo.lock`;
 no dependency submodule or sibling checkout is required. Nix uses the same Rust
-toolchain file and Cargo lockfile. The read-only repositories in `references/`
-are optional research material, not build inputs.
+toolchain file and Cargo lockfile. The read-only clones in the workspace's
+`../references/` are optional research material, not build inputs.
 
 See [architecture and dependency boundaries](ARCHITECTURE.md) for ownership,
 persistence, cache limits, and the remaining dependency-audit exception.

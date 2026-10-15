@@ -302,10 +302,11 @@ egui_extras and craft-ui move together (craft-ui follows egui's releases),
 and `pdf-gpu` uses egui's wgpu. Exact renderer/compiler/math pins and major
 library upgrades require compatibility work.
 
-`references/` contains shallow upstream reference submodules, including Zed;
-these are not maintained forks or build inputs. To refresh an intended reference,
-use `git submodule update --remote --depth 1 references/<name>` and review its
-gitlink. Preserve copied-source and theme provenance independently of renames.
+The workspace's `../references/` holds read-only clones of upstream projects
+(Highly-Efficient-PDF-Renderer, lucide, retain-pdf, typst, sioyek, zathura,
+niri); they are not maintained forks, submodules or build inputs. To refresh
+one, run `git -C ../references/<name> pull`. Preserve copied-source
+and theme provenance independently of renames.
 
 ## Dependency audit
 

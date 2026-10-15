@@ -28,7 +28,7 @@ pages through `pdf-gpu`), with artcraft's craft-ui components.
   the old file (see the library persistence notes in ARCHITECTURE.md).
 - Normal builds use the published revisions in `Cargo.toml` and `Cargo.lock`
   (see the [dependency policy](ARCHITECTURE.md#dependency-maintenance)).
-  `references/` contains read-only reference submodules.
+  The workspace's `../references/` holds read-only upstream clones.
 - Do not build Nix derivations unless explicitly requested. Do not use cua-driver
   on this Niri development environment.
 
