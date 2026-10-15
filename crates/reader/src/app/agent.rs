@@ -1031,6 +1031,7 @@ mod tests {
         assert!(agent_may_run(Command::NextPage));
         assert!(agent_may_run(Command::ZoomIn));
         assert!(!agent_may_run(Command::Open));
+        assert!(!agent_may_run(Command::OpenWithDialog));
         assert!(!agent_may_run(Command::CloseTab));
         assert!(!agent_may_run(Command::TranslateDocument));
         assert!(!agent_may_run(Command::QuickAsk));

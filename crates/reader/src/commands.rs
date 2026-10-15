@@ -11,7 +11,11 @@ use crate::keys::KeymapPreset;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Command {
+    /// Opens a document by path from the palette, like Zed's in-app path
+    /// prompt.
     Open,
+    /// Opens documents through the system's file dialog.
+    OpenWithDialog,
     CloseTab,
     NextTab,
     PreviousTab,
@@ -134,8 +138,9 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 56] = [
         Self::Open,
+        Self::OpenWithDialog,
         Self::CloseTab,
         Self::NextTab,
         Self::PreviousTab,
@@ -196,6 +201,7 @@ impl Command {
     pub fn id(self) -> &'static str {
         match self {
             Self::Open => "app.open",
+            Self::OpenWithDialog => "app.open_with_dialog",
             Self::CloseTab => "app.close_tab",
             Self::NextTab => "app.next_tab",
             Self::PreviousTab => "app.previous_tab",
@@ -259,7 +265,8 @@ impl Command {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Open => "Open documents…",
+            Self::Open => "Open document…",
+            Self::OpenWithDialog => "Open with system dialog…",
             Self::CloseTab => "Close tab",
             Self::NextTab => "Next tab",
             Self::PreviousTab => "Previous tab",
@@ -320,7 +327,8 @@ impl Command {
     /// Its Lucide icon, shown in the palette, menus and the dock.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Open => "folder-open",
+            Self::Open => "file-search",
+            Self::OpenWithDialog => "folder-open",
             Self::CloseTab => "x",
             Self::NextTab => "chevron-right",
             Self::PreviousTab => "chevron-left",
@@ -377,6 +385,7 @@ impl Command {
     pub fn category(self) -> Category {
         match self {
             Self::Open
+            | Self::OpenWithDialog
             | Self::CloseTab
             | Self::NextTab
             | Self::PreviousTab
@@ -444,6 +453,7 @@ impl Command {
     fn standard_keys(self) -> &'static [&'static str] {
         match self {
             Self::Open => &["Ctrl+O"],
+            Self::OpenWithDialog => &["Ctrl+Shift+O"],
             Self::CloseTab => &["Ctrl+W"],
             Self::NextTab => &["Ctrl+Tab"],
             Self::PreviousTab => &["Ctrl+Shift+Tab"],
@@ -507,6 +517,7 @@ impl Command {
     fn vim_keys(self) -> &'static [&'static str] {
         match self {
             Self::Open => &["O"],
+            Self::OpenWithDialog => &["Shift+O"],
             Self::CloseTab => &["Q"],
             Self::NextTab => &["G T", "Ctrl+Tab"],
             Self::PreviousTab => &["G Shift+T", "Ctrl+Shift+Tab"],
@@ -559,6 +570,7 @@ impl Command {
     pub fn needs(self) -> Needs {
         match self {
             Self::Open
+            | Self::OpenWithDialog
             | Self::NextTab
             | Self::PreviousTab
             | Self::Palette

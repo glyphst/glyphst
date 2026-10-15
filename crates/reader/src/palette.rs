@@ -1,12 +1,21 @@
 //! The command palette (Ctrl+K), after pdfcraft's `palette.rs`: commands
 //! with their keys, open tabs, recent documents, settings sections and
-//! "Go to page N", ranked by a substring-then-subsequence match.
+//! "Go to page N", ranked by a substring-then-subsequence match. Open
+//! document turns it into a path prompt, after Zed's: the field holds a
+//! path and the folders and documents matching it are listed below.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use egui::{Align2, CornerRadius, Key, Rect, Sense, vec2};
+use egui::{
+    Align2, CornerRadius, Key, Rect, Sense,
+    text::{CCursor, CCursorRange},
+    vec2,
+};
 
-use crate::{commands::Command, icons, settings_window::Section, theme::Tokens, widgets};
+use crate::{
+    commands::Command, icons, pickers::is_document, settings_window::Section, theme::Tokens,
+    widgets,
+};
 
 /// Results shown at most.
 const MAX_HITS: usize = 12;
@@ -19,6 +28,8 @@ pub enum Item {
     /// Index into the app's tabs.
     Tab(usize),
     Open(PathBuf),
+    /// A folder in the path prompt: the query that lists it.
+    Browse(String),
     /// A page index (from 0).
     GoToPage(usize),
     Settings(Section),
@@ -162,14 +173,101 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
     ranked.into_iter().map(|(_, _, hit)| hit).collect()
 }
 
+/// The folder `query` names, with `~` and a bare name taken from `home`,
+/// the text naming it (up to its last `/`) and the name typed after it.
+fn split_path<'a>(query: &'a str, home: &Path) -> (PathBuf, &'a str, &'a str) {
+    if query == "~" {
+        return (home.to_path_buf(), "~/", "");
+    }
+    let (folder, name) = query
+        .rfind('/')
+        .map_or(("", query), |slash| (&query[..=slash], &query[slash + 1..]));
+    let path = if let Some(rest) = folder.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        home.join(folder)
+    };
+    (path, folder, name)
+}
+
+/// What a folder holds: each entry's name and whether it is a folder.
+pub type Listing = Vec<(String, bool)>;
+
+/// The path prompt's hits for `query` over its folder's `entries`: the
+/// folders and documents whose names match, best first, folders before
+/// documents that match as well.
+pub fn path_hits(query: &str, home: &Path, entries: &[(String, bool)]) -> Vec<Hit> {
+    let (path, folder, name) = split_path(query, home);
+    let needle = name.to_lowercase();
+    let mut ranked: Vec<(usize, bool, String, Hit)> = entries
+        .iter()
+        .filter(|(entry, is_folder)| {
+            (needle.starts_with('.') || !entry.starts_with('.'))
+                && (*is_folder || is_document(Path::new(entry)))
+        })
+        .filter_map(|(entry, is_folder)| {
+            let found = score(entry, &needle)?;
+            let hit = if *is_folder {
+                Hit {
+                    item: Item::Browse(format!("{folder}{entry}/")),
+                    icon: "folder-open",
+                    label: format!("{entry}/"),
+                    detail: "Folder".into(),
+                    blocked: None,
+                }
+            } else {
+                Hit {
+                    item: Item::Open(path.join(entry)),
+                    icon: "file-text",
+                    label: entry.clone(),
+                    detail: Path::new(entry)
+                        .extension()
+                        .map(|extension| extension.to_string_lossy().to_uppercase())
+                        .unwrap_or_default(),
+                    blocked: None,
+                }
+            };
+            Some((found, !is_folder, entry.to_lowercase(), hit))
+        })
+        .collect();
+    ranked.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+    ranked.truncate(MAX_HITS);
+    ranked.into_iter().map(|(_, _, _, hit)| hit).collect()
+}
+
+/// The query that completes `query` to `hit`: its folder, or its document
+/// in the same folder.
+fn completion(query: &str, home: &Path, hit: &Hit) -> Option<String> {
+    match &hit.item {
+        Item::Browse(next) => Some(next.clone()),
+        Item::Open(path) => {
+            let (_, folder, _) = split_path(query, home);
+            Some(format!("{folder}{}", path.file_name()?.to_string_lossy()))
+        }
+        _ => None,
+    }
+}
+
+/// What the palette lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Commands,
+    /// Open document's path prompt.
+    OpenPath,
+}
+
 #[derive(Default)]
 pub struct Palette {
     pub open: bool,
     pub query: String,
+    pub mode: Mode,
     highlight: usize,
     used: Vec<Command>,
     /// Where it was drawn last frame, to close on a click outside.
     rect: Option<Rect>,
+    /// The path prompt's folder as last read, or `None` if it can't be.
+    listing: Option<(PathBuf, Option<Listing>)>,
 }
 
 impl Palette {
@@ -182,10 +280,64 @@ impl Palette {
         }
     }
 
+    /// Opens the path prompt at `start`, a folder ending in `/`.
+    pub fn open_path(&mut self, ctx: &egui::Context, start: String) {
+        self.open = true;
+        self.mode = Mode::OpenPath;
+        self.highlight = 0;
+        self.set_query(ctx, start);
+    }
+
     pub fn close(&mut self) {
         self.open = false;
+        self.mode = Mode::Commands;
         self.query.clear();
         self.rect = None;
+        self.listing = None;
+    }
+
+    /// Replaces the query, with the caret after it.
+    fn set_query(&mut self, ctx: &egui::Context, query: String) {
+        let end = query.chars().count();
+        self.query = query;
+        self.highlight = 0;
+        if let Some(mut state) = egui::TextEdit::load_state(ctx, field_id()) {
+            state
+                .cursor
+                .set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+            state.store(ctx, field_id());
+        }
+    }
+
+    /// The path prompt's hits, reading the query's folder when it changed.
+    pub fn path_hits(&mut self, home: &Path) -> Vec<Hit> {
+        let (folder, _, _) = split_path(&self.query, home);
+        if self
+            .listing
+            .as_ref()
+            .is_none_or(|(read, _)| *read != folder)
+        {
+            let entries = std::fs::read_dir(&folder).ok().map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        (name, entry.path().is_dir())
+                    })
+                    .collect()
+            });
+            self.listing = Some((folder, entries));
+        }
+        match &self.listing {
+            Some((_, Some(entries))) => path_hits(&self.query, home, entries),
+            _ => vec![Hit {
+                item: Item::Browse(self.query.clone()),
+                icon: "folder-open",
+                label: split_path(&self.query, home).0.display().to_string(),
+                detail: String::new(),
+                blocked: Some("Can't read this folder"),
+            }],
+        }
     }
 
     pub fn used(&self) -> &[Command] {
@@ -193,12 +345,13 @@ impl Palette {
     }
 
     /// Draws the palette over `hits`; returns the item chosen.
-    pub fn show(&mut self, ctx: &egui::Context, hits: &[Hit]) -> Option<Item> {
+    pub fn show(&mut self, ctx: &egui::Context, hits: &[Hit], home: &Path) -> Option<Item> {
         if !self.open {
             return None;
         }
         let tokens = Tokens::get(ctx);
-        let (escape, up, down, outside) = ctx.input_mut(|input| {
+        let path_mode = self.mode == Mode::OpenPath;
+        let (escape, up, down, tab, outside) = ctx.input_mut(|input| {
             let outside = input.pointer.button_pressed(egui::PointerButton::Primary)
                 && input
                     .pointer
@@ -208,6 +361,7 @@ impl Palette {
                 input.consume_key(egui::Modifiers::NONE, Key::Escape),
                 input.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
                 input.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                path_mode && input.consume_key(egui::Modifiers::NONE, Key::Tab),
                 outside,
             )
         });
@@ -222,6 +376,14 @@ impl Palette {
             self.highlight = self.highlight.saturating_sub(1);
         }
         self.highlight = self.highlight.min(hits.len().saturating_sub(1));
+        if tab
+            && let Some(query) = hits
+                .get(self.highlight)
+                .and_then(|hit| completion(&self.query, home, hit))
+        {
+            self.set_query(ctx, query);
+            ctx.request_repaint();
+        }
         let screen = ctx.content_rect();
         let mut chosen = None;
         let previous_query = self.query.clone();
@@ -238,10 +400,19 @@ impl Palette {
                         ui.set_width((screen.width() - 32.0).clamp(240.0, 600.0));
                         let field_row = ui.horizontal(|ui| {
                             ui.add_space(6.0);
-                            ui.add(icons::image("search", 16.0, tokens.text_muted));
+                            let (icon, hint) = if path_mode {
+                                ("folder-open", "Type a path to a document…")
+                            } else {
+                                ("search", "Type a command, a page number or a document…")
+                            };
+                            ui.add(icons::image(icon, 16.0, tokens.text_muted));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
-                                    .hint_text("Type a command, a page number or a document…")
+                                    .id(field_id())
+                                    .hint_text(hint)
+                                    // Tab completes a path instead of
+                                    // moving the focus.
+                                    .lock_focus(true)
                                     .font(crate::theme::regular(15.0))
                                     .frame(egui::Frame::NONE)
                                     .margin(egui::Margin::symmetric(4, 8))
@@ -360,9 +531,12 @@ impl Palette {
                         }
                         if hits.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("Nothing matches").color(tokens.text_muted),
-                            );
+                            let empty = if path_mode {
+                                "No documents or folders match"
+                            } else {
+                                "Nothing matches"
+                            };
+                            ui.label(egui::RichText::new(empty).color(tokens.text_muted));
                             ui.add_space(4.0);
                         }
                     });
@@ -370,6 +544,12 @@ impl Palette {
         self.rect = Some(response.response.rect);
         if self.query != previous_query {
             self.highlight = 0;
+        }
+        // A folder lists its contents instead of closing the prompt.
+        if let Some(Item::Browse(query)) = chosen {
+            self.set_query(ctx, query);
+            ctx.request_repaint();
+            return None;
         }
         if let Some(Item::Command(command)) = &chosen {
             self.used.retain(|used| used != command);
@@ -381,6 +561,11 @@ impl Palette {
         }
         chosen
     }
+}
+
+/// The query field's id, to move its caret after replacing the query.
+fn field_id() -> egui::Id {
+    egui::Id::new("command-palette-field")
 }
 
 #[cfg(test)]
@@ -458,6 +643,145 @@ mod tests {
         );
     }
 
+    fn entries() -> Listing {
+        [
+            ("Papers", true),
+            ("papers.pdf", false),
+            ("notes.txt", false),
+            ("Novel.epub", false),
+            (".cache", true),
+            ("pictures", true),
+        ]
+        .into_iter()
+        .map(|(name, folder)| (name.to_string(), folder))
+        .collect()
+    }
+
+    fn labels(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|hit| hit.label.as_str()).collect()
+    }
+
+    #[test]
+    fn the_path_prompt_lists_folders_and_documents() {
+        let home = Path::new("/home/reader");
+        // Only folders and documents, without hidden ones.
+        let found = path_hits("~/", home, &entries());
+        assert_eq!(
+            labels(&found),
+            ["Papers/", "pictures/", "Novel.epub", "papers.pdf"]
+        );
+        assert_eq!(found[0].item, Item::Browse("~/Papers/".into()));
+        assert_eq!(
+            found[3].item,
+            Item::Open(PathBuf::from("/home/reader/papers.pdf"))
+        );
+        assert_eq!(found[3].detail, "PDF");
+        // Folders come before documents that match as well.
+        assert_eq!(
+            labels(&path_hits("/books/pap", home, &entries())),
+            ["Papers/", "papers.pdf"]
+        );
+        assert_eq!(
+            path_hits("/books/pap", home, &entries())[1].item,
+            Item::Open(PathBuf::from("/books/papers.pdf"))
+        );
+        // A subsequence matches; a dot shows hidden folders.
+        assert_eq!(
+            labels(&path_hits("~/nvl", home, &entries())),
+            ["Novel.epub"]
+        );
+        assert_eq!(labels(&path_hits("~/.c", home, &entries())), [".cache/"]);
+    }
+
+    #[test]
+    fn paths_resolve_from_home() {
+        let home = Path::new("/home/reader");
+        assert_eq!(
+            split_path("~/Books/war", home),
+            (PathBuf::from("/home/reader/Books/"), "~/Books/", "war")
+        );
+        assert_eq!(
+            split_path("~", home),
+            (PathBuf::from("/home/reader"), "~/", "")
+        );
+        assert_eq!(split_path("/tmp/a", home).0, PathBuf::from("/tmp/"));
+        assert_eq!(split_path("war", home).0, PathBuf::from("/home/reader"));
+        // Tab completes a folder with its slash and a document in place.
+        let found = path_hits("~/Books/pa", home, &entries());
+        assert_eq!(
+            completion("~/Books/pa", home, &found[0]).as_deref(),
+            Some("~/Books/Papers/")
+        );
+        assert_eq!(
+            completion("~/Books/pa", home, &found[1]).as_deref(),
+            Some("~/Books/papers.pdf")
+        );
+    }
+
+    /// One frame of the palette over `hits` with `events`.
+    fn frame(
+        ctx: &egui::Context,
+        palette: &mut Palette,
+        hits: &[Hit],
+        events: Vec<egui::Event>,
+    ) -> Option<Item> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 700.0))),
+            events,
+            ..Default::default()
+        };
+        let mut chosen = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            chosen = palette.show(ui.ctx(), hits, Path::new("/home/reader"));
+        });
+        output.textures_delta.clear();
+        chosen
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_folder_opens_in_the_prompt_and_a_document_closes_it() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut palette = Palette::default();
+        palette.open_path(&ctx, "~/".into());
+        let hits = path_hits("~/", Path::new("/home/reader"), &entries());
+        for _ in 0..2 {
+            frame(&ctx, &mut palette, &hits, Vec::new());
+        }
+        // Enter on a folder lists it instead of closing.
+        assert_eq!(
+            frame(&ctx, &mut palette, &hits, vec![key(Key::Enter)]),
+            None
+        );
+        assert!(palette.open);
+        assert_eq!(palette.query, "~/Papers/");
+        // Tab completes the highlighted hit.
+        palette.set_query(&ctx, "~/".into());
+        frame(&ctx, &mut palette, &hits, vec![key(Key::ArrowDown)]);
+        frame(&ctx, &mut palette, &hits, vec![key(Key::Tab)]);
+        assert_eq!(palette.query, "~/pictures/");
+        assert_eq!(palette.mode, Mode::OpenPath);
+        // Enter on a document opens it and closes the prompt.
+        let documents = &hits[2..];
+        for _ in 0..2 {
+            frame(&ctx, &mut palette, documents, Vec::new());
+        }
+        let chosen = frame(&ctx, &mut palette, documents, vec![key(Key::Enter)]);
+        assert_eq!(chosen, Some(documents[0].item.clone()));
+        assert!(!palette.open);
+        assert_eq!(palette.mode, Mode::Commands);
+    }
+
     /// One frame of the palette with `events`; returns the IME output.
     fn ime_frame(
         ctx: &egui::Context,
@@ -470,7 +794,7 @@ mod tests {
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
-            palette.show(ui.ctx(), &[]);
+            palette.show(ui.ctx(), &[], Path::new("/home/reader"));
         });
         output.textures_delta.clear();
         output.platform_output.ime

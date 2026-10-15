@@ -1772,6 +1772,11 @@ impl ReaderApp {
         let view = |action| Some(action);
         let action = match command {
             Command::Open => {
+                let start = self.open_start();
+                self.palette.open_path(ctx, start);
+                None
+            }
+            Command::OpenWithDialog => {
                 self.pickers.open_documents(ctx);
                 None
             }
@@ -2053,29 +2058,19 @@ impl ReaderApp {
     /// The palette and the settings window, drawn over everything.
     fn overlays(&mut self, ctx: &egui::Context) {
         if self.palette.open {
-            let sources = palette::Sources {
-                commands: Command::ALL
-                    .into_iter()
-                    .map(|command| {
-                        (
-                            command,
-                            self.keymap.label(command),
-                            self.command_blocked(command),
-                        )
-                    })
-                    .collect(),
-                tabs: self.tabs.iter().map(|tab| tab.title.clone()).collect(),
-                recent: self.recent_documents(),
-                pages: self.active.map(|active| self.tabs[active].layout.len()),
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let hits = if self.palette.mode == palette::Mode::OpenPath {
+                self.palette.path_hits(&home)
+            } else {
+                self.palette_hits()
             };
-            let hits = palette::hits(&self.palette.query, &sources, self.palette.used());
-            match self.palette.show(ctx, &hits) {
+            match self.palette.show(ctx, &hits, &home) {
                 Some(Item::Command(command)) => self.run_or_notify(command, ctx),
                 Some(Item::Tab(index)) => self.activate(Some(index)),
                 Some(Item::Open(path)) => self.open(&path, ctx, None),
                 Some(Item::GoToPage(page)) => self.pending_actions.push(ViewAction::GoToPage(page)),
                 Some(Item::Settings(section)) => self.settings_window.show_section(section),
-                None => {}
+                Some(Item::Browse(_)) | None => {}
             }
         }
         if self.settings_window.open {
@@ -2105,6 +2100,59 @@ impl ReaderApp {
         }
         if let Some(path) = self.pickers.take_image() {
             self.prefs.wallpaper = Some(path.display().to_string());
+        }
+    }
+
+    /// The command palette's hits for its query.
+    fn palette_hits(&self) -> Vec<palette::Hit> {
+        let sources = palette::Sources {
+            commands: Command::ALL
+                .into_iter()
+                .map(|command| {
+                    (
+                        command,
+                        self.keymap.label(command),
+                        self.command_blocked(command),
+                    )
+                })
+                .collect(),
+            tabs: self.tabs.iter().map(|tab| tab.title.clone()).collect(),
+            recent: self.recent_documents(),
+            pages: self.active.map(|active| self.tabs[active].layout.len()),
+        };
+        palette::hits(&self.palette.query, &sources, self.palette.used())
+    }
+
+    /// Where Open document starts: the active document's folder, else the
+    /// latest recent document's, else home; `~` for home, ending in `/`.
+    fn open_start(&self) -> String {
+        let home = dirs::home_dir();
+        let folder = self
+            .active
+            .map(|active| self.tabs[active].path.clone())
+            .into_iter()
+            .chain(self.recent_documents())
+            .find_map(|path| {
+                path.parent()
+                    .filter(|folder| folder.is_dir())
+                    .map(Path::to_path_buf)
+            })
+            .or_else(|| home.clone());
+        let Some(folder) = folder else {
+            return "/".into();
+        };
+        let text = match home
+            .as_deref()
+            .and_then(|home| folder.strip_prefix(home).ok())
+        {
+            Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Some(rest) => format!("~/{}", rest.display()),
+            None => folder.display().to_string(),
+        };
+        if text.ends_with('/') {
+            text
+        } else {
+            format!("{text}/")
         }
     }
 
@@ -2339,7 +2387,9 @@ impl ReaderApp {
                     }
                 });
             }
-            let tip = self.keymap.tip("Open documents", Command::Open);
+            let tip = self
+                .keymap
+                .tip("Open with system dialog", Command::OpenWithDialog);
             if ui
                 .add_enabled_ui(!self.pickers.is_showing(), |ui| {
                     icons::button(ui, "plus", 28.0, false, &tip)
@@ -2347,7 +2397,7 @@ impl ReaderApp {
                 .inner
                 .clicked()
             {
-                run = Some(Command::Open);
+                run = Some(Command::OpenWithDialog);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let response = icons::button(ui, "ellipsis", 28.0, false, "Menu");
@@ -2515,11 +2565,12 @@ impl ReaderApp {
         let mut run = None;
         for command in [
             Command::Open,
+            Command::OpenWithDialog,
             Command::Palette,
             Command::Settings,
             Command::KeyboardShortcuts,
         ] {
-            let enabled = command != Command::Open || !self.pickers.is_showing();
+            let enabled = command != Command::OpenWithDialog || !self.pickers.is_showing();
             if ui
                 .add_enabled(enabled, self.menu_button(ui, command.label(), command))
                 .clicked()
