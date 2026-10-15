@@ -98,14 +98,8 @@ impl QuickAsk {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(fill)
-                    .stroke(egui::Stroke::new(1.0, tokens.rule_strong))
-                    .corner_radius(14)
-                    .shadow(egui::Shadow {
-                        offset: [0, 6],
-                        blur: 24,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(40),
-                    })
+                    .stroke(tokens.edge())
+                    .corner_radius(tokens.pop_radius())
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(width);
@@ -123,18 +117,26 @@ impl QuickAsk {
         tokens: &Tokens,
     ) -> Option<Action> {
         let mut action = None;
+        // The selection as a context chip, then the question.
         ui.horizontal(|ui| {
-            ui.add(crate::icons::image("sparkles", 15.0, tokens.accent));
-            ui.label(egui::RichText::new("Ask").font(crate::theme::semibold(14.0)));
-            if let Some(selection) = selection {
-                ui.label(
-                    egui::RichText::new(format!("· {}", short(selection, 56)))
-                        .small()
-                        .color(tokens.muted),
-                );
+            ui.spacing_mut().item_spacing.x = 8.0;
+            match selection {
+                Some(selection) => {
+                    let label = format!("@{}", short(selection, 24).to_lowercase());
+                    glyphst_ui::badge::Chip::new(&label)
+                        .icon("text-cursor")
+                        .show(ui);
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new("ask")
+                            .font(crate::theme::mono(11.0))
+                            .color(tokens.text_2),
+                    );
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::icons::button(ui, "x", 24.0, false, "Close (Esc)").clicked() {
+                if crate::icons::button(ui, "x", 22.0, false, "close (esc)").clicked() {
                     action = Some(Action::Close);
                 }
             });
@@ -150,7 +152,7 @@ impl QuickAsk {
             .show(
                 ui,
                 &EditorStyle {
-                    hint: "Ask about this page",
+                    hint: "ask about this page",
                     rows: 1,
                     max_height: 160.0,
                     font,
@@ -171,12 +173,18 @@ impl QuickAsk {
         let running = self.assistant.is_running();
         let answer = self.assistant.latest_answer();
         if running || answer.is_some() || self.assistant.error.is_some() {
-            ui.separator();
+            let line = ui.available_rect_before_wrap();
+            ui.painter()
+                .hline(line.x_range(), line.top() + 3.0, tokens.hairline());
+            ui.add_space(8.0);
             egui::ScrollArea::vertical()
                 .max_height(ANSWER_HEIGHT)
                 .auto_shrink([false, true])
                 .show(ui, |ui| match &answer {
                     Some(answer) if !answer.is_empty() => {
+                        ui.style_mut()
+                            .text_styles
+                            .insert(egui::TextStyle::Body, crate::theme::regular(14.0));
                         egui_commonmark::CommonMarkViewer::new().show(
                             ui,
                             &mut self.markdown,
@@ -185,22 +193,48 @@ impl QuickAsk {
                     }
                     _ if running => {
                         ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(egui::RichText::new("Thinking…").color(tokens.muted));
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(24.0, 14.0), egui::Sense::hover());
+                            crate::widgets::loading_dots(ui, rect, tokens.accent);
+                            ui.label(
+                                egui::RichText::new("thinking")
+                                    .font(crate::theme::mono(11.0))
+                                    .color(tokens.muted),
+                            );
                         });
                     }
                     _ => {}
                 });
             if let Some(error) = &self.assistant.error {
-                ui.label(egui::RichText::new(error).color(tokens.err));
+                ui.label(
+                    egui::RichText::new(error)
+                        .font(crate::theme::mono(11.0))
+                        .color(tokens.err),
+                );
             }
-            if !running && answer.is_some() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::widgets::ghost_button(ui, "message-square", "Continue in assistant")
+            if !running && let Some(answer) = &answer {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if ui
+                        .add(glyphst_ui::button::Button::bracket("continue in assistant"))
                         .clicked()
                     {
                         action = Some(Action::Continue);
                     }
+                    if ui
+                        .add(glyphst_ui::button::Button::bracket_muted("copy"))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(answer.clone());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("esc")
+                                .font(crate::theme::mono(10.0))
+                                .color(tokens.faint),
+                        );
+                    });
                 });
             }
         }

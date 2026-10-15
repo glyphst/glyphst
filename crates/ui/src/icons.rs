@@ -76,9 +76,5 @@ pub fn button(ui: &mut egui::Ui, name: &str, size: f32, selected: bool, tooltip:
         .show(ui, |ui, rect, tint| {
             paint(ui, rect, name, (size * 0.55).round(), tint);
         });
-    if tooltip.is_empty() {
-        response
-    } else {
-        response.on_hover_text(tooltip)
-    }
+    crate::overlay::tooltip(response, tooltip, None)
 }

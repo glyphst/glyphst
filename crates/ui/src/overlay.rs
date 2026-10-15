@@ -186,44 +186,54 @@ impl Toasts {
 }
 
 /// The keys of a sequence typed so far (`g`), with a block cursor, on an
-/// accent-edged chip centred at the bottom `lift` points up.
-pub fn pending_keys(ctx: &egui::Context, keys: &str, lift: f32) {
+/// accent-edged chip whose bottom left is at `at`; `hints` (what can
+/// follow: `gg top · gt tab`) follow it in faint mono.
+pub fn pending_keys(ctx: &egui::Context, keys: &str, hints: &str, at: egui::Pos2) {
     let t = Tokens::get(ctx);
-    let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("pending-keys"))
         .order(egui::Order::Tooltip)
         .interactable(false)
-        .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(screen.center_bottom() - vec2(0.0, lift))
+        .pivot(Align2::LEFT_BOTTOM)
+        .fixed_pos(at)
         .show(ctx, |ui| {
-            let font = theme::mono(12.0);
-            let width = text::width(ui, keys, &font) + 4.0 + 7.0 + 16.0;
-            let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
-            ui.painter().rect(
-                rect,
-                t.ctl_radius(),
-                t.raised,
-                egui::Stroke::new(1.0, t.accent),
-                StrokeKind::Inside,
-            );
-            let galley = ui.painter().layout_no_wrap(keys.to_owned(), font, t.text);
-            let text_width = galley.size().x;
-            ui.painter().galley(
-                egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0),
-                galley,
-                t.text,
-            );
-            let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-            if blink {
-                ui.painter().rect_filled(
-                    Rect::from_center_size(
-                        egui::pos2(rect.left() + 8.0 + text_width + 4.0 + 3.5, rect.center().y),
-                        vec2(7.0, 14.0),
-                    ),
-                    0,
-                    t.accent,
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let font = theme::mono(12.0);
+                let width = text::width(ui, keys, &font) + 4.0 + 7.0 + 16.0;
+                let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
+                ui.painter().rect(
+                    rect,
+                    t.ctl_radius(),
+                    t.raised,
+                    egui::Stroke::new(1.0, t.accent),
+                    StrokeKind::Inside,
                 );
-            }
+                let galley = ui.painter().layout_no_wrap(keys.to_owned(), font, t.text);
+                let text_width = galley.size().x;
+                ui.painter().galley(
+                    egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    t.text,
+                );
+                let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
+                if blink {
+                    ui.painter().rect_filled(
+                        Rect::from_center_size(
+                            egui::pos2(rect.left() + 8.0 + text_width + 4.0 + 3.5, rect.center().y),
+                            vec2(7.0, 14.0),
+                        ),
+                        0,
+                        t.accent,
+                    );
+                }
+                if !hints.is_empty() {
+                    ui.label(
+                        egui::RichText::new(hints)
+                            .font(theme::mono(10.0))
+                            .color(t.faint),
+                    );
+                }
+            });
             ui.ctx().request_repaint_after(Duration::from_millis(500));
         });
 }

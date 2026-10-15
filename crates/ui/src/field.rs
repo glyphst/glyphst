@@ -188,9 +188,8 @@ impl<'a> TextField<'a> {
             );
         }
         for (toggle, cell) in self.toggles.into_iter().zip(toggle_rects) {
-            let hit = ui
-                .interact(cell, response.id.with(toggle.label), Sense::click())
-                .on_hover_text(toggle.tooltip);
+            let hit = ui.interact(cell, response.id.with(toggle.label), Sense::click());
+            let hit = crate::overlay::tooltip(hit, toggle.tooltip, None);
             if hit.clicked() {
                 *toggle.on = !*toggle.on;
             }

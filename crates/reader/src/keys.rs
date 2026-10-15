@@ -311,6 +311,36 @@ enum Step {
 }
 
 impl Keymap {
+    /// The bindings `pending` starts, as the pending-keys chip lists them:
+    /// `gg top`, `gt tab`. Single unmodified keys run together, as vim
+    /// writes them.
+    pub fn continuations(&self, pending: &Pending) -> Vec<(String, Command)> {
+        if pending.keys.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<(String, Command)> = self
+            .bindings
+            .iter()
+            .filter(|(keys, _)| {
+                keys.0.len() > pending.keys.len() && keys.0.starts_with(&pending.keys)
+            })
+            .map(|(keys, command)| {
+                let plain = keys.0.iter().all(|stroke| !stroke.ctrl && !stroke.alt);
+                let label = if plain {
+                    keys.0
+                        .iter()
+                        .map(|&stroke| stroke.label().to_lowercase())
+                        .collect::<String>()
+                } else {
+                    keys.label().to_lowercase()
+                };
+                (label, *command)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
     pub fn new(preset: KeymapPreset, overrides: &Overrides) -> Self {
         let chosen: HashMap<Command, Vec<Keys>> = overrides
             .iter()
@@ -910,6 +940,21 @@ mod tests {
             ),
             [Command::PreviousTab]
         );
+    }
+
+    #[test]
+    fn a_pending_key_lists_what_can_follow_it() {
+        let keymap = vim();
+        let mut pending = Pending::default();
+        assert!(keymap.continuations(&pending).is_empty());
+        assert!(sequence(&keymap, "G", &mut pending).is_empty());
+        let next = keymap.continuations(&pending);
+        assert!(
+            next.iter()
+                .any(|(keys, command)| keys == "gg" && *command == Command::FirstPage),
+            "{next:?}"
+        );
+        assert!(next.iter().all(|(keys, _)| keys.starts_with('g')));
     }
 
     #[test]

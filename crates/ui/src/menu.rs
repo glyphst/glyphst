@@ -68,7 +68,9 @@ impl<'a> Item<'a> {
         let natural = 8.0
             + if self.icon.is_some() { 21.0 } else { 0.0 }
             + text::width(ui, self.label, &font)
-            + self.key.map_or(0.0, |key| key::size(ui, key).x + 16.0)
+            + self
+                .key
+                .map_or(0.0, |key| key::size(ui, &key::display(key)).x + 16.0)
             + if self.checked.is_some() { 22.0 } else { 0.0 }
             + 8.0;
         let width = self
@@ -121,17 +123,32 @@ impl<'a> Item<'a> {
             right -= 22.0;
         }
         if let Some(key) = self.key {
+            let key = key::display(key);
             ui.painter().text(
                 egui::pos2(right, y),
                 egui::Align2::RIGHT_CENTER,
-                key,
+                &key,
                 theme::mono(10.0),
                 t.faint,
             );
-            right -= text::width(ui, key, &theme::mono(10.0)) + 12.0;
+            right -= text::width(ui, &key, &theme::mono(10.0)) + 12.0;
         }
-        text::row(ui, egui::pos2(x, y), self.label, font, color, right - x);
+        // Menus write their entries in lower case, as the design does.
+        text::row(
+            ui,
+            egui::pos2(x, y),
+            self.label.to_lowercase(),
+            font,
+            color,
+            right - x,
+        );
         response
+    }
+}
+
+impl egui::Widget for Item<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        self.show(ui)
     }
 }
 

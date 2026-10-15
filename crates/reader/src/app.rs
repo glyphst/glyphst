@@ -16,6 +16,7 @@ use glyphst_core::{
 use glyphst_effects::EffectDef;
 use glyphst_library::{DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
+use glyphst_ui::Tip;
 
 use crate::{
     ai::{AskContext, Assistant, PanelAction},
@@ -276,6 +277,8 @@ pub struct ReaderApp {
     chrome: chrome::StageChrome,
     /// Present mode was on last frame (to say how to leave it).
     was_presenting: bool,
+    /// The highlight the toast's `[ undo ]` removes.
+    undo_highlight: Option<AnnotationId>,
     /// When the current presentation started, for its clock.
     present_started: Option<Instant>,
     /// The user's effects folder, what it held when last loaded, and when
@@ -437,6 +440,7 @@ impl ReaderApp {
             pending_actions: Vec::new(),
             chrome: Default::default(),
             was_presenting: false,
+            undo_highlight: None,
             present_started: None,
             effects_dir: user_effects,
             effects_stamp,
@@ -892,6 +896,14 @@ impl ReaderApp {
                         color,
                         fresh: true,
                     });
+                } else {
+                    // `highlight saved [ undo ]` (frame 06c).
+                    self.notices.push_with(
+                        "highlight saved",
+                        glyphst_ui::overlay::Tone::Ok,
+                        Some("undo"),
+                    );
+                    self.undo_highlight = Some(id);
                 }
             }
             Err(error) => self.notices.push(format!("Could not save: {error:#}")),
@@ -2172,13 +2184,23 @@ impl ReaderApp {
     }
 
     /// A menu entry for `command`: its icon, `text` and its keys.
-    fn menu_button(&self, ui: &egui::Ui, text: &str, command: Command) -> egui::Button<'static> {
-        menu_entry(
-            ui,
+    fn menu_button(
+        &self,
+        _ui: &egui::Ui,
+        text: &str,
+        command: Command,
+    ) -> impl egui::Widget + use<> {
+        let (text, key, icon) = (
+            text.to_owned(),
+            self.keymap.label(command).unwrap_or_default(),
             command.icon(),
-            text,
-            &self.keymap.label(command).unwrap_or_default(),
-        )
+        );
+        move |ui: &mut egui::Ui| {
+            glyphst_ui::menu::Item::new(&text)
+                .icon(icon)
+                .key(key.as_str())
+                .show(ui)
+        }
     }
 
     /// The palette and the settings window, drawn over everything.
@@ -2393,7 +2415,7 @@ impl ReaderApp {
                 ui.close();
             }
         }
-        ui.separator();
+        glyphst_ui::menu::separator(ui);
         let sidebar = self
             .keymap
             .label(Command::ToggleSidebar)
@@ -2888,7 +2910,10 @@ impl ReaderApp {
             self.context_page = click.map(|(map, _)| map.page);
         }
         let menu_at = response.interact_pointer_pos().unwrap_or(rect.center());
-        response.context_menu(|ui| self.context_menu(ui, ctx, active, menu_at, actions));
+        response.context_menu(|ui| {
+            glyphst_ui::menu::style(ui);
+            self.context_menu(ui, ctx, active, menu_at, actions)
+        });
         autoscroll
     }
 
@@ -2930,18 +2955,22 @@ impl ReaderApp {
             }
         }
         if let Some(text) = selected.as_ref().filter(|_| !translated) {
-            ui.separator();
-            ui.label(egui::RichText::new("Highlight").color(Tokens::get(ctx).faint));
+            glyphst_ui::menu::separator(ui);
+            glyphst_ui::menu::group(ui, "highlight");
             ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
                 for color in HighlightColor::ALL {
                     let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                    let swatch = if response.hovered() {
+                        rect.shrink(1.0)
+                    } else {
+                        rect.shrink(3.0)
+                    };
                     ui.painter()
-                        .circle_filled(rect.center(), 8.0, annotations::color(color));
-                    if response
-                        .on_hover_text(annotations::color_name(color))
-                        .clicked()
-                    {
+                        .rect_filled(swatch, 1, annotations::color(color));
+                    if response.tip(annotations::color_name(color)).clicked() {
                         self.annotate_selection(color, false, at);
                         ui.close();
                     }
@@ -2965,7 +2994,7 @@ impl ReaderApp {
                 tab.find.query = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 ui.close();
             }
-            ui.separator();
+            glyphst_ui::menu::separator(ui);
         }
         if let Some(page) = self.context_page
             && ui
@@ -3394,7 +3423,11 @@ impl eframe::App for ReaderApp {
         } else {
             glyphst_ui::status::HEIGHT + 16.0
         };
-        self.notices.show(&ctx, lift);
+        if self.notices.show(&ctx, lift).as_deref() == Some("undo")
+            && let Some(id) = self.undo_highlight.take()
+        {
+            self.remove_annotation(id);
+        }
         self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();
         self.run_harness(&ctx, pages_drawn && wallpaper_ready, now);
@@ -3551,10 +3584,13 @@ impl ReaderApp {
 }
 
 /// A menu entry with an icon, a label and a key at the right.
-fn menu_entry(ui: &egui::Ui, icon: &str, text: &str, key: &str) -> egui::Button<'static> {
-    let tokens = Tokens::get(ui.ctx());
-    egui::Button::image_and_text(icons::image(icon, 15.0, tokens.text_2), text.to_string())
-        .shortcut_text(egui::RichText::new(key.to_string()).color(tokens.faint))
+fn menu_entry<'a>(
+    _ui: &egui::Ui,
+    icon: &'a str,
+    text: &'a str,
+    key: &'a str,
+) -> glyphst_ui::menu::Item<'a> {
+    glyphst_ui::menu::Item::new(text).icon(icon).key(key)
 }
 
 /// What a tab's context menu does.
@@ -3591,7 +3627,7 @@ fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) 
         "Close tabs to the right",
         TabMenu::CloseToTheRight,
     );
-    ui.separator();
+    glyphst_ui::menu::separator(ui);
     if !shown {
         entry(
             ui,
@@ -3609,7 +3645,7 @@ fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) 
         );
     }
     entry(ui, true, "refresh-cw", "Reload", TabMenu::Reload);
-    ui.separator();
+    glyphst_ui::menu::separator(ui);
     entry(ui, true, "copy", "Copy path", TabMenu::CopyPath);
     entry(
         ui,

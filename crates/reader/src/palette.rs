@@ -7,13 +7,17 @@
 use std::path::{Path, PathBuf};
 
 use egui::{
-    Align2, CornerRadius, Key, Rect, Sense,
+    Align2, Key, Rect, Sense,
     text::{CCursor, CCursorRange},
     vec2,
 };
 
 use crate::{
-    commands::Command, icons, pickers::is_document, settings_window::Section, theme::Tokens,
+    commands::Command,
+    icons,
+    pickers::is_document,
+    settings_window::Section,
+    theme::{self, Tokens},
     widgets,
 };
 
@@ -170,7 +174,23 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
     }
     ranked.sort_by_key(|(score, kind, hit)| (*score, hit.blocked.is_some(), *kind));
     ranked.truncate(MAX_HITS);
-    ranked.into_iter().map(|(_, _, hit)| hit).collect()
+    let hits: Vec<Hit> = ranked.into_iter().map(|(_, _, hit)| hit).collect();
+    grouped(hits)
+}
+
+/// `hits` with each kind together under one title, the kinds in the order
+/// of their best hit and the hits of a kind in their own order.
+fn grouped(hits: Vec<Hit>) -> Vec<Hit> {
+    let mut order: Vec<&'static str> = Vec::new();
+    for hit in &hits {
+        let group = group_of(&hit.item);
+        if !order.contains(&group) {
+            order.push(group);
+        }
+    }
+    let mut hits = hits;
+    hits.sort_by_key(|hit| order.iter().position(|group| *group == group_of(&hit.item)));
+    hits
 }
 
 /// The folder `query` names, with `~` and a bare name taken from `home`,
@@ -387,37 +407,56 @@ impl Palette {
         let screen = ctx.content_rect();
         let mut chosen = None;
         let previous_query = self.query.clone();
+        // The window dims behind the palette (frame 06a).
+        glyphst_ui::overlay::scrim(ctx, "command-palette-scrim");
         let response = egui::Area::new(egui::Id::new("command-palette"))
             .order(egui::Order::Foreground)
             .pivot(Align2::CENTER_TOP)
             .fixed_pos(egui::pos2(screen.center().x, screen.top() + 72.0))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .fill(tokens.raised)
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(egui::Margin::same(8))
+                glyphst_ui::pane::popover(ctx)
+                    .inner_margin(egui::Margin::ZERO)
                     .show(ui, |ui| {
                         ui.set_width((screen.width() - 32.0).clamp(240.0, 600.0));
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         let field_row = ui.horizontal(|ui| {
-                            ui.add_space(6.0);
-                            let (icon, hint) = if path_mode {
-                                ("folder-open", "Type a path to a document…")
+                            ui.set_min_height(44.0);
+                            ui.add_space(14.0);
+                            let (prompt, hint) = if path_mode {
+                                ("~", "type a path to a document…")
                             } else {
-                                ("search", "Type a command, a page number or a document…")
+                                (">", "type a command, a page number or a document…")
                             };
-                            ui.add(icons::image(icon, 16.0, tokens.muted));
-                            ui.add(
+                            ui.label(
+                                egui::RichText::new(prompt)
+                                    .font(theme::mono(14.0))
+                                    .color(tokens.accent),
+                            );
+                            let count = if hits.len() == 1 {
+                                "1 result".to_owned()
+                            } else {
+                                format!("{} results", hits.len())
+                            };
+                            let count_width =
+                                glyphst_ui::text::width(ui, &count, &theme::mono(10.0)) + 28.0;
+                            let field = ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
                                     .id(field_id())
-                                    .hint_text(hint)
+                                    .hint_text(egui::RichText::new(hint).color(tokens.faint))
                                     // Tab completes a path instead of
                                     // moving the focus.
                                     .lock_focus(true)
-                                    .font(crate::theme::regular(15.0))
+                                    .font(theme::mono(14.0))
                                     .frame(egui::Frame::NONE)
                                     .margin(egui::Margin::symmetric(4, 8))
-                                    .desired_width(f32::INFINITY),
-                            )
+                                    .desired_width((ui.available_width() - count_width).max(40.0)),
+                            );
+                            ui.label(
+                                egui::RichText::new(count)
+                                    .font(theme::mono(10.0))
+                                    .color(tokens.faint),
+                            );
+                            field
                         });
                         let field = field_row.inner;
                         if (field.has_focus() || field.lost_focus())
@@ -434,15 +473,32 @@ impl Palette {
                             field.request_focus();
                         }
                         let line = ui.available_rect_before_wrap();
-                        ui.painter().hline(
-                            line.x_range(),
-                            line.top(),
-                            egui::Stroke::new(1.0, tokens.rule),
-                        );
-                        ui.add_space(6.0);
+                        ui.painter()
+                            .hline(line.x_range(), line.top(), tokens.hairline());
+                        ui.add_space(4.0);
+                        let typed = self.query.trim().to_lowercase();
                         for (index, hit) in hits.iter().enumerate() {
+                            // A rule title where a kind of result starts.
+                            let group = group_of(&hit.item);
+                            if index == 0 || group_of(&hits[index - 1].item) != group {
+                                let count = hits[index..]
+                                    .iter()
+                                    .take_while(|other| group_of(&other.item) == group)
+                                    .count();
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 24.0),
+                                    Sense::hover(),
+                                );
+                                glyphst_ui::motif::paint_rule_title(
+                                    ui,
+                                    rect.shrink2(vec2(14.0, 0.0)),
+                                    group,
+                                    Some(&count.to_string()),
+                                    true,
+                                );
+                            }
                             let (rect, row) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 34.0),
+                                vec2(ui.available_width(), 30.0),
                                 Sense::click(),
                             );
                             if row.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
@@ -451,11 +507,7 @@ impl Palette {
                             }
                             let highlighted = index == self.highlight;
                             if highlighted {
-                                ui.painter().rect_filled(
-                                    rect,
-                                    CornerRadius::same(8),
-                                    tokens.accent_soft,
-                                );
+                                ui.painter().rect_filled(rect, 0, tokens.accent_soft);
                             }
                             let blocked = hit.blocked.is_some();
                             let (color, icon_color) = if blocked {
@@ -463,24 +515,24 @@ impl Palette {
                             } else if highlighted {
                                 (tokens.text, tokens.accent_text)
                             } else {
-                                (tokens.text, tokens.text_2)
+                                (tokens.text_2, tokens.muted)
                             };
                             icons::paint(
                                 ui,
                                 egui::Rect::from_center_size(
-                                    rect.left_center() + vec2(18.0, 0.0),
-                                    vec2(16.0, 16.0),
+                                    rect.left_center() + vec2(21.0, 0.0),
+                                    vec2(14.0, 14.0),
                                 ),
                                 hit.icon,
-                                16.0,
+                                14.0,
                                 icon_color,
                             );
                             // The key chip or the reason at the right.
-                            let mut right = rect.right() - 8.0;
+                            let mut right = rect.right() - 14.0;
                             if let Some(reason) = hit.blocked {
                                 let galley = ui.painter().layout_no_wrap(
-                                    reason.to_string(),
-                                    crate::theme::regular(12.0),
+                                    reason.to_lowercase(),
+                                    theme::mono(10.0),
                                     tokens.faint,
                                 );
                                 right -= galley.size().x;
@@ -504,8 +556,8 @@ impl Palette {
                                     );
                                 } else {
                                     let galley = ui.painter().layout_no_wrap(
-                                        hit.detail.clone(),
-                                        crate::theme::regular(12.0),
+                                        hit.detail.to_lowercase(),
+                                        theme::mono(10.0),
                                         tokens.faint,
                                     );
                                     right -= galley.size().x;
@@ -516,28 +568,82 @@ impl Palette {
                                     );
                                 }
                             }
-                            let left = rect.left() + 36.0;
-                            widgets::row_text(
-                                ui,
-                                egui::pos2(left, rect.center().y),
-                                hit.label.as_str(),
-                                crate::theme::regular(13.5),
+                            let left = rect.left() + 38.0;
+                            let label = hit.label.to_lowercase();
+                            let mut job = egui::text::LayoutJob::default();
+                            let font = theme::mono(13.0);
+                            let found = (!typed.is_empty()).then(|| label.find(&typed)).flatten();
+                            match found {
+                                Some(start) => {
+                                    let end = start + typed.len();
+                                    let plain = egui::TextFormat::simple(font.clone(), color);
+                                    let strong = egui::TextFormat::simple(font, tokens.accent_text);
+                                    job.append(&label[..start], 0.0, plain.clone());
+                                    job.append(&label[start..end], 0.0, strong);
+                                    job.append(&label[end..], 0.0, plain);
+                                }
+                                None => {
+                                    job.append(&label, 0.0, egui::TextFormat::simple(font, color))
+                                }
+                            }
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(
+                                (right - left - 12.0).max(0.0),
+                            );
+                            let galley = ui.painter().layout_job(job);
+                            ui.painter().galley(
+                                egui::pos2(left, rect.center().y - galley.size().y / 2.0),
+                                galley,
                                 color,
-                                right - left - 12.0,
                             );
                             if row.clicked() {
                                 chosen = Some(hit.item.clone());
                             }
                         }
                         if hits.is_empty() {
-                            ui.add_space(4.0);
+                            ui.add_space(10.0);
                             let empty = if path_mode {
-                                "No documents or folders match"
+                                "no documents or folders match"
                             } else {
-                                "Nothing matches"
+                                "nothing matches"
                             };
-                            ui.label(egui::RichText::new(empty).color(tokens.muted));
-                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(14.0);
+                                ui.label(
+                                    egui::RichText::new(empty)
+                                        .font(theme::mono(11.0))
+                                        .color(tokens.muted),
+                                );
+                            });
+                            ui.add_space(10.0);
+                        }
+                        // The keys, along the foot.
+                        ui.add_space(4.0);
+                        let (foot, _) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+                        ui.painter()
+                            .rect_filled(foot, 0, tokens.surface.to_opaque());
+                        ui.painter()
+                            .hline(foot.x_range(), foot.top(), tokens.hairline());
+                        let keys = if path_mode {
+                            "↑↓ move   ↲ open   tab complete   esc close"
+                        } else {
+                            "↑↓ move   ↲ run   esc close"
+                        };
+                        ui.painter().text(
+                            foot.left_center() + vec2(14.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            keys,
+                            theme::mono(10.0),
+                            tokens.faint,
+                        );
+                        if !path_mode {
+                            ui.painter().text(
+                                foot.right_center() - vec2(14.0, 0.0),
+                                Align2::RIGHT_CENTER,
+                                "a number goes to a page",
+                                theme::mono(10.0),
+                                tokens.faint,
+                            );
                         }
                     });
             });
@@ -560,6 +666,17 @@ impl Palette {
             self.close();
         }
         chosen
+    }
+}
+
+/// The rule title over a kind of result.
+fn group_of(item: &Item) -> &'static str {
+    match item {
+        Item::Command(_) => "commands",
+        Item::Tab(_) => "tabs",
+        Item::Open(_) | Item::Browse(_) => "files",
+        Item::GoToPage(_) => "pages",
+        Item::Settings(_) => "settings",
     }
 }
 
@@ -628,6 +745,26 @@ mod tests {
         // A subsequence still finds it.
         let found = hits("fdnx", &sources(true), &[]);
         assert_eq!(found[0].item, Item::Command(Command::FindNext));
+    }
+
+    #[test]
+    fn kinds_of_hits_stay_together() {
+        let hit = |item: Item| Hit {
+            item,
+            icon: "x",
+            label: String::new(),
+            detail: String::new(),
+            blocked: None,
+        };
+        let hits = grouped(vec![
+            hit(Item::Command(Command::Find)),
+            hit(Item::Tab(0)),
+            hit(Item::Command(Command::Palette)),
+            hit(Item::GoToPage(1)),
+        ]);
+        let groups: Vec<&str> = hits.iter().map(|hit| group_of(&hit.item)).collect();
+        assert_eq!(groups, ["commands", "commands", "tabs", "pages"]);
+        assert_eq!(hits[1].item, Item::Command(Command::Palette));
     }
 
     #[test]

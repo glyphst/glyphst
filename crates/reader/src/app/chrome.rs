@@ -848,7 +848,30 @@ impl ReaderApp {
         let Some(label) = self.pending_keys.indicator() else {
             return;
         };
-        overlay::pending_keys(ctx, &label, lift);
+        let hints = self
+            .keymap
+            .continuations(&self.pending_keys)
+            .into_iter()
+            .take(4)
+            .map(|(keys, command)| {
+                let name = command.label().to_lowercase();
+                let short: String = name
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{keys} {short}")
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        // At the bottom left of the pages, or of the window.
+        let at = self
+            .chrome
+            .panes
+            .first()
+            .map(|(_, rect)| rect.left_bottom() + vec2(16.0, -16.0))
+            .unwrap_or_else(|| ctx.content_rect().left_bottom() + vec2(16.0, -lift));
+        overlay::pending_keys(ctx, &label, &hints, at);
     }
 }
 

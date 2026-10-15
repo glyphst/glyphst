@@ -229,7 +229,10 @@ impl ReaderApp {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
             let response = icons::button(ui, "ellipsis", 28.0, false, "menu");
-            egui::Popup::menu(&response).show(|ui| self.menu(ui));
+            egui::Popup::menu(&response).show(|ui| {
+                ui_menu::style(ui);
+                self.menu(ui)
+            });
             let tip = self.keymap.tip("settings", Command::Settings);
             if icons::button(ui, "settings", 28.0, self.settings_window.open, &tip).clicked() {
                 run = Some(Command::Settings);
