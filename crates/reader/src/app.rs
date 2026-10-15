@@ -131,6 +131,8 @@ pub struct Launch {
     pub palette: Option<String>,
     pub settings: Option<Section>,
     pub shortcuts: bool,
+    /// Shows frame 01 of the design (every component) instead of home.
+    pub gallery: bool,
     /// Scripted runs: commands run once the documents are open.
     pub commands: Vec<Command>,
     /// Scripted runs: a region drawn on a page (from 1) at startup.
@@ -299,6 +301,8 @@ pub struct ReaderApp {
     /// The Keyboard shortcuts tab is the one shown; `active` is then
     /// `None`, so everything for documents treats it like the home tab.
     keymap_focused: bool,
+    /// Frame 01 of the design in place of home (`--gallery`).
+    gallery: Option<glyphst_ui::gallery::Gallery>,
     /// The document tab to go back to when the shortcuts tab closes.
     keymap_return: Option<u64>,
 }
@@ -318,6 +322,9 @@ impl ReaderApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let persist = launch.harness.is_none();
         let mut prefs = Prefs::load(cc.storage);
+        // Before the first frame: every text style names these families.
+        crate::fonts::install(&cc.egui_ctx, &prefs.fonts);
+        let fonts_applied = Some(prefs.fonts.clone());
         if let Some(background) = launch.background {
             prefs.background = background;
         }
@@ -362,7 +369,7 @@ impl ReaderApp {
         let mut app = Self {
             prefs,
             theme_applied: None,
-            fonts_applied: None,
+            fonts_applied,
             desktop_theme: {
                 let ctx = cc.egui_ctx.clone();
                 DesktopTheme::start(move || ctx.request_repaint())
@@ -446,6 +453,7 @@ impl ReaderApp {
             settings_window: SettingsWindow::default(),
             keymap_page: None,
             keymap_focused: false,
+            gallery: launch.gallery.then(Default::default),
             keymap_return: None,
         };
         app.rebuild_keymap();
@@ -3532,6 +3540,8 @@ impl eframe::App for ReaderApp {
             .show(ui, |ui| {
                 if self.active.is_some() {
                     (animating, pages_drawn) = self.stage(ui, actions, &pad, seconds, now);
+                } else if let Some(gallery) = self.gallery.as_mut() {
+                    gallery.show(ui);
                 } else if self.keymap_focused
                     && let Some(page) = self.keymap_page.as_mut()
                 {

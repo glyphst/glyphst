@@ -426,7 +426,12 @@ pub fn semibold(size: f32) -> FontId {
 
 /// The prose style's font in `ui`.
 pub fn prose(ui: &egui::Ui) -> FontId {
-    TextStyle::Name(PROSE.into()).resolve(ui.style())
+    // A style made before `apply` (the first frame) has no prose style.
+    ui.style()
+        .text_styles
+        .get(&TextStyle::Name(PROSE.into()))
+        .cloned()
+        .unwrap_or_else(|| regular(14.0))
 }
 
 /// Applies `appearance` to egui's style: tokens, visuals, spacing, text

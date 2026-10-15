@@ -73,7 +73,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--controls shown|hidden] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--assistant-demo STATE] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
+                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH]";
 
@@ -105,6 +105,7 @@ fn parse_args() -> Result<Launch> {
         palette: None,
         settings: None,
         shortcuts: false,
+        gallery: false,
         commands: Vec::new(),
         select_region: None,
     };
@@ -193,6 +194,7 @@ fn parse_args() -> Result<Launch> {
                 launch.agent = Some(id);
             }
             "--palette" => launch.palette = Some(value()?),
+            "--gallery" => launch.gallery = true,
             "--select-region" => {
                 let usage = "--select-region takes PAGE:X0,Y0,X1,Y1 (page points)";
                 let value = value()?;

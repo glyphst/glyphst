@@ -19,10 +19,18 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/arrow-left.svg"),
     ),
     (
+        "arrow-left-right",
+        include_bytes!("../assets/icons/arrow-left-right.svg"),
+    ),
+    (
         "arrow-right",
         include_bytes!("../assets/icons/arrow-right.svg"),
     ),
     ("arrow-up", include_bytes!("../assets/icons/arrow-up.svg")),
+    (
+        "arrow-up-down",
+        include_bytes!("../assets/icons/arrow-up-down.svg"),
+    ),
     ("at-sign", include_bytes!("../assets/icons/at-sign.svg")),
     ("book-open", include_bytes!("../assets/icons/book-open.svg")),
     (
@@ -36,6 +44,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("bot", include_bytes!("../assets/icons/bot.svg")),
     ("brain", include_bytes!("../assets/icons/brain.svg")),
+    (
+        "case-sensitive",
+        include_bytes!("../assets/icons/case-sensitive.svg"),
+    ),
     ("check", include_bytes!("../assets/icons/check.svg")),
     (
         "chevron-down",
@@ -52,6 +64,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     (
         "chevron-up",
         include_bytes!("../assets/icons/chevron-up.svg"),
+    ),
+    (
+        "chevrons-down-up",
+        include_bytes!("../assets/icons/chevrons-down-up.svg"),
     ),
     (
         "chevrons-up-down",
@@ -79,10 +95,17 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "corner-down-left",
         include_bytes!("../assets/icons/corner-down-left.svg"),
     ),
+    (
+        "corner-left-up",
+        include_bytes!("../assets/icons/corner-left-up.svg"),
+    ),
+    ("cpu", include_bytes!("../assets/icons/cpu.svg")),
+    ("database", include_bytes!("../assets/icons/database.svg")),
     ("download", include_bytes!("../assets/icons/download.svg")),
     ("ellipsis", include_bytes!("../assets/icons/ellipsis.svg")),
     ("eye", include_bytes!("../assets/icons/eye.svg")),
     ("eye-off", include_bytes!("../assets/icons/eye-off.svg")),
+    ("file", include_bytes!("../assets/icons/file.svg")),
     ("file-down", include_bytes!("../assets/icons/file-down.svg")),
     ("file-plus", include_bytes!("../assets/icons/file-plus.svg")),
     (
@@ -90,6 +113,8 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/file-search.svg"),
     ),
     ("file-text", include_bytes!("../assets/icons/file-text.svg")),
+    ("file-up", include_bytes!("../assets/icons/file-up.svg")),
+    ("folder", include_bytes!("../assets/icons/folder.svg")),
     (
         "folder-open",
         include_bytes!("../assets/icons/folder-open.svg"),
@@ -98,11 +123,19 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("gauge", include_bytes!("../assets/icons/gauge.svg")),
     ("globe", include_bytes!("../assets/icons/globe.svg")),
     (
+        "hard-drive",
+        include_bytes!("../assets/icons/hard-drive.svg"),
+    ),
+    (
         "highlighter",
         include_bytes!("../assets/icons/highlighter.svg"),
     ),
     ("house", include_bytes!("../assets/icons/house.svg")),
     ("image", include_bytes!("../assets/icons/image.svg")),
+    (
+        "image-down",
+        include_bytes!("../assets/icons/image-down.svg"),
+    ),
     ("info", include_bytes!("../assets/icons/info.svg")),
     ("keyboard", include_bytes!("../assets/icons/keyboard.svg")),
     ("languages", include_bytes!("../assets/icons/languages.svg")),
@@ -113,6 +146,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("library", include_bytes!("../assets/icons/library.svg")),
     ("list", include_bytes!("../assets/icons/list.svg")),
     ("list-todo", include_bytes!("../assets/icons/list-todo.svg")),
+    ("list-tree", include_bytes!("../assets/icons/list-tree.svg")),
     (
         "locate-fixed",
         include_bytes!("../assets/icons/locate-fixed.svg"),
@@ -137,6 +171,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("monitor", include_bytes!("../assets/icons/monitor.svg")),
     ("moon", include_bytes!("../assets/icons/moon.svg")),
+    (
+        "mouse-pointer-2",
+        include_bytes!("../assets/icons/mouse-pointer-2.svg"),
+    ),
     ("palette", include_bytes!("../assets/icons/palette.svg")),
     (
         "panel-left",
@@ -160,13 +198,19 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "refresh-cw",
         include_bytes!("../assets/icons/refresh-cw.svg"),
     ),
+    ("regex", include_bytes!("../assets/icons/regex.svg")),
     (
         "rotate-ccw",
         include_bytes!("../assets/icons/rotate-ccw.svg"),
     ),
+    (
+        "rotate-ccw-clock",
+        include_bytes!("../assets/icons/rotate-ccw-clock.svg"),
+    ),
     ("rotate-cw", include_bytes!("../assets/icons/rotate-cw.svg")),
     ("rows-2", include_bytes!("../assets/icons/rows-2.svg")),
     ("scan", include_bytes!("../assets/icons/scan.svg")),
+    ("scan-line", include_bytes!("../assets/icons/scan-line.svg")),
     ("scan-text", include_bytes!("../assets/icons/scan-text.svg")),
     ("search", include_bytes!("../assets/icons/search.svg")),
     (
@@ -181,6 +225,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("sparkles", include_bytes!("../assets/icons/sparkles.svg")),
     ("square", include_bytes!("../assets/icons/square.svg")),
+    (
+        "square-dashed",
+        include_bytes!("../assets/icons/square-dashed.svg"),
+    ),
     (
         "sticky-note",
         include_bytes!("../assets/icons/sticky-note.svg"),
@@ -198,6 +246,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("type", include_bytes!("../assets/icons/type.svg")),
     ("undo-2", include_bytes!("../assets/icons/undo-2.svg")),
+    ("upload", include_bytes!("../assets/icons/upload.svg")),
     (
         "wand-sparkles",
         include_bytes!("../assets/icons/wand-sparkles.svg"),
