@@ -383,6 +383,23 @@ impl ReaderGpu {
                 .any(|upload| matches!(upload, Upload::Page { key: k, .. } if *k == key))
     }
 
+    /// A thumbnail of `key` drawn from its vectors (see
+    /// [`Renderer::render_thumbnail`]), once it is wholly on the GPU.
+    pub fn render_thumbnail(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: PageKey,
+        scale: f32,
+        max_side: u32,
+    ) -> Option<wgpu::Texture> {
+        let resident = self.pages.get(&key)?;
+        Some(
+            self.renderer
+                .render_thumbnail(device, queue, &resident.page, scale, max_side),
+        )
+    }
+
     /// Whether `key` can be drawn: it is resident, or enough of it is
     /// written to draw a coarse version.
     pub fn is_drawable(&self, key: PageKey) -> bool {

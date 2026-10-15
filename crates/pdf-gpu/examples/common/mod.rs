@@ -206,7 +206,12 @@ impl Gpu {
 
     /// The target's pixels as RGB8 rows.
     pub fn read_target(&self) -> Result<Vec<u8>> {
-        let [width, height] = self.target.size();
+        self.read_texture(self.target.texture())
+    }
+
+    /// An RGBA8 texture's pixels as RGB8 rows.
+    pub fn read_texture(&self, texture: &wgpu::Texture) -> Result<Vec<u8>> {
+        let [width, height] = [texture.width(), texture.height()];
         let padded = (width * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -216,7 +221,7 @@ impl Gpu {
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            self.target.texture().as_image_copy(),
+            texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {

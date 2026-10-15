@@ -22,6 +22,9 @@ use serde_json::json;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 64.0;
 const CHECKPOINTS: [f32; 3] = [1.0, 8.0, 64.0];
+/// The Reader's thumbnail scale and size limit.
+const THUMBNAIL_SCALE: f32 = 0.35;
+const THUMBNAIL_MAX_SIDE: u32 = 512;
 
 struct Options {
     pdf: PathBuf,
@@ -206,6 +209,38 @@ fn main() -> Result<()> {
         }));
     }
 
+    // The sidebar thumbnail the Reader draws from a resident page.
+    let thumbnail = renderer.render_thumbnail(
+        &gpu.device,
+        &gpu.queue,
+        gpu_page,
+        THUMBNAIL_SCALE,
+        THUMBNAIL_MAX_SIDE,
+    );
+    let thumbnail_size = [thumbnail.width(), thumbnail.height()];
+    let thumbnail_pixels = gpu.read_texture(&thumbnail)?;
+    let reference = mupdf_view(list, &Camera::fitting(bounds, thumbnail_size))?;
+    let result = diff(&thumbnail_pixels, &reference, thumbnail_size);
+    if options.images
+        && let Some(out) = &options.out
+    {
+        save_png(
+            &out.join(format!("{name}-thumbnail-gpu.png")),
+            thumbnail_pixels,
+            thumbnail_size,
+        )?;
+        save_png(
+            &out.join(format!("{name}-thumbnail-mupdf.png")),
+            reference,
+            thumbnail_size,
+        )?;
+    }
+    let thumbnail = json!({
+        "size": thumbnail_size,
+        "mean_abs_diff": result.mean_abs,
+        "differing_pixels": result.differing,
+    });
+
     let stats = &vector_page.stats;
     let summary = json!({
         "pdf": options.pdf.display().to_string(),
@@ -257,6 +292,7 @@ fn main() -> Result<()> {
             "by_zoom": by_zoom,
         },
         "checkpoints": checkpoints,
+        "thumbnail": thumbnail,
     });
     let text = serde_json::to_string_pretty(&summary)?;
     println!("{text}");

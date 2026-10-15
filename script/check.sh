@@ -116,9 +116,10 @@ if [[ ${tier} == screens ]]; then
     mkdir -p "${shots}"
     step reader-build cargo build --locked -p glyphst-reader
     reader="${repo}/target/debug/glyphst-reader"
+    dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one; a `--screenshot-*` argument picks the kind of
-    # shot instead of a plain one).
+    # for the second one, `%` for a dense drawing; a `--screenshot-*`
+    # argument picks the kind of shot instead of a plain one).
     states=(
         "01-gallery --gallery"
         "02a-reader @ --sidebar outline --assistant-demo done"
@@ -130,6 +131,7 @@ if [[ ${tier} == screens ]]; then
         "03-outline @ --sidebar outline"
         "03-pages @ --sidebar pages"
         "03-pages-one @ --sidebar pages --command view.page_columns"
+        "03-pages-dense % --sidebar pages"
         "03-bookmarks @ --sidebar bookmarks"
         "03-notes @ --sidebar notes"
         "03-search @ --sidebar search --find the"
@@ -160,6 +162,7 @@ if [[ ${tier} == screens ]]; then
                 case ${arg} in
                     @) args+=("${document}") ;;
                     \#) args+=("${second}") ;;
+                    %) args+=("${dense}") ;;
                     --screenshot-*) shot=${arg} ;;
                     *) args+=("${arg}") ;;
                 esac

@@ -90,6 +90,14 @@ pub fn rotate_rect(rect: PageRect, quarter_turns: u8) -> PageRect {
 
 impl Camera {
     /// Centers `focus` (page space) in the viewport at `scale`.
+    /// Shows all of `bounds`, centred, in `viewport`.
+    pub fn fitting(bounds: PageRect, viewport: [u32; 2]) -> Self {
+        let [x0, y0, x1, y1] = bounds;
+        let scale = (viewport[0] as f32 / (x1 - x0).max(1e-3))
+            .min(viewport[1] as f32 / (y1 - y0).max(1e-3));
+        Self::centered([(x0 + x1) / 2.0, (y0 + y1) / 2.0], scale, viewport)
+    }
+
     pub fn centered(focus: [f32; 2], scale: f32, viewport: [u32; 2]) -> Self {
         Self::centered_rotated(focus, scale, viewport, 0)
     }
@@ -1057,6 +1065,41 @@ impl Renderer {
         true
     }
 
+    /// Draws all of `page` on white into a new texture that can be sampled
+    /// (a thumbnail), `scale` pixels per point and at most `max_side`
+    /// pixels long, without reading it back; a page with an overview draws
+    /// that.
+    pub fn render_thumbnail(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        page: &GpuPage,
+        scale: f32,
+        max_side: u32,
+    ) -> wgpu::Texture {
+        let [x0, y0, x1, y1] = page.bounds;
+        let (width, height) = ((x1 - x0) * scale, (y1 - y0) * scale);
+        let shrink = (max_side as f32 / width.max(height)).min(1.0);
+        let size = [
+            (width * shrink).round().max(1.0) as u32,
+            (height * shrink).round().max(1.0) as u32,
+        ];
+        let target = OffscreenTarget::new(
+            device,
+            self.format,
+            size,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        );
+        let camera = Camera::fitting(page.bounds, target.size());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = target.begin_pass(&mut encoder, wgpu::Color::WHITE);
+            self.draw(queue, page, &camera, &mut pass);
+        }
+        queue.submit([encoder.finish()]);
+        target.texture().clone()
+    }
+
     /// Records the page into `pass`, which must target this renderer's format
     /// with [`SAMPLE_COUNT`] samples.
     pub fn draw(
@@ -1733,6 +1776,15 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fitting_camera_shows_the_whole_page() {
+        let camera = Camera::fitting([0.0, 0.0, 600.0, 800.0], [150, 300]);
+        assert_eq!(camera.scale, 0.25);
+        let [x0, y0, x1, y1] = camera.visible_page_rect(0.0);
+        assert!(x0 <= 0.0 && x1 >= 600.0 && y0 <= 0.0 && y1 >= 800.0);
+        assert!((y0 + y1 - 800.0).abs() < 1e-3, "centred");
+    }
 
     #[test]
     fn a_selection_serves_small_moves_and_zooms_in() {

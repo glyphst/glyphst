@@ -1519,7 +1519,7 @@ fn pages(
                 let texture = if sharp {
                     crate::overview::page_texture(tab, page, paper, ppp, &mut wanted)
                 } else {
-                    tab.thumbnail(page).map(|texture| texture.id())
+                    tab.thumbnail(page).map(|(id, _)| id)
                 };
                 if let Some(texture) = texture {
                     glyphst_ui::paint::paint_turned_image(

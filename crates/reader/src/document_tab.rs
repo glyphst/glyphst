@@ -63,6 +63,14 @@ const MAX_THUMBNAILS: usize = 400;
 /// Sharp overview renders kept before those out of view go.
 const MAX_GRID_IMAGES: usize = 48;
 
+/// A sidebar thumbnail: MuPDF's raster, or one the GPU drew from a
+/// resident page's vectors (registered with egui's renderer, so it is freed
+/// through the app).
+enum Thumbnail {
+    Raster(egui::TextureHandle),
+    Gpu { id: egui::TextureId, size: [u32; 2] },
+}
+
 /// Where the view is: origin, target scale and presented page.
 type PickedView = ([f64; 2], f64, Option<usize>);
 
@@ -180,7 +188,12 @@ pub struct DocumentTab {
     pub modified: Option<std::time::SystemTime>,
     loader: Loader,
     indexer: Indexer,
-    thumbnails: HashMap<usize, egui::TextureHandle>,
+    thumbnails: HashMap<usize, Thumbnail>,
+    /// Pages of the thumbnails last wanted that have none (dense ones
+    /// too), for the GPU to draw when they are resident.
+    thumbnails_wanted: Vec<usize>,
+    /// GPU thumbnails dropped, for the app to free from egui's renderer.
+    freed_textures: Vec<egui::TextureId>,
     /// The structure the loading animation traces, by page, with the
     /// source version it was read from.
     sketches: HashMap<usize, (u64, Arc<PageSketch>)>,
@@ -276,6 +289,8 @@ impl DocumentTab {
             loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
             indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
             thumbnails: HashMap::new(),
+            thumbnails_wanted: Vec::new(),
+            freed_textures: Vec::new(),
             sketches: HashMap::new(),
             grid_images: HashMap::new(),
             overview: None,
@@ -347,7 +362,9 @@ impl DocumentTab {
         self.outline_pick = None;
         self.loader = Loader::new(self.path.clone(), info.layout, ctx.clone());
         self.indexer = Indexer::new(self.path.clone(), info.layout, ctx.clone());
-        self.thumbnails.clear();
+        for page in self.thumbnails.keys().copied().collect::<Vec<_>>() {
+            self.drop_thumbnail(page);
+        }
         self.sketches.clear();
         self.dense_pages.clear();
         self.failed.clear();
@@ -391,7 +408,8 @@ impl DocumentTab {
                         image,
                         egui::TextureOptions::LINEAR,
                     );
-                    self.thumbnails.insert(page, texture);
+                    self.drop_thumbnail(page);
+                    self.thumbnails.insert(page, Thumbnail::Raster(texture));
                 }
                 Loaded::Prepared {
                     page,
@@ -582,7 +600,7 @@ impl DocumentTab {
                 self.find.invalidate_page(page);
                 self.text_version[page] = version;
                 self.text_requested[page] = false;
-                self.thumbnails.remove(&page);
+                self.drop_thumbnail(page);
                 if self
                     .selection
                     .as_ref()
@@ -710,6 +728,10 @@ impl DocumentTab {
             .filter(|page| !self.thumbnails.contains_key(page) && !self.dense_pages.contains(page))
             .collect();
         self.indexer.want_thumbnails(missing);
+        self.thumbnails_wanted = pages
+            .clone()
+            .filter(|page| !self.thumbnails.contains_key(page))
+            .collect();
         if self.thumbnails.len() > MAX_THUMBNAILS {
             let center = (pages.start + pages.end) / 2;
             let mut far: Vec<usize> = self
@@ -720,7 +742,7 @@ impl DocumentTab {
                 .collect();
             far.sort_by_key(|page| std::cmp::Reverse(page.abs_diff(center)));
             for page in far.into_iter().take(self.thumbnails.len() - MAX_THUMBNAILS) {
-                self.thumbnails.remove(&page);
+                self.drop_thumbnail(page);
             }
         }
     }
@@ -743,8 +765,42 @@ impl DocumentTab {
             .map(|(scale, texture)| (*scale, texture))
     }
 
-    pub fn thumbnail(&self, page: usize) -> Option<&egui::TextureHandle> {
-        self.thumbnails.get(&page)
+    /// A page's sidebar thumbnail and its size in pixels.
+    pub fn thumbnail(&self, page: usize) -> Option<(egui::TextureId, egui::Vec2)> {
+        self.thumbnails.get(&page).map(|thumbnail| match thumbnail {
+            Thumbnail::Raster(texture) => (texture.id(), texture.size_vec2()),
+            Thumbnail::Gpu { id, size } => (*id, egui::vec2(size[0] as f32, size[1] as f32)),
+        })
+    }
+
+    /// Pages whose thumbnails are wanted but missing, nearest first.
+    pub fn thumbnails_wanted(&self) -> &[usize] {
+        &self.thumbnails_wanted
+    }
+
+    /// Takes a thumbnail the GPU drew from `page`'s vectors (a dense page
+    /// gets one once it has been shown).
+    pub fn set_gpu_thumbnail(&mut self, page: usize, id: egui::TextureId, size: [u32; 2]) {
+        self.drop_thumbnail(page);
+        self.thumbnails.insert(page, Thumbnail::Gpu { id, size });
+        self.thumbnails_wanted.retain(|&wanted| wanted != page);
+        self.dense_pages.remove(&page);
+    }
+
+    fn drop_thumbnail(&mut self, page: usize) {
+        if let Some(Thumbnail::Gpu { id, .. }) = self.thumbnails.remove(&page) {
+            self.freed_textures.push(id);
+        }
+    }
+
+    /// GPU thumbnails to free, all of them when `all` (the tab closes).
+    pub fn take_freed_textures(&mut self, all: bool) -> Vec<egui::TextureId> {
+        if all {
+            for page in self.thumbnails.keys().copied().collect::<Vec<_>>() {
+                self.drop_thumbnail(page);
+            }
+        }
+        std::mem::take(&mut self.freed_textures)
     }
 
     /// The loading animation's structure of a page as it is shown.
@@ -1381,7 +1437,7 @@ impl DocumentTab {
             .draws
             .iter()
             .filter(|draw| !resident(draw.page))
-            .map(|draw| (draw.paper, self.thumbnails.get(&draw.page).map(|t| t.id())))
+            .map(|draw| (draw.paper, self.thumbnail(draw.page).map(|(id, _)| id)))
             .collect();
     }
 
@@ -1478,6 +1534,8 @@ mod tests {
             loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
             indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
             thumbnails: HashMap::new(),
+            thumbnails_wanted: Vec::new(),
+            freed_textures: Vec::new(),
             sketches: HashMap::new(),
             grid_images: HashMap::new(),
             overview: None,

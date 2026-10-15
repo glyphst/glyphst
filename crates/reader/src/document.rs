@@ -28,10 +28,12 @@ use crate::generation::PageSketch;
 /// Gap between pages, in page points.
 pub const PAGE_GAP: f64 = 12.0;
 /// Device pixels per point of the loading and sidebar thumbnails.
-const THUMBNAIL_SCALE: f32 = 0.35;
-/// A sidebar thumbnail slower than this marks the document as too dense
-/// for thumbnails of pages that are not open.
+pub const THUMBNAIL_SCALE: f32 = 0.35;
+/// A thumbnail or overview render slower than this is slow (see [`Pacing`]).
 const HEAVY_THUMBNAIL: Duration = Duration::from_millis(400);
+/// Slow renders in a row after which the indexer makes no more thumbnails
+/// or overview renders for the document.
+const HEAVY_STREAK: u32 = 3;
 const THUMBNAIL_MAX_POINTS: usize = 200_000;
 /// Device pixels per point at which raster layers are rasterized.
 const LAYER_SCALE: f32 = 4.0;
@@ -730,7 +732,7 @@ impl Indexer {
                     return;
                 };
                 let document = document.inner();
-                let mut heavy = false;
+                let mut pacing = Pacing::default();
                 let send = |loaded| {
                     let sent = result_tx.send(loaded).is_ok();
                     ctx.request_repaint();
@@ -743,9 +745,10 @@ impl Indexer {
                         };
                         let thumbnail =
                             (!work.thumbnails.is_empty()).then(|| work.thumbnails.remove(0));
-                        // Too slow on dense documents: the overview keeps
-                        // their thumbnails, or says they are dense.
-                        if heavy {
+                        // Too slow on dense documents: their pages show
+                        // the GPU's thumbnails once open, or say they are
+                        // dense.
+                        if pacing.stopped() {
                             work.images.clear();
                         }
                         let image = match thumbnail {
@@ -761,18 +764,18 @@ impl Indexer {
                     let sent = if let Some((page, scale)) = image {
                         let started = Instant::now();
                         let rendered = page_image(document, page, scale);
-                        heavy |= started.elapsed() > HEAVY_THUMBNAIL;
+                        pacing.record(started.elapsed());
                         match rendered {
                             Some(image) => send(Loaded::PageImage { page, scale, image }),
                             None => true,
                         }
                     } else if let Some(page) = thumbnail {
-                        if heavy {
+                        if pacing.stopped() {
                             send(Loaded::ThumbnailSkipped { page })
                         } else {
                             let started = Instant::now();
                             let image = page_thumbnail(document, page);
-                            heavy = started.elapsed() > HEAVY_THUMBNAIL;
+                            pacing.record(started.elapsed());
                             match image {
                                 Some(image) => send(Loaded::Thumbnail { page, image }),
                                 None => send(Loaded::ThumbnailSkipped { page }),
@@ -851,6 +854,28 @@ impl Drop for Indexer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.worker.unpark();
+    }
+}
+
+/// Whether the indexer still renders thumbnails and overview images: one
+/// slow page does not stop them (the next may be light), a run of them
+/// does.
+#[derive(Default)]
+struct Pacing {
+    slow_in_a_row: u32,
+}
+
+impl Pacing {
+    fn record(&mut self, took: Duration) {
+        self.slow_in_a_row = if took > HEAVY_THUMBNAIL {
+            self.slow_in_a_row + 1
+        } else {
+            0
+        };
+    }
+
+    fn stopped(&self) -> bool {
+        self.slow_in_a_row >= HEAVY_STREAK
     }
 }
 
@@ -1015,6 +1040,20 @@ pub fn percentile_ms(values: &[Duration], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_slow_page_does_not_stop_thumbnails_but_a_run_does() {
+        let (slow, fast) = (HEAVY_THUMBNAIL * 2, Duration::from_millis(5));
+        let mut pacing = Pacing::default();
+        for took in [slow, fast, slow, slow, fast] {
+            pacing.record(took);
+            assert!(!pacing.stopped());
+        }
+        for _ in 0..HEAVY_STREAK {
+            pacing.record(slow);
+        }
+        assert!(pacing.stopped());
+    }
 
     fn layout() -> Layout {
         Layout::new(vec![

@@ -23,7 +23,7 @@ use crate::{
     annotations::{self, AnnotationId, Annotations},
     commands::{Command, Needs},
     desktop_theme::DesktopTheme,
-    document::{Arrangement, FrameTimes},
+    document::{Arrangement, FrameTimes, THUMBNAIL_SCALE},
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
     gamepad::{GamepadInput, Gamepads},
@@ -64,6 +64,11 @@ mod tab_bar;
 const EFFECTS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Positions are written to the library at most this often while reading.
 const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Thumbnails the GPU draws a frame, each one small render pass.
+const GPU_THUMBNAILS_PER_FRAME: usize = 2;
+/// Longest side of a GPU thumbnail in pixels (a large drawing's page is
+/// thumbnailed no larger).
+const GPU_THUMBNAIL_MAX_SIDE: u32 = 512;
 const TAB_MIN_WIDTH: f32 = 90.0;
 const TAB_MAX_LABEL: usize = 32;
 const TAB_OVERFLOW_WIDTH: f32 = 28.0;
@@ -735,7 +740,8 @@ impl ReaderApp {
             Ok(mut reloaded) => {
                 reloaded.annotations = Annotations::load(&self.library, &path);
                 self.with_gpu(|gpu| gpu.drop_tab(id));
-                self.tabs[index] = reloaded;
+                let mut old = std::mem::replace(&mut self.tabs[index], reloaded);
+                self.free_textures(&old.take_freed_textures(true));
             }
             Err(error) => self
                 .notices
@@ -1657,7 +1663,8 @@ impl ReaderApp {
 
     fn close(&mut self, index: usize) {
         self.save_position(index, true);
-        let tab = self.tabs.remove(index);
+        let mut tab = self.tabs.remove(index);
+        self.free_textures(&tab.take_freed_textures(true));
         self.saved_positions.remove(&tab.id);
         self.with_gpu(|gpu| gpu.drop_tab(tab.id));
         self.panes.remove_tab(tab.id);
@@ -1762,6 +1769,63 @@ impl ReaderApp {
             if self.first_page_ms.is_none() {
                 self.first_page_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
             }
+        }
+    }
+
+    /// Draws thumbnails of the active tab's wanted pages that are wholly on
+    /// the GPU but have none yet (dense pages the indexer skips get theirs
+    /// this way), and frees the ones tabs dropped.
+    fn draw_gpu_thumbnails(&mut self) {
+        let freed: Vec<egui::TextureId> = self
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| tab.take_freed_textures(false))
+            .collect();
+        self.free_textures(&freed);
+        let Some(active) = self.active else {
+            return;
+        };
+        let (device, queue) = (
+            self.render_state.device.clone(),
+            self.render_state.queue.clone(),
+        );
+        let tab = self.tabs[active].id;
+        let wanted = self.tabs[active].thumbnails_wanted().to_vec();
+        let mut drawn = 0;
+        for page in wanted {
+            if drawn == GPU_THUMBNAILS_PER_FRAME {
+                break;
+            }
+            let key = PageKey { tab, page };
+            let Some(Some(texture)) = self.with_gpu(|gpu| {
+                gpu.render_thumbnail(
+                    &device,
+                    &queue,
+                    key,
+                    THUMBNAIL_SCALE,
+                    GPU_THUMBNAIL_MAX_SIDE,
+                )
+            }) else {
+                continue;
+            };
+            drawn += 1;
+            let view = texture.create_view(&Default::default());
+            let id = self.render_state.renderer.write().register_native_texture(
+                &device,
+                &view,
+                wgpu::FilterMode::Linear,
+            );
+            self.tabs[active].set_gpu_thumbnail(page, id, [texture.width(), texture.height()]);
+        }
+    }
+
+    fn free_textures(&self, ids: &[egui::TextureId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut renderer = self.render_state.renderer.write();
+        for id in ids {
+            renderer.free_texture(id);
         }
     }
 
@@ -3423,6 +3487,7 @@ impl eframe::App for ReaderApp {
             tab.update_text(now);
         }
         self.upload_ready_page();
+        self.draw_gpu_thumbnails();
         self.finish_region_jobs(&ctx);
         self.upload_ready_layers();
         self.watch_effects(&ctx, now);

@@ -178,13 +178,13 @@ pub fn page_texture(
         .map(|(_, texture)| texture.id());
     let thumbnail_sharp = tab
         .thumbnail(page)
-        .is_some_and(|texture| texture.size()[0] as f32 >= paper.width() * ppp * 0.9);
+        .is_some_and(|(_, size)| size.x >= paper.width() * ppp * 0.9);
     if sharp.is_none() && !thumbnail_sharp && !tab.dense_pages.contains(&page) {
         wanted.push((page, want));
     }
     sharp
         .or_else(|| tab.grid_image(page).map(|(_, texture)| texture.id()))
-        .or_else(|| tab.thumbnail(page).map(|texture| texture.id()))
+        .or_else(|| tab.thumbnail(page).map(|(id, _)| id))
 }
 
 /// Draws tab's overview in `rect`; returns the page clicked to open.
