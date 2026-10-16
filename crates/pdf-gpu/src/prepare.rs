@@ -822,6 +822,240 @@ fn band(segments: &[CoverageSegment], first: u32, bounds: PageRect) -> Option<Ve
     Some(bands)
 }
 
+/// What a level's coverage fills ask of each pixel at one scale, estimated
+/// on the CPU to choose how to bound that work. Means are over shaded
+/// pixels, weighted by how many each path shades.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CoverageWork {
+    pub paths: usize,
+    /// Pixels the paths' quads shade.
+    pub pixels: f64,
+    /// Share of those pixels at least as large as their whole path, which
+    /// read no edges (the signed-area shortcut).
+    pub area_share: f64,
+    /// Edges a pixel sums, as `fill_color` finds them through bands.
+    pub edges_per_pixel: f64,
+    /// The same through a cell index on paths of [`CELL_INDEXED_EDGES`] or
+    /// more edges (HEPR's threshold): edges reaching the pixel's box widened
+    /// by one pixel each way, plus two closures in each of four cells.
+    pub cell_edges_per_pixel: f64,
+    /// The same with curves kept as quadratics, each costing
+    /// [`QUADRATIC_COST`] lines.
+    pub quadratic_edges_per_pixel: f64,
+    /// Edges per path as flattened, and their cost in lines with curves
+    /// kept as quadratics.
+    pub edges_per_path: f64,
+    pub curved_edges_per_path: f64,
+}
+
+/// Paths a cell index would serve, in [`CoverageWork`].
+pub const CELL_INDEXED_EDGES: usize = 24;
+/// Lines a quadratic edge costs a pixel, in [`CoverageWork`]: HEPR solves it
+/// for its rows and clips it at up to two roots.
+pub const QUADRATIC_COST: f64 = 3.0;
+
+/// Estimates the per-pixel work of `level`'s coverage fills at `scale`
+/// device pixels per point; `page` is the page it was prepared from.
+pub fn coverage_work(page: &VectorPage, level: &PreparedLevel, scale: f32) -> CoverageWork {
+    let curved = curved_edge_counts(page, level);
+    let footprint = 1.0 / scale;
+    let mut work = CoverageWork {
+        paths: level.coverage_paths.len(),
+        ..CoverageWork::default()
+    };
+    let (mut area, mut today, mut cells, mut quadratic) = (0.0, 0.0, 0.0, 0.0);
+    let (mut edges, mut curved_edges) = (0usize, 0usize);
+    for (index, path) in level.coverage_paths.iter().enumerate() {
+        let [first, count] = path.segments.map(|value| value as usize);
+        let own = &level.coverage_segments[first..][..count];
+        let curves = curved.get(index).copied().unwrap_or(count);
+        edges += count;
+        curved_edges += curves;
+        // The quad `fill_vertex` draws.
+        let margin = 0.75 * footprint;
+        let quad = [
+            path.bounds[0] - margin,
+            path.bounds[1] - margin,
+            path.bounds[2] + margin,
+            path.bounds[3] + margin,
+        ];
+        let size = [(quad[2] - quad[0]) * scale, (quad[3] - quad[1]) * scale];
+        let pixels = f64::from(size[0].max(1.0)) * f64::from(size[1].max(1.0));
+        work.pixels += pixels;
+        let hull = [
+            path.bounds[2] - path.bounds[0],
+            path.bounds[3] - path.bounds[1],
+        ];
+        if hull[0] <= footprint && hull[1] <= footprint {
+            area += pixels;
+            continue;
+        }
+        let columns = (size[0].ceil() as usize).clamp(1, 8);
+        let rows = (size[1].ceil() as usize).clamp(1, 8);
+        let (mut path_today, mut path_cells) = (0.0, 0.0);
+        for row in 0..rows {
+            for column in 0..columns {
+                let centre = [
+                    quad[0] + (column as f32 + 0.5) / columns as f32 * (quad[2] - quad[0]),
+                    quad[1] + (row as f32 + 0.5) / rows as f32 * (quad[3] - quad[1]),
+                ];
+                let low = [centre[0] - footprint / 2.0, centre[1] - footprint / 2.0];
+                let high = [centre[0] + footprint / 2.0, centre[1] + footprint / 2.0];
+                let visits = band_visits(level, path, low[1], high[1]);
+                path_today += visits as f64;
+                path_cells += if count < CELL_INDEXED_EDGES {
+                    visits as f64
+                } else {
+                    let near = own
+                        .iter()
+                        .filter(|edge| {
+                            edge.p0[0].max(edge.p1[0]) >= low[0] - footprint
+                                && edge.p0[0].min(edge.p1[0]) <= high[0] + footprint
+                                && edge.p0[1].max(edge.p1[1]) >= low[1] - footprint
+                                && edge.p0[1].min(edge.p1[1]) <= high[1] + footprint
+                        })
+                        .count();
+                    near as f64 + 8.0
+                };
+            }
+        }
+        let samples = (rows * columns) as f64;
+        let ratio = curves as f64 / count as f64;
+        today += path_today / samples * pixels;
+        cells += path_cells / samples * pixels;
+        quadratic += path_today / samples * pixels * ratio;
+    }
+    if work.pixels > 0.0 {
+        work.area_share = area / work.pixels;
+        work.edges_per_pixel = today / work.pixels;
+        work.cell_edges_per_pixel = cells / work.pixels;
+        work.quadratic_edges_per_pixel = quadratic / work.pixels;
+    }
+    if work.paths > 0 {
+        work.edges_per_path = edges as f64 / work.paths as f64;
+        work.curved_edges_per_path = curved_edges as f64 / work.paths as f64;
+    }
+    work
+}
+
+/// Edges a pixel spanning rows `low..high` sums for `path`, as `fill_color`
+/// walks its bands.
+fn band_visits(level: &PreparedLevel, path: &CoveragePath, low: f32, high: f32) -> usize {
+    let [start, count] = path.bands;
+    if count == 0 {
+        return path.segments[1] as usize;
+    }
+    let height = (path.bounds[3] - path.bounds[1]) / count as f32;
+    let last = (count - 1) as f32;
+    let first_band = ((low - path.bounds[1]) / height).floor().clamp(0.0, last) as u32;
+    let last_band = ((high - path.bounds[1]) / height).floor().clamp(0.0, last) as u32;
+    (first_band..=last_band)
+        .map(|band| level.bands[(start + band) as usize][1] as usize)
+        .sum()
+}
+
+/// Per coverage path of `level`, its edge cost with curves kept as
+/// y-monotone quadratics (lines plus [`QUADRATIC_COST`] per quadratic),
+/// rounded up. Paths are matched to `page`'s fills by flattening them again.
+fn curved_edge_counts(page: &VectorPage, level: &PreparedLevel) -> Vec<usize> {
+    let mut costs = Vec::with_capacity(level.coverage_paths.len());
+    let mut polylines = Vec::new();
+    for draw in &page.draws {
+        let Some(next) = level.coverage_paths.get(costs.len()) else {
+            break;
+        };
+        let VectorItem::Fill { path, .. } = &draw.item else {
+            continue;
+        };
+        flatten(path, level.tolerance, &mut polylines);
+        let mut count = 0;
+        let mut bounds: Option<PageRect> = None;
+        for points in polylines.iter().map(|polyline| &polyline.points) {
+            if points.len() < 2 {
+                continue;
+            }
+            for (index, &p0) in points.iter().enumerate() {
+                let p1 = points[(index + 1) % points.len()];
+                count += usize::from(p0[1] != p1[1]);
+                bounds = Some(union(
+                    bounds.unwrap_or([p0[0], p0[1], p0[0], p0[1]]),
+                    [
+                        p0[0].min(p1[0]),
+                        p0[1].min(p1[1]),
+                        p0[0].max(p1[0]),
+                        p0[1].max(p1[1]),
+                    ],
+                ));
+            }
+        }
+        if count != next.segments[1] as usize || bounds != Some(next.bounds) {
+            continue;
+        }
+        let (lines, quadratics) = curved_edges(path, level.tolerance);
+        costs.push(lines + (quadratics as f64 * QUADRATIC_COST).ceil() as usize);
+    }
+    costs
+}
+
+/// Non-horizontal lines and y-monotone quadratics of a fill's outline with
+/// curves approximated within `tolerance`; every subpath is closed.
+fn curved_edges(path: &PagePath, tolerance: f32) -> (usize, usize) {
+    let (mut lines, mut quadratics) = (0, 0);
+    let mut points = path.points.iter().copied();
+    let mut start: Option<[f32; 2]> = None;
+    let mut current = [0.0, 0.0];
+    let sloped = |from: [f32; 2], to: [f32; 2]| usize::from(from[1] != to[1]);
+    for verb in &path.verbs {
+        match verb {
+            PathVerb::MoveTo => {
+                let Some(point) = points.next() else { break };
+                if let Some(start) = start {
+                    lines += sloped(current, start);
+                }
+                start = Some(point);
+                current = point;
+            }
+            PathVerb::LineTo => {
+                let Some(point) = points.next() else { break };
+                start.get_or_insert(current);
+                lines += usize::from(current[1] != point[1]);
+                current = point;
+            }
+            PathVerb::CubicTo => {
+                let (Some(c1), Some(c2), Some(to)) = (points.next(), points.next(), points.next())
+                else {
+                    break;
+                };
+                start.get_or_insert(current);
+                CubicBezierSegment {
+                    from: point(current[0], current[1]),
+                    ctrl1: point(c1[0], c1[1]),
+                    ctrl2: point(c2[0], c2[1]),
+                    to: point(to[0], to[1]),
+                }
+                .for_each_quadratic_bezier(tolerance, &mut |quadratic| {
+                    let flat =
+                        quadratic.from.y == quadratic.ctrl.y && quadratic.ctrl.y == quadratic.to.y;
+                    if !flat {
+                        quadratics += 1 + usize::from(quadratic.local_y_extremum_t().is_some());
+                    }
+                });
+                current = to;
+            }
+            PathVerb::Close => {
+                if let Some(start) = start.take() {
+                    lines += sloped(current, start);
+                    current = start;
+                }
+            }
+        }
+    }
+    if let Some(start) = start {
+        lines += sloped(current, start);
+    }
+    (lines, quadratics)
+}
+
 fn union(a: PageRect, b: PageRect) -> PageRect {
     [
         a[0].min(b[0]),
@@ -1348,6 +1582,60 @@ mod tests {
         // The second line repeats the first; the third is painted again
         // over the fill.
         assert_eq!(prepared.exact().segments.len(), 3);
+    }
+
+    #[test]
+    fn coverage_work_counts_band_visits_and_curved_edges() {
+        // A circle of radius 10 from four quarter-circle cubics.
+        let k = 10.0 * 0.552_284_8;
+        let circle = path(
+            &[
+                PathVerb::MoveTo,
+                PathVerb::CubicTo,
+                PathVerb::CubicTo,
+                PathVerb::CubicTo,
+                PathVerb::CubicTo,
+                PathVerb::Close,
+            ],
+            &[
+                [20.0, 10.0],
+                [20.0, 10.0 + k],
+                [10.0 + k, 20.0],
+                [10.0, 20.0],
+                [10.0 - k, 20.0],
+                [0.0, 10.0 + k],
+                [0.0, 10.0],
+                [0.0, 10.0 - k],
+                [10.0 - k, 0.0],
+                [10.0, 0.0],
+                [10.0 + k, 0.0],
+                [20.0, 10.0 - k],
+                [20.0, 10.0],
+            ],
+        );
+        let page = fill(circle);
+        let prepared = PreparedPage::new(&page);
+        let level = prepared.exact();
+        let edges = level.coverage_paths[0].segments[1] as f64;
+
+        let work = coverage_work(&page, level, 4.0);
+        assert_eq!(work.paths, 1);
+        assert_eq!(work.area_share, 0.0);
+        assert_eq!(work.edges_per_path, edges);
+        // Each quarter is a y-monotone run of three quadratics.
+        assert_eq!(work.curved_edges_per_path, 12.0 * QUADRATIC_COST);
+        assert!(
+            work.curved_edges_per_path < edges / 2.0,
+            "{work:?} for {edges} edges"
+        );
+        // Bands keep a pixel's work well under every edge of the circle.
+        assert!(work.edges_per_pixel > 0.0 && work.edges_per_pixel < edges / 4.0);
+        assert!(work.quadratic_edges_per_pixel < work.edges_per_pixel);
+
+        // Zoomed far out, the whole circle fits in a pixel.
+        let far = coverage_work(&page, level, 0.01);
+        assert_eq!(far.area_share, 1.0);
+        assert_eq!(far.edges_per_pixel, 0.0);
     }
 
     fn fill(path: PagePath) -> VectorPage {

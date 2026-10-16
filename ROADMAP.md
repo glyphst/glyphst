@@ -138,12 +138,24 @@ between 0.25x and 1x, from per-pixel edge loops. Spreading the ink of paths
 under 2.5 px (HEPR's small-glyph rule) did not help: most glyphs at those
 zooms are larger.
 
-Still to port:
-- Tighter fill quads matter less than thought: Murietta's fills cover 51%
-  (glyphs) to 100% (large fills) of their quads.
-- HEPR's cell index (`vectorCellIndex.ts`, `vectorCellShaders.ts`): edges
-  right of a pixel's cell summarized as closure pairs, so a pixel sums a
-  few edges.
+What a text pixel costs (`zoom_bench` `coverage_work`, a CPU model of
+each pixel's edge reads): at 0.25x-1x a tracemonkey pixel sums 13-17
+edges of glyphs of 19-28 edges, so neither HEPR's cell index (13-18:
+HEPR itself indexes only paths of 24+ segments) nor quadratic edges
+(24-47 line-equivalents: coarse levels flatten a glyph into fewer lines
+than it has curves) would cut it. Yet the loop is the cost: returning
+full coverage without it brings the GPU p50 back to 0.38-0.44 ms. That is
+0.04-0.22 Mpx of ~15 edges, far below the GPU's arithmetic, and Mesa
+compiles `fs_vector` at SIMD16 with no spills. Reading four edges ahead
+(HEPR's latency hiding) and a 0.51 px quad margin (less overlap between
+neighbouring glyphs) did not help.
+
+Still to port or find:
+- Why ~15 edges a pixel cost 0.3 ms on Intel Arc (MTL): profile the pass
+  (Intel GPA or Mesa's `INTEL_DEBUG` perf output), and compare with lyon
+  fills for coarse text levels only.
+- HEPR's cell index (`vectorCellIndex.ts`, `vectorCellShaders.ts`) for
+  large drawing paths; it does not bound glyphs.
 - Per-pixel clip tests instead of stencil push/pop (`vectorClipShaders.ts`):
   Murietta's remaining draws are 1,644 stencil clip pairs per level.
   Coverage clips would also allow dropping MSAA.
@@ -151,8 +163,9 @@ Still to port:
   stencil patterns (b6a755c), and smoothed one-pixel stroke coverage for
   thumbnails (178588b): GPU thumbnails of Murietta are darker than MuPDF's.
 
-**Next step:** the cell index for text, measured by `zoom_bench` GPU time
-on tracemonkey, Murietta and Lower Level.
+**Next step:** profile where tracemonkey's coverage pass spends its time
+at 0.25x-1x, measured by `zoom_bench` GPU time on tracemonkey, Murietta
+and Lower Level.
 
 **Done when:** tracemonkey's GPU p50 is within 10% of its 0.38 ms before
 coverage fills, the drawings are no slower, and the corpus keeps its mean

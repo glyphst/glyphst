@@ -16,12 +16,14 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use common::{FORMAT, Gpu, LoadedPage, diff, ms, mupdf_view, save_png};
-use glyphst_pdf_gpu::{Camera, Renderer};
+use glyphst_pdf_gpu::{Camera, PreparedPage, Renderer, prepare::coverage_work};
 use serde_json::json;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 64.0;
 const CHECKPOINTS: [f32; 3] = [1.0, 8.0, 64.0];
+/// Zooms at which `coverage_work` is reported.
+const WORK_ZOOMS: [f32; 5] = [0.25, 0.5, 1.0, 4.0, 16.0];
 /// The Reader's thumbnail scale and size limit.
 const THUMBNAIL_SCALE: f32 = 0.35;
 const THUMBNAIL_MAX_SIDE: u32 = 512;
@@ -254,6 +256,33 @@ fn main() -> Result<()> {
         "differing_pixels": result.differing,
     });
 
+    // What coverage fills ask of a pixel at a few zooms (see `coverage_work`).
+    let max_scales: Vec<f32> = prepared
+        .levels
+        .iter()
+        .map(|level| level.max_scale)
+        .collect();
+    let coverage_work: Vec<_> = WORK_ZOOMS
+        .iter()
+        .map(|&zoom| {
+            let scale = fit * zoom;
+            let level = PreparedPage::level_for_scale(&max_scales, scale);
+            let work = coverage_work(vector_page, &prepared.levels[level], scale);
+            json!({
+                "zoom": zoom,
+                "level": level,
+                "paths": work.paths,
+                "megapixels": work.pixels / 1e6,
+                "area_share": work.area_share,
+                "edges_per_pixel": work.edges_per_pixel,
+                "cell_edges_per_pixel": work.cell_edges_per_pixel,
+                "quadratic_edges_per_pixel": work.quadratic_edges_per_pixel,
+                "edges_per_path": work.edges_per_path,
+                "curved_edges_per_path": work.curved_edges_per_path,
+            })
+        })
+        .collect();
+
     let stats = &vector_page.stats;
     let summary = json!({
         "pdf": options.pdf.display().to_string(),
@@ -286,6 +315,7 @@ fn main() -> Result<()> {
             "gpu_mib": gpu_page.gpu_bytes as f64 / (1024.0 * 1024.0),
             "raster_layer_megapixels": uploaded.layer_pixels as f64 / 1e6,
         },
+        "coverage_work": coverage_work,
         "timings_ms": {
             "parse_display_list": ms(loaded.parse),
             "capture": ms(loaded.capture),
