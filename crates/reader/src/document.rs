@@ -537,13 +537,15 @@ impl Loader {
 
     /// Requests `pages` (in priority order) from their `source` and
     /// forgets other pages that were requested but not loaded yet. A page
-    /// asked for from another source is requested again.
+    /// asked for from another source is requested again. Returns the pages
+    /// requested now.
     pub fn want(
         &mut self,
         pages: &[usize],
         loaded: impl Fn(usize) -> bool,
         source: impl Fn(usize) -> PageSource,
-    ) {
+    ) -> Vec<usize> {
+        let mut requested = Vec::new();
         if let Ok(mut wanted) = self.wanted.lock() {
             wanted.clear();
             wanted.extend(pages.iter().copied().filter(|&page| !loaded(page)));
@@ -557,8 +559,10 @@ impl Loader {
             if self.requested.get(&page) != Some(&source.version()) {
                 self.requested.insert(page, source.version());
                 let _ = self.requests.send(Request::Page { page, source });
+                requested.push(page);
             }
         }
+        requested
     }
 
     /// Re-rasterizes raster layer `layer` of `page` (its display-list `ops`)

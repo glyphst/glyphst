@@ -18,6 +18,34 @@ pub(super) const MINIMAP_FROM: f32 = 360.0;
 /// At most this many ticks; longer documents are sampled.
 const MAX_TICKS: usize = 120;
 
+/// How far the page under the meta line has loaded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    /// Its upload to the GPU: the share written, and seconds since it was
+    /// asked for.
+    Uploading(f32, f32),
+    /// Its loading animation runs, for this many seconds.
+    Generating(f32),
+    /// Seconds since it was asked for; its preview may show.
+    Loading(f32),
+    Loaded,
+}
+
+/// The meta line of page `page` (0-based) of `size` points, of `pages`.
+fn meta_line(page: usize, [width, height]: [f64; 2], pages: usize, stage: Stage) -> String {
+    let p = page + 1;
+    let size = format!("{width:.0} × {height:.0} pt");
+    match stage {
+        Stage::Uploading(written, seconds) => format!(
+            "p.{p} — uploading {:.0}% — {size} — {seconds:.1} s",
+            written * 100.0
+        ),
+        Stage::Generating(seconds) => format!("p.{p} — generating — {size} — {seconds:.2} s"),
+        Stage::Loading(seconds) => format!("p.{p} — loading — {size} — {seconds:.1} s"),
+        Stage::Loaded => format!("p.{p} — {size} — page {p} of {pages}"),
+    }
+}
+
 impl ReaderApp {
     /// Corner ticks and the meta line on the current page of tab `active`,
     /// and the page ticks of the pane at `rect`.
@@ -35,6 +63,8 @@ impl ReaderApp {
         if tab.present.is_some() || self.zen {
             return;
         }
+        // The current page, once it is found wholly on the GPU.
+        let mut finished = None;
         let pages = tab.layout.len();
         let current = tab.current_page();
         if let Some(map) = maps.iter().find(|map| map.page == current)
@@ -61,13 +91,40 @@ impl ReaderApp {
                 motif::corner_ticks(ui, map.paper, offset, 12.0, tokens.accent);
             }
             let [width, height] = tab.layout.page_size(current);
-            let loading = self.generations.loading(
-                PageKey {
-                    tab: tab.id,
-                    page: current,
-                },
-                now,
-            );
+            let key = PageKey {
+                tab: tab.id,
+                page: current,
+            };
+            let since = tab
+                .loading_since(current)
+                .map(|since| now.saturating_duration_since(since).as_secs_f32());
+            let (complete, upload, previewing) = self
+                .with_gpu(|gpu| {
+                    (
+                        gpu.is_complete(key),
+                        gpu.upload_progress(key),
+                        gpu.is_previewing(key),
+                    )
+                })
+                .unwrap_or((false, None, false));
+            if complete && since.is_some() {
+                finished = Some(current);
+            }
+            // Until the page is wholly on the GPU the line says how far it
+            // is, in the accent (frame 02b).
+            let stage = match (upload, self.generations.loading(key, now)) {
+                (Some(written), _) => Stage::Uploading(written, since.unwrap_or_default()),
+                (None, Some(seconds)) => Stage::Generating(seconds),
+                (None, None) if !complete && (previewing || since.is_some()) => {
+                    Stage::Loading(since.unwrap_or_default())
+                }
+                (None, None) => Stage::Loaded,
+            };
+            let loading = stage != Stage::Loaded;
+            if loading {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
             let meta = match tab.translation.as_ref().filter(|session| {
                 session.show_translated && session.previews.contains_key(&current)
             }) {
@@ -80,19 +137,7 @@ impl ReaderApp {
                         .active_provider
                         .as_str()),
                 ),
-                // While the page generates, the line says so in the accent
-                // (frame 02b).
-                None => match loading {
-                    Some(seconds) => format!(
-                        "p.{} — generating — {width:.0} × {height:.0} pt — {seconds:.2} s",
-                        current + 1,
-                    ),
-                    None => format!(
-                        "p.{} — {width:.0} × {height:.0} pt — page {} of {pages}",
-                        current + 1,
-                        current + 1
-                    ),
-                },
+                None => meta_line(current, [width, height], pages, stage),
             };
             let top = map.paper.top() - 13.0;
             if top - 6.0 > rect.top() && above >= 26.0 {
@@ -101,7 +146,7 @@ impl ReaderApp {
                     pos2(map.paper.right() - 18.0, top + 7.0),
                 );
                 let painter = painter.with_clip_rect(rect);
-                let color = if loading.is_some() {
+                let color = if loading {
                     tokens.accent_text
                 } else {
                     tokens.faint
@@ -115,6 +160,9 @@ impl ReaderApp {
                     );
                 }
             }
+        }
+        if let Some(page) = finished {
+            self.tabs[active].finished_loading(page);
         }
         self.minimap(ui, rect, active, pages, current);
     }
@@ -282,5 +330,28 @@ impl ReaderApp {
             });
         // The clock ticks.
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_meta_line_says_how_far_the_page_has_loaded() {
+        let line = |stage| meta_line(0, [3456.0, 2592.4], 12, stage);
+        assert_eq!(
+            line(Stage::Generating(1.416)),
+            "p.1 — generating — 3456 × 2592 pt — 1.42 s"
+        );
+        assert_eq!(
+            line(Stage::Loading(4.23)),
+            "p.1 — loading — 3456 × 2592 pt — 4.2 s"
+        );
+        assert_eq!(
+            line(Stage::Uploading(0.634, 11.06)),
+            "p.1 — uploading 63% — 3456 × 2592 pt — 11.1 s"
+        );
+        assert_eq!(line(Stage::Loaded), "p.1 — 3456 × 2592 pt — page 1 of 12");
     }
 }

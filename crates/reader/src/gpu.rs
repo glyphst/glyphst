@@ -425,6 +425,21 @@ impl ReaderGpu {
             && self.parts.get(&key).is_some_and(|parts| !parts.is_empty())
     }
 
+    /// Whether `key` is wholly on the GPU, with no newer version of it
+    /// being written.
+    pub fn is_complete(&self, key: PageKey) -> bool {
+        self.pages.contains_key(&key) && self.upload_progress(key).is_none()
+    }
+
+    /// How much of `key`'s upload is written, from 0 to 1, while it is
+    /// under way.
+    pub fn upload_progress(&self, key: PageKey) -> Option<f32> {
+        self.uploads.iter().find_map(|upload| match upload {
+            Upload::Page { key: k, upload, .. } if *k == key => Some(upload.progress()),
+            _ => None,
+        })
+    }
+
     /// Whether any page shows a preview part.
     pub fn has_parts(&self) -> bool {
         !self.parts.is_empty()

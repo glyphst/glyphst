@@ -1524,6 +1524,15 @@ impl<P: Borrow<PreparedPage>> PageUpload<P> {
         self.gpu.ready_levels
     }
 
+    /// The share of the page's levels and images written, from 0 to 1.
+    pub fn progress(&self) -> f32 {
+        let total: u64 = self.items.iter().map(|item| item.len).sum();
+        if total == 0 {
+            return 1.0;
+        }
+        1.0 - self.cursor.remaining(&self.items) as f32 / total as f32
+    }
+
     /// Writes up to `budget` bytes more (at least one row or word) through
     /// `belt` and submits them; returns whether the upload is complete.
     /// Hosts keep one belt, whose staging buffers are reused once the GPU

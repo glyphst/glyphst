@@ -207,6 +207,9 @@ pub struct DocumentTab {
     pub dense_pages: HashSet<usize>,
     pub failed: HashMap<usize, String>,
     pub ready: VecDeque<ReadyPage>,
+    /// When pages still loading were asked for, until they are wholly on
+    /// the GPU or fail.
+    loading_since: HashMap<usize, Instant>,
     /// Preview parts of pages still loading, waiting for the GPU.
     pub ready_parts: VecDeque<(usize, Box<PreparedPage>)>,
     /// Re-rasterized layers waiting for the GPU: page, layer, image.
@@ -300,6 +303,7 @@ impl DocumentTab {
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
+            loading_since: HashMap::new(),
             ready_parts: VecDeque::new(),
             ready_layers: VecDeque::new(),
             layers: HashMap::new(),
@@ -386,6 +390,7 @@ impl DocumentTab {
         self.reflow_mismatch = None;
         self.translation = None;
         self.loaded_version.clear();
+        self.loading_since.clear();
         self.text_version = vec![0; pages];
         self.original_text.clear();
         self.restore = Some(position);
@@ -471,6 +476,7 @@ impl DocumentTab {
                     });
                 }
                 Loaded::Failed { page, error } => {
+                    self.loading_since.remove(&page);
                     self.failed.insert(page, error);
                 }
                 Loaded::Text {
@@ -542,11 +548,25 @@ impl DocumentTab {
             .iter()
             .map(|&page| (page, self.source(page)))
             .collect();
-        self.loader.want(
+        let requested = self.loader.want(
             wanted,
             |page| loaded.contains(&page),
             |page| sources.get(&page).cloned().unwrap_or(PageSource::Original),
         );
+        let now = Instant::now();
+        for page in requested {
+            self.loading_since.insert(page, now);
+        }
+    }
+
+    /// When `page` was asked for, while it is still loading.
+    pub fn loading_since(&self, page: usize) -> Option<Instant> {
+        self.loading_since.get(&page).copied()
+    }
+
+    /// Notes that `page` is wholly on the GPU.
+    pub fn finished_loading(&mut self, page: usize) {
+        self.loading_since.remove(&page);
     }
 
     /// Where `page` is drawn from: its translation when one is shown,
@@ -1558,6 +1578,7 @@ mod tests {
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
+            loading_since: HashMap::new(),
             ready_parts: VecDeque::new(),
             ready_layers: VecDeque::new(),
             layers: HashMap::new(),
