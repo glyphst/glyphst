@@ -16,7 +16,8 @@ use std::{collections::HashSet, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
 use glyphst_pdf::vector::{
-    LineCap, PagePath, PageRect, PathVerb, StrokeStyle, VectorItem, VectorPage,
+    LineCap, PagePath, PageRect, PathVerb, StrokeStyle, VectorChunk, VectorDraw, VectorItem,
+    VectorPage,
 };
 use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex as LyonFillVertex,
@@ -35,6 +36,9 @@ pub const LOD_ERROR_PX: f32 = 0.5;
 /// Largest device pixels per page point each coarse level serves; above the
 /// last one the exact level is used.
 const LOD_MAX_SCALES: [f32; 6] = [1.0 / 16.0, 0.25, 1.0, 4.0, 16.0, 64.0];
+
+/// The scale whose level [`PreparedPage::preview`] matches.
+const PREVIEW_SCALE: f32 = 1.0;
 
 /// A coarse level is kept only when it has at most this fraction of the
 /// primitives of the next finer level.
@@ -275,9 +279,9 @@ impl PreparedPage {
                 .map(|max_scale| {
                     scope.spawn(move || match max_scale {
                         Some(max_scale) => {
-                            PreparedLevel::new(page, max_scale, LOD_ERROR_PX / max_scale)
+                            PreparedLevel::new(&page.draws, max_scale, LOD_ERROR_PX / max_scale)
                         }
-                        None => PreparedLevel::new(page, f32::INFINITY, FLATTEN_TOLERANCE),
+                        None => PreparedLevel::new(&page.draws, f32::INFINITY, FLATTEN_TOLERANCE),
                     })
                 })
                 .collect();
@@ -306,6 +310,26 @@ impl PreparedPage {
         }
     }
 
+    /// A quick drawing of part of a page while it loads: one level, as
+    /// exact as the level serving `PREVIEW_SCALE` pixels per point, drawn
+    /// at every scale. Images and raster layers are left out.
+    pub fn preview(chunk: &VectorChunk) -> Self {
+        let vectors = chunk.draws().filter(|draw| {
+            !matches!(
+                draw.item,
+                VectorItem::Image { .. } | VectorItem::Raster { .. }
+            )
+        });
+        let mut level = PreparedLevel::new(vectors, PREVIEW_SCALE, LOD_ERROR_PX / PREVIEW_SCALE);
+        level.max_scale = f32::INFINITY;
+        Self {
+            bounds: chunk.bounds,
+            levels: vec![level],
+            raster_layers: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+
     /// Index of the coarsest level exact enough for `scale` device pixels
     /// per page point.
     pub fn level_for_scale(levels: &[f32], scale: f32) -> usize {
@@ -323,7 +347,11 @@ impl PreparedPage {
 }
 
 impl PreparedLevel {
-    fn new(page: &VectorPage, max_scale: f32, tolerance: f32) -> Self {
+    fn new<'a>(
+        draws: impl IntoIterator<Item = &'a VectorDraw>,
+        max_scale: f32,
+        tolerance: f32,
+    ) -> Self {
         let mut level = Self {
             max_scale,
             tolerance,
@@ -335,7 +363,7 @@ impl PreparedLevel {
         let mut image = 0;
         // Index ranges and push batches of the clips on the stencil stack.
         let mut clips: Vec<(Range<u32>, usize)> = Vec::new();
-        for draw in &page.draws {
+        for draw in draws {
             level.depth = clips.len() as u32;
             match &draw.item {
                 VectorItem::Fill {

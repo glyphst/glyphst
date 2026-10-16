@@ -18,7 +18,10 @@ use glyphst_core::DocumentLayout;
 use glyphst_pdf::{
     DocumentSnapshot, GlyphstDocument,
     text::{PageLink, PageText, page_links},
-    vector::{LayerImage, PageRect, capture_display_list, rasterize_layer},
+    vector::{
+        ChunkOptions, LayerImage, PageRect, VectorChunk, capture_display_list, capture_page,
+        rasterize_layer,
+    },
 };
 use glyphst_pdf_gpu::{Camera, PreparedPage, rotate, rotate_rect};
 use mupdf::{Colorspace, DisplayList, Matrix};
@@ -325,6 +328,13 @@ pub enum Loaded {
         page: usize,
         image: egui::ColorImage,
     },
+    /// The next part of a page's preview: what MuPDF drew of it so far,
+    /// while the page itself is still loading (see `load_page`).
+    Part {
+        page: usize,
+        version: u64,
+        prepared: Box<PreparedPage>,
+    },
     Prepared {
         page: usize,
         version: u64,
@@ -387,6 +397,17 @@ enum Request {
 /// Display lists the loader keeps for re-rasterizing layers.
 const CACHED_LISTS: usize = 8;
 
+/// A page still capturing after this long shows what it has so far...
+const PREVIEW_DELAY: Duration = Duration::from_millis(300);
+/// ...and then more of it this often.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Where a page's preview parts go, from the thread preparing them.
+struct PartSink {
+    results: Sender<Loaded>,
+    ctx: egui::Context,
+}
+
 /// Captures and prepares pages on a worker thread with its own document.
 /// Requests for pages no longer wanted are skipped.
 pub struct Loader {
@@ -408,6 +429,10 @@ impl Loader {
         let (result_tx, results) = mpsc::channel();
         let wanted = Arc::new(Mutex::new(HashSet::new()));
         let worker_wanted = wanted.clone();
+        let parts = PartSink {
+            results: result_tx.clone(),
+            ctx: ctx.clone(),
+        };
         thread::Builder::new()
             .name("page-loader".into())
             .spawn(move || {
@@ -439,7 +464,7 @@ impl Loader {
                             }
                             let key = (page, source.version());
                             if let Some(list) =
-                                load_page(document.inner(), page, &source, &mut send)
+                                load_page(document.inner(), page, &source, &mut send, &parts)
                             {
                                 lists.retain(|(cached, _)| *cached != key);
                                 lists.push_back((key, list));
@@ -546,24 +571,77 @@ impl Loader {
     }
 }
 
-/// Loads one page, sending a thumbnail as soon as it is drawn and the
-/// prepared vectors after. MuPDF interprets the page once, into a display
-/// list both are made from. Pages with more path points than
-/// [`THUMBNAIL_MAX_POINTS`] get no thumbnail: rasterizing them takes
-/// seconds, about as long as preparing their vectors.
+/// A page ready to send, and what its list, thumbnail and text are made
+/// from after it.
+struct LoadedPage {
+    loaded: Loaded,
+    page: mupdf::Page,
+    /// The display list, when the page needed it already.
+    list: Option<DisplayList>,
+    path_points: usize,
+}
+
+/// Loads one page. MuPDF interprets it straight into a capture
+/// ([`capture_page`]); a page still capturing after [`PREVIEW_DELAY`] hands
+/// out what it has every [`PREVIEW_INTERVAL`], prepared on another thread
+/// and sent as [`Loaded::Part`]s, so a dense page shows while it loads. The
+/// prepared vectors follow, then a display list of the page for its
+/// thumbnail and text. A page with raster layers is captured again from its
+/// list first, since the layers' operation numbers must be the list's.
+/// Pages with more path points than [`THUMBNAIL_MAX_POINTS`] get no
+/// thumbnail: rasterizing them takes seconds, about as long as preparing
+/// their vectors.
 fn load_page(
     document: &mupdf::Document,
     page: usize,
     source: &PageSource,
     send: &mut dyn FnMut(Loaded) -> bool,
+    parts: &PartSink,
 ) -> Option<DisplayList> {
     let started = Instant::now();
     let version = source.version();
-    let result = (|| -> Result<Option<(Loaded, DisplayList)>> {
+    let result = (|| -> Result<Option<LoadedPage>> {
         let loaded_page = source_page(document, page, source)?;
-        let list = loaded_page.to_display_list(true)?;
         let links = page_links(&loaded_page);
-        let vector = capture_display_list(&list)?;
+        let (chunks, chunk_rx) = mpsc::channel::<VectorChunk>();
+        let options = ChunkOptions {
+            first: PREVIEW_DELAY,
+            interval: PREVIEW_INTERVAL,
+            sender: chunks,
+        };
+        let captured = AtomicBool::new(false);
+        let mut vector = thread::scope(|scope| {
+            scope.spawn(|| {
+                for chunk in chunk_rx {
+                    // Parts left when capture is done would show no sooner
+                    // than the page itself.
+                    if captured.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let prepared = Box::new(PreparedPage::preview(&chunk));
+                    drop(chunk);
+                    let part = Loaded::Part {
+                        page,
+                        version,
+                        prepared,
+                    };
+                    if parts.results.send(part).is_err() {
+                        return;
+                    }
+                    parts.ctx.request_repaint();
+                }
+            });
+            let result = capture_page(&loaded_page, Some(options));
+            captured.store(true, Ordering::Relaxed);
+            result
+        })?
+        .into_page();
+        let mut list = None;
+        if vector.stats.raster_layers > 0 {
+            let made = loaded_page.to_display_list(true)?;
+            vector = capture_display_list(&made)?;
+            list = Some(made);
+        }
         let sketch = Arc::new(PageSketch::from_vector(&vector));
         if !send(Loaded::Sketch {
             page,
@@ -572,23 +650,12 @@ fn load_page(
         }) {
             return Ok(None);
         }
-        if vector.stats.path_points <= THUMBNAIL_MAX_POINTS {
-            let thumbnail = list.to_pixmap(
-                &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
-                &Colorspace::device_rgb(),
-                false,
-            )?;
-            let size = [thumbnail.width() as usize, thumbnail.height() as usize];
-            let image = egui::ColorImage::from_rgb(size, thumbnail.samples());
-            if !send(Loaded::Thumbnail { page, image }) {
-                return Ok(None);
-            }
-        }
         let prepared = PreparedPage::new(&vector);
         let mut layers = Vec::new();
         for (index, layer) in prepared.raster_layers.iter().enumerate() {
+            let Some(list) = &list else { break };
             if let Some(image) = rasterize_layer(
-                &list,
+                list,
                 layer.ops.clone(),
                 layer.bounds,
                 LAYER_SCALE,
@@ -605,15 +672,43 @@ fn load_page(
             links,
             seconds: started.elapsed().as_secs_f64(),
         };
-        Ok(Some((loaded, list)))
+        Ok(Some(LoadedPage {
+            loaded,
+            page: loaded_page,
+            list,
+            path_points: vector.stats.path_points,
+        }))
     })();
     match result {
-        Ok(Some((loaded, list))) => {
+        Ok(Some(LoadedPage {
+            loaded,
+            page: loaded_page,
+            list,
+            path_points,
+        })) => {
             if !send(loaded) {
                 return None;
             }
-            // The text follows the page, so a dense page shows without
-            // waiting for it; a page whose text cannot be read still shows.
+            // The display list, thumbnail and text follow the page, so a
+            // dense page shows without waiting for them; a page whose list
+            // cannot be made still shows.
+            let list = match list {
+                Some(list) => list,
+                None => loaded_page.to_display_list(true).ok()?,
+            };
+            if path_points <= THUMBNAIL_MAX_POINTS
+                && let Ok(thumbnail) = list.to_pixmap(
+                    &Matrix::new_scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE),
+                    &Colorspace::device_rgb(),
+                    false,
+                )
+            {
+                let size = [thumbnail.width() as usize, thumbnail.height() as usize];
+                let image = egui::ColorImage::from_rgb(size, thumbnail.samples());
+                if !send(Loaded::Thumbnail { page, image }) {
+                    return None;
+                }
+            }
             let text = PageText::from_display_list(&list).unwrap_or_default();
             if !send(Loaded::Text {
                 page,

@@ -207,6 +207,8 @@ pub struct DocumentTab {
     pub dense_pages: HashSet<usize>,
     pub failed: HashMap<usize, String>,
     pub ready: VecDeque<ReadyPage>,
+    /// Preview parts of pages still loading, waiting for the GPU.
+    pub ready_parts: VecDeque<(usize, Box<PreparedPage>)>,
     /// Re-rasterized layers waiting for the GPU: page, layer, image.
     pub ready_layers: VecDeque<(usize, usize, LayerImage)>,
     layers: HashMap<usize, Vec<LayerState>>,
@@ -298,6 +300,7 @@ impl DocumentTab {
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
+            ready_parts: VecDeque::new(),
             ready_layers: VecDeque::new(),
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
@@ -410,6 +413,18 @@ impl DocumentTab {
                     );
                     self.drop_thumbnail(page);
                     self.thumbnails.insert(page, Thumbnail::Raster(texture));
+                }
+                Loaded::Part {
+                    page,
+                    version,
+                    prepared,
+                } => {
+                    // Parts finished after their page are dropped.
+                    if version == self.source(page).version()
+                        && self.loaded_version.get(&page) != Some(&version)
+                    {
+                        self.ready_parts.push_back((page, prepared));
+                    }
                 }
                 Loaded::Prepared {
                     page,
@@ -1543,6 +1558,7 @@ mod tests {
             dense_pages: HashSet::new(),
             failed: HashMap::new(),
             ready: VecDeque::new(),
+            ready_parts: VecDeque::new(),
             ready_layers: VecDeque::new(),
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),

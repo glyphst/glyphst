@@ -74,10 +74,13 @@ of 100 files render, 1 differs from MuPDF by more than 1%; turned 90
 degrees, 20 of them differ from MuPDF as little as upright.
 
 Known gaps:
-- A very dense page is slow to load: Lower Level (7.6M strokes) takes
-  about 10.5 s before its upload starts (MuPDF's display list 7.0 s,
-  capture 1.9 s, preparing levels 1.4 s). Once uploading it shows its
-  coarsest level after 49 ms and sharpens over 1.6 s of 4 MiB frames.
+- A very dense page is slow to finish loading: Lower Level (7.6M
+  strokes) shows previews of what MuPDF has interpreted from about
+  0.55 s, but the page itself is drawn after 11-13 s. MuPDF's run over
+  the page dominates (in a profile, reading and lexing the 51 MB content
+  stream 41%, inflate 15%), then capture and preparing levels (1.3 s).
+  Measure on the performance cores (`taskset -c 0-11`): a loader thread
+  on a low-power core takes twice as long.
 - Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.

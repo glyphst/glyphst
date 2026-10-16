@@ -29,12 +29,19 @@ documents cannot rely on independent EPUB style policies.
 
 ## GPU vector rendering
 
-[Vector capture](crates/pdf/src/vector.rs) replays a MuPDF display list
-through a native device and records fills, strokes and glyph outlines in page
-space. Rectangular clips become scissors and other path clips stencil clips.
-Shadings, images, soft masks, non-normal blend groups, patterns and text or
-stroke clips stay ranges of display-list operations that MuPDF rasterizes as
-ordered layers, so no page falls back as a whole. [`pdf-gpu`](crates/pdf-gpu)
+[Vector capture](crates/pdf/src/vector.rs) runs MuPDF over a page (or
+replays a display list) through a native device and records fills, strokes
+and glyph outlines in page space. Rectangular clips become scissors and other
+path clips stencil clips. Shadings, images, soft masks, non-normal blend
+groups, patterns and text or stroke clips stay ranges of display-list
+operations that MuPDF rasterizes as ordered layers, so no page falls back as
+a whole. The Reader captures straight from MuPDF's interpreter, handing out
+the draws captured so far every 250 ms once a page has taken 300 ms; their
+one-level previews draw, in order, until the page itself is written. The
+page's display list (thumbnail, text, re-rasterized layers) is made after
+the page is sent. A page with raster layers is captured again from its list,
+because a list's replay culls operations (paths without points, contents of
+clips with no area) and the layers' ranges are numbered by the list. [`pdf-gpu`](crates/pdf-gpu)
 prepares each page once per level of detail and draws it with a camera
 uniform (pan, zoom and quarter turns): fills are quads whose pixels integrate
 the path's coverage from its edges (HEPR's analytic fills, banded when long)

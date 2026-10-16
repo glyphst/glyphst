@@ -10,7 +10,14 @@
 //! ranges through MuPDF's own rasterizer, so paint order is preserved and no
 //! page falls back as a whole.
 
-use std::{cell::RefCell, num::NonZero, ops::Range, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    num::NonZero,
+    ops::Range,
+    rc::Rc,
+    sync::{Arc, mpsc::Sender},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use mupdf::{
@@ -248,6 +255,110 @@ pub fn capture_display_list(display_list: &DisplayList) -> Result<VectorPage> {
     Ok(capture.finish())
 }
 
+/// A run of a page's draws handed out while MuPDF is still interpreting the
+/// rest of the page, for drawing what is captured so far.
+pub struct VectorChunk {
+    pub bounds: PageRect,
+    /// The stencil clips open where the chunk starts, pushed again.
+    pub open: Vec<VectorDraw>,
+    pub draws: Arc<Vec<VectorDraw>>,
+    /// How many stencil clips are still open where it ends.
+    pub still_open: usize,
+}
+
+static CLIP_POP: VectorDraw = VectorDraw {
+    item: VectorItem::ClipPop,
+    clip: None,
+};
+
+impl VectorChunk {
+    /// The chunk as a drawing of its own: every stencil clip it uses is
+    /// pushed and popped within it.
+    pub fn draws(&self) -> impl Iterator<Item = &VectorDraw> {
+        self.open
+            .iter()
+            .chain(self.draws.iter())
+            .chain(std::iter::repeat_n(&CLIP_POP, self.still_open))
+    }
+}
+
+/// When [`capture_page`] hands out [`VectorChunk`]s, and to whom.
+pub struct ChunkOptions {
+    /// The first chunk goes once capture has run this long, the next ones
+    /// every `interval`; a page captured sooner sends none.
+    pub first: Duration,
+    pub interval: Duration,
+    pub sender: Sender<VectorChunk>,
+}
+
+/// A page from [`capture_page`]: the draws still held and the chunks handed
+/// out, shared until [`CapturedPage::into_page`].
+pub struct CapturedPage {
+    page: VectorPage,
+    sent: Vec<Arc<Vec<VectorDraw>>>,
+}
+
+impl CapturedPage {
+    /// The whole page. The chunks' draws are taken back, or copied while a
+    /// receiver still holds them.
+    pub fn into_page(self) -> VectorPage {
+        let Self { mut page, sent } = self;
+        if sent.is_empty() {
+            return page;
+        }
+        let total = sent.iter().map(|chunk| chunk.len()).sum::<usize>() + page.draws.len();
+        let mut draws = Vec::with_capacity(total);
+        for chunk in sent {
+            match Arc::try_unwrap(chunk) {
+                Ok(mut owned) => draws.append(&mut owned),
+                Err(shared) => draws.extend(shared.iter().cloned()),
+            }
+        }
+        draws.append(&mut page.draws);
+        page.draws = draws;
+        page.stats.raster_layers = page
+            .draws
+            .iter()
+            .filter(|draw| matches!(draw.item, VectorItem::Raster { .. }))
+            .count();
+        page
+    }
+}
+
+/// Records `page` in page space straight from MuPDF's interpreter, as
+/// [`capture_display_list`] records a display list of it, without building
+/// and replaying the list. A display list's replay skips operations it
+/// culls (paths without points, the contents of clips with no area), which
+/// this keeps: raster-layer operation numbers only match a list for a page
+/// captured from that list. With `chunks`, the draws captured so far are
+/// handed out as it goes.
+pub fn capture_page(page: &mupdf::Page, chunks: Option<ChunkOptions>) -> Result<CapturedPage> {
+    let bounds = page.bounds().context("failed to bound PDF page")?;
+    let mut capture = Capture::new(bounds);
+    capture.chunks = chunks.map(|options| ChunkSink {
+        sender: options.sender,
+        next: Instant::now() + options.first,
+        interval: options.interval,
+        sent: Vec::new(),
+    });
+    let state = Rc::new(RefCell::new(capture));
+    let device = Device::from_native(CaptureDevice(state.clone()))
+        .context("failed to create vector capture device")?;
+    page.run(&device, &Matrix::IDENTITY)
+        .context("failed to capture PDF page vectors")?;
+    drop(device);
+    let mut capture = state.replace(Capture::new(bounds));
+    let sent = capture
+        .chunks
+        .take()
+        .map(|sink| sink.sent)
+        .unwrap_or_default();
+    Ok(CapturedPage {
+        page: capture.finish(),
+        sent,
+    })
+}
+
 /// Rasterizes the display-list operations in `ops` onto a transparent RGBA
 /// pixmap of `width` x `height` pixels, with `ctm` mapping page space to it.
 pub fn rasterize_ops(
@@ -382,6 +493,14 @@ struct ClipEntry {
     stencil: bool,
 }
 
+/// Where [`capture_page`] sends its chunks, and those it sent.
+struct ChunkSink {
+    sender: Sender<VectorChunk>,
+    next: Instant,
+    interval: Duration,
+    sent: Vec<Arc<Vec<VectorDraw>>>,
+}
+
 struct Capture {
     bounds: PageRect,
     rgb: Colorspace,
@@ -393,6 +512,12 @@ struct Capture {
     tiles: u32,
     /// Index into `draws` of the raster run still accepting operations.
     open_raster: Option<usize>,
+    /// Set when capture hands out chunks.
+    chunks: Option<ChunkSink>,
+    /// With chunks: the open stencil clips, and those open when the last
+    /// chunk was sent.
+    stencils: Vec<VectorDraw>,
+    chunk_stencils: Vec<VectorDraw>,
 }
 
 impl Capture {
@@ -407,6 +532,9 @@ impl Capture {
             groups: Vec::new(),
             tiles: 0,
             open_raster: None,
+            chunks: None,
+            stencils: Vec::new(),
+            chunk_stencils: Vec::new(),
         }
     }
 
@@ -423,6 +551,25 @@ impl Capture {
             draws: self.draws,
             stats: self.stats,
         }
+    }
+
+    /// Hands out the draws since the last chunk once it is time.
+    fn send_chunk(&mut self) {
+        let Some(sink) = &mut self.chunks else {
+            return;
+        };
+        if self.draws.is_empty() || Instant::now() < sink.next {
+            return;
+        }
+        sink.next = Instant::now() + sink.interval;
+        let draws = Arc::new(std::mem::take(&mut self.draws));
+        sink.sent.push(draws.clone());
+        let _ = sink.sender.send(VectorChunk {
+            bounds: self.bounds,
+            open: std::mem::replace(&mut self.chunk_stencils, self.stencils.clone()),
+            draws,
+            still_open: self.stencils.len(),
+        });
     }
 
     fn take_op(&mut self) -> u32 {
@@ -484,7 +631,20 @@ impl Capture {
     fn push_vector(&mut self, item: VectorItem) {
         self.open_raster = None;
         let clip = self.clip_rect();
+        if self.chunks.is_some() {
+            match &item {
+                VectorItem::ClipPush { .. } => self.stencils.push(VectorDraw {
+                    item: item.clone(),
+                    clip,
+                }),
+                VectorItem::ClipPop => {
+                    self.stencils.pop();
+                }
+                _ => {}
+            }
+        }
         self.draws.push(VectorDraw { item, clip });
+        self.send_chunk();
     }
 
     fn color(
@@ -1207,18 +1367,19 @@ mod tests {
         assert!(render_region(&page, [5.0, 5.0, 5.0, 9.0], 100).is_err());
     }
 
+    fn kind(item: &VectorItem) -> &'static str {
+        match item {
+            VectorItem::Fill { .. } => "fill",
+            VectorItem::Stroke { .. } => "stroke",
+            VectorItem::Raster { .. } => "raster",
+            VectorItem::Image { .. } => "image",
+            VectorItem::ClipPush { .. } => "clip",
+            VectorItem::ClipPop => "unclip",
+        }
+    }
+
     fn kinds(page: &VectorPage) -> Vec<&'static str> {
-        page.draws
-            .iter()
-            .map(|draw| match draw.item {
-                VectorItem::Fill { .. } => "fill",
-                VectorItem::Stroke { .. } => "stroke",
-                VectorItem::Raster { .. } => "raster",
-                VectorItem::Image { .. } => "image",
-                VectorItem::ClipPush { .. } => "clip",
-                VectorItem::ClipPop => "unclip",
-            })
-            .collect()
+        page.draws.iter().map(|draw| kind(&draw.item)).collect()
     }
 
     const SHADING: &str = "<< /Shading << /Sh0 << /ShadingType 2 /ColorSpace /DeviceRGB \
@@ -1244,6 +1405,50 @@ mod tests {
         assert_eq!(style.width, 2.0);
         assert_eq!(path.points, [[50.0, 50.0], [150.0, 50.0]]);
         assert_eq!(page.stats.raster_op_count(), 0);
+    }
+
+    #[test]
+    fn pages_capture_directly_in_balanced_chunks_as_a_list_capture_does() {
+        let content = "q 0 0 m 100 0 l 50 80 l h W n 0 g 0 0 10 10 re f 20 0 10 10 re f Q \
+                       1 0 0 rg 50 50 10 10 re f /Sh0 sh 0 0 1 rg 5 5 5 5 re f";
+        let (full, _) = capture(content, SHADING);
+        let bytes = crate::test_pdf::single_page_pdf(content, SHADING, "");
+        let document = mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let page = document.load_page(0).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // No waiting: a chunk after every vector item.
+        let options = ChunkOptions {
+            first: Duration::ZERO,
+            interval: Duration::ZERO,
+            sender,
+        };
+        let captured = capture_page(&page, Some(options)).unwrap();
+        let chunks: Vec<VectorChunk> = receiver.try_iter().collect();
+        assert!(chunks.len() > 2, "{} chunks", chunks.len());
+        for chunk in &chunks {
+            let kinds: Vec<_> = chunk.draws().map(|draw| kind(&draw.item)).collect();
+            let pushes = kinds.iter().filter(|kind| **kind == "clip").count();
+            let pops = kinds.iter().filter(|kind| **kind == "unclip").count();
+            assert_eq!(pushes, pops, "{kinds:?}");
+        }
+        drop(chunks);
+        let direct = captured.into_page();
+        assert_eq!(direct.draws, full.draws);
+        assert_eq!(direct.stats.raster_layers, full.stats.raster_layers);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let options = ChunkOptions {
+            first: Duration::from_secs(60),
+            interval: Duration::ZERO,
+            sender,
+        };
+        let quick = capture_page(&page, Some(options)).unwrap().into_page();
+        assert_eq!(
+            receiver.try_iter().count(),
+            0,
+            "a quick page sends no chunks"
+        );
+        assert_eq!(quick.draws, full.draws);
     }
 
     #[test]

@@ -106,6 +106,11 @@ enum Upload {
         key: PageKey,
         upload: LayerUpload,
     },
+    /// A part of a page's preview, drawn until the page itself is.
+    Part {
+        key: PageKey,
+        upload: Box<PageUpload<Box<PreparedPage>>>,
+    },
 }
 
 /// How long a page upload took, in milliseconds.
@@ -129,7 +134,7 @@ fn partial_page(uploads: &VecDeque<Upload>, key: PageKey) -> Option<&GpuPage> {
 impl Upload {
     fn key(&self) -> PageKey {
         match self {
-            Self::Page { key, .. } | Self::Layer { key, .. } => *key,
+            Self::Page { key, .. } | Self::Layer { key, .. } | Self::Part { key, .. } => *key,
         }
     }
 }
@@ -171,6 +176,9 @@ pub struct ReaderGpu {
     format: wgpu::TextureFormat,
     effects: EffectRegistry,
     pages: HashMap<PageKey, Resident>,
+    /// Preview parts of pages still loading, drawn in order until the page
+    /// itself is written.
+    parts: HashMap<PageKey, Vec<GpuPage>>,
     /// Overviews being built, one tile per frame (see `step_overview`).
     overviews: HashMap<PageKey, OverviewJob>,
     /// Uploads in order; the first is written a chunk per frame.
@@ -293,6 +301,7 @@ impl ReaderGpu {
             format,
             effects,
             pages: HashMap::new(),
+            parts: HashMap::new(),
             overviews: HashMap::new(),
             uploads: VecDeque::new(),
             belt: wgpu::util::StagingBelt::new(device.clone(), UPLOAD_BYTES_PER_FRAME),
@@ -403,7 +412,22 @@ impl ReaderGpu {
     /// Whether `key` can be drawn: it is resident, or enough of it is
     /// written to draw a coarse version.
     pub fn is_drawable(&self, key: PageKey) -> bool {
-        self.pages.contains_key(&key) || partial_page(&self.uploads, key).is_some()
+        self.pages.contains_key(&key)
+            || partial_page(&self.uploads, key).is_some()
+            || self.parts.get(&key).is_some_and(|parts| !parts.is_empty())
+    }
+
+    /// Whether `key` is drawn from its preview's parts, the page itself
+    /// not being drawable yet.
+    pub fn is_previewing(&self, key: PageKey) -> bool {
+        !self.pages.contains_key(&key)
+            && partial_page(&self.uploads, key).is_none()
+            && self.parts.get(&key).is_some_and(|parts| !parts.is_empty())
+    }
+
+    /// Whether any page shows a preview part.
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
     }
 
     /// Whether a page is being uploaded.
@@ -440,6 +464,16 @@ impl ReaderGpu {
             begun: started,
             visible_ms: None,
         });
+    }
+
+    /// Starts writing the next part of `key`'s preview, unless the page
+    /// itself is already on its way.
+    pub fn begin_part(&mut self, device: &wgpu::Device, key: PageKey, prepared: Box<PreparedPage>) {
+        if self.is_resident(key) {
+            return;
+        }
+        let upload = Box::new(self.renderer.begin_upload(device, prepared));
+        self.uploads.push_back(Upload::Part { key, upload });
     }
 
     /// Replaces raster layer `layer` of a resident page with a texture
@@ -485,6 +519,7 @@ impl ReaderGpu {
                 done
             }
             Upload::Layer { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
+            Upload::Part { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
         };
         if !done {
             return None;
@@ -493,6 +528,13 @@ impl ReaderGpu {
             Upload::Layer { key, upload } => {
                 if let Some(resident) = self.pages.get_mut(&key) {
                     self.renderer.finish_layer(&mut resident.page, upload);
+                }
+                None
+            }
+            Upload::Part { key, upload } => {
+                let page = self.renderer.finish_upload(*upload);
+                if !self.is_resident(key) {
+                    self.parts.entry(key).or_default().push(page);
                 }
                 None
             }
@@ -508,6 +550,7 @@ impl ReaderGpu {
                 // the overview being built for the old one.
                 self.overviews.remove(&key);
                 let page = self.renderer.finish_upload(*upload);
+                self.parts.remove(&key);
                 if page.wants_overview() {
                     let dimension = device
                         .limits()
@@ -580,6 +623,7 @@ impl ReaderGpu {
     /// Drops every page of a closed tab.
     pub fn drop_tab(&mut self, tab: u64) {
         self.pages.retain(|key, _| key.tab != tab);
+        self.parts.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
         self.uploads.retain(|upload| upload.key().tab != tab);
         self.views.remove(&tab);
@@ -769,6 +813,7 @@ impl CallbackTrait for ViewCallback {
         let ReaderGpu {
             views,
             pages,
+            parts,
             uploads,
             renderer,
             effects,
@@ -802,7 +847,12 @@ impl CallbackTrait for ViewCallback {
                     }
                     None => partial_page(uploads, key),
                 };
-                if let Some(page) = page {
+                // A page still loading draws its preview's parts in order.
+                let drawn: &[GpuPage] = match page {
+                    Some(page) => std::slice::from_ref(page),
+                    None => parts.get(&key).map_or(&[], Vec::as_slice),
+                };
+                for page in drawn {
                     let page_stats = renderer.draw(queue, page, &draw.camera, &mut pass);
                     stats.draw_calls += page_stats.draw_calls;
                     stats.triangles += page_stats.triangles;

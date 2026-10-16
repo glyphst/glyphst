@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use glyphst_pdf::vector::{VectorPage, capture_display_list, rasterize_layer};
+use glyphst_pdf::vector::{VectorPage, capture_display_list, capture_page, rasterize_layer};
 use glyphst_pdf_gpu::{Camera, DrawStats, GpuPage, OffscreenTarget, PreparedPage, Renderer};
 use mupdf::{Colorspace, Device, DisplayList, Matrix, Pixmap, Rect};
 
@@ -22,13 +22,16 @@ pub fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-/// One page opened through MuPDF, captured and prepared.
+/// One page opened through MuPDF, captured and prepared as the Reader
+/// does, and its display list for MuPDF's own rendering and raster layers.
 pub struct LoadedPage {
     pub list: DisplayList,
     pub vector: VectorPage,
     pub prepared: PreparedPage,
-    pub parse: Duration,
+    /// MuPDF interpreting the page into the capture.
     pub capture: Duration,
+    /// Building the display list after it.
+    pub display_list: Duration,
     pub prepare: Duration,
 }
 
@@ -37,17 +40,23 @@ impl LoadedPage {
         Self::open_with(path, page, || {})
     }
 
-    /// Like [`LoadedPage::open`], calling `parsed` once MuPDF has built the
-    /// display list.
+    /// Like [`LoadedPage::open`], calling `parsed` once MuPDF has run over
+    /// the page.
     pub fn open_with(path: &Path, page: i32, parsed: impl FnOnce()) -> Result<Self> {
         let started = Instant::now();
         let document = mupdf::Document::open(path.to_str().context("non-UTF-8 path")?)?;
-        let list = document.load_page(page)?.to_display_list(true)?;
-        let parse = started.elapsed();
+        let page = document.load_page(page)?;
+        let mut vector = capture_page(&page, None)?.into_page();
+        let capture = started.elapsed();
         parsed();
         let started = Instant::now();
-        let vector = capture_display_list(&list)?;
-        let capture = started.elapsed();
+        let list = page.to_display_list(true)?;
+        // Raster layers are numbered by the list's operations, so a page
+        // with them is captured from its list, as in the Reader.
+        if vector.stats.raster_layers > 0 {
+            vector = capture_display_list(&list)?;
+        }
+        let display_list = started.elapsed();
         let started = Instant::now();
         let prepared = PreparedPage::new(&vector);
         let prepare = started.elapsed();
@@ -55,8 +64,8 @@ impl LoadedPage {
             list,
             vector,
             prepared,
-            parse,
             capture,
+            display_list,
             prepare,
         })
     }

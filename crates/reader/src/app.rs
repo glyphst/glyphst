@@ -271,6 +271,8 @@ pub struct ReaderApp {
     persist: bool,
     pub(crate) harness: Option<Harness>,
     pub(crate) first_page_ms: Option<f64>,
+    /// When a preview part was first drawable, for `--bench`.
+    pub(crate) first_part_ms: Option<f64>,
     pub(crate) upload_ms: Vec<f64>,
     /// Per uploaded page, milliseconds until it first showed (coarse) and
     /// until it was complete.
@@ -446,6 +448,7 @@ impl ReaderApp {
             persist,
             harness: launch.harness,
             first_page_ms: None,
+            first_part_ms: None,
             upload_ms: Vec::new(),
             upload_visible_ms: Vec::new(),
             upload_complete_ms: Vec::new(),
@@ -1746,23 +1749,32 @@ impl ReaderApp {
             self.render_state.queue.clone(),
         );
         self.with_gpu(|gpu| gpu.step_overview(&device, &queue));
+        for index in 0..self.tabs.len() {
+            let tab = self.tabs[index].id;
+            while let Some((page, prepared)) = self.tabs[index].ready_parts.pop_front() {
+                let key = PageKey { tab, page };
+                self.with_gpu(|gpu| gpu.begin_part(&device, key, prepared));
+            }
+        }
         if !self.with_gpu(|gpu| gpu.is_uploading()).unwrap_or(false) {
             let order: Vec<usize> = self.active.into_iter().chain(0..self.tabs.len()).collect();
-            let Some((key, ready)) = order.into_iter().find_map(|index| {
+            let next = order.into_iter().find_map(|index| {
                 let ready = self.tabs[index].ready.pop_front()?;
                 let key = PageKey {
                     tab: self.tabs[index].id,
                     page: ready.page,
                 };
                 Some((key, ready))
-            }) else {
-                return;
-            };
-            self.with_gpu(|gpu| gpu.begin_upload(&device, key, ready.prepared, ready.layers));
+            });
+            if let Some((key, ready)) = next {
+                self.with_gpu(|gpu| gpu.begin_upload(&device, key, ready.prepared, ready.layers));
+            }
         }
-        if let Some(Some(times)) =
-            self.with_gpu(|gpu| gpu.step_upload(&device, &queue, UPLOAD_BYTES_PER_FRAME))
-        {
+        let times = self.with_gpu(|gpu| gpu.step_upload(&device, &queue, UPLOAD_BYTES_PER_FRAME));
+        if self.first_part_ms.is_none() && self.with_gpu(|gpu| gpu.has_parts()).unwrap_or(false) {
+            self.first_part_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Some(Some(times)) = times {
             self.upload_ms.push(times.cpu_ms);
             self.upload_visible_ms.push(times.visible_ms);
             self.upload_complete_ms.push(times.complete_ms);
@@ -2691,6 +2703,11 @@ impl ReaderApp {
             })
             .collect();
         self.tabs[active].placeholders(&mut frame, |page| drawable.contains(&page));
+        // Pages showing only their preview are not drawn yet.
+        let previewing = frame.wanted.iter().any(|&page| {
+            self.with_gpu(|gpu| gpu.is_previewing(PageKey { tab: tab_id, page }))
+                .unwrap_or(false)
+        });
         for draw in &frame.draws {
             let [x0, y0, x1, y1] = draw.paper;
             let tab = &self.tabs[active];
@@ -2784,7 +2801,7 @@ impl ReaderApp {
         }
         (
             frame.animating || autoscroll != 0.0,
-            frame.placeholders.is_empty(),
+            frame.placeholders.is_empty() && !previewing,
         )
     }
 

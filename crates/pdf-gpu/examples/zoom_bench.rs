@@ -317,8 +317,8 @@ fn main() -> Result<()> {
         },
         "coverage_work": coverage_work,
         "timings_ms": {
-            "parse_display_list": ms(loaded.parse),
             "capture": ms(loaded.capture),
+            "display_list": ms(loaded.display_list),
             "prepare": ms(loaded.prepare),
             "upload": ms(uploaded.upload),
             "raster_layers": ms(uploaded.raster_layers),

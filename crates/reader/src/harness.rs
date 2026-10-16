@@ -335,6 +335,7 @@ impl ReaderApp {
             "document": tab.path.display().to_string(),
             "pages": tab.layout.len(),
             "first_page_ms": self.first_page_ms,
+            "first_part_ms": self.first_part_ms,
             "zoom": summarize(&bench.zoom),
             "scroll": summarize(&bench.scroll),
             "find": {
