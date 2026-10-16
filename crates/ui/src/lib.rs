@@ -26,6 +26,8 @@
 //! | page-thumb | [`thumb`] |
 //! | rule titles, trees, meters, ticks, dot fields | [`motif`] |
 //! | settings rows (frame 07) | [`settings`] |
+//! | ring (frames 01, 02h) | [`ring`] |
+//! | toolbox (frames 01, 02h) | [`toolbox`] |
 
 pub mod badge;
 pub mod button;
@@ -46,6 +48,7 @@ pub mod overlay;
 pub mod paint;
 pub mod pane;
 pub mod rail;
+pub mod ring;
 pub mod row;
 pub mod segmented;
 pub mod settings;
@@ -56,5 +59,6 @@ pub mod text;
 pub mod theme;
 pub mod thumb;
 pub mod toggle;
+pub mod toolbox;
 
 pub use overlay::Tip;

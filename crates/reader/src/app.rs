@@ -61,6 +61,7 @@ use crate::{
 pub(crate) mod agent;
 mod chrome;
 mod page_chrome;
+mod present;
 mod status_bar;
 mod tab_bar;
 
@@ -287,12 +288,10 @@ pub struct ReaderApp {
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
     chrome: chrome::StageChrome,
-    /// Present mode was on last frame (to say how to leave it).
-    was_presenting: bool,
     /// The highlight the toast's `[ undo ]` removes.
     undo_highlight: Option<AnnotationId>,
-    /// When the current presentation started, for its clock.
-    present_started: Option<Instant>,
+    /// The presentation's tools and clock while presenting.
+    pub(crate) presenting: Option<crate::present::Presenting>,
     /// The user's effects folder, what it held when last loaded, and when
     /// it was last looked at.
     pub(crate) effects_dir: Option<PathBuf>,
@@ -462,9 +461,8 @@ impl ReaderApp {
             upload_complete_ms: Vec::new(),
             pending_actions: Vec::new(),
             chrome: Default::default(),
-            was_presenting: false,
             undo_highlight: None,
-            present_started: None,
+            presenting: None,
             effects_dir: user_effects,
             effects_stamp,
             effects_checked: Instant::now(),
@@ -2068,9 +2066,10 @@ impl ReaderApp {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
+        let presenting = self.presenting.is_some();
         let pressed = self
             .keymap
-            .take_pressed(ctx, typing, &mut self.pending_keys);
+            .take_pressed(ctx, typing, presenting, &mut self.pending_keys);
         for keys::Pressed { command, count } in pressed {
             if let Err(reason) = self.run_counted(command, count, ctx)
                 && self.active.is_some()
@@ -2108,7 +2107,9 @@ impl ReaderApp {
                 } else if tab.find.open {
                     tab.find.close();
                 } else if tab.present.is_some() {
-                    actions.push(ViewAction::TogglePresent);
+                    if !self.present_cancel() {
+                        actions.push(ViewAction::TogglePresent);
+                    }
                 } else if self.zen {
                     self.zen = false;
                 }
@@ -2122,8 +2123,14 @@ impl ReaderApp {
         let Some(tab) = self.active.map(|active| &self.tabs[active]) else {
             return (command.needs() != Needs::Nothing).then(|| Needs::Document.reason());
         };
+        // Presenting keeps to its own commands, the page turns and a few
+        // others (frame 02i).
+        if tab.present.is_some() && !present_allows(command) {
+            return Some("Not while presenting");
+        }
         let can = match command.needs() {
             Needs::Nothing | Needs::Document => true,
+            Needs::Presenting => tab.present.is_some(),
             Needs::Selection => tab.selection.is_some(),
             Needs::Reflow => matches!(tab.document_layout, DocumentLayout::Reflow(_)),
             Needs::Translation => tab.translation.is_some(),
@@ -2393,6 +2400,28 @@ impl ReaderApp {
                 None
             }
             Command::Present => view(ViewAction::TogglePresent),
+            Command::ToggleFullscreen => {
+                let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                // The window is the user's now: leaving keeps it.
+                if let Some(state) = self.presenting.as_mut() {
+                    state.made_fullscreen = false;
+                }
+                None
+            }
+            Command::PresentDraw
+            | Command::PresentHighlight
+            | Command::PresentErase
+            | Command::PresentClear
+            | Command::PresentUndo
+            | Command::PresentCursor
+            | Command::PresentBlack
+            | Command::PresentWhite
+            | Command::PresentTimer
+            | Command::PresentTimerReset => {
+                self.run_present(command, Instant::now());
+                None
+            }
             Command::SplitRight | Command::SplitDown => {
                 let zone = if command == Command::SplitRight {
                     Zone::Right
@@ -2559,9 +2588,11 @@ impl ReaderApp {
 
     /// The command palette's hits for its query.
     fn palette_hits(&self) -> Vec<palette::Hit> {
+        let presenting = self.presenting.is_some();
         let sources = palette::Sources {
             commands: Command::ALL
                 .into_iter()
+                .filter(|&command| !presenting || present_palette(command))
                 .map(|command| {
                     (
                         command,
@@ -2573,6 +2604,8 @@ impl ReaderApp {
             tabs: self.tabs.iter().map(|tab| tab.title.clone()).collect(),
             recent: self.recent_documents(),
             pages: self.active.map(|active| self.tabs[active].layout.len()),
+            labels: self.present_labels(),
+            presenting,
         };
         palette::hits(&self.palette.query, &sources, self.palette.used())
     }
@@ -2785,7 +2818,13 @@ impl ReaderApp {
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
         let mut actions = actions;
-        let autoscroll = self.text_input(&ctx, &response, &maps, active, rect, &mut actions);
+        let presenting = self.tabs[active].present.is_some() && self.presenting.is_some();
+        let autoscroll = if presenting {
+            self.present_input(&ctx, &response, &maps, active, &mut actions, now);
+            0.0
+        } else {
+            self.text_input(&ctx, &response, &maps, active, rect, &mut actions)
+        };
         let tab_id = self.tabs[active].id;
         let drag = if self.drag == Some((tab_id, Drag::Pan)) {
             response.drag_delta()
@@ -2913,6 +2952,9 @@ impl ReaderApp {
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
         self.paint_text_overlays(&painter, &maps, active, &tokens);
+        if presenting {
+            self.paint_ink(&painter, &maps, active);
+        }
         self.region_overlay(&ctx, &painter, &maps, active, &tokens);
         let turns = self.tabs[active].layout.arrangement.rotation;
         for (paper, thumbnail) in &frame.placeholders {
@@ -3536,6 +3578,31 @@ impl ReaderApp {
     }
 }
 
+/// Whether `command` can run while presenting: its own commands, page
+/// turns, and leaving, fullscreen, the palette and settings.
+fn present_allows(command: Command) -> bool {
+    use crate::commands::Category;
+    matches!(command.category(), Category::Present | Category::Navigation)
+        || matches!(
+            command,
+            Command::Present
+                | Command::ToggleFullscreen
+                | Command::Palette
+                | Command::Settings
+                | Command::PageOverview
+        )
+}
+
+/// The palette's commands while presenting (frame 02i): presenting's,
+/// then leaving, fullscreen and settings; page numbers go to their page.
+fn present_palette(command: Command) -> bool {
+    command.category() == crate::commands::Category::Present
+        || matches!(
+            command,
+            Command::Present | Command::ToggleFullscreen | Command::Settings
+        )
+}
+
 impl eframe::App for ReaderApp {
     /// The window is transparent-capable, and the panels paint every pixel:
     /// opaque, or as translucent as the window's opacity.
@@ -3692,10 +3759,7 @@ impl eframe::App for ReaderApp {
         let presenting = self
             .active
             .is_some_and(|active| self.tabs[active].present.is_some());
-        if presenting && !self.was_presenting {
-            self.present_started = Some(now);
-        }
-        self.was_presenting = presenting;
+        self.presenting_edges(&ctx, presenting, now);
         // Zen mode is for reading a document; the home page leaves it.
         self.zen &= self.active.is_some();
         if !presenting && !self.zen {

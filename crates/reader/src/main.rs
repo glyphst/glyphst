@@ -54,6 +54,7 @@ mod palette;
 mod panes;
 mod pickers;
 mod prefs;
+mod present;
 mod quick_ask;
 mod reading_clock;
 mod reading_days;
@@ -81,7 +82,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -134,6 +135,7 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
             "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),
+            "--screenshot-present-tools" => launch.harness = shot(ShotKind::PresentTools, value()?),
             "--background" => launch.background = Some(value()?),
             "--overlay" => launch.overlay = Some(value()?),
             "--wallpaper" => launch.wallpaper = Some(value()?),

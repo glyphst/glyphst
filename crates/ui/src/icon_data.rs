@@ -104,6 +104,8 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("database", include_bytes!("../assets/icons/database.svg")),
     ("download", include_bytes!("../assets/icons/download.svg")),
     ("ellipsis", include_bytes!("../assets/icons/ellipsis.svg")),
+    ("eraser", include_bytes!("../assets/icons/eraser.svg")),
+    ("expand", include_bytes!("../assets/icons/expand.svg")),
     ("eye", include_bytes!("../assets/icons/eye.svg")),
     ("eye-off", include_bytes!("../assets/icons/eye-off.svg")),
     ("file", include_bytes!("../assets/icons/file.svg")),
@@ -190,9 +192,11 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/panels-top-left.svg"),
     ),
     ("paperclip", include_bytes!("../assets/icons/paperclip.svg")),
+    ("pause", include_bytes!("../assets/icons/pause.svg")),
     ("pen-line", include_bytes!("../assets/icons/pen-line.svg")),
     ("pencil", include_bytes!("../assets/icons/pencil.svg")),
     ("pin", include_bytes!("../assets/icons/pin.svg")),
+    ("play", include_bytes!("../assets/icons/play.svg")),
     ("plus", include_bytes!("../assets/icons/plus.svg")),
     (
         "presentation",
@@ -224,6 +228,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("send", include_bytes!("../assets/icons/send.svg")),
     ("settings", include_bytes!("../assets/icons/settings.svg")),
+    ("shrink", include_bytes!("../assets/icons/shrink.svg")),
     (
         "sliders-horizontal",
         include_bytes!("../assets/icons/sliders-horizontal.svg"),
@@ -243,6 +248,11 @@ pub static ICONS: &[(&str, &[u8])] = &[
     (
         "text-cursor",
         include_bytes!("../assets/icons/text-cursor.svg"),
+    ),
+    ("timer", include_bytes!("../assets/icons/timer.svg")),
+    (
+        "timer-reset",
+        include_bytes!("../assets/icons/timer-reset.svg"),
     ),
     ("trash-2", include_bytes!("../assets/icons/trash-2.svg")),
     (

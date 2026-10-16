@@ -22,6 +22,8 @@ use crate::{
 
 /// Results shown at most.
 const MAX_HITS: usize = 12;
+/// Every presenting command fits (frame 02i).
+const MAX_PRESENT_HITS: usize = 16;
 /// The path prompt's results at most: a whole folder, scrolled.
 const MAX_PATH_HITS: usize = 500;
 /// The results' list grows to this height before it scrolls.
@@ -63,6 +65,11 @@ pub struct Sources {
     pub recent: Vec<PathBuf>,
     /// Pages of the active document.
     pub pages: Option<usize>,
+    /// Labels that follow the state (`End draw`), by command.
+    pub labels: std::collections::HashMap<Command, &'static str>,
+    /// While presenting the palette holds commands and page numbers only:
+    /// no tabs, files or settings sections.
+    pub presenting: bool,
 }
 
 /// Where `needle` (lower case) matches `hay`: lower is better.
@@ -104,7 +111,12 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
         ));
     }
     for (command, key, blocked) in &sources.commands {
-        let Some(found) = score(command.label(), &needle)
+        let label = sources
+            .labels
+            .get(command)
+            .copied()
+            .unwrap_or(command.label());
+        let Some(found) = score(label, &needle)
             .or_else(|| score(command.category().label(), &needle).map(|score| score + 50))
         else {
             continue;
@@ -113,17 +125,26 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
             .iter()
             .position(|used| used == command)
             .unwrap_or(MAX_USED);
+        // While presenting, its own commands come before leaving and the
+        // others (frame 02i).
+        let found = found
+            + usize::from(
+                sources.presenting && command.category() != crate::commands::Category::Present,
+            );
         ranked.push((
             found,
             1 + recency,
             Hit {
                 item: Item::Command(*command),
                 icon: command.icon(),
-                label: command.label().to_string(),
+                label: label.to_string(),
                 detail: key.clone().unwrap_or_default(),
                 blocked: *blocked,
             },
         ));
+    }
+    if sources.presenting {
+        return finish(ranked, MAX_PRESENT_HITS);
     }
     for (index, title) in sources.tabs.iter().enumerate() {
         if let Some(found) = score(title, &needle) {
@@ -175,8 +196,13 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
             ));
         }
     }
+    finish(ranked, MAX_HITS)
+}
+
+/// The best `limit` of `ranked`, grouped by kind.
+fn finish(mut ranked: Vec<(usize, usize, Hit)>, limit: usize) -> Vec<Hit> {
     ranked.sort_by_key(|(score, kind, hit)| (*score, hit.blocked.is_some(), *kind));
-    ranked.truncate(MAX_HITS);
+    ranked.truncate(limit);
     let hits: Vec<Hit> = ranked.into_iter().map(|(_, _, hit)| hit).collect();
     grouped(hits)
 }
@@ -740,7 +766,29 @@ mod tests {
             },
             recent: vec![PathBuf::from("/books/brochure.pdf")],
             pages: document.then_some(1259),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn presenting_offers_its_commands_with_their_labels_and_no_files() {
+        let mut sources = sources(true);
+        sources.presenting = true;
+        sources.commands.retain(|(command, ..)| {
+            command.category() == crate::commands::Category::Present || *command == Command::Present
+        });
+        sources.labels.insert(Command::PresentDraw, "End draw");
+        let found = hits("", &sources, &[]);
+        assert!(found.iter().all(|hit| matches!(hit.item, Item::Command(_))));
+        assert!(found.iter().any(|hit| hit.label == "End draw"));
+        assert_eq!(
+            found.last().map(|hit| &hit.item),
+            Some(&Item::Command(Command::Present)),
+            "presenting's own commands first"
+        );
+        assert!(hits("end dr", &sources, &[])[0].item == Item::Command(Command::PresentDraw));
+        assert!(hits("brochure", &sources, &[]).is_empty());
+        assert_eq!(hits("12", &sources, &[])[0].item, Item::GoToPage(11));
     }
 
     #[test]

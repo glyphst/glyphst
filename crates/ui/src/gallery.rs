@@ -320,6 +320,8 @@ impl Gallery {
                 width: 96.0,
             }
             .show(ui);
+            crate::ring::sample(ui);
+            crate::toolbox::sample(ui);
         });
         let (rect, _) = ui.allocate_exact_size(vec2(300.0, 120.0), egui::Sense::hover());
         motif::corner_ticks(

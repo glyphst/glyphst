@@ -44,8 +44,6 @@ const STEP_ZOOM: f64 = 1.25;
 const PREFETCH_PAGES: usize = 2;
 /// View pixels per D-pad step.
 const STEP_PIXELS: f64 = 120.0;
-/// Presentation pages fill this share of the view.
-const PRESENT_FILL: f64 = 0.96;
 /// Raster layers are re-rasterized once the view has been still this long.
 const LAYER_SETTLE: Duration = Duration::from_millis(150);
 /// Largest raster layer side, as the loader rasterizes it.
@@ -227,6 +225,9 @@ pub struct DocumentTab {
     /// the frame clamps it); it is current until the view changes.
     outline_pick: Option<(usize, Option<PickedView>)>,
     pub present: Option<usize>,
+    /// What was drawn on the pages while presenting; kept while the tab
+    /// is open.
+    pub ink: crate::present::Ink,
     pub load_seconds: Vec<f64>,
     pub text: DocText,
     /// Pages whose text the indexer was asked for.
@@ -313,6 +314,7 @@ impl DocumentTab {
             outline_view: OutlineView::default(),
             outline_pick: None,
             present: None,
+            ink: Default::default(),
             load_seconds: Vec::new(),
             text: DocText::new(pages),
             text_requested: vec![false; pages],
@@ -1492,7 +1494,8 @@ impl DocumentTab {
     fn presented(&self, page: usize, viewport: [u32; 2]) -> PageDraw {
         let [width, height] = self.layout.page_size(page);
         let size = [f64::from(viewport[0]), f64::from(viewport[1])];
-        let scale = (size[0] / width).min(size[1] / height) * PRESENT_FILL;
+        // The page fills the window on its limiting side.
+        let scale = (size[0] / width).min(size[1] / height);
         let mut view = View::new(scale);
         view.origin = [
             self.layout.offsets[page][0] + (width - size[0] / scale) / 2.0,
@@ -1601,6 +1604,7 @@ mod tests {
             outline_view: OutlineView::default(),
             outline_pick: None,
             present: None,
+            ink: Default::default(),
             load_seconds: Vec::new(),
             text: DocText::new(pages),
             text_requested: vec![false; pages],
@@ -1753,6 +1757,25 @@ mod tests {
         tab.apply(ViewAction::TogglePresent, false);
         assert_eq!(tab.apply(ViewAction::HalfPage(1), false), Some(1.0));
         assert_eq!(tab.present, Some(1));
+    }
+
+    #[test]
+    fn a_presented_page_fills_the_window_on_its_limiting_side() {
+        let mut tab = tab(3);
+        settle(&mut tab);
+        tab.apply(ViewAction::TogglePresent, false);
+        for viewport in [[1440, 920], [700, 1400]] {
+            let draws = tab.visible_draws(viewport);
+            assert_eq!(draws.len(), 1);
+            let [x0, y0, x1, y1] = draws[0].paper;
+            let (width, height) = (x1 - x0, y1 - y0);
+            let [w, h] = viewport.map(|side| side as f32);
+            assert!(
+                (width - w).abs() < 1.0 || (height - h).abs() < 1.0,
+                "{viewport:?}: the page is {width} × {height}"
+            );
+            assert!(width <= w + 0.5 && height <= h + 0.5);
+        }
     }
 
     #[test]

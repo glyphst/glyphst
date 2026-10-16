@@ -921,7 +921,10 @@ pub(crate) fn mention_sources(
 fn agent_may_run(command: Command) -> bool {
     match command.category() {
         Category::Navigation => true,
-        Category::View => !matches!(command, Command::ClosePane | Command::Reload),
+        Category::View => !matches!(
+            command,
+            Command::ClosePane | Command::Reload | Command::ToggleFullscreen
+        ),
         Category::Text => matches!(
             command,
             Command::Find | Command::FindNext | Command::FindPrevious
@@ -936,7 +939,7 @@ fn agent_may_run(command: Command) -> bool {
                 | Command::PreviousTab
         ),
         Category::Translation => command == Command::ShowTranslated,
-        Category::Assistant => false,
+        Category::Assistant | Category::Present => false,
     }
 }
 

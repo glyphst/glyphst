@@ -61,6 +61,8 @@ pub enum Command {
     ToggleSpread,
     Reload,
     Present,
+    /// The window fullscreen or not.
+    ToggleFullscreen,
     Zen,
     PageOverview,
     /// One or two columns of thumbnails in the Pages sidebar.
@@ -84,6 +86,22 @@ pub enum Command {
     QuickAsk,
     /// Copies the MCP server's config for a coding agent started by hand.
     McpConfig,
+    /// Presenting's tools (frames 02h, 02i): their keys work only while
+    /// presenting, where they shadow the others.
+    PresentDraw,
+    PresentHighlight,
+    PresentErase,
+    /// Clears the page's ink.
+    PresentClear,
+    /// Removes the page's latest stroke.
+    PresentUndo,
+    /// Shows the pointer as the laser, or hides it.
+    PresentCursor,
+    PresentBlack,
+    PresentWhite,
+    /// Pauses or resumes the clock.
+    PresentTimer,
+    PresentTimerReset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,13 +112,15 @@ pub enum Category {
     Text,
     Translation,
     Assistant,
+    Present,
 }
 
 impl Category {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::App,
         Self::Navigation,
         Self::View,
+        Self::Present,
         Self::Text,
         Self::Translation,
         Self::Assistant,
@@ -114,6 +134,7 @@ impl Category {
             Self::Text => "Text",
             Self::Translation => "Translation",
             Self::Assistant => "Assistant",
+            Self::Present => "Presenting",
         }
     }
 }
@@ -134,6 +155,8 @@ pub enum Needs {
     Panes,
     /// The active document has fixed pages (not a reflowed book).
     FixedLayout,
+    /// The active document is being presented.
+    Presenting,
 }
 
 impl Needs {
@@ -146,12 +169,13 @@ impl Needs {
             Self::Translation => "Translate the document first",
             Self::Panes => "Split the view first",
             Self::FixedLayout => "Reflowed books don't turn or spread",
+            Self::Presenting => "Only while presenting",
         }
     }
 }
 
 impl Command {
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 74] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -194,6 +218,7 @@ impl Command {
         Self::ToggleSpread,
         Self::Reload,
         Self::Present,
+        Self::ToggleFullscreen,
         Self::Zen,
         Self::PageOverview,
         Self::PageColumns,
@@ -215,6 +240,16 @@ impl Command {
         Self::Assistant,
         Self::QuickAsk,
         Self::McpConfig,
+        Self::PresentDraw,
+        Self::PresentHighlight,
+        Self::PresentErase,
+        Self::PresentClear,
+        Self::PresentUndo,
+        Self::PresentCursor,
+        Self::PresentBlack,
+        Self::PresentWhite,
+        Self::PresentTimer,
+        Self::PresentTimerReset,
     ];
 
     /// The stable id kept in preferences.
@@ -262,6 +297,7 @@ impl Command {
             Self::ToggleSpread => "view.two_page_spread",
             Self::Reload => "view.reload",
             Self::Present => "view.present",
+            Self::ToggleFullscreen => "view.fullscreen",
             Self::Zen => "view.zen",
             Self::PageOverview => "view.page_overview",
             Self::PageColumns => "view.page_columns",
@@ -283,6 +319,16 @@ impl Command {
             Self::Assistant => "assistant.toggle",
             Self::QuickAsk => "assistant.quick_ask",
             Self::McpConfig => "assistant.mcp_config",
+            Self::PresentDraw => "present.draw",
+            Self::PresentHighlight => "present.highlight",
+            Self::PresentErase => "present.erase",
+            Self::PresentClear => "present.clear",
+            Self::PresentUndo => "present.undo",
+            Self::PresentCursor => "present.cursor",
+            Self::PresentBlack => "present.black",
+            Self::PresentWhite => "present.white",
+            Self::PresentTimer => "present.timer",
+            Self::PresentTimerReset => "present.timer_reset",
         }
     }
 
@@ -334,6 +380,7 @@ impl Command {
             Self::ToggleSpread => "Two-page spread",
             Self::Reload => "Reload the document",
             Self::Present => "Present",
+            Self::ToggleFullscreen => "Toggle full screen",
             Self::Zen => "Zen mode: hide everything but the pages",
             Self::PageOverview => "Page overview",
             Self::PageColumns => "Pages in one or two columns",
@@ -355,6 +402,16 @@ impl Command {
             Self::Assistant => "Show or hide the assistant",
             Self::QuickAsk => "Quick ask about this page",
             Self::McpConfig => "Copy the MCP server config for coding agents",
+            Self::PresentDraw => "Draw",
+            Self::PresentHighlight => "Highlight",
+            Self::PresentErase => "Eraser",
+            Self::PresentClear => "Clear the page's drawing",
+            Self::PresentUndo => "Undo the last stroke",
+            Self::PresentCursor => "Show cursor",
+            Self::PresentBlack => "Black screen",
+            Self::PresentWhite => "White screen",
+            Self::PresentTimer => "Pause the timer",
+            Self::PresentTimerReset => "Reset the timer",
         }
     }
 
@@ -402,6 +459,7 @@ impl Command {
             Self::ToggleSpread => "book-open",
             Self::Reload => "refresh-cw",
             Self::Present => "presentation",
+            Self::ToggleFullscreen => "expand",
             Self::Zen => "eye-off",
             Self::PageOverview => "layout-grid",
             Self::PageColumns => "rows-2",
@@ -420,6 +478,16 @@ impl Command {
             Self::Assistant => "sparkles",
             Self::QuickAsk => "message-square",
             Self::McpConfig => "copy",
+            Self::PresentDraw => "pencil",
+            Self::PresentHighlight => "highlighter",
+            Self::PresentErase => "eraser",
+            Self::PresentClear => "trash-2",
+            Self::PresentUndo => "undo-2",
+            Self::PresentCursor => "mouse-pointer-2",
+            Self::PresentBlack => "square",
+            Self::PresentWhite => "square-dashed",
+            Self::PresentTimer => "pause",
+            Self::PresentTimerReset => "timer-reset",
         }
     }
 
@@ -467,6 +535,7 @@ impl Command {
             | Self::ToggleSpread
             | Self::Reload
             | Self::Present
+            | Self::ToggleFullscreen
             | Self::Zen
             | Self::PageOverview
             | Self::PageColumns
@@ -486,6 +555,16 @@ impl Command {
                 Category::Translation
             }
             Self::Assistant | Self::QuickAsk | Self::McpConfig => Category::Assistant,
+            Self::PresentDraw
+            | Self::PresentHighlight
+            | Self::PresentErase
+            | Self::PresentClear
+            | Self::PresentUndo
+            | Self::PresentCursor
+            | Self::PresentBlack
+            | Self::PresentWhite
+            | Self::PresentTimer
+            | Self::PresentTimerReset => Category::Present,
         }
     }
 
@@ -533,6 +612,7 @@ impl Command {
             Self::RotateCounterclockwise => &["Shift+R"],
             Self::Reload => &["F5", "Ctrl+R"],
             Self::Present => &["P"],
+            Self::ToggleFullscreen => &["F11"],
             Self::Zen => &["Z"],
             Self::PageOverview => &["Ctrl+G"],
             Self::SplitRight => &["Ctrl+Backslash"],
@@ -546,6 +626,18 @@ impl Command {
             Self::TranslateSelection => &["Ctrl+T"],
             Self::Assistant => &["Ctrl+L"],
             Self::QuickAsk => &["Tab"],
+            // Presenting's keys, after PowerPoint (E, B, W) and Google
+            // Slides (L); they shadow the others only while presenting.
+            Self::PresentDraw => &["D"],
+            Self::PresentHighlight => &["H"],
+            Self::PresentErase => &["X"],
+            Self::PresentClear => &["E"],
+            Self::PresentUndo => &["Ctrl+Z"],
+            Self::PresentCursor => &["L"],
+            Self::PresentBlack => &["B", "Period"],
+            Self::PresentWhite => &["W", "Comma"],
+            Self::PresentTimer => &["T"],
+            Self::PresentTimerReset => &["Shift+T"],
             Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
@@ -647,6 +739,7 @@ impl Command {
             | Self::KeysStandard
             | Self::KeysVim
             | Self::PageColumns
+            | Self::ToggleFullscreen
             | Self::McpConfig => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
@@ -656,6 +749,7 @@ impl Command {
             | Self::RotateCounterclockwise
             | Self::ToggleSpread
             | Self::RegionSelect => Needs::FixedLayout,
+            command if command.category() == Category::Present => Needs::Presenting,
             _ => Needs::Document,
         }
     }
@@ -687,7 +781,7 @@ impl Command {
                 | Self::RotateCounterclockwise
                 | Self::Present
                 | Self::Zen
-        )
+        ) && self.category() != Category::Present
     }
 }
 
@@ -762,6 +856,10 @@ pub const ICONS_IN_USE: &[&str] = &[
     "wrench",
     "chevrons-up-down",
     "file-search",
+    "play",
+    "eraser",
+    "mouse-pointer-2",
+    "square",
 ];
 
 #[cfg(test)]

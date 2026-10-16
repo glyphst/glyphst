@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     book_effects::{self, BookEffects},
     keys::{self, KeymapPreset, Overrides},
+    present::{self, RingSlots},
     sidebar::SidebarTab,
     theme::{Accent, Density, ThemePreference},
 };
@@ -19,6 +20,8 @@ use glyphst_ui::fonts::FontChoice;
 const STORAGE_KEY: &str = "glyphst-reader-egui";
 /// More files than anyone keeps open; storage is untrusted.
 pub const MAX_SESSION_FILES: usize = 64;
+/// The longest talk the clock counts down.
+pub const MAX_TALK_MINUTES: u32 = 600;
 /// Page counts remembered for home.
 pub const MAX_PAGE_COUNTS: usize = 2_000;
 
@@ -97,6 +100,15 @@ pub struct Prefs {
     pub shortcuts: Overrides,
     /// Which default keys commands have.
     pub keymap: KeymapPreset,
+    /// Presenting makes the window fullscreen (and leaving puts it back).
+    pub present_fullscreen: bool,
+    /// The page and clock show in the presentation's corner.
+    pub present_timer: bool,
+    /// The talk's length in minutes, for the clock to count down; 0
+    /// counts up.
+    pub talk_minutes: u32,
+    /// The tool ring's commands by id, from up clockwise.
+    pub present_ring: RingSlots,
     pub last_session: LastSession,
 }
 
@@ -129,6 +141,10 @@ impl Default for Prefs {
             translate_as_read: false,
             shortcuts: Overrides::new(),
             keymap: KeymapPreset::Standard,
+            present_fullscreen: true,
+            present_timer: true,
+            talk_minutes: 0,
+            present_ring: present::default_ring(),
             last_session: LastSession::default(),
         }
     }
@@ -170,6 +186,7 @@ impl Prefs {
             prefs.last_session.active = None;
         }
         prefs.background_fps = prefs.background_fps.clamp(1, 120);
+        prefs.talk_minutes = prefs.talk_minutes.min(MAX_TALK_MINUTES);
         // Storage is untrusted: keep the newest few hundred counts.
         while prefs.page_counts.len() > MAX_PAGE_COUNTS {
             let first = prefs.page_counts.keys().next().cloned();

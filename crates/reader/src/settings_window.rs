@@ -31,6 +31,7 @@ use crate::{
 pub enum Section {
     Appearance,
     Reading,
+    Presenting,
     Effects,
     Translation,
     Ocr,
@@ -39,7 +40,10 @@ pub enum Section {
 
 /// The section list's groups, top to bottom.
 const GROUPS: [(&str, &[Section]); 3] = [
-    ("general", &[Section::Appearance, Section::Reading]),
+    (
+        "general",
+        &[Section::Appearance, Section::Reading, Section::Presenting],
+    ),
     ("look", &[Section::Effects]),
     (
         "services",
@@ -51,9 +55,10 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const HEADER_HEIGHT: f32 = 40.0;
 
 impl Section {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Reading,
+        Self::Presenting,
         Self::Effects,
         Self::Translation,
         Self::Ocr,
@@ -74,6 +79,7 @@ impl Section {
         match self {
             Self::Appearance => "palette",
             Self::Reading => "book-open",
+            Self::Presenting => "presentation",
             Self::Effects => "wand-sparkles",
             Self::Translation => "languages",
             Self::Ocr => "scan-text",
@@ -85,6 +91,7 @@ impl Section {
         match self {
             Self::Appearance => "Appearance",
             Self::Reading => "Reading",
+            Self::Presenting => "Presenting",
             Self::Effects => "Effects",
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
@@ -100,6 +107,10 @@ impl Section {
                  transparency opacity blur glyph ornaments"
             }
             Self::Reading => "session reopen sidebar drawer vim keys motion",
+            Self::Presenting => {
+                "present presentation slides full screen fullscreen timer clock talk length \
+                 countdown ring tools right click draw pen eraser laser"
+            }
             Self::Effects => "background transition tint wallpaper animation folder",
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
@@ -112,6 +123,7 @@ impl Section {
         match self {
             Self::Appearance => "How Glyphst looks. Changes apply to every window immediately.",
             Self::Reading => "What opens at start, and what shows while you read.",
+            Self::Presenting => "Full screen, the pointer, ink and the timer while you present.",
             Self::Effects => "Backgrounds, page transitions and tints for every book.",
             Self::Translation => "The service that translates selections and documents.",
             Self::Ocr => "Recognizing the text of scanned pages.",
@@ -424,6 +436,7 @@ impl SettingsWindow {
                         }
                     }
                     Section::Reading => reading(ui, app.prefs, app.user),
+                    Section::Presenting => presenting(ui, app.prefs),
                     Section::Effects => {
                         // The previews are animated.
                         ui.ctx().request_repaint();
@@ -672,6 +685,133 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs, user: &mut UserSettings) {
             );
         }
     });
+}
+
+/// The Presenting page (frame 07): full screen, the clock, and the tool
+/// ring's slots.
+fn presenting(ui: &mut egui::Ui, prefs: &mut Prefs) {
+    ui_settings::group(ui, "", |group| {
+        group.row(
+            "enter full screen",
+            Some("go full screen when a presentation starts; leaving restores the window"),
+            |ui| {
+                ui.add(Switch(&mut prefs.present_fullscreen));
+            },
+        );
+        group.row(
+            "show timer",
+            Some("page and time in the bottom-right corner; t pauses it"),
+            |ui| {
+                ui.add(Switch(&mut prefs.present_timer));
+            },
+        );
+        group.row(
+            "talk length",
+            Some("count down from this length: amber in the last 10%, red and +m:ss once over"),
+            |ui| {
+                let label = match prefs.talk_minutes {
+                    0 => "off · count up".to_string(),
+                    minutes => format!("{minutes} min"),
+                };
+                egui::ComboBox::from_id_salt("talk-length")
+                    .selected_text(RichText::new(label).font(theme::mono(12.0)))
+                    .width(200.0)
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        glyphst_ui::menu::style(ui);
+                        for minutes in TALK_LENGTHS {
+                            let label = match minutes {
+                                0 => "off · count up".to_string(),
+                                minutes => format!("{minutes} min"),
+                            };
+                            if glyphst_ui::menu::Item::new(&label)
+                                .checked(prefs.talk_minutes == minutes)
+                                .show(ui)
+                                .clicked()
+                            {
+                                prefs.talk_minutes = minutes;
+                            }
+                        }
+                    });
+            },
+        );
+    });
+    ui.add_space(10.0);
+    motif::rule_title(ui, "tool ring", None);
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Hold the right button and flick toward a tool. A plain right-click goes to the \
+             previous page; release on the hub to cancel.",
+        )
+        .font(theme::regular(12.0))
+        .color(Tokens::get(ui.ctx()).muted),
+    );
+    ui.add_space(8.0);
+    ring_slots(ui, &mut prefs.present_ring);
+}
+
+/// Talk lengths offered, in minutes.
+const TALK_LENGTHS: [u32; 9] = [0, 5, 10, 15, 20, 30, 45, 60, 90];
+
+/// The ring's eight directions in two columns: up to down-right on the
+/// left, down to up-left on the right.
+fn ring_slots(ui: &mut egui::Ui, slots: &mut crate::present::RingSlots) {
+    const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+    let tokens = Tokens::get(ui.ctx());
+    let tools: Vec<crate::commands::Command> = crate::commands::Command::ALL
+        .into_iter()
+        .filter(|command| command.category() == crate::commands::Category::Present)
+        .collect();
+    let width = ((ui.available_width() - 32.0) / 2.0).max(160.0);
+    for row in 0..4 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 32.0;
+            for slot in [row, row + 4] {
+                ui.allocate_ui_with_layout(
+                    vec2(width, 28.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        ui.label(
+                            RichText::new(ARROWS[slot])
+                                .font(theme::mono(13.0))
+                                .color(tokens.accent_text),
+                        );
+                        let chosen = slots[slot]
+                            .as_deref()
+                            .and_then(crate::commands::Command::from_id);
+                        let label = chosen.map_or("none", |command| command.label());
+                        egui::ComboBox::from_id_salt(("ring-slot", slot))
+                            .selected_text(RichText::new(label).font(theme::mono(12.0)))
+                            .width(width - 28.0)
+                            .height(320.0)
+                            .show_ui(ui, |ui| {
+                                glyphst_ui::menu::style(ui);
+                                if glyphst_ui::menu::Item::new("none")
+                                    .checked(chosen.is_none())
+                                    .show(ui)
+                                    .clicked()
+                                {
+                                    slots[slot] = None;
+                                }
+                                for &tool in &tools {
+                                    if glyphst_ui::menu::Item::new(tool.label())
+                                        .icon(tool.icon())
+                                        .checked(chosen == Some(tool))
+                                        .show(ui)
+                                        .clicked()
+                                    {
+                                        slots[slot] = Some(tool.id().to_string());
+                                    }
+                                }
+                            });
+                    },
+                );
+            }
+        });
+        ui.add_space(8.0);
+    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,8 @@ Use [architecture](ARCHITECTURE.md) for boundaries and
 vector renderer; it replaced the GPUI Reader (removed with the GPUI crates
 and the abandoned Files app in M5). It has:
 - **M1-M4:** a library home, [craft-ui](https://github.com/storytold/craft-libs)
-  tabs, the GPU document view, presentation mode, reading positions, text
+  tabs, the GPU document view, presentation mode (fullscreen, a tool ring,
+  ink, the laser and a clock), reading positions, text
   selection, find, links with history, bookmarks/highlights/notes, a
   sidebar, EPUB reflow, selection and whole-document translation, an
   assistant (streaming answers, document tools, sessions in the library), a
@@ -86,6 +87,8 @@ Known gaps:
   performance cores (`taskset -c 0-11`): a loader thread on a low-power
   core takes twice as long.
 - Presenting a spread shows one page at a time.
+  Presenting's ink lives while its tab is open (never saved), and it has
+  no spotlight, zoom to a region or presenter view on a second screen.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
 - The assistant has no Mermaid diagrams (`mermaid-render` is kept for

@@ -159,7 +159,7 @@ impl KeymapPage {
             return false;
         };
         let others: Vec<(Keys, Command)> = keymap
-            .conflicts(&recorded)
+            .conflicts(&recorded, command)
             .into_iter()
             .filter(|(_, owner)| *owner != command)
             .collect();

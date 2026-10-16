@@ -46,6 +46,9 @@ pub enum ShotKind {
     Generating,
     /// The loading animation's reveal, halfway down the page.
     Revealing,
+    /// Presenting's tools (frame 02h): ink on the page, the laser's
+    /// toolbox with the pen's colours, and the ring open.
+    PresentTools,
 }
 
 /// Progress of a replayed loading animation at which `Generating` is
@@ -439,6 +442,15 @@ impl ReaderApp {
                     shot.started = true;
                 }
                 shot.started && halfway(self)
+            }
+            ShotKind::PresentTools => {
+                // Drawn the frame after the tools are set out.
+                if !shot.started {
+                    self.seed_present_tools(ctx);
+                    shot.started = true;
+                    return false;
+                }
+                true
             }
             ShotKind::Generating | ShotKind::Revealing => {
                 let revealing = shot.kind == ShotKind::Revealing;

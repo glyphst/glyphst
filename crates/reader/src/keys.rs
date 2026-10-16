@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use egui::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::Command;
+use crate::commands::{Category, Command};
 
 /// Which default keys commands have.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -321,8 +321,10 @@ impl Keymap {
         let mut found: Vec<(String, Command)> = self
             .bindings
             .iter()
-            .filter(|(keys, _)| {
-                keys.0.len() > pending.keys.len() && keys.0.starts_with(&pending.keys)
+            .filter(|(keys, command)| {
+                !presents(*command)
+                    && keys.0.len() > pending.keys.len()
+                    && keys.0.starts_with(&pending.keys)
             })
             .map(|(keys, command)| {
                 let plain = keys.0.iter().all(|stroke| !stroke.ctrl && !stroke.alt);
@@ -367,11 +369,10 @@ impl Keymap {
                 };
                 let entry = keymap.keys.entry(command).or_default();
                 for binding in keys {
-                    if !keymap
-                        .bindings
-                        .iter()
-                        .any(|(bound, _)| bound.overlaps(&binding))
-                    {
+                    // Presenting's keys only meet each other.
+                    if !keymap.bindings.iter().any(|(bound, owner)| {
+                        same_scope(*owner, command) && bound.overlaps(&binding)
+                    }) {
                         entry.push(binding.clone());
                         keymap.bindings.push((binding, command));
                     }
@@ -403,12 +404,13 @@ impl Keymap {
             .map(|(_, command)| *command)
     }
 
-    /// The bindings `keys` can't live with: the same keys, ones it starts
-    /// and ones that start it.
-    pub fn conflicts(&self, keys: &Keys) -> Vec<(Keys, Command)> {
+    /// The bindings `keys` can't live with for `command`: the same keys,
+    /// ones it starts and ones that start it, among the commands its keys
+    /// meet (presenting's keys meet only each other).
+    pub fn conflicts(&self, keys: &Keys, command: Command) -> Vec<(Keys, Command)> {
         self.bindings
             .iter()
-            .filter(|(bound, _)| bound.overlaps(keys))
+            .filter(|(bound, owner)| same_scope(*owner, command) && bound.overlaps(keys))
             .cloned()
             .collect()
     }
@@ -430,11 +432,13 @@ impl Keymap {
     /// presses from egui's input. A press that starts or continues a
     /// sequence, or adds to a count, waits in `pending`; Escape drops what
     /// is pending. While `typing`, only single shortcuts typing can't
-    /// produce fire, and only for commands that allow it.
+    /// produce fire, and only for commands that allow it. While
+    /// `presenting`, presenting's keys come first; otherwise they are off.
     pub fn take_pressed(
         &self,
         ctx: &egui::Context,
         typing: bool,
+        presenting: bool,
         pending: &mut Pending,
     ) -> Vec<Pressed> {
         if typing {
@@ -461,6 +465,7 @@ impl Keymap {
                             return false;
                         };
                         shortcut.matches(*key, *modifiers)
+                            && (presenting || !presents(*command))
                             && command.in_text()
                             && shortcut.works_in_text()
                     });
@@ -494,7 +499,14 @@ impl Keymap {
                     );
                     return false;
                 }
-                match self.step(&pending.keys, *key, *modifiers) {
+                let step = match presenting {
+                    true => match self.step(&pending.keys, *key, *modifiers, true) {
+                        Step::Nothing => self.step(&pending.keys, *key, *modifiers, false),
+                        step => step,
+                    },
+                    false => self.step(&pending.keys, *key, *modifiers, false),
+                };
+                match step {
                     Step::Run(command) => {
                         pressed.push(Pressed {
                             command,
@@ -519,12 +531,16 @@ impl Keymap {
         pressed
     }
 
-    /// Where pressing `key` after `pending` leads. Of the shortcuts the
-    /// press matches, the one with the most modifiers wins.
-    fn step(&self, pending: &[Shortcut], key: Key, modifiers: Modifiers) -> Step {
-        let next = self
-            .bindings
-            .iter()
+    /// Where pressing `key` after `pending` leads, among presenting's keys
+    /// or the others. Of the shortcuts the press matches, the one with the
+    /// most modifiers wins.
+    fn step(&self, pending: &[Shortcut], key: Key, modifiers: Modifiers, present: bool) -> Step {
+        let scope = || {
+            self.bindings
+                .iter()
+                .filter(move |(_, command)| presents(*command) == present)
+        };
+        let next = scope()
             .filter_map(|(binding, _)| {
                 let strokes = binding.strokes();
                 strokes
@@ -539,15 +555,21 @@ impl Keymap {
         };
         let mut keys = pending.to_vec();
         keys.push(next);
-        match self
-            .bindings
-            .iter()
-            .find(|(binding, _)| binding.strokes() == keys.as_slice())
-        {
+        match scope().find(|(binding, _)| binding.strokes() == keys.as_slice()) {
             Some((_, command)) => Step::Run(*command),
             None => Step::Continue(keys),
         }
     }
+}
+
+/// Whether `command`'s keys work only while presenting.
+fn presents(command: Command) -> bool {
+    command.category() == Category::Present
+}
+
+/// Whether the keys of `a` and `b` can clash.
+fn same_scope(a: Command, b: Command) -> bool {
+    presents(a) == presents(b)
 }
 
 /// The largest count kept; more digits don't grow it.
@@ -582,7 +604,7 @@ fn defaults(preset: KeymapPreset, command: Command) -> Vec<Keys> {
 /// Gives `keys` to `command`, taking it from the bindings it conflicts
 /// with (the same keys, or ones that start or continue them).
 pub fn assign(overrides: &mut Overrides, keymap: &Keymap, command: Command, keys: Keys) {
-    let conflicts = keymap.conflicts(&keys);
+    let conflicts = keymap.conflicts(&keys, command);
     if conflicts
         .iter()
         .any(|(bound, owner)| *owner == command && *bound == keys)
@@ -718,9 +740,10 @@ mod tests {
             for command in Command::ALL {
                 for key in command.default_keys(preset) {
                     let parsed = keys(key);
-                    if let Some((other, owner)) =
-                        seen.iter().find(|(bound, _)| bound.overlaps(&parsed))
-                    {
+                    // Presenting's keys meet only each other.
+                    if let Some((other, owner)) = seen.iter().find(|(bound, owner)| {
+                        same_scope(*owner, command) && bound.overlaps(&parsed)
+                    }) {
                         panic!("{preset:?}: {key} meets {other:?} of {owner:?} in {command:?}");
                     }
                     seen.push((parsed, command));
@@ -813,10 +836,44 @@ mod tests {
     }
 
     #[test]
+    fn presenting_keys_shadow_the_others_only_while_presenting() {
+        let keymap = vim();
+        let press = |key, presenting| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![self::key(key, Modifiers::NONE)],
+                ..Default::default()
+            };
+            let mut pressed = Vec::new();
+            let mut output = ctx.run_ui(input, |ui| {
+                pressed = keymap.take_pressed(ui.ctx(), false, presenting, &mut Pending::default());
+            });
+            output.textures_delta.clear();
+            pressed
+                .into_iter()
+                .map(|pressed| pressed.command)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(press(Key::D, false), [Command::ToggleSpread]);
+        assert_eq!(press(Key::D, true), [Command::PresentDraw]);
+        assert_eq!(press(Key::E, false), []);
+        assert_eq!(press(Key::E, true), [Command::PresentClear]);
+        // The others still work while presenting.
+        assert_eq!(press(Key::J, true), [Command::ScrollDown]);
+        // Both keep their keys, and only meet their own kind.
+        assert_eq!(keymap.keys(Command::ToggleSpread), &[keys("D")]);
+        assert_eq!(keymap.keys(Command::PresentDraw), &[keys("D")]);
+        let draw = keymap.conflicts(&keys("D"), Command::PresentDraw);
+        assert_eq!(draw, [(keys("D"), Command::PresentDraw)]);
+        let spread = keymap.conflicts(&keys("D"), Command::ToggleSpread);
+        assert_eq!(spread, [(keys("D"), Command::ToggleSpread)]);
+    }
+
+    #[test]
     fn assigning_a_prefix_takes_every_sequence_it_starts() {
         let mut overrides = Overrides::new();
         let keymap = vim();
-        let conflicts = keymap.conflicts(&keys("G"));
+        let conflicts = keymap.conflicts(&keys("G"), Command::Zen);
         assert_eq!(conflicts.len(), 3, "G G, G T and G Shift+T");
         assign(&mut overrides, &keymap, Command::Zen, keys("G"));
         let keymap = Keymap::new(KeymapPreset::Vim, &overrides);
@@ -852,7 +909,7 @@ mod tests {
         let mut pressed = Vec::new();
         let mut left = 0;
         let mut output = ctx.run_ui(input, |ui| {
-            pressed = keymap.take_pressed(ui.ctx(), typing, pending);
+            pressed = keymap.take_pressed(ui.ctx(), typing, false, pending);
             left = ui.input(|input| input.events.len());
         });
         output.textures_delta.clear();
