@@ -91,6 +91,9 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
         write_txn.open_table(ACTIVITY_V1_TABLE)?;
     }
     {
+        write_txn.open_table(READING_SESSIONS_V1_TABLE)?;
+    }
+    {
         write_txn.open_table(AI_SESSIONS_V6_TABLE)?;
     }
     {
@@ -295,6 +298,7 @@ fn load_storage_v2(read_txn: &redb::ReadTransaction, library: &mut Library) -> R
     load_ai_sessions(read_txn, library)?;
     load_shared_v1_storage(read_txn, library)?;
     super::activity::load_activity(read_txn, library)?;
+    super::reading::load_reading_sessions(read_txn, library)?;
     Ok(())
 }
 

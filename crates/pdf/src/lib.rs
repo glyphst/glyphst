@@ -1,3 +1,4 @@
+mod cover;
 mod document;
 mod reload;
 mod render;
@@ -7,6 +8,7 @@ pub mod text;
 pub mod vector;
 pub mod vector_cache;
 
+pub use cover::{Cover, render_cover};
 pub use document::{
     DocumentAuthenticationError, DocumentPassword, DocumentSnapshot, GlyphstDocument, PdfDocument,
 };

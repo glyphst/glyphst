@@ -36,6 +36,8 @@ const BOOKMARKS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bo
 const HIGHLIGHTS_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("highlights_v2");
 const NOTES_V2_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("notes_v2");
 const ACTIVITY_V1_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("activity_v1");
+const READING_SESSIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("reading_sessions_v1");
 const DOCUMENT_PREFERENCES_V4_VERSION: u8 = 4;
 const DOCUMENT_PREFERENCES_V4_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v4");
@@ -1927,6 +1929,8 @@ pub struct Library {
     pub notes: Vec<Note>,
     /// The reading activity log, oldest first.
     pub activity: Vec<ActivityEvent>,
+    /// Reading sessions, oldest first.
+    pub reading_sessions: Vec<ReadingSession>,
     pub ai_sessions: Vec<AiSession>,
     pub sidebar_widths: Option<SidebarWidths>,
     pub document_browser_size: Option<DocumentBrowserSize>,
@@ -2075,6 +2079,8 @@ impl Error for DocumentEditConflict {}
 
 mod activity;
 pub use activity::{ActivityEvent, ActivityKind};
+mod reading;
+pub use reading::ReadingSession;
 mod agent_edits;
 mod ai_sessions;
 mod annotations;

@@ -17,7 +17,7 @@ pub use library::{
     ReaderNewTabDestination, ReaderNewTabSession, ReaderPaneSession, ReaderPaneTree,
     ReaderSessionSnapshot, ReaderSidebar, ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind,
     ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession,
-    ReaderWindowState, ReadingStatus, ReflowPosition, RegionImageReference, SemanticTextAnchor,
-    SemanticTextRange, SidebarWidths, current_timestamp, is_edit_conflict, normalize_path,
-    prepare_managed_import,
+    ReaderWindowState, ReadingSession, ReadingStatus, ReflowPosition, RegionImageReference,
+    SemanticTextAnchor, SemanticTextRange, SidebarWidths, current_timestamp, is_edit_conflict,
+    normalize_path, prepare_managed_import,
 };
