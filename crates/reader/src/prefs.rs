@@ -102,8 +102,9 @@ pub struct Prefs {
     pub keymap: KeymapPreset,
     /// Presenting makes the window fullscreen (and leaving puts it back).
     pub present_fullscreen: bool,
-    /// The page and clock show in the presentation's corner.
-    pub present_timer: bool,
+    /// The page number shows in the presentation's corner (the timer
+    /// tool adds the time).
+    pub present_page_number: bool,
     /// The talk's length in minutes, for the clock to count down; 0
     /// counts up.
     pub talk_minutes: u32,
@@ -142,7 +143,7 @@ impl Default for Prefs {
             shortcuts: Overrides::new(),
             keymap: KeymapPreset::Standard,
             present_fullscreen: true,
-            present_timer: true,
+            present_page_number: false,
             talk_minutes: 0,
             present_ring: present::default_ring(),
             last_session: LastSession::default(),

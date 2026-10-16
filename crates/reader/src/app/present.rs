@@ -1,7 +1,8 @@
-//! Presenting (frames 02g–i): the window going fullscreen, the page's
-//! input while presenting (page turns, the tool ring, ink, the laser) and
-//! what is drawn over it: the clock chip, the progress line, the toolbox,
-//! the ring, the cursors and the blank screen.
+//! Presenting (frames 02g–j): the window going fullscreen, the hidden
+//! cursor locked at the centre, the page's input while presenting (page
+//! turns, the tool ring, ink, the laser) and what is drawn over it: the
+//! corner chip, the progress line, the toolbox, the ring, the cursors and
+//! the blank screen.
 
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,8 @@ use crate::{
     commands::{Category, Command},
     document_tab::ViewAction,
     present::{
-        self, Blank, ERASER_RADIUS, HIGHLIGHTER, HIGHLIGHTER_WIDTH, INK, LASER, PEN_WIDTH, Pace,
-        Pointer, Presenting, RingGesture, TRAIL, Tool,
+        self, Blank, Clock, ERASER_RADIUS, HIGHLIGHTER, HIGHLIGHTER_WIDTH, INK, LASER, Mode,
+        PEN_WIDTH, Pace, Presenting, RingGesture, TRAIL,
     },
     text_overlay::{PageMap, page_at},
     theme::{self, Tokens},
@@ -48,10 +49,13 @@ impl ReaderApp {
                     .push("Presenting · Esc to leave · hold the right button for tools");
             }
             (false, true) => {
-                if let Some(state) = self.presenting.take()
-                    && state.made_fullscreen
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                if let Some(state) = self.presenting.take() {
+                    if state.locked {
+                        unlock(ctx);
+                    }
+                    if state.made_fullscreen {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
                 }
             }
             _ => {}
@@ -68,7 +72,8 @@ impl ReaderApp {
     }
 
     /// Escape while presenting: closes the ring, ends the blank screen or
-    /// puts the tool down, in that order; whether it did any.
+    /// goes back to the hidden cursor (from the laser or a tool), in that
+    /// order; whether it did any.
     pub(super) fn present_cancel(&mut self) -> bool {
         let Some(state) = self.presenting.as_mut() else {
             return false;
@@ -79,8 +84,8 @@ impl ReaderApp {
         if state.blank.take().is_some() {
             return true;
         }
-        if state.tool.take().is_some() {
-            state.drawing = None;
+        if state.mode != Mode::Hidden {
+            state.toggle_mode(state.mode);
             return true;
         }
         false
@@ -94,28 +99,32 @@ impl ReaderApp {
             return;
         };
         let ink = &mut self.tabs[active].ink;
+        let mode = match command {
+            Command::PresentDraw => Some(Mode::Pen),
+            Command::PresentHighlight => Some(Mode::Highlighter),
+            Command::PresentErase => Some(Mode::Eraser),
+            Command::PresentCursor => Some(Mode::Laser),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            state.toggle_mode(mode);
+            state.moved = now;
+            return;
+        }
         match command {
-            Command::PresentDraw => state.toggle_tool(Tool::Pen),
-            Command::PresentHighlight => state.toggle_tool(Tool::Highlighter),
-            Command::PresentErase => state.toggle_tool(Tool::Eraser),
             Command::PresentClear => {
                 ink.clear(page);
             }
             Command::PresentUndo => {
                 ink.undo(page);
             }
-            Command::PresentCursor => {
-                state.pointer = match state.pointer {
-                    Pointer::Hidden => Pointer::Laser,
-                    Pointer::Laser => Pointer::Hidden,
-                };
-                state.trail.clear();
-                state.moved = now;
+            Command::PresentRedo => {
+                ink.redo(page);
             }
             Command::PresentBlack => state.toggle_blank(Blank::Black),
             Command::PresentWhite => state.toggle_blank(Blank::White),
-            Command::PresentTimer => state.clock.toggle_pause(now),
-            Command::PresentTimerReset => state.clock.reset(now),
+            Command::PresentTimer => state.timer(now),
+            Command::PresentTimerStop => state.clock = None,
             _ => {}
         }
     }
@@ -130,18 +139,19 @@ impl ReaderApp {
             return;
         };
         let now = Instant::now();
-        state.pointer = Pointer::Laser;
-        state.tool = Some(Tool::Pen);
+        state.mode = Mode::Pen;
         state.moved = now;
+        state.clock = Some(Clock::new(
+            now.checked_sub(Duration::from_secs(761)).unwrap_or(now),
+        ));
         let screen = ctx.content_rect();
+        let at = pos2(
+            screen.left() + screen.width() * 0.74,
+            screen.top() + screen.height() * 0.32,
+        );
         state.ring = Some(RingGesture::Open {
-            center: ring::center_within(
-                pos2(
-                    screen.left() + screen.width() * 0.74,
-                    screen.top() + screen.height() * 0.32,
-                ),
-                screen,
-            ),
+            at,
+            center: ring::center_within(at, screen),
         });
         let tab = &mut self.tabs[active];
         let page = tab.current_page();
@@ -211,17 +221,27 @@ impl ReaderApp {
         let Some(state) = self.presenting.as_mut() else {
             return;
         };
-        let (primary_pressed, primary_down, secondary_pressed, secondary_released, wheel, moved) =
+        let (primary_pressed, primary_down, secondary_pressed, secondary_released, wheel, motion) =
             ctx.input(|i| {
+                let motion = i
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::MouseMoved(delta) => Some(*delta),
+                        _ => None,
+                    })
+                    .fold(egui::Vec2::ZERO, |sum, delta| sum + delta);
                 (
                     i.pointer.button_pressed(PointerButton::Primary),
                     i.pointer.primary_down(),
                     i.pointer.button_pressed(PointerButton::Secondary),
                     i.pointer.button_released(PointerButton::Secondary),
                     i.smooth_scroll_delta.y,
-                    i.pointer.delta() != egui::Vec2::ZERO,
+                    motion / i.pixels_per_point,
                 )
             });
+        let moved =
+            motion != egui::Vec2::ZERO || ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
         let over = response.contains_pointer();
         let latest = ctx.pointer_latest_pos();
         if moved {
@@ -238,22 +258,37 @@ impl ReaderApp {
         }
 
         let mut picked = None;
+        let screen = ctx.content_rect();
         if secondary_pressed
             && over
             && let Some(at) = latest
         {
-            state.ring = Some(RingGesture::Pressed { at, since: now });
+            // Hidden, the cursor waits at the centre and the ring opens
+            // there; shown, it opens where the button went down.
+            let center = match state.mode {
+                Mode::Hidden => screen.center(),
+                _ => ring::center_within(at, screen),
+            };
+            state.ring = Some(RingGesture::Pressed {
+                at,
+                center,
+                since: now,
+            });
+            state.ring_motion = None;
+        }
+        if state.ring.is_some() && state.locked && motion != egui::Vec2::ZERO {
+            state.ring_motion = Some(state.ring_motion.unwrap_or_default() + motion);
         }
         match state.ring {
-            Some(RingGesture::Pressed { at, since }) => {
+            Some(RingGesture::Pressed { at, center, since }) => {
                 let held = now.saturating_duration_since(since);
+                let pointer =
+                    present::virtual_pointer(center, state.ring_motion, at, latest.unwrap_or(at));
                 if secondary_released {
                     state.ring = None;
                     actions.push(ViewAction::PreviousPage);
-                } else if ring::opens((latest.unwrap_or(at) - at).length(), held) {
-                    state.ring = Some(RingGesture::Open {
-                        center: ring::center_within(at, ctx.content_rect()),
-                    });
+                } else if ring::opens((pointer - center).length(), held) {
+                    state.ring = Some(RingGesture::Open { at, center });
                     state.drawing = None;
                 } else {
                     ctx.request_repaint_after(ring::OPEN_HOLD.saturating_sub(held));
@@ -261,9 +296,11 @@ impl ReaderApp {
             }
             // Releasing picks what is under the pointer; till then (or
             // Esc) the ring stays.
-            Some(RingGesture::Open { center }) if secondary_released => {
+            Some(RingGesture::Open { at, center }) if secondary_released => {
                 state.ring = None;
-                if let ring::Pick::Slot(slot) = ring::pick(center, latest.unwrap_or(center)) {
+                let pointer =
+                    present::virtual_pointer(center, state.ring_motion, at, latest.unwrap_or(at));
+                if let ring::Pick::Slot(slot) = ring::pick(center, pointer) {
                     picked = ring_commands[slot];
                 }
             }
@@ -279,15 +316,15 @@ impl ReaderApp {
                 });
             }
             let ink = &mut self.tabs[active].ink;
-            match state.tool {
-                Some(tool @ (Tool::Pen | Tool::Highlighter)) => {
+            match state.mode {
+                tool @ (Mode::Pen | Mode::Highlighter) => {
                     if primary_pressed
                         && over
                         && let Some(pos) = latest
                         && let Some(map) = page_at(maps, pos)
                     {
                         let (color, width) = match tool {
-                            Tool::Highlighter => (HIGHLIGHTER, HIGHLIGHTER_WIDTH),
+                            Mode::Highlighter => (HIGHLIGHTER, HIGHLIGHTER_WIDTH),
                             _ => (INK[state.color].1, PEN_WIDTH),
                         };
                         ink.start(
@@ -310,20 +347,24 @@ impl ReaderApp {
                         state.drawing = None;
                     }
                 }
-                Some(Tool::Eraser) => {
+                Mode::Eraser => {
                     if primary_down
                         && (over || state.drawing.is_some())
                         && let Some(pos) = latest
                         && let Some(map) = page_at(maps, pos)
                     {
                         state.drawing = Some(map.page);
-                        ink.erase(map.page, map.page_point(pos), map.points(ERASER_RADIUS));
+                        let point = map.page_point(pos);
+                        if ink.erase(map.page, point, map.points(ERASER_RADIUS), !state.erased) {
+                            state.erased = true;
+                        }
                     }
                     if !primary_down {
                         state.drawing = None;
+                        state.erased = false;
                     }
                 }
-                None => {
+                Mode::Hidden | Mode::Laser => {
                     if response.clicked() {
                         actions.push(ViewAction::NextPage);
                     }
@@ -388,15 +429,31 @@ impl ReaderApp {
         let current = tab.current_page();
         let talk = (self.prefs.talk_minutes > 0)
             .then(|| Duration::from_secs(u64::from(self.prefs.talk_minutes) * 60));
-        let show_timer = self.prefs.present_timer;
+        let page_number = self.prefs.present_page_number;
+        let lockable = self.persist;
         let Some(state) = self.presenting.as_mut() else {
             return;
         };
         let hover = ctx.pointer_hover_pos().filter(|_| !dialog);
         let over_toolbox =
             hover.is_some_and(|pos| state.toolbox.iter().any(|rect| rect.contains(pos)));
-        state.trail_to(hover.filter(|_| !over_toolbox), now);
-        let (clock, pace) = present::clock_text(state.clock.elapsed(now), talk);
+        let passed: Vec<Pos2> = if dialog || over_toolbox {
+            Vec::new()
+        } else {
+            ctx.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::PointerMoved(pos) => Some(*pos),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        };
+        state.trail_to(&passed, now);
+        let clock = state
+            .clock
+            .map(|clock| present::clock_text(clock.elapsed(now), talk));
         let slots = ring_commands.map(|command| {
             command.map(|command| {
                 let (label, icon) = state.slot(command);
@@ -427,13 +484,14 @@ impl ReaderApp {
                         0,
                         tokens.accent,
                     );
-                    if show_timer {
-                        timer_chip(ui, screen, current, pages, &clock, pace, &tokens);
+                    if state.chip_shows(page_number) {
+                        corner_chip(ui, screen, current, pages, clock.as_ref(), &tokens);
                     }
                 }
-                if let Some(RingGesture::Open { center }) = state.ring {
-                    let pointer = ctx.pointer_latest_pos().unwrap_or(center);
-                    ring::paint(ui, center, &slots, ring::pick(center, pointer));
+                if let Some(RingGesture::Open { at, center }) = state.ring {
+                    let latest = ctx.pointer_latest_pos().unwrap_or(at);
+                    let pointer = present::virtual_pointer(center, state.ring_motion, at, latest);
+                    ring::paint(ui, center, &slots, pointer);
                 }
                 if let Some(pos) = hover.filter(|_| !over_toolbox && state.ring.is_none()) {
                     paint_cursor(ui, state, pos, now);
@@ -444,13 +502,9 @@ impl ReaderApp {
         let idle = now.saturating_duration_since(state.moved) > TOOLBOX_IDLE;
         let mut clicked = Vec::new();
         state.toolbox.clear();
-        if state.pointer == Pointer::Laser
-            && state.blank.is_none()
-            && !dialog
-            && (!idle || over_toolbox)
+        if state.mode != Mode::Hidden && state.blank.is_none() && !dialog && (!idle || over_toolbox)
         {
-            let tool = state.tool;
-            let laser = state.pointer == Pointer::Laser;
+            let mode = state.mode;
             let area = egui::Area::new(egui::Id::new("present-toolbox"))
                 .order(egui::Order::Foreground)
                 .fade_in(false)
@@ -469,14 +523,12 @@ impl ReaderApp {
                                     }
                                     for &(icon, command) in group.iter() {
                                         let on = match command {
-                                            Some(Command::PresentCursor) => laser,
-                                            Some(Command::PresentDraw) => tool == Some(Tool::Pen),
+                                            Some(Command::PresentCursor) => mode == Mode::Laser,
+                                            Some(Command::PresentDraw) => mode == Mode::Pen,
                                             Some(Command::PresentHighlight) => {
-                                                tool == Some(Tool::Highlighter)
+                                                mode == Mode::Highlighter
                                             }
-                                            Some(Command::PresentErase) => {
-                                                tool == Some(Tool::Eraser)
-                                            }
+                                            Some(Command::PresentErase) => mode == Mode::Eraser,
                                             _ => false,
                                         };
                                         let tip = command
@@ -513,7 +565,7 @@ impl ReaderApp {
                 });
             state.toolbox.push(area.response.rect);
             // The pen's colours, over its button.
-            if tool == Some(Tool::Pen)
+            if mode == Mode::Pen
                 && let Some(pen) = area.inner
             {
                 let colors = egui::Area::new(egui::Id::new("present-colors"))
@@ -557,15 +609,29 @@ impl ReaderApp {
         if !dialog && !over_toolbox {
             ctx.set_cursor_icon(CursorIcon::None);
         }
-        let Some(state) = &self.presenting else {
+        let Some(state) = self.presenting.as_mut() else {
             return;
         };
+        // Hidden, the cursor is locked where it waits, at the centre;
+        // shown again, it comes back there.
+        let lock = lockable && state.mode == Mode::Hidden && !dialog;
+        if lock != state.locked {
+            if lock {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                    egui::viewport::CursorGrab::Locked,
+                ));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(screen.center()));
+                unlock(ctx);
+            }
+            state.locked = lock;
+        }
         if !state.trail.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(16));
-        } else if show_timer && !state.clock.is_paused() {
+        } else if state.clock.is_some_and(|clock| !clock.is_paused()) {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
-        if state.pointer == Pointer::Laser && !idle {
+        if state.mode != Mode::Hidden && !idle {
             // The toolbox fades once the pointer rests.
             ctx.request_repaint_after(
                 TOOLBOX_IDLE.saturating_sub(now.saturating_duration_since(state.moved)),
@@ -594,38 +660,47 @@ const TOOLBOX: [&[(&str, Option<Command>)]; 4] = [
     ],
     &[
         ("undo-2", Some(Command::PresentUndo)),
+        ("redo-2", Some(Command::PresentRedo)),
         ("trash-2", Some(Command::PresentClear)),
         ("square", Some(Command::PresentBlack)),
     ],
     &[("ellipsis", None)],
 ];
 
-/// The page and clock chip in the bottom-right corner (frame 02g).
-fn timer_chip(
+/// The cursor back to the system.
+fn unlock(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+        egui::viewport::CursorGrab::None,
+    ));
+}
+
+/// The chip in the bottom-right corner (frames 02g, 02h): the page, and
+/// the clock once the timer tool started it.
+fn corner_chip(
     ui: &egui::Ui,
     screen: Rect,
     current: usize,
     pages: usize,
-    clock: &str,
-    pace: Pace,
+    clock: Option<&(String, Pace)>,
     tokens: &Tokens,
 ) {
     let painter = ui.painter();
     let font = theme::mono(11.0);
     let width = pages.to_string().len().max(2);
     let page = format!("{:0width$} / {pages:0width$}", current + 1);
-    let clock_color = match pace {
-        Pace::OnTime => tokens.muted,
-        Pace::Closing => tokens.accent_text,
-        Pace::Over => tokens.err,
-    };
-    let galleys = [
-        (painter.layout_no_wrap(page, font.clone(), tokens.muted)),
-        (painter.layout_no_wrap("·".into(), font.clone(), tokens.faint)),
-        (painter.layout_no_wrap(clock.into(), font, clock_color)),
-    ];
+    let mut galleys = vec![painter.layout_no_wrap(page, font.clone(), tokens.muted)];
+    if let Some((clock, pace)) = clock {
+        let color = match pace {
+            Pace::OnTime => tokens.muted,
+            Pace::Closing => tokens.accent_text,
+            Pace::Over => tokens.err,
+        };
+        galleys.push(painter.layout_no_wrap("·".into(), font.clone(), tokens.faint));
+        galleys.push(painter.layout_no_wrap(clock.clone(), font, color));
+    }
     let gap = 8.0;
-    let inner: f32 = galleys.iter().map(|galley| galley.size().x).sum::<f32>() + gap * 2.0;
+    let inner: f32 = galleys.iter().map(|galley| galley.size().x).sum::<f32>()
+        + gap * (galleys.len() - 1) as f32;
     let height = galleys[0].size().y + 8.0;
     let chip = Rect::from_min_size(
         pos2(
@@ -653,12 +728,12 @@ fn timer_chip(
     }
 }
 
-/// The cursor drawn on the page: the laser with its trail, the pencil
+/// The cursor drawn on the page: the laser with its tail, the pencil
 /// with its tip at the pointer, or the eraser's circle.
 fn paint_cursor(ui: &egui::Ui, state: &Presenting, pos: Pos2, now: Instant) {
     let painter = ui.painter();
-    match state.tool {
-        Some(Tool::Eraser) => {
+    match state.mode {
+        Mode::Eraser => {
             painter.circle(
                 pos,
                 ERASER_RADIUS,
@@ -667,15 +742,10 @@ fn paint_cursor(ui: &egui::Ui, state: &Presenting, pos: Pos2, now: Instant) {
             );
             painter.circle_stroke(pos, ERASER_RADIUS + 1.5, Stroke::new(1.0, Color32::WHITE));
         }
-        Some(tool @ (Tool::Pen | Tool::Highlighter)) => {
-            let icon = if tool == Tool::Pen {
-                "pencil"
-            } else {
-                "highlighter"
-            };
-            let color = match tool {
-                Tool::Pen => INK[state.color].1,
-                _ => Color32::from_rgb(0xC9, 0xA2, 0x00),
+        tool @ (Mode::Pen | Mode::Highlighter) => {
+            let (icon, color) = match tool {
+                Mode::Pen => ("pencil", INK[state.color].1),
+                _ => ("highlighter", Color32::from_rgb(0xC9, 0xA2, 0x00)),
             };
             // The pencil's tip is its bottom-left corner.
             let rect = Rect::from_min_size(pos - vec2(0.0, 20.0), vec2(20.0, 20.0));
@@ -688,18 +758,55 @@ fn paint_cursor(ui: &egui::Ui, state: &Presenting, pos: Pos2, now: Instant) {
             );
             glyphst_ui::icons::paint(ui, rect, icon, 20.0, color);
         }
-        None if state.pointer == Pointer::Laser => {
-            let points: Vec<&(Pos2, Instant)> = state.trail.iter().collect();
-            for (index, (at, when)) in points.iter().enumerate() {
-                let age = now.saturating_duration_since(*when).as_secs_f32() / TRAIL.as_secs_f32();
-                let fade = (1.0 - age).clamp(0.0, 1.0) * (index + 1) as f32 / points.len() as f32;
-                painter.circle_filled(*at, 3.0, LASER.gamma_multiply(fade * 0.5));
-            }
-            painter.circle_filled(pos, 11.0, LASER.gamma_multiply(0.25));
+        Mode::Laser => {
+            painter.add(meteor(&state.trail, pos, now));
+            painter.circle_filled(pos, 13.0, LASER.gamma_multiply(0.25));
             painter.circle(pos, 5.0, LASER, Stroke::new(1.0, Color32::WHITE));
         }
-        None => {}
+        Mode::Hidden => {}
     }
+}
+
+/// The laser's tail (frame 02j, L1): one ribbon along the pointer's path
+/// to `head`, thinning and fading toward its end and as it ages.
+fn meteor(trail: &std::collections::VecDeque<(Pos2, Instant)>, head: Pos2, now: Instant) -> Shape {
+    let mut points: Vec<(Pos2, f32)> = trail
+        .iter()
+        .map(|(at, when)| {
+            let age = now.saturating_duration_since(*when).as_secs_f32() / TRAIL.as_secs_f32();
+            (*at, (1.0 - age).clamp(0.0, 1.0))
+        })
+        .collect();
+    if points.last().is_none_or(|(last, _)| *last != head) {
+        points.push((head, 1.0));
+    }
+    if points.len() < 2 {
+        return Shape::Noop;
+    }
+    let mut along = vec![0.0f32; points.len()];
+    for index in 1..points.len() {
+        along[index] = along[index - 1] + (points[index].0 - points[index - 1].0).length();
+    }
+    let total = along[points.len() - 1].max(1.0);
+    let mut mesh = egui::Mesh::default();
+    for (index, &(at, life)) in points.iter().enumerate() {
+        let before = points[index.saturating_sub(1)].0;
+        let after = points[(index + 1).min(points.len() - 1)].0;
+        let direction = (after - before).normalized();
+        let normal = vec2(-direction.y, direction.x);
+        // 0 at the tail's end, 1 at the head.
+        let t = along[index] / total;
+        let half = 0.4 + 4.2 * t.powf(1.6) * life.sqrt();
+        let color = LASER.gamma_multiply(t.powf(1.3) * life * 0.9);
+        mesh.colored_vertex(at + normal * half, color);
+        mesh.colored_vertex(at - normal * half, color);
+    }
+    for index in 0..points.len() as u32 - 1 {
+        let i = index * 2;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    Shape::mesh(mesh)
 }
 
 /// A colour of the pen's popover; the chosen one is ringed.

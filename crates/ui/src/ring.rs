@@ -1,7 +1,10 @@
-//! The tool ring (pen component `ring`, frames 01 and 02h): eight tools
-//! around the pointer, picked by flicking toward one, with `cancel` on the
-//! hub. Slot 0 is up and the slots go clockwise every 45°; the slot under
-//! the pointer is an `accent-soft` wedge.
+//! The tool ring (pen component `ring`, frames 01, 02h and 02j option A):
+//! eight tools around the pointer, picked by flicking toward one, with
+//! `cancel` on the hub. Slot 0 is up and the slots go clockwise every 45°.
+//! It has no outline: a soft disc, solid behind the labels, fades out at
+//! its rim; the slot under the pointer is an `accent-soft` wedge fading the
+//! same way; an `accent` notch on the hub and an `accent` dot show the
+//! pointer.
 
 use std::{f32::consts::TAU, time::Duration};
 
@@ -12,11 +15,23 @@ use crate::{
     theme::{self, Tokens},
 };
 
-pub const DIAMETER: f32 = 232.0;
-pub const HUB: f32 = 64.0;
+pub const DIAMETER: f32 = 320.0;
+pub const HUB: f32 = 84.0;
 pub const SLOTS: usize = 8;
 /// From the centre to a slot's icon and label.
-const SLOT_RADIUS: f32 = 76.0;
+const SLOT_RADIUS: f32 = 106.0;
+/// The disc's alpha from the centre (0) to the rim (1): solid behind the
+/// labels, then fading out. The page shows through more than the design's
+/// alphas suggest (egui blends in linear light), so it stays opaque longer.
+const DISC: [(f32, f32); 5] = [
+    (0.0, 1.0),
+    (0.74, 1.0),
+    (0.86, 0.85),
+    (0.94, 0.4),
+    (1.0, 0.0),
+];
+/// The hot wedge's alpha from the hub (0) to the rim (1).
+const WEDGE: [(f32, f32); 4] = [(0.0, 1.0), (0.6, 0.9), (0.85, 0.45), (1.0, 0.0)];
 /// How far the pointer moves with the button held before the ring opens.
 pub const OPEN_DISTANCE: f32 = 12.0;
 /// How long the button is held still before the ring opens.
@@ -71,91 +86,141 @@ fn direction(slot: usize) -> Vec2 {
     vec2(angle.sin(), -angle.cos())
 }
 
-/// Paints the ring at `center`; `hot` is what releasing now picks.
-pub fn paint(ui: &egui::Ui, center: Pos2, slots: &[Option<Slot<'_>>; SLOTS], hot: Pick) {
+/// Paints the ring at `center` with the pointer at `pointer`: what
+/// releasing there picks is lit, and the notch and dot show where it is.
+pub fn paint(ui: &egui::Ui, center: Pos2, slots: &[Option<Slot<'_>>; SLOTS], pointer: Pos2) {
     let t = Tokens::get(ui.ctx());
     let painter = ui.painter();
+    let hot = pick(center, pointer);
     let outer = DIAMETER / 2.0;
     let inner = HUB / 2.0;
-    painter.circle(center, outer, t.raised, Stroke::new(1.0, t.rule_strong));
+    painter.add(disc(center, outer, t.raised));
     if let Pick::Slot(slot) = hot
         && slots[slot].is_some()
     {
-        painter.add(wedge(center, inner, outer, slot, t.accent_soft));
-    }
-    for spoke in 0..SLOTS {
-        let angle = (spoke as f32 + 0.5) / SLOTS as f32 * TAU;
-        let along = vec2(angle.sin(), -angle.cos());
-        painter.line_segment(
-            [
-                center + along * (inner + 1.0),
-                center + along * (outer - 1.0),
-            ],
-            Stroke::new(1.0, t.rule),
-        );
+        let color = theme::mix(t.accent_soft, t.accent, 0.12);
+        painter.add(wedge(center, inner, outer, slot, color));
     }
     for (index, slot) in slots.iter().enumerate() {
         let Some(slot) = slot else { continue };
         let on = hot == Pick::Slot(index);
         let at = center + direction(index) * SLOT_RADIUS;
-        let icon = egui::Rect::from_center_size(at - vec2(0.0, 9.0), Vec2::splat(14.0));
+        let icon = egui::Rect::from_center_size(at - vec2(0.0, 10.0), Vec2::splat(16.0));
         icons::paint(
             ui,
             icon,
             slot.icon,
-            14.0,
+            16.0,
             if on { t.accent_text } else { t.muted },
         );
         painter.text(
-            at + vec2(0.0, 9.0),
+            at + vec2(0.0, 10.0),
             Align2::CENTER_CENTER,
             slot.label,
-            theme::mono(10.0),
+            theme::mono(11.0),
             if on { t.accent_text } else { t.text_2 },
         );
     }
     let hub = if hot == Pick::Cancel {
-        t.hover
+        t.rule_strong
     } else {
-        t.surface
+        t.hover
     };
-    painter.circle(center, inner, hub, Stroke::new(1.0, t.rule_strong));
-    let x = egui::Rect::from_center_size(center - vec2(0.0, 8.0), Vec2::splat(12.0));
-    icons::paint(ui, x, "x", 12.0, t.faint);
+    painter.circle_filled(center, inner, hub);
+    let x = egui::Rect::from_center_size(center - vec2(0.0, 9.0), Vec2::splat(13.0));
+    icons::paint(ui, x, "x", 13.0, t.faint);
     painter.text(
-        center + vec2(0.0, 8.0),
+        center + vec2(0.0, 9.0),
         Align2::CENTER_CENTER,
         "cancel",
-        theme::mono(10.0),
+        theme::mono(11.0),
         if hot == Pick::Cancel { t.text } else { t.muted },
     );
+    // Where the pointer is: a notch on the hub toward it, and its dot.
+    let offset = pointer - center;
+    if offset.length() > 2.0 {
+        let along = offset.normalized();
+        let across = vec2(-along.y, along.x);
+        let tip = center + along * (inner + 8.0);
+        let base = center + along * (inner + 1.5);
+        painter.add(Shape::convex_polygon(
+            vec![tip, base + across * 6.0, base - across * 6.0],
+            t.accent,
+            Stroke::NONE,
+        ));
+    }
+    let reach = outer - 8.0;
+    let dot = if offset.length() > reach {
+        center + offset.normalized() * reach
+    } else {
+        pointer
+    };
+    painter.circle(dot, 5.0, t.accent, Stroke::new(1.5, t.bg));
 }
 
-/// The ring's 45° between `inner` and `outer` about slot `slot`.
+/// A filled circle whose alpha follows [`DISC`] from the centre out.
+fn disc(center: Pos2, radius: f32, color: Color32) -> Shape {
+    const STEPS: u32 = 64;
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(center, color.gamma_multiply(DISC[0].1));
+    for &(r, alpha) in &DISC[1..] {
+        for step in 0..STEPS {
+            let angle = step as f32 / STEPS as f32 * TAU;
+            mesh.colored_vertex(
+                center + vec2(angle.sin(), -angle.cos()) * radius * r,
+                color.gamma_multiply(alpha),
+            );
+        }
+    }
+    let at = |band: u32, step: u32| 1 + band * STEPS + step % STEPS;
+    for step in 0..STEPS {
+        mesh.add_triangle(0, at(0, step), at(0, step + 1));
+    }
+    for band in 0..DISC.len() as u32 - 2 {
+        for step in 0..STEPS {
+            let (a, b) = (at(band, step), at(band, step + 1));
+            let (c, d) = (at(band + 1, step), at(band + 1, step + 1));
+            mesh.add_triangle(a, c, b);
+            mesh.add_triangle(b, c, d);
+        }
+    }
+    Shape::mesh(mesh)
+}
+
+/// The ring's 45° between `inner` and `outer` about slot `slot`, its
+/// alpha following [`WEDGE`] outward.
 fn wedge(center: Pos2, inner: f32, outer: f32, slot: usize, color: Color32) -> Shape {
-    const STEPS: usize = 12;
+    const STEPS: u32 = 12;
+    let bands = WEDGE.len() as u32;
     let mut mesh = Mesh::default();
     let start = (slot as f32 - 0.5) / SLOTS as f32 * TAU;
     let span = TAU / SLOTS as f32;
     for step in 0..=STEPS {
         let angle = start + span * step as f32 / STEPS as f32;
         let along = vec2(angle.sin(), -angle.cos());
-        mesh.colored_vertex(center + along * inner, color);
-        mesh.colored_vertex(center + along * outer, color);
+        for &(r, alpha) in &WEDGE {
+            mesh.colored_vertex(
+                center + along * (inner + (outer - inner) * r),
+                color.gamma_multiply(alpha),
+            );
+        }
     }
-    for step in 0..STEPS as u32 {
-        let i = step * 2;
-        mesh.add_triangle(i, i + 1, i + 2);
-        mesh.add_triangle(i + 1, i + 3, i + 2);
+    for step in 0..STEPS {
+        for band in 0..bands - 1 {
+            let i = step * bands + band;
+            let j = i + bands;
+            mesh.add_triangle(i, i + 1, j);
+            mesh.add_triangle(i + 1, j + 1, j);
+        }
     }
     Shape::mesh(mesh)
 }
 
-/// The gallery's sample: the ring with `draw` under the pointer.
+/// The gallery's sample: the ring with the pointer over `end draw`.
 pub fn sample(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(DIAMETER + 2.0), egui::Sense::hover());
     let labels = [
-        ("pencil", "draw"),
+        ("pencil", "end draw"),
         ("highlighter", "highlight"),
         ("mouse-pointer-2", "cursor"),
         ("undo-2", "undo"),
@@ -165,7 +230,12 @@ pub fn sample(ui: &mut egui::Ui) {
         ("timer", "timer"),
     ];
     let slots = labels.map(|(icon, label)| Some(Slot { icon, label }));
-    paint(ui, rect.center(), &slots, Pick::Slot(0));
+    paint(
+        ui,
+        rect.center(),
+        &slots,
+        rect.center() - vec2(0.0, DIAMETER / 2.0 - 12.0),
+    );
 }
 
 #[cfg(test)]

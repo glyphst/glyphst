@@ -93,15 +93,16 @@ pub enum Command {
     PresentErase,
     /// Clears the page's ink.
     PresentClear,
-    /// Removes the page's latest stroke.
+    /// Undoes the page's latest drawing, erasing or clearing.
     PresentUndo,
+    PresentRedo,
     /// Shows the pointer as the laser, or hides it.
     PresentCursor,
     PresentBlack,
     PresentWhite,
-    /// Pauses or resumes the clock.
+    /// Starts the clock, then pauses and resumes it.
     PresentTimer,
-    PresentTimerReset,
+    PresentTimerStop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +176,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 74] = [
+    pub const ALL: [Self; 75] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -245,11 +246,12 @@ impl Command {
         Self::PresentErase,
         Self::PresentClear,
         Self::PresentUndo,
+        Self::PresentRedo,
         Self::PresentCursor,
         Self::PresentBlack,
         Self::PresentWhite,
         Self::PresentTimer,
-        Self::PresentTimerReset,
+        Self::PresentTimerStop,
     ];
 
     /// The stable id kept in preferences.
@@ -324,11 +326,12 @@ impl Command {
             Self::PresentErase => "present.erase",
             Self::PresentClear => "present.clear",
             Self::PresentUndo => "present.undo",
+            Self::PresentRedo => "present.redo",
             Self::PresentCursor => "present.cursor",
             Self::PresentBlack => "present.black",
             Self::PresentWhite => "present.white",
             Self::PresentTimer => "present.timer",
-            Self::PresentTimerReset => "present.timer_reset",
+            Self::PresentTimerStop => "present.timer_stop",
         }
     }
 
@@ -406,12 +409,13 @@ impl Command {
             Self::PresentHighlight => "Highlight",
             Self::PresentErase => "Eraser",
             Self::PresentClear => "Clear the page's drawing",
-            Self::PresentUndo => "Undo the last stroke",
+            Self::PresentUndo => "Undo drawing",
+            Self::PresentRedo => "Redo drawing",
             Self::PresentCursor => "Show cursor",
             Self::PresentBlack => "Black screen",
             Self::PresentWhite => "White screen",
-            Self::PresentTimer => "Pause the timer",
-            Self::PresentTimerReset => "Reset the timer",
+            Self::PresentTimer => "Start the timer",
+            Self::PresentTimerStop => "Stop the timer",
         }
     }
 
@@ -483,11 +487,12 @@ impl Command {
             Self::PresentErase => "eraser",
             Self::PresentClear => "trash-2",
             Self::PresentUndo => "undo-2",
+            Self::PresentRedo => "redo-2",
             Self::PresentCursor => "mouse-pointer-2",
             Self::PresentBlack => "square",
             Self::PresentWhite => "square-dashed",
-            Self::PresentTimer => "pause",
-            Self::PresentTimerReset => "timer-reset",
+            Self::PresentTimer => "timer",
+            Self::PresentTimerStop => "circle-stop",
         }
     }
 
@@ -560,11 +565,12 @@ impl Command {
             | Self::PresentErase
             | Self::PresentClear
             | Self::PresentUndo
+            | Self::PresentRedo
             | Self::PresentCursor
             | Self::PresentBlack
             | Self::PresentWhite
             | Self::PresentTimer
-            | Self::PresentTimerReset => Category::Present,
+            | Self::PresentTimerStop => Category::Present,
         }
     }
 
@@ -633,11 +639,12 @@ impl Command {
             Self::PresentErase => &["X"],
             Self::PresentClear => &["E"],
             Self::PresentUndo => &["Ctrl+Z"],
+            Self::PresentRedo => &["Ctrl+Shift+Z", "Ctrl+Y"],
             Self::PresentCursor => &["L"],
             Self::PresentBlack => &["B", "Period"],
             Self::PresentWhite => &["W", "Comma"],
             Self::PresentTimer => &["T"],
-            Self::PresentTimerReset => &["Shift+T"],
+            Self::PresentTimerStop => &["Shift+T"],
             Self::ThemeSystem
             | Self::ThemeLight
             | Self::ThemeDark
@@ -857,6 +864,9 @@ pub const ICONS_IN_USE: &[&str] = &[
     "chevrons-up-down",
     "file-search",
     "play",
+    "pause",
+    "shrink",
+    "expand",
     "eraser",
     "mouse-pointer-2",
     "square",

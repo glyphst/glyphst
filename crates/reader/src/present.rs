@@ -1,14 +1,14 @@
-//! What presenting keeps beside the page (frames 02g–i): the pointer
-//! (hidden, or the laser), the tool in use, ink on each page, the blank
-//! screen, the tool ring's gesture and the clock. `app/present.rs` takes
-//! the input and draws them.
+//! What presenting keeps beside the page (frames 02g–j): the mode (the
+//! hidden cursor, the laser, or a drawing tool), ink on each page with its
+//! undo history, the blank screen, the tool ring's gesture and the clock.
+//! `app/present.rs` takes the input and draws them.
 
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
-use egui::{Color32, Pos2};
+use egui::{Color32, Pos2, Vec2};
 
 use crate::commands::Command;
 
@@ -28,21 +28,22 @@ pub const PEN_WIDTH: f32 = 2.0;
 pub const HIGHLIGHTER_WIDTH: f32 = 10.0;
 /// The eraser's radius in screen points.
 pub const ERASER_RADIUS: f32 = 12.0;
-/// How long the laser's trail lasts.
-pub const TRAIL: Duration = Duration::from_millis(300);
+/// How long the laser's tail lasts (frame 02j, L1).
+pub const TRAIL: Duration = Duration::from_millis(250);
+/// The tail is kept at least this many points between samples, and longer
+/// jumps are filled in.
+const TRAIL_STEP: f32 = 3.0;
+/// Changes kept to undo, per page.
+const HISTORY: usize = 100;
 
-/// The pointer while presenting: hidden (the default; nothing hovers), or
-/// shown as the laser.
+/// What the pointer is while presenting; one at a time. Hidden is the
+/// default: the cursor waits at the centre and nothing hovers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Pointer {
+pub enum Mode {
     #[default]
     Hidden,
+    /// The cursor shown, as the laser.
     Laser,
-}
-
-/// What a primary drag on the page does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool {
     Pen,
     Highlighter,
     Eraser,
@@ -64,19 +65,42 @@ pub struct Stroke {
     pub width: f32,
 }
 
+/// A page's strokes and what undo and redo bring back.
+#[derive(Clone, Debug, Default)]
+struct PageInk {
+    strokes: Vec<Stroke>,
+    undo: Vec<Vec<Stroke>>,
+    redo: Vec<Vec<Stroke>>,
+}
+
+impl PageInk {
+    /// Keeps the strokes as they are for undo, before a change.
+    fn checkpoint(&mut self) {
+        self.undo.push(self.strokes.clone());
+        if self.undo.len() > HISTORY {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+}
+
 /// A document's ink, by page; kept while its tab is open, never saved.
 #[derive(Clone, Debug, Default)]
 pub struct Ink {
-    pages: HashMap<usize, Vec<Stroke>>,
+    pages: HashMap<usize, PageInk>,
 }
 
 impl Ink {
     pub fn page(&self, page: usize) -> &[Stroke] {
-        self.pages.get(&page).map_or(&[], Vec::as_slice)
+        self.pages
+            .get(&page)
+            .map_or(&[], |ink| ink.strokes.as_slice())
     }
 
     pub fn start(&mut self, page: usize, stroke: Stroke) {
-        self.pages.entry(page).or_default().push(stroke);
+        let ink = self.pages.entry(page).or_default();
+        ink.checkpoint();
+        ink.strokes.push(stroke);
     }
 
     /// Adds `point` to the page's latest stroke, unless it is within
@@ -85,7 +109,7 @@ impl Ink {
         let Some(stroke) = self
             .pages
             .get_mut(&page)
-            .and_then(|strokes| strokes.last_mut())
+            .and_then(|ink| ink.strokes.last_mut())
         else {
             return;
         };
@@ -98,30 +122,64 @@ impl Ink {
         }
     }
 
-    /// Removes the page's latest stroke; whether there was one.
+    /// Puts the page back as it was before its latest change; whether
+    /// there was one.
     pub fn undo(&mut self, page: usize) -> bool {
-        self.pages
-            .get_mut(&page)
-            .and_then(|strokes| strokes.pop())
-            .is_some()
+        let Some(ink) = self.pages.get_mut(&page) else {
+            return false;
+        };
+        let Some(before) = ink.undo.pop() else {
+            return false;
+        };
+        ink.redo.push(std::mem::replace(&mut ink.strokes, before));
+        true
     }
 
-    /// Removes the page's strokes; whether it had any.
+    /// Makes again the change undo took back; whether there was one.
+    pub fn redo(&mut self, page: usize) -> bool {
+        let Some(ink) = self.pages.get_mut(&page) else {
+            return false;
+        };
+        let Some(after) = ink.redo.pop() else {
+            return false;
+        };
+        ink.undo.push(std::mem::replace(&mut ink.strokes, after));
+        true
+    }
+
+    /// Removes the page's strokes, undoably; whether it had any.
     pub fn clear(&mut self, page: usize) -> bool {
-        self.pages
-            .remove(&page)
-            .is_some_and(|strokes| !strokes.is_empty())
+        let Some(ink) = self
+            .pages
+            .get_mut(&page)
+            .filter(|ink| !ink.strokes.is_empty())
+        else {
+            return false;
+        };
+        ink.checkpoint();
+        ink.strokes.clear();
+        true
     }
 
     /// Removes the page's strokes that pass within `radius` page points of
-    /// `point`, as whole strokes; whether any went.
-    pub fn erase(&mut self, page: usize, point: [f32; 2], radius: f32) -> bool {
-        let Some(strokes) = self.pages.get_mut(&page) else {
+    /// `point`, as whole strokes; whether any went. A drag keeps one
+    /// undo step: `checkpoint` is true for its first removal only.
+    pub fn erase(&mut self, page: usize, point: [f32; 2], radius: f32, checkpoint: bool) -> bool {
+        let Some(ink) = self.pages.get_mut(&page) else {
             return false;
         };
-        let before = strokes.len();
-        strokes.retain(|stroke| !touches(stroke, point, radius));
-        strokes.len() != before
+        if !ink
+            .strokes
+            .iter()
+            .any(|stroke| touches(stroke, point, radius))
+        {
+            return false;
+        }
+        if checkpoint {
+            ink.checkpoint();
+        }
+        ink.strokes.retain(|stroke| !touches(stroke, point, radius));
+        true
     }
 }
 
@@ -152,7 +210,7 @@ fn segment_distance(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
     distance([a[0] + along[0] * t, a[1] + along[1] * t], p)
 }
 
-/// The presentation's clock: it can be paused and reset.
+/// The presentation's clock, started by the timer tool; it can be paused.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
     started: Instant,
@@ -183,15 +241,6 @@ impl Clock {
         match self.paused_at.take() {
             Some(at) => self.paused += now.saturating_duration_since(at),
             None => self.paused_at = Some(now),
-        }
-    }
-
-    /// Back to zero, keeping whether it is paused.
-    pub fn reset(&mut self, now: Instant) {
-        let paused = self.is_paused();
-        *self = Self::new(now);
-        if paused {
-            self.paused_at = Some(now);
         }
     }
 }
@@ -242,11 +291,27 @@ fn hms(duration: Duration) -> String {
 }
 
 /// A right-button press on the page: a click goes to the previous page,
-/// holding or dragging opens the tool ring.
+/// holding or dragging opens the tool ring at `center` (the screen's
+/// centre while the cursor is hidden, else where the button went down).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RingGesture {
-    Pressed { at: Pos2, since: Instant },
-    Open { center: Pos2 },
+    Pressed {
+        at: Pos2,
+        center: Pos2,
+        since: Instant,
+    },
+    Open {
+        at: Pos2,
+        center: Pos2,
+    },
+}
+
+/// Where the ring's pointer is: the ring's centre moved as the mouse has
+/// moved since the button went down. `raw` is the mouse's own motion
+/// (sent while the cursor is locked); without it the pointer's change
+/// stands in.
+pub fn virtual_pointer(center: Pos2, raw: Option<Vec2>, at: Pos2, latest: Pos2) -> Pos2 {
+    center + raw.unwrap_or(latest - at)
 }
 
 /// The ring's default tools, from up clockwise.
@@ -272,21 +337,28 @@ pub fn default_ring() -> RingSlots {
 /// with the tab).
 #[derive(Debug)]
 pub struct Presenting {
-    pub pointer: Pointer,
-    pub tool: Option<Tool>,
+    pub mode: Mode,
     /// Index into [`INK`].
     pub color: usize,
     /// The laser's recent positions.
     pub trail: VecDeque<(Pos2, Instant)>,
     pub ring: Option<RingGesture>,
+    /// The mouse's own motion since the ring's button went down, when any
+    /// came.
+    pub ring_motion: Option<Vec2>,
     pub blank: Option<Blank>,
-    pub clock: Clock,
+    /// Off until the timer tool starts it.
+    pub clock: Option<Clock>,
     /// The app made the window fullscreen and puts it back on leaving.
     pub made_fullscreen: bool,
+    /// The cursor is locked at the centre (while hidden).
+    pub locked: bool,
     /// Wheel movement not yet turned into a page turn.
     pub wheel: f32,
-    /// The page a stroke is being drawn on.
+    /// The page a stroke is being drawn on (or erased on).
     pub drawing: Option<usize>,
+    /// The eraser's drag has removed a stroke (one undo step per drag).
+    pub erased: bool,
     /// When the pointer last moved, for the toolbox's fade.
     pub moved: Instant,
     /// Where the toolbox and the pen's colours were last frame: the
@@ -297,23 +369,26 @@ pub struct Presenting {
 impl Presenting {
     pub fn new(now: Instant) -> Self {
         Self {
-            pointer: Pointer::Hidden,
-            tool: None,
+            mode: Mode::Hidden,
             color: 0,
             trail: VecDeque::new(),
             ring: None,
+            ring_motion: None,
             blank: None,
-            clock: Clock::new(now),
+            clock: None,
             made_fullscreen: false,
+            locked: false,
             wheel: 0.0,
             drawing: None,
+            erased: false,
             moved: now,
             toolbox: Vec::new(),
         }
     }
 
-    /// Keeps the trail to its last [`TRAIL`].
-    pub fn trail_to(&mut self, pos: Option<Pos2>, now: Instant) {
+    /// Ages the trail and adds the positions the pointer passed this frame,
+    /// filling long jumps so the tail stays whole.
+    pub fn trail_to(&mut self, positions: &[Pos2], now: Instant) {
         while self
             .trail
             .front()
@@ -321,22 +396,54 @@ impl Presenting {
         {
             self.trail.pop_front();
         }
-        if let Some(pos) = pos
-            && self.pointer == Pointer::Laser
-            && self.trail.back().is_none_or(|(last, _)| *last != pos)
-        {
-            self.trail.push_back((pos, now));
+        if self.mode != Mode::Laser {
+            self.trail.clear();
+            return;
+        }
+        for &pos in positions {
+            let Some(&(last, _)) = self.trail.back() else {
+                self.trail.push_back((pos, now));
+                continue;
+            };
+            let gap = (pos - last).length();
+            if gap < TRAIL_STEP {
+                continue;
+            }
+            let steps = (gap / (TRAIL_STEP * 2.0)).ceil() as usize;
+            for step in 1..=steps {
+                self.trail
+                    .push_back((last + (pos - last) * (step as f32 / steps as f32), now));
+            }
         }
     }
 
-    /// Turns `tool` on, or off when it is on.
-    pub fn toggle_tool(&mut self, tool: Tool) {
-        self.tool = (self.tool != Some(tool)).then_some(tool);
+    /// Turns `mode` on, or back to the hidden cursor when it is on.
+    pub fn toggle_mode(&mut self, mode: Mode) {
+        self.mode = if self.mode == mode {
+            Mode::Hidden
+        } else {
+            mode
+        };
         self.drawing = None;
+        self.trail.clear();
     }
 
     pub fn toggle_blank(&mut self, blank: Blank) {
         self.blank = (self.blank != Some(blank)).then_some(blank);
+    }
+
+    /// The timer tool: starts the clock, then pauses and resumes it.
+    pub fn timer(&mut self, now: Instant) {
+        match &mut self.clock {
+            Some(clock) => clock.toggle_pause(now),
+            None => self.clock = Some(Clock::new(now)),
+        }
+    }
+
+    /// Whether the corner chip shows: when asked for, or while the clock
+    /// is on.
+    pub fn chip_shows(&self, page_number: bool) -> bool {
+        page_number || self.clock.is_some()
     }
 
     /// Takes wheel movement; returns a page turn, forward when positive,
@@ -356,50 +463,58 @@ impl Presenting {
             forward
         })
     }
-}
 
-impl Presenting {
     /// `command`'s label now, when it follows the state: `End draw` while
     /// drawing.
     pub fn label(&self, command: Command) -> Option<&'static str> {
-        let on = |tool| self.tool == Some(tool);
+        let on = |mode| self.mode == mode;
         Some(match command {
             Command::Present => "Exit presentation",
-            Command::PresentDraw if on(Tool::Pen) => "End draw",
-            Command::PresentHighlight if on(Tool::Highlighter) => "End highlight",
-            Command::PresentErase if on(Tool::Eraser) => "Exit eraser",
-            Command::PresentCursor if self.pointer == Pointer::Laser => "Hide cursor",
+            Command::PresentDraw if on(Mode::Pen) => "End draw",
+            Command::PresentHighlight if on(Mode::Highlighter) => "End highlight",
+            Command::PresentErase if on(Mode::Eraser) => "Exit eraser",
+            Command::PresentCursor if on(Mode::Laser) => "Hide cursor",
             Command::PresentBlack if self.blank == Some(Blank::Black) => "End black screen",
             Command::PresentWhite if self.blank == Some(Blank::White) => "End white screen",
-            Command::PresentTimer if self.clock.is_paused() => "Resume the timer",
+            Command::PresentTimer => match self.clock {
+                None => return None,
+                Some(clock) if clock.is_paused() => "Resume the timer",
+                Some(_) => "Pause the timer",
+            },
             _ => return None,
         })
     }
 
     /// The ring's short label and icon for `command`.
     pub fn slot(&self, command: Command) -> (&'static str, &'static str) {
-        let on = |tool| self.tool == Some(tool);
+        let on = |mode| self.mode == mode;
+        let paused = self.clock.map(|clock| clock.is_paused());
         let label = match command {
-            Command::PresentDraw if on(Tool::Pen) => "end draw",
+            Command::PresentDraw if on(Mode::Pen) => "end draw",
             Command::PresentDraw => "draw",
-            Command::PresentHighlight if on(Tool::Highlighter) => "end highlight",
+            Command::PresentHighlight if on(Mode::Highlighter) => "end highlight",
             Command::PresentHighlight => "highlight",
-            Command::PresentErase if on(Tool::Eraser) => "exit eraser",
+            Command::PresentErase if on(Mode::Eraser) => "exit eraser",
             Command::PresentErase => "eraser",
             Command::PresentClear => "clear",
             Command::PresentUndo => "undo",
-            Command::PresentCursor if self.pointer == Pointer::Laser => "hide cursor",
+            Command::PresentRedo => "redo",
+            Command::PresentCursor if on(Mode::Laser) => "hide cursor",
             Command::PresentCursor => "cursor",
             Command::PresentBlack => "black",
             Command::PresentWhite => "white",
-            Command::PresentTimer if self.clock.is_paused() => "resume",
-            Command::PresentTimer => "timer",
-            Command::PresentTimerReset => "reset",
+            Command::PresentTimer => match paused {
+                None => "timer",
+                Some(false) => "pause",
+                Some(true) => "resume",
+            },
+            Command::PresentTimerStop => "stop timer",
             other => other.label(),
         };
-        let icon = match command {
-            Command::PresentTimer if self.clock.is_paused() => "play",
-            other => other.icon(),
+        let icon = match (command, paused) {
+            (Command::PresentTimer, Some(false)) => "pause",
+            (Command::PresentTimer, Some(true)) => "play",
+            (other, _) => other.icon(),
         };
         (label, icon)
     }
@@ -424,20 +539,20 @@ mod tests {
         ink.start(3, line(&[[0.0, 50.0], [100.0, 50.0]]));
         ink.start(4, line(&[[50.0, 0.0]]));
         // Near the first line's middle, not its ends.
-        assert!(ink.erase(3, [50.0, 6.0], 5.0));
+        assert!(ink.erase(3, [50.0, 6.0], 5.0, true));
         assert_eq!(ink.page(3).len(), 1);
         assert_eq!(ink.page(3)[0].points[0], [0.0, 50.0]);
         // Too far from the second.
-        assert!(!ink.erase(3, [50.0, 30.0], 5.0));
+        assert!(!ink.erase(3, [50.0, 30.0], 5.0, true));
         // Other pages keep theirs.
         assert_eq!(ink.page(4).len(), 1);
-        assert!(ink.erase(4, [52.0, 0.0], 1.0));
+        assert!(ink.erase(4, [52.0, 0.0], 1.0, true));
     }
 
     #[test]
-    fn undo_and_clear_work_on_one_page() {
+    fn undo_and_redo_step_through_strokes_erasing_and_clearing() {
         let mut ink = Ink::default();
-        assert!(!ink.undo(0));
+        assert!(!ink.undo(0) && !ink.redo(0));
         ink.start(0, line(&[[0.0, 0.0]]));
         ink.extend(0, [0.2, 0.0], 0.5);
         ink.extend(0, [3.0, 0.0], 0.5);
@@ -446,28 +561,57 @@ mod tests {
         ink.start(1, line(&[[9.0, 9.0]]));
         assert!(ink.undo(0));
         assert_eq!(ink.page(0).len(), 1);
+        assert!(ink.redo(0));
+        assert_eq!(ink.page(0).len(), 2);
+        assert!(!ink.redo(0), "nothing more to redo");
+
+        // Clearing and erasing are undone too.
         assert!(ink.clear(0));
         assert!(!ink.clear(0));
-        assert_eq!(ink.page(1).len(), 1);
+        assert!(ink.page(0).is_empty());
+        assert!(ink.undo(0));
+        assert_eq!(ink.page(0).len(), 2);
+        // A drag erasing twice is one step.
+        assert!(ink.erase(0, [9.0, 9.0], 1.0, true));
+        assert!(ink.erase(0, [1.0, 0.0], 1.0, false));
+        assert!(ink.page(0).is_empty());
+        assert!(ink.undo(0));
+        assert_eq!(ink.page(0).len(), 2);
+
+        // A new change drops what redo had.
+        assert!(ink.undo(0));
+        ink.start(0, line(&[[5.0, 5.0]]));
+        assert!(!ink.redo(0));
+        assert_eq!(ink.page(1).len(), 1, "other pages are left alone");
     }
 
     #[test]
-    fn the_clock_pauses_and_resets() {
+    fn the_timer_starts_then_pauses_and_resumes() {
         let start = Instant::now();
         let at = |seconds: u64| start + Duration::from_secs(seconds);
-        let mut clock = Clock::new(start);
-        assert_eq!(clock.elapsed(at(10)), Duration::from_secs(10));
-        clock.toggle_pause(at(10));
-        assert!(clock.is_paused());
-        assert_eq!(clock.elapsed(at(25)), Duration::from_secs(10));
-        clock.toggle_pause(at(30));
-        assert_eq!(clock.elapsed(at(35)), Duration::from_secs(15));
-        clock.reset(at(40));
-        assert_eq!(clock.elapsed(at(42)), Duration::from_secs(2));
-        clock.toggle_pause(at(42));
-        clock.reset(at(50));
-        assert!(clock.is_paused(), "a reset keeps the pause");
-        assert_eq!(clock.elapsed(at(60)), Duration::ZERO);
+        let mut presenting = Presenting::new(start);
+        assert!(presenting.clock.is_none());
+        assert!(!presenting.chip_shows(false));
+        assert!(presenting.chip_shows(true));
+        assert_eq!(presenting.slot(Command::PresentTimer), ("timer", "timer"));
+        assert_eq!(presenting.label(Command::PresentTimer), None);
+        presenting.timer(at(5));
+        assert!(presenting.chip_shows(false), "the timer shows the chip");
+        assert_eq!(presenting.slot(Command::PresentTimer), ("pause", "pause"));
+        assert_eq!(
+            presenting.label(Command::PresentTimer),
+            Some("Pause the timer")
+        );
+        let clock = |p: &Presenting, s| p.clock.unwrap().elapsed(at(s));
+        assert_eq!(clock(&presenting, 15), Duration::from_secs(10));
+        presenting.timer(at(15));
+        assert_eq!(presenting.slot(Command::PresentTimer), ("resume", "play"));
+        assert_eq!(clock(&presenting, 40), Duration::from_secs(10));
+        presenting.timer(at(40));
+        assert_eq!(clock(&presenting, 45), Duration::from_secs(15));
+        // Stopping hides it.
+        presenting.clock = None;
+        assert!(!presenting.chip_shows(false));
     }
 
     #[test]
@@ -516,19 +660,16 @@ mod tests {
     }
 
     #[test]
-    fn labels_follow_the_state() {
-        let now = Instant::now();
-        let mut presenting = Presenting::new(now);
+    fn labels_follow_the_mode() {
+        let mut presenting = Presenting::new(Instant::now());
         assert_eq!(presenting.label(Command::PresentDraw), None);
         assert_eq!(presenting.slot(Command::PresentDraw).0, "draw");
-        presenting.toggle_tool(Tool::Pen);
+        presenting.toggle_mode(Mode::Pen);
         assert_eq!(presenting.label(Command::PresentDraw), Some("End draw"));
         assert_eq!(presenting.slot(Command::PresentDraw).0, "end draw");
-        presenting.toggle_tool(Tool::Eraser);
+        presenting.toggle_mode(Mode::Eraser);
         assert_eq!(presenting.label(Command::PresentDraw), None);
         assert_eq!(presenting.label(Command::PresentErase), Some("Exit eraser"));
-        presenting.clock.toggle_pause(now);
-        assert_eq!(presenting.slot(Command::PresentTimer), ("resume", "play"));
         assert_eq!(
             presenting.label(Command::Present),
             Some("Exit presentation")
@@ -536,18 +677,57 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_blanks_toggle() {
+    fn modes_exclude_each_other() {
         let mut presenting = Presenting::new(Instant::now());
-        presenting.toggle_tool(Tool::Pen);
-        assert_eq!(presenting.tool, Some(Tool::Pen));
-        presenting.toggle_tool(Tool::Eraser);
-        assert_eq!(presenting.tool, Some(Tool::Eraser));
-        presenting.toggle_tool(Tool::Eraser);
-        assert_eq!(presenting.tool, None);
+        assert_eq!(presenting.mode, Mode::Hidden);
+        presenting.toggle_mode(Mode::Laser);
+        assert_eq!(presenting.mode, Mode::Laser);
+        presenting.toggle_mode(Mode::Pen);
+        assert_eq!(presenting.mode, Mode::Pen, "drawing ends the laser");
+        presenting.toggle_mode(Mode::Laser);
+        assert_eq!(presenting.mode, Mode::Laser, "the laser ends drawing");
+        presenting.toggle_mode(Mode::Laser);
+        assert_eq!(presenting.mode, Mode::Hidden);
         presenting.toggle_blank(Blank::Black);
         presenting.toggle_blank(Blank::White);
         assert_eq!(presenting.blank, Some(Blank::White));
         presenting.toggle_blank(Blank::White);
         assert_eq!(presenting.blank, None);
+    }
+
+    #[test]
+    fn the_tail_fills_fast_moves_and_fades() {
+        let now = Instant::now();
+        let mut presenting = Presenting::new(now);
+        presenting.trail_to(&[Pos2::ZERO], now);
+        assert!(presenting.trail.is_empty(), "only the laser leaves a tail");
+        presenting.toggle_mode(Mode::Laser);
+        presenting.trail_to(&[Pos2::ZERO, egui::pos2(60.0, 0.0)], now);
+        let gaps: Vec<f32> = presenting
+            .trail
+            .iter()
+            .zip(presenting.trail.iter().skip(1))
+            .map(|((a, _), (b, _))| (*b - *a).length())
+            .collect();
+        assert!(gaps.len() >= 9, "a fast move is filled in: {gaps:?}");
+        assert!(gaps.iter().all(|gap| *gap <= TRAIL_STEP * 2.0 + 0.01));
+        presenting.trail_to(&[], now + TRAIL + Duration::from_millis(1));
+        assert!(presenting.trail.is_empty(), "the tail fades away");
+    }
+
+    #[test]
+    fn the_rings_pointer_follows_the_mouse_from_the_centre() {
+        let center = egui::pos2(720.0, 460.0);
+        let at = egui::pos2(100.0, 100.0);
+        // Locked: the mouse's own motion.
+        assert_eq!(
+            virtual_pointer(center, Some(egui::vec2(0.0, -40.0)), at, at),
+            egui::pos2(720.0, 420.0)
+        );
+        // Not locked: how far the pointer went.
+        assert_eq!(
+            virtual_pointer(center, None, at, egui::pos2(130.0, 100.0)),
+            egui::pos2(750.0, 460.0)
+        );
     }
 }

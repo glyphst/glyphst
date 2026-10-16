@@ -250,10 +250,6 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/text-cursor.svg"),
     ),
     ("timer", include_bytes!("../assets/icons/timer.svg")),
-    (
-        "timer-reset",
-        include_bytes!("../assets/icons/timer-reset.svg"),
-    ),
     ("trash-2", include_bytes!("../assets/icons/trash-2.svg")),
     (
         "triangle-alert",

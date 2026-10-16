@@ -2414,11 +2414,12 @@ impl ReaderApp {
             | Command::PresentErase
             | Command::PresentClear
             | Command::PresentUndo
+            | Command::PresentRedo
             | Command::PresentCursor
             | Command::PresentBlack
             | Command::PresentWhite
             | Command::PresentTimer
-            | Command::PresentTimerReset => {
+            | Command::PresentTimerStop => {
                 self.run_present(command, Instant::now());
                 None
             }

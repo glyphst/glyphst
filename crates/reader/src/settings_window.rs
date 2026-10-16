@@ -109,7 +109,7 @@ impl Section {
             Self::Reading => "session reopen sidebar drawer vim keys motion",
             Self::Presenting => {
                 "present presentation slides full screen fullscreen timer clock talk length \
-                 countdown ring tools right click draw pen eraser laser"
+                 countdown ring tools right click draw pen eraser laser page number"
             }
             Self::Effects => "background transition tint wallpaper animation folder",
             Self::Translation => "translate deepl google microsoft language engine glossary",
@@ -699,10 +699,10 @@ fn presenting(ui: &mut egui::Ui, prefs: &mut Prefs) {
             },
         );
         group.row(
-            "show timer",
-            Some("page and time in the bottom-right corner; t pauses it"),
+            "show page number",
+            Some("the page in the bottom-right corner; the timer tool (t) adds the time beside it"),
             |ui| {
-                ui.add(Switch(&mut prefs.present_timer));
+                ui.add(Switch(&mut prefs.present_page_number));
             },
         );
         group.row(
