@@ -27,7 +27,8 @@ and the abandoned Files app in M5). It has:
 - **Styling:** the glyph design (`design/main.pen`) on the `ui` crate's
   components: mono chrome, hairline panes docked beside the pages, a
   status bar in place of the dock and progress line, rule titles and tree
-  branches, ASCII covers, an activity log on home, and new appearance
+  branches, first-page covers, a reading heatmap and activity log on home,
+  new tabs with a launcher, a reading activity tab, and new appearance
   settings (accent, fonts, ui scale, density, ornaments).
 - **M5:** page uploads spread across frames; split panes (a tab dragged
   onto a pane's edge, or Split right/down, opens beside it; each pane has a

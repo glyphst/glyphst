@@ -117,6 +117,15 @@ impl ReaderApp {
     /// whether they are still waiting for text.
     fn prepare_text_shot(&mut self, ctx: &egui::Context, now: Instant) -> bool {
         let Some(active) = self.active else {
+            // Without a document, commands for the app's own tabs (a new
+            // tab, the reading activity) run straight away.
+            if self.tabs.is_empty() {
+                for command in std::mem::take(&mut self.launch_commands) {
+                    if let Err(reason) = self.run(command, ctx) {
+                        eprintln!("--command {}: {reason}", command.id());
+                    }
+                }
+            }
             return false;
         };
         for command in std::mem::take(&mut self.launch_commands) {

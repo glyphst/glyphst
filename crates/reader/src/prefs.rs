@@ -59,6 +59,9 @@ pub struct Prefs {
     pub glyph_ornaments: bool,
     /// The chrome and prose families.
     pub fonts: FontChoice,
+    /// Documents open at the zoom they were left at; off, at fit width
+    /// (on the page they were left at either way).
+    pub remember_zoom: bool,
     pub reopen_last_session: bool,
     /// Effect id of the transition between views, or `None` for a cut.
     pub transition: Option<String>,
@@ -106,6 +109,7 @@ impl Default for Prefs {
             ui_scale: glyphst_ui::theme::BASE_SCALE,
             glyph_ornaments: true,
             fonts: FontChoice::default(),
+            remember_zoom: true,
             reopen_last_session: true,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),

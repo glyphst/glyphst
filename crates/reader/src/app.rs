@@ -19,6 +19,7 @@ use glyphst_pdf::text::LinkTarget;
 use glyphst_ui::Tip;
 
 use crate::{
+    activity_view::{ActivityAction, ActivityView},
     ai::{AskContext, Assistant, PanelAction},
     annotations::{self, AnnotationId, Annotations},
     commands::{Command, Needs},
@@ -37,7 +38,9 @@ use crate::{
     icons,
     keymap_page::KeymapPage,
     keys::{self, Keymap, KeymapPreset},
+    launcher::{Launcher, LauncherAction, LauncherContext},
     overview::Overview,
+    pages::Page,
     palette::{self, Item, Palette},
     panes::{self, Panes},
     pickers::{Pickers, is_document},
@@ -73,7 +76,6 @@ const TAB_MIN_WIDTH: f32 = 90.0;
 const TAB_MAX_LABEL: usize = 32;
 const TAB_OVERFLOW_WIDTH: f32 = 28.0;
 /// The Keyboard shortcuts tab's label.
-const KEYMAP_TAB_LABEL: &str = "Keyboard shortcuts";
 /// Margin on each side of a reflowed column, in points.
 const REFLOW_MARGIN: f32 = 24.0;
 /// Height of a reflowed page, in points (as the GPUI Reader lays out).
@@ -307,15 +309,17 @@ pub struct ReaderApp {
     pub(crate) pending_keys: keys::Pending,
     pub(crate) palette: Palette,
     pub(crate) settings_window: SettingsWindow,
-    /// The Keyboard shortcuts tab, while it is open.
-    keymap_page: Option<KeymapPage>,
-    /// The Keyboard shortcuts tab is the one shown; `active` is then
-    /// `None`, so everything for documents treats it like the home tab.
-    keymap_focused: bool,
+    /// Tabs that are not documents: shortcuts, new tabs, reading activity.
+    pages: Vec<Page>,
+    /// The page tab shown; `active` is then `None`, so everything for
+    /// documents treats it like home.
+    page_focused: Option<usize>,
     /// Frame 01 of the design in place of home (`--gallery`).
     gallery: Option<glyphst_ui::gallery::Gallery>,
-    /// The document tab to go back to when the shortcuts tab closes.
-    keymap_return: Option<u64>,
+    /// The document tab to go back to when a page tab shown closes.
+    page_return: Option<u64>,
+    /// First-page covers for home and the launcher.
+    covers: crate::covers::Covers,
 }
 
 impl ReaderApp {
@@ -469,10 +473,11 @@ impl ReaderApp {
             pending_keys: keys::Pending::default(),
             palette: Palette::default(),
             settings_window: SettingsWindow::default(),
-            keymap_page: None,
-            keymap_focused: false,
+            pages: Vec::new(),
+            page_focused: None,
             gallery: launch.gallery.then(Default::default),
-            keymap_return: None,
+            page_return: None,
+            covers: crate::covers::Covers::new(&cc.egui_ctx),
         };
         app.rebuild_keymap();
         if let Some(query) = launch.palette {
@@ -561,7 +566,11 @@ impl ReaderApp {
             self.activate(Some(index));
             return;
         }
-        let mut restore = self.library.history_position(path).map(sane_zoom);
+        let remember_zoom = self.prefs.remember_zoom;
+        let mut restore = self
+            .library
+            .history_position(path)
+            .map(|position| opening_zoom(position, remember_zoom));
         if let Some(page) = page {
             let mut position =
                 restore.unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, 1.0, page + 1));
@@ -609,7 +618,7 @@ impl ReaderApp {
     /// pane gets the focus), with the transition effect from the document
     /// it replaces.
     pub(crate) fn activate(&mut self, next: Option<usize>) {
-        self.keymap_focused = false;
+        self.page_focused = None;
         if next == self.active {
             return;
         }
@@ -636,22 +645,109 @@ impl ReaderApp {
 
     /// Opens the Keyboard shortcuts tab, or goes to it.
     pub(crate) fn open_keymap_tab(&mut self) {
-        if !self.keymap_focused {
-            self.keymap_return = self.active.map(|active| self.tabs[active].id);
-        }
-        self.keymap_page.get_or_insert_default();
-        self.activate(None);
-        self.keymap_focused = true;
+        self.open_page(Page::Keymap(KeymapPage::default()));
     }
 
-    /// Closes the Keyboard shortcuts tab; when it was shown, the document
-    /// shown before it comes back (or the home tab).
-    fn close_keymap_tab(&mut self) {
-        self.keymap_page = None;
-        if std::mem::take(&mut self.keymap_focused)
-            && let Some(id) = self.keymap_return.take()
+    /// Opens a page tab and shows it; one of a kind there is only one of
+    /// is shown again instead.
+    pub(crate) fn open_page(&mut self, page: Page) -> usize {
+        let index = match self
+            .pages
+            .iter()
+            .position(|open| page.single() && open.same_kind(&page))
         {
-            self.focus_tab(id);
+            Some(index) => index,
+            None => {
+                self.pages.push(page);
+                self.pages.len() - 1
+            }
+        };
+        self.focus_page(index);
+        index
+    }
+
+    /// Shows page tab `index`.
+    pub(crate) fn focus_page(&mut self, index: usize) {
+        if self.page_focused.is_none() {
+            self.page_return = self.active.map(|active| self.tabs[active].id);
+        }
+        self.activate(None);
+        self.gallery = None;
+        self.page_focused = Some(index);
+    }
+
+    /// The reading activity tab, at `day`.
+    pub(crate) fn open_activity(&mut self, day: Option<chrono::NaiveDate>) {
+        let index = self.open_page(Page::Activity(ActivityView::at(day)));
+        if let Some(Page::Activity(view)) = self.pages.get_mut(index)
+            && day.is_some()
+        {
+            view.select(day);
+        }
+    }
+
+    /// Closes page tab `index`; when it was shown, the document shown
+    /// before it comes back (or home).
+    pub(crate) fn close_page(&mut self, index: usize) {
+        if index >= self.pages.len() {
+            return;
+        }
+        self.pages.remove(index);
+        match self.page_focused {
+            Some(focused) if focused == index => {
+                self.page_focused = None;
+                if let Some(id) = self.page_return.take() {
+                    self.focus_tab(id);
+                }
+            }
+            Some(focused) if focused > index => self.page_focused = Some(focused - 1),
+            _ => {}
+        }
+    }
+
+    /// Draws page tab `index` and does what it asks.
+    fn show_page(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
+        let docs = || crate::home::documents(&self.library, &self.prefs.page_counts);
+        match &mut self.pages[index] {
+            Page::Keymap(page) => {
+                if page.show(ui, &mut self.prefs, &self.keymap) {
+                    self.rebuild_keymap();
+                }
+            }
+            Page::Activity(view) => {
+                let docs = docs();
+                if let Some(ActivityAction::Open(path)) = view.ui(ui, &self.library, &docs) {
+                    self.open(&path, ctx, None);
+                }
+            }
+            Page::NewTab(launcher) => {
+                let action = launcher.ui(
+                    ui,
+                    LauncherContext {
+                        library: &self.library,
+                        page_counts: &self.prefs.page_counts,
+                        covers: &mut self.covers,
+                        picking: self.pickers.is_showing(),
+                        open_key: self.keymap.label(Command::OpenWithDialog),
+                        palette_key: self.keymap.label(Command::Palette),
+                    },
+                );
+                match action {
+                    // The new tab turns into the document.
+                    Some(LauncherAction::Open(path)) => {
+                        self.open(&path, ctx, None);
+                        if self.tabs.iter().any(|tab| tab.path == path) {
+                            self.pages.remove(index);
+                            self.page_return = None;
+                        }
+                    }
+                    Some(LauncherAction::OpenDialog) => self.pickers.open_documents(ctx),
+                    Some(LauncherAction::Home) => self.activate(None),
+                    Some(LauncherAction::Activity) => self.open_activity(None),
+                    Some(LauncherAction::Palette) => self.palette.toggle(),
+                    None => {}
+                }
+            }
         }
     }
 
@@ -1131,6 +1227,19 @@ impl ReaderApp {
 
     /// Adds an event to the activity log; a failure is only reported.
     /// Scripted runs leave the log alone.
+    /// Logs a span of reading: to the activity log, and as a reading
+    /// session for the heatmaps.
+    fn log_reading(&mut self, read: crate::reading_clock::Read) {
+        self.log_activity(ActivityKind::Read, &read.path, String::new(), read.seconds);
+        if self.persist
+            && let Err(error) =
+                self.library
+                    .record_reading(&read.path, read.start, read.seconds, read.pages)
+        {
+            log::warn!("could not record reading: {error:#}");
+        }
+    }
+
     pub(crate) fn log_activity(
         &mut self,
         kind: ActivityKind,
@@ -1922,12 +2031,7 @@ impl ReaderApp {
         }
         // Key presses go to a shortcut being recorded, and the settings
         // window stands in front of the document.
-        if self.settings_window.open
-            || self
-                .keymap_page
-                .as_ref()
-                .is_some_and(KeymapPage::is_recording)
-        {
+        if self.settings_window.open || self.pages.iter().any(Page::is_recording) {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
@@ -2039,9 +2143,11 @@ impl ReaderApp {
         command: Command,
         ctx: &egui::Context,
     ) -> Result<(), &'static str> {
-        // Closing a tab closes the shortcuts tab while it is shown.
-        if command == Command::CloseTab && self.keymap_focused {
-            self.close_keymap_tab();
+        // Closing a tab closes the page tab shown.
+        if command == Command::CloseTab
+            && let Some(index) = self.page_focused
+        {
+            self.close_page(index);
             return Ok(());
         }
         if let Some(reason) = self.command_blocked(command) {
@@ -2086,6 +2192,14 @@ impl ReaderApp {
             Command::KeyboardShortcuts => {
                 self.settings_window.open = false;
                 self.open_keymap_tab();
+                None
+            }
+            Command::NewTab => {
+                self.open_page(Page::NewTab(Launcher::default()));
+                None
+            }
+            Command::ReadingActivity => {
+                self.open_activity(None);
                 None
             }
             Command::ToggleTransparency => {
@@ -3469,8 +3583,14 @@ impl eframe::App for ReaderApp {
         // Reading time for the activity log.
         let input = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || !i.events.is_empty());
         let document = self.active.map(|active| self.tabs[active].path.clone());
-        if let Some((path, seconds)) = self.reading.tick(now, document.as_deref(), input, focused) {
-            self.log_activity(ActivityKind::Read, &path, String::new(), seconds);
+        let page = self
+            .active
+            .map(|active| self.tabs[active].current_page() + 1);
+        if let Some(read) = self
+            .reading
+            .tick(now, document.as_deref(), page, input, focused)
+        {
+            self.log_reading(read);
         }
         self.user_settings.poll(now);
         self.translator.set_settings(self.user_settings.get());
@@ -3555,8 +3675,10 @@ impl eframe::App for ReaderApp {
         let mut animating = false;
         let mut pages_drawn = true;
         // A document shown (opened, or chosen from the palette) leaves the
-        // shortcuts tab.
-        self.keymap_focused &= self.active.is_none() && self.keymap_page.is_some();
+        // page tab.
+        self.page_focused = self
+            .page_focused
+            .filter(|&index| self.active.is_none() && index < self.pages.len());
         egui::CentralPanel::no_frame()
             // A document's stage is filled by its background effect; a
             // fill under it would double a transparent window's opacity.
@@ -3570,12 +3692,8 @@ impl eframe::App for ReaderApp {
                     (animating, pages_drawn) = self.stage(ui, actions, &pad, seconds, now);
                 } else if let Some(gallery) = self.gallery.as_mut() {
                     gallery.show(ui);
-                } else if self.keymap_focused
-                    && let Some(page) = self.keymap_page.as_mut()
-                {
-                    if page.show(ui, &mut self.prefs, &self.keymap) {
-                        self.rebuild_keymap();
-                    }
+                } else if let Some(index) = self.page_focused {
+                    self.show_page(ui, index, &ctx);
                 } else if let Some(action) = self.home.ui(
                     ui,
                     crate::home::HomeContext {
@@ -3583,6 +3701,7 @@ impl eframe::App for ReaderApp {
                         page_counts: &self.prefs.page_counts,
                         picking: self.pickers.is_showing(),
                         open_key: self.keymap.label(Command::OpenWithDialog),
+                        covers: &mut self.covers,
                     },
                 ) {
                     match action {
@@ -3594,6 +3713,7 @@ impl eframe::App for ReaderApp {
                                 self.toggle_assistant();
                             }
                         }
+                        HomeAction::Activity(day) => self.open_activity(day),
                     }
                 }
             });
@@ -3618,7 +3738,9 @@ impl eframe::App for ReaderApp {
         }
         self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();
-        self.run_harness(&ctx, pages_drawn && wallpaper_ready, now);
+        self.covers.poll(&ctx);
+        let covers_ready = !self.covers.pending();
+        self.run_harness(&ctx, pages_drawn && wallpaper_ready && covers_ready, now);
         if self
             .transition
             .as_ref()
@@ -3651,8 +3773,8 @@ impl eframe::App for ReaderApp {
     }
 
     fn on_exit(&mut self) {
-        if let Some((path, seconds)) = self.reading.finish() {
-            self.log_activity(ActivityKind::Read, &path, String::new(), seconds);
+        if let Some(read) = self.reading.finish() {
+            self.log_reading(read);
         }
         self.window_blur.detach();
     }
@@ -3864,8 +3986,10 @@ fn tabs_to_close(count: usize, index: usize, action: TabMenu) -> Vec<usize> {
 /// outside it (a view saved before it had a size) opens at fit width.
 const SANE_ZOOM: std::ops::RangeInclusive<f32> = 0.25..=8.0;
 
-fn sane_zoom(mut position: DocumentPosition) -> DocumentPosition {
-    if !SANE_ZOOM.contains(&position.zoom) {
+/// The zoom `position` opens at: the remembered one when it is sane and
+/// `remember` is on (Settings › Reading › remember zoom), else fit width.
+fn opening_zoom(mut position: DocumentPosition, remember: bool) -> DocumentPosition {
+    if !remember || !SANE_ZOOM.contains(&position.zoom) {
         position.zoom = 1.0;
     }
     position
@@ -3886,12 +4010,18 @@ mod tests {
 
     #[test]
     fn a_remembered_zoom_out_of_range_opens_at_fit_width() {
-        let at = |zoom| sane_zoom(DocumentPosition::fixed(0.0, 120.0, zoom, 3));
+        let at = |zoom| opening_zoom(DocumentPosition::fixed(0.0, 120.0, zoom, 3), true);
         assert_eq!(at(636.0).zoom, 1.0);
         assert_eq!(at(0.01).zoom, 1.0);
         assert_eq!(at(f32::NAN).zoom, 1.0);
         assert_eq!(at(2.5).zoom, 2.5);
         assert_eq!(at(636.0).page, 3, "the page stays");
+        let fit = opening_zoom(DocumentPosition::fixed(0.0, 120.0, 2.5, 3), false);
+        assert_eq!(
+            (fit.zoom, fit.page),
+            (1.0, 3),
+            "not remembering opens at fit width"
+        );
     }
 
     #[test]

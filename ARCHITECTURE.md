@@ -170,8 +170,10 @@ sequences need no timeout. In the Vim preset a count typed first repeats a
 move, or names the page for `G`/`gg`. The user's shortcuts replace a
 command's default keys in either preset and are kept by command id in the
 Reader's preferences. They are edited in the Keyboard shortcuts tab
-(`keymap_page.rs`), which sits in the tab strip beside the documents like
-the home tab: while it shows, no document is active.
+(`keymap_page.rs`), one of the page tabs (`pages.rs`) that sit in the tab
+strip after the documents, with new tabs (`launcher.rs`, frame 04b) and the
+reading activity (`activity_view.rs`, frame 04c): while one shows, no
+document is active, as on home (the `g` mark).
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs
@@ -303,7 +305,13 @@ Glyphst carries no database migrations; there are no external users to
 preserve data for. The activity log (`activity_v1`, `library/activity.rs`) is an additive
 table of events (open, reading spans with their seconds, highlight, note,
 bookmark, ask, translate), the newest 5,000 kept; home lists them and sums
-the reading time. The Reader records them only when it persists.
+the reading time. Reading sessions (`reading_sessions_v1`,
+`library/reading.rs`) keep every span of reading, uncapped, with its start
+and pages; an empty table starts from the log's reading spans. Home's
+heatmap and the reading activity tab bucket them into local days
+(`reader/src/reading_days.rs`). The Reader records both only when it
+persists. First-page covers are rendered by MuPDF on a worker thread and
+kept as JPEGs in the cache directory's `covers/` (`reader/src/covers.rs`).
 
 When redb reports a file from an older file format
 (`UpgradeRequired`), the library and the translation cache rename it aside as

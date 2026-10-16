@@ -22,6 +22,10 @@ pub enum Command {
     Palette,
     Settings,
     KeyboardShortcuts,
+    /// A new tab showing the launcher (frame 04b).
+    NewTab,
+    /// The reading activity tab (frame 04c).
+    ReadingActivity,
     ToggleSidebar,
     ToggleStats,
     ThemeSystem,
@@ -145,7 +149,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 62] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -154,6 +158,8 @@ impl Command {
         Self::Palette,
         Self::Settings,
         Self::KeyboardShortcuts,
+        Self::NewTab,
+        Self::ReadingActivity,
         Self::ToggleSidebar,
         Self::ToggleStats,
         Self::ThemeSystem,
@@ -219,6 +225,8 @@ impl Command {
             Self::Palette => "app.command_palette",
             Self::Settings => "app.settings",
             Self::KeyboardShortcuts => "app.keyboard_shortcuts",
+            Self::NewTab => "app.new_tab",
+            Self::ReadingActivity => "app.reading_activity",
             Self::ToggleTransparency => "app.toggle_transparency",
             Self::UiScaleUp => "app.ui_scale_up",
             Self::UiScaleDown => "app.ui_scale_down",
@@ -288,6 +296,8 @@ impl Command {
             Self::Palette => "Command palette",
             Self::Settings => "Settings…",
             Self::KeyboardShortcuts => "Keyboard shortcuts",
+            Self::NewTab => "New tab",
+            Self::ReadingActivity => "Reading activity",
             Self::ToggleTransparency => "Toggle transparency",
             Self::UiScaleUp => "Larger interface",
             Self::UiScaleDown => "Smaller interface",
@@ -354,6 +364,8 @@ impl Command {
             Self::Palette => "command",
             Self::Settings => "settings",
             Self::KeyboardShortcuts => "keyboard",
+            Self::NewTab => "plus",
+            Self::ReadingActivity => "activity",
             Self::ToggleTransparency => "eye",
             Self::UiScaleUp => "a-arrow-up",
             Self::UiScaleDown => "a-arrow-down",
@@ -415,6 +427,8 @@ impl Command {
             | Self::Palette
             | Self::Settings
             | Self::KeyboardShortcuts
+            | Self::NewTab
+            | Self::ReadingActivity
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
@@ -481,6 +495,8 @@ impl Command {
         match self {
             Self::Open => &["Ctrl+O"],
             Self::OpenWithDialog => &["Ctrl+Shift+O"],
+            // Ctrl+T translates the selection.
+            Self::NewTab => &["Ctrl+N"],
             Self::CloseTab => &["Ctrl+W"],
             Self::NextTab => &["Ctrl+Tab"],
             Self::PreviousTab => &["Ctrl+Shift+Tab"],
@@ -527,6 +543,7 @@ impl Command {
             | Self::ThemeLight
             | Self::ThemeDark
             | Self::KeyboardShortcuts
+            | Self::ReadingActivity
             | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim
@@ -607,6 +624,8 @@ impl Command {
             | Self::Palette
             | Self::Settings
             | Self::KeyboardShortcuts
+            | Self::NewTab
+            | Self::ReadingActivity
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
@@ -668,6 +687,9 @@ impl Command {
 #[cfg(test)]
 pub const ICONS_IN_USE: &[&str] = &[
     "house",
+    "folder-search",
+    "folder",
+    "library",
     "monitor",
     "sun",
     "moon",

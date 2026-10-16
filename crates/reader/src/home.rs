@@ -1,8 +1,8 @@
 //! Home (frame 04): the day and a greeting with the week's reading, the
-//! wordmark, the document to continue, recent documents as ASCII covers,
-//! the library as a table to filter and sort, and at the right the
-//! activity log over a drop zone. Covers are drawn from the title; real
-//! covers are not rendered.
+//! wordmark, a heatmap of the last year's reading, the document to
+//! continue, one row of recent documents as their first pages
+//! (`crate::covers`), the library as a table to filter and sort, and at
+//! the right the activity log over a drop zone.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -15,21 +15,29 @@ use glyphst_library::{ActivityKind, LibraryStore, current_timestamp};
 use glyphst_ui::{
     Tip,
     button::Button,
-    cover::DocCover,
+    cover::PageCover,
     field::TextField,
+    heatmap::{self, Heatmap},
     key::Key,
     meter::Meter,
     motif,
     pane::{self, Action as PaneAction, Header},
     segmented,
+    thumb::PageThumb,
 };
 
 use crate::{
+    covers::Covers,
     icons,
+    reading_days::{self, ReadingDays},
     theme::{self, Tokens},
 };
 
-const RECENT_LIMIT: usize = 12;
+/// A recent document's cover, and the room between covers.
+pub const COVER_WIDTH: f32 = 148.0;
+pub const COVER_GAP: f32 = 16.0;
+/// Room for the numbers beside home's heatmap.
+const HEAT_STATS: f32 = 140.0;
 /// The main column's widest.
 const COLUMN: f32 = 980.0;
 /// The activity pane's width.
@@ -41,6 +49,8 @@ pub enum HomeAction {
     OpenDialog,
     /// Opens a document with the assistant beside it.
     AskAbout(PathBuf),
+    /// Opens the reading activity tab, at a day.
+    Activity(Option<chrono::NaiveDate>),
 }
 
 /// Which documents the library table lists.
@@ -80,6 +90,31 @@ pub struct Home {
     sort: Sort,
     /// The activity pane is shown.
     activity_hidden: bool,
+    heat: Option<Heat>,
+}
+
+/// The heatmap's days, worked out again when a session is added, the day
+/// changes or the map's width does.
+struct Heat {
+    key: (usize, chrono::NaiveDate, usize),
+    days: ReadingDays,
+    levels: Vec<Option<u8>>,
+    months: Vec<(usize, &'static str)>,
+    streaks: (usize, usize),
+}
+
+impl Heat {
+    fn new(library: &LibraryStore, today: chrono::NaiveDate, weeks: usize) -> Self {
+        let sessions = library.reading_sessions();
+        let days = ReadingDays::weeks_to(sessions, today, weeks);
+        Self {
+            key: (sessions.len(), today, weeks),
+            levels: days.levels(),
+            months: days.months(),
+            streaks: reading_days::streaks(sessions, today),
+            days,
+        }
+    }
 }
 
 /// What home shows besides the library.
@@ -90,29 +125,30 @@ pub struct HomeContext<'a> {
     pub picking: bool,
     /// The key of "open with system dialog", as preferences keep it.
     pub open_key: Option<String>,
+    pub covers: &'a mut Covers,
 }
 
-/// A document as home lists it.
+/// A document as home and the launcher list it.
 #[derive(Clone, Debug)]
-struct Doc {
-    path: PathBuf,
-    title: String,
-    authors: String,
+pub struct Doc {
+    pub path: PathBuf,
+    pub title: String,
+    pub authors: String,
     year: Option<i32>,
-    kind: String,
+    pub kind: String,
     /// The page last read (from 1) and the page count, when known.
     page: usize,
     pages: Option<usize>,
-    opened: Option<u64>,
+    pub opened: Option<u64>,
 }
 
 impl Doc {
-    fn progress(&self) -> Option<f32> {
+    pub fn progress(&self) -> Option<f32> {
         let pages = self.pages.filter(|&pages| pages > 0)?;
         Some((self.page as f32 / pages as f32).clamp(0.0, 1.0))
     }
 
-    fn progress_label(&self) -> String {
+    pub fn progress_label(&self) -> String {
         match self.progress() {
             Some(progress) if progress >= 0.999 => "done".into(),
             Some(progress) => format!("{:.0}%", progress * 100.0),
@@ -122,7 +158,7 @@ impl Doc {
     }
 
     /// `pdf · 15p`.
-    fn kind_line(&self) -> String {
+    pub fn kind_line(&self) -> String {
         match self.pages {
             Some(pages) => format!("{} · {pages}p", self.kind),
             None => self.kind.clone(),
@@ -164,13 +200,20 @@ impl Home {
                             ui.add_space(16.0);
                             notice(ui, &tokens, error);
                         }
+                        ui.add_space(20.0);
+                        if let Some(chosen) = self.reading(ui, &tokens, home.library, &docs) {
+                            action = Some(chosen);
+                        }
                         // The documents come most recently opened first.
                         let continuing = docs
                             .iter()
                             .find(|doc| doc.opened.is_some() && doc.path.exists());
                         if let Some(doc) = continuing {
                             ui.add_space(24.0);
-                            if let Some(chosen) = continue_card(ui, &tokens, home.library, doc) {
+                            let cover = home.covers.get(&doc.path);
+                            if let Some(chosen) =
+                                continue_card(ui, &tokens, home.library, doc, cover)
+                            {
                                 action = Some(chosen);
                             }
                         }
@@ -178,26 +221,22 @@ impl Home {
                             .iter()
                             .filter(|doc| doc.opened.is_some())
                             .filter(|doc| Some(&doc.path) != continuing.map(|doc| &doc.path))
-                            .take(RECENT_LIMIT)
                             .collect();
                         if !recent.is_empty() {
                             ui.add_space(24.0);
-                            motif::rule_title(ui, "recent", Some(&recent.len().to_string()));
+                            // One row: as many covers as the column holds.
+                            let shown = covers_in(column).min(recent.len());
+                            motif::rule_title(
+                                ui,
+                                "recent",
+                                Some(&format!("{shown} of {}", recent.len())),
+                            );
                             ui.add_space(8.0);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = vec2(16.0, 16.0);
-                                for doc in recent {
-                                    let label = doc.progress_label();
-                                    let response = DocCover::new(&doc.title, &doc.kind_line())
-                                        .progress(doc.progress(), &label)
-                                        .size(vec2(148.0, 152.0))
-                                        .show(ui)
-                                        .tip(&doc.path.display().to_string());
-                                    if response.clicked() {
-                                        action = Some(HomeAction::Open(doc.path.clone()));
-                                    }
-                                }
-                            });
+                            if let Some(chosen) =
+                                cover_row(ui, home.covers, &recent[..shown], column)
+                            {
+                                action = Some(chosen);
+                            }
                         }
                         if let Some(chosen) = self.library(ui, &tokens, &docs) {
                             action = Some(chosen);
@@ -543,74 +582,92 @@ impl Home {
             pos2(rect.left() + 12.0, rect.bottom() - drop_height),
             pos2(rect.right() - 12.0, rect.bottom() - 12.0),
         );
-        ui.painter().rect(
-            zone,
-            tokens.ctl_radius(),
-            tokens.raised,
-            tokens.edge(),
-            StrokeKind::Inside,
-        );
-        let field = Rect::from_center_size(
-            zone.center() - vec2(0.0, 36.0),
-            vec2(zone.width() - 80.0, 60.0),
-        );
-        motif::dot_field(ui, field, 12.0, 0.9, |_, _| 0.0);
-        let arrow = Rect::from_center_size(field.center(), vec2(26.0, 26.0));
-        ui.painter().rect(
-            arrow,
-            tokens.ctl_radius(),
-            tokens.raised,
-            tokens.edge(),
-            StrokeKind::Inside,
-        );
-        icons::paint(ui, arrow, "arrow-down", 14.0, tokens.muted);
-        ui.painter().text(
-            zone.center() + vec2(0.0, 18.0),
-            Align2::CENTER_CENTER,
-            "drop pdf · epub · cbz · djvu",
-            theme::mono(11.0),
-            tokens.text_2,
-        );
-        // Centred by the width it took last frame: the key differs by keymap.
-        let width_id = egui::Id::new("home-open-row");
-        let width = ui
-            .ctx()
-            .data(|data| data.get_temp::<f32>(width_id))
-            .unwrap_or(220.0);
-        let row = Rect::from_center_size(zone.center() + vec2(0.0, 48.0), vec2(width, 24.0));
-        let mut row_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(row)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        row_ui.spacing_mut().item_spacing.x = 8.0;
-        row_ui.label(
-            egui::RichText::new("or")
-                .font(theme::mono(11.0))
-                .color(tokens.faint),
-        );
-        if row_ui
-            .add_enabled(!picking, Button::bracket("open file"))
-            .clicked()
-        {
+        if drop_zone(ui, tokens, zone, picking, open_key, "home-open-row") {
             action = Some(HomeAction::OpenDialog);
-        }
-        if let Some(key) = open_key {
-            row_ui.add(Key(&glyphst_ui::key::display(key)));
-        }
-        let taken = row_ui.min_rect().width();
-        if (taken - width).abs() > 0.5 {
-            ui.ctx().data_mut(|data| data.insert_temp(width_id, taken));
-            ui.ctx().request_repaint();
         }
         action
     }
 }
 
+/// A drop zone in `zone`: a dot field around an arrow, `drop pdf · epub ·
+/// cbz · djvu` and `or [ open file ]` with its key. True when `open file`
+/// is clicked.
+pub fn drop_zone(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    zone: Rect,
+    picking: bool,
+    open_key: Option<&str>,
+    id: &str,
+) -> bool {
+    let mut open = false;
+    ui.painter().rect(
+        zone,
+        tokens.ctl_radius(),
+        tokens.raised,
+        tokens.edge(),
+        StrokeKind::Inside,
+    );
+    let field = Rect::from_center_size(
+        zone.center() - vec2(0.0, 36.0),
+        vec2(zone.width() - 80.0, 60.0),
+    );
+    motif::dot_field(ui, field, 12.0, 0.9, |_, _| 0.0);
+    let arrow = Rect::from_center_size(field.center(), vec2(26.0, 26.0));
+    ui.painter().rect(
+        arrow,
+        tokens.ctl_radius(),
+        tokens.raised,
+        tokens.edge(),
+        StrokeKind::Inside,
+    );
+    icons::paint(ui, arrow, "arrow-down", 14.0, tokens.muted);
+    ui.painter().text(
+        zone.center() + vec2(0.0, 18.0),
+        Align2::CENTER_CENTER,
+        "drop pdf · epub · cbz · djvu",
+        theme::mono(11.0),
+        tokens.text_2,
+    );
+    // Centred by the width it took last frame: the key differs by keymap.
+    let width_id = egui::Id::new(id);
+    let width = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(width_id))
+        .unwrap_or(220.0);
+    let row = Rect::from_center_size(zone.center() + vec2(0.0, 48.0), vec2(width, 24.0));
+    let mut row_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(row)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row_ui.spacing_mut().item_spacing.x = 8.0;
+    row_ui.label(
+        egui::RichText::new("or")
+            .font(theme::mono(11.0))
+            .color(tokens.faint),
+    );
+    if row_ui
+        .add_enabled(!picking, Button::bracket("open file"))
+        .clicked()
+    {
+        open = true;
+    }
+    if let Some(key) = open_key {
+        row_ui.add(Key(&glyphst_ui::key::display(key)));
+    }
+    let taken = row_ui.min_rect().width();
+    if (taken - width).abs() > 0.5 {
+        ui.ctx().data_mut(|data| data.insert_temp(width_id, taken));
+        ui.ctx().request_repaint();
+    }
+    open
+}
+
 /// The documents home lists, with what is known of each: those opened
 /// before, most recent first, then the rest of the library by path. The
 /// order is fixed, so equal times never trade places between frames.
-fn documents(library: &LibraryStore, page_counts: &BTreeMap<String, usize>) -> Vec<Doc> {
+pub fn documents(library: &LibraryStore, page_counts: &BTreeMap<String, usize>) -> Vec<Doc> {
     let doc = |path: &Path| {
         let item = library.library_item_for_path(path);
         let authors = item
@@ -664,6 +721,166 @@ fn documents(library: &LibraryStore, page_counts: &BTreeMap<String, usize>) -> V
     attachments.dedup();
     docs.extend(attachments.into_iter().map(doc));
     docs
+}
+
+/// How many covers fit across `width`.
+pub fn covers_in(width: f32) -> usize {
+    (((width + COVER_GAP) / (COVER_WIDTH + COVER_GAP)).floor() as usize).max(1)
+}
+
+/// `docs` as one row of first-page covers filling `width`.
+pub fn cover_row(
+    ui: &mut egui::Ui,
+    covers: &mut Covers,
+    docs: &[&Doc],
+    width: f32,
+) -> Option<HomeAction> {
+    let mut action = None;
+    let count = covers_in(width).max(docs.len()) as f32;
+    let cover_width = ((width - (count - 1.0) * COVER_GAP) / count).max(60.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = COVER_GAP;
+        for doc in docs {
+            let label = doc.progress_label();
+            let kind = doc.kind_line();
+            let response = PageCover::new(&doc.title, &kind)
+                .progress(doc.progress(), &label)
+                .page(covers.get(&doc.path))
+                .width(cover_width)
+                .show(ui)
+                .tip(&doc.path.display().to_string());
+            if response.clicked() {
+                action = Some(HomeAction::Open(doc.path.clone()));
+            }
+        }
+    });
+    action
+}
+
+impl Home {
+    /// The last year's reading (frame 04): `── reading ── last 12 months`
+    /// and `[ activity → ]`, the heatmap with the totals beside it, and
+    /// under it the day pointed at and the legend.
+    fn reading(
+        &mut self,
+        ui: &mut egui::Ui,
+        tokens: &Tokens,
+        library: &LibraryStore,
+        docs: &[Doc],
+    ) -> Option<HomeAction> {
+        let mut action = None;
+        let width = ui.available_width();
+        let today = Local::now().date_naive();
+        let weeks = Heatmap::weeks_in(width - HEAT_STATS - 24.0, 12.0).min(53);
+        if self
+            .heat
+            .as_ref()
+            .is_none_or(|heat| heat.key != (library.reading_sessions().len(), today, weeks))
+        {
+            self.heat = Some(Heat::new(library, today, weeks));
+        }
+        let heat = self.heat.as_ref()?;
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(width - 120.0, 20.0), Sense::hover());
+            motif::paint_rule_title(ui, rect, "reading  ──  last 12 months", None, true);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(Button::bracket("activity →")).clicked() {
+                    action = Some(HomeAction::Activity(None));
+                }
+            });
+        });
+        ui.add_space(10.0);
+        let mut hovered = None;
+        let mut map_rect = egui::Rect::NOTHING;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 24.0;
+            let map = Heatmap::new(&heat.levels)
+                .months(&heat.months)
+                .today(heat.days.index(today).unwrap_or(usize::MAX))
+                .show(ui);
+            hovered = map.hovered;
+            map_rect = map.response.rect;
+            if let Some(day) = map.clicked {
+                action = Some(HomeAction::Activity(Some(heat.days.date(day))));
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 12.0;
+                ui.add_space(18.0);
+                let (current, longest) = heat.streaks;
+                let days = heat.days.reading_days().max(1) as u64;
+                for (value, key) in [
+                    (hours(heat.days.total()), "in 12 months".to_owned()),
+                    (
+                        format!("{current} {}", if current == 1 { "day" } else { "days" }),
+                        format!("streak · best {longest}"),
+                    ),
+                    (
+                        minutes(heat.days.total() / days),
+                        "a reading day".to_owned(),
+                    ),
+                ] {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(
+                            egui::RichText::new(value)
+                                .font(theme::mono_strong(15.0))
+                                .color(tokens.text),
+                        );
+                        ui.label(
+                            egui::RichText::new(key)
+                                .font(theme::mono(10.0))
+                                .color(tokens.faint),
+                        );
+                    });
+                }
+            });
+        });
+        ui.add_space(6.0);
+        // The day pointed at (today otherwise) under the cells, the legend
+        // under the map's right edge.
+        let (row, _) = ui.allocate_exact_size(vec2(map_rect.width(), 12.0), Sense::hover());
+        let mut legend_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(row)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let legend = heatmap::legend(&mut legend_ui).rect;
+        let day = hovered.map_or(today, |day| heat.days.date(day));
+        glyphst_ui::text::row(
+            ui,
+            pos2(row.left() + 30.0, row.center().y),
+            day_summary(library, docs, day),
+            theme::mono(9.0),
+            tokens.faint,
+            (legend.left() - row.left() - 46.0).max(0.0),
+        );
+        action
+    }
+}
+
+/// `wed 15 oct · 38 min · attention.pdf, bert-2018.pdf`.
+fn day_summary(library: &LibraryStore, docs: &[Doc], day: chrono::NaiveDate) -> String {
+    let sessions = reading_days::sessions_on(library.reading_sessions(), day);
+    let seconds: u64 = sessions.iter().map(|session| session.seconds).sum();
+    let mut names: Vec<String> = Vec::new();
+    for session in &sessions {
+        let name = docs
+            .iter()
+            .find(|doc| doc.path == session.path)
+            .map(|doc| doc.title.clone())
+            .unwrap_or_else(|| title_of(&session.path));
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let mut line = reading_days::day_label(day);
+    if seconds == 0 {
+        line.push_str(" · no reading");
+    } else {
+        line.push_str(&format!(" · {}", reading_days::duration_label(seconds)));
+        line.push_str(&format!(" · {}", names.join(", ").to_lowercase()));
+    }
+    line
 }
 
 /// `── wed 15 oct ── 09:42 ──`, the greeting and the week's numbers, with
@@ -760,6 +977,7 @@ fn continue_card(
     tokens: &Tokens,
     library: &LibraryStore,
     doc: &Doc,
+    cover: Option<crate::covers::CoverTexture>,
 ) -> Option<HomeAction> {
     let mut action = None;
     pane::card(ui.ctx())
@@ -767,12 +985,15 @@ fn continue_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let label = doc.progress_label();
-                let cover = DocCover::new(&doc.title, &doc.kind_line())
-                    .progress(None, "")
-                    .size(vec2(100.0, 132.0))
-                    .show(ui);
-                let _ = label;
+                let cover = PageThumb {
+                    label: "",
+                    current: false,
+                    texture: cover.map(|(texture, _)| texture),
+                    aspect: cover.map_or(96.0 / 124.0, |(_, aspect)| aspect.max(96.0 / 192.0)),
+                    width: 96.0,
+                }
+                .show(ui)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if cover.clicked() {
                     action = Some(HomeAction::Open(doc.path.clone()));
                 }
@@ -949,7 +1170,7 @@ fn table_columns(x: egui::Rangef) -> [f32; 5] {
 }
 
 /// `pdf`, `epub`… from the file's extension.
-fn kind_of(path: &Path) -> String {
+pub fn kind_of(path: &Path) -> String {
     path.extension()
         .map(|extension| extension.to_string_lossy().to_lowercase())
         .unwrap_or_default()

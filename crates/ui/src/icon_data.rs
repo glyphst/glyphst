@@ -10,6 +10,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "a-arrow-up",
         include_bytes!("../assets/icons/a-arrow-up.svg"),
     ),
+    ("activity", include_bytes!("../assets/icons/activity.svg")),
     (
         "arrow-down",
         include_bytes!("../assets/icons/arrow-down.svg"),
@@ -118,6 +119,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     (
         "folder-open",
         include_bytes!("../assets/icons/folder-open.svg"),
+    ),
+    (
+        "folder-search",
+        include_bytes!("../assets/icons/folder-search.svg"),
     ),
     ("gamepad-2", include_bytes!("../assets/icons/gamepad-2.svg")),
     ("gauge", include_bytes!("../assets/icons/gauge.svg")),

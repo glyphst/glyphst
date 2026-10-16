@@ -633,6 +633,13 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs, user: &mut UserSettings) {
             },
         );
         group.row(
+            "remember zoom",
+            Some("reopen each document at its zoom; off opens at the default zoom, on its page"),
+            |ui| {
+                ui.add(Switch(&mut prefs.remember_zoom));
+            },
+        );
+        group.row(
             "sidebar",
             Some("the outline, pages, bookmarks, notes and search beside the pages"),
             |ui| {

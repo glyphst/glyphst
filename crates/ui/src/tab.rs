@@ -129,9 +129,15 @@ impl DocTab<'_> {
 }
 
 /// The `g▌` mark at the start of the tab bar.
-pub fn logo(ui: &mut Ui) -> Response {
+pub fn logo(ui: &mut Ui, active: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(40.0, BAR_HEIGHT), egui::Sense::click());
+    // Home has no tab of its own: the mark is on `surface` while it shows.
+    if active {
+        ui.painter().rect_filled(rect, 0, t.surface.to_opaque());
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 0, t.hover);
+    }
     ui.painter()
         .vline(rect.right() - 0.5, rect.y_range(), t.hairline());
     let galley = ui

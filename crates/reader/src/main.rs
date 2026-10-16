@@ -18,6 +18,7 @@
 //! Alt+Right back and forward, Ctrl+\ split right, F6 next pane, F9
 //! sidebar, F12 statistics. Dragging a tab onto the pages splits them.
 
+mod activity_view;
 mod ai;
 mod ai_bridge;
 mod ai_changes;
@@ -30,6 +31,7 @@ mod annotations;
 mod app;
 mod book_effects;
 mod commands;
+mod covers;
 mod desktop_theme;
 mod doc_text;
 mod document;
@@ -44,13 +46,16 @@ mod harness;
 mod home;
 mod keymap_page;
 mod keys;
+mod launcher;
 mod overview;
+mod pages;
 mod palette;
 mod panes;
 mod pickers;
 mod prefs;
 mod quick_ask;
 mod reading_clock;
+mod reading_days;
 mod region;
 mod settings_providers;
 mod settings_window;

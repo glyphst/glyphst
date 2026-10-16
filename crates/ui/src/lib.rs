@@ -20,7 +20,8 @@
 //! | status-seg | [`status`] |
 //! | row/list, row/list-active, row/tree | [`row`] |
 //! | menu, menu-item | [`menu`] |
-//! | doc-cover | [`cover`] |
+//! | doc-cover, doc-cover/page | [`cover`] |
+//! | reading heatmap (frames 04, 04c) | [`heatmap`] |
 //! | msg/user, timeline-step, suggestion | [`chat`] |
 //! | page-thumb | [`thumb`] |
 //! | rule titles, trees, meters, ticks, dot fields | [`motif`] |
@@ -33,6 +34,7 @@ pub mod cover;
 pub mod field;
 pub mod fonts;
 pub mod gallery;
+pub mod heatmap;
 mod icon_data;
 pub mod icons;
 pub mod key;

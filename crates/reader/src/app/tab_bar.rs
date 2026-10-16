@@ -1,7 +1,9 @@
 //! The 36pt tab bar (frame 02a, pen components `tab` and `tab/active`):
-//! the `g▌` mark, home, the document tabs, `+`, and at the right the
-//! palette's search field, theme, settings and the menu. Tabs are laid
-//! out by `craft_ui::tabs` and painted by `glyphst_ui::tab::DocTab`.
+//! the `g▌` mark (home, on `surface` while home shows), the document
+//! tabs, the page tabs (shortcuts, new tabs, reading activity), `+` for a
+//! new tab, and at the right the palette's search field, theme, settings
+//! and the menu. Tabs are laid out by `craft_ui::tabs` and painted by
+//! `glyphst_ui::tab::DocTab`.
 
 use egui::{Rect, Sense, pos2, vec2};
 use glyphst_ui::{
@@ -19,12 +21,11 @@ const SEARCH_WIDTH: f32 = 300.0;
 /// The bar shows the search field from this width.
 const SEARCH_FROM: f32 = 900.0;
 
-/// A tab in the bar: a document, home, or the shortcuts page.
+/// A tab in the bar: a document or a page.
 #[derive(Clone, Copy, PartialEq)]
 enum BarTab {
-    Home,
     Document(usize),
-    Keymap,
+    Page(usize),
 }
 
 impl ReaderApp {
@@ -78,35 +79,32 @@ impl ReaderApp {
         let natural: Vec<f32> = (0..self.tabs.len())
             .map(|index| doc_tab(index, self.active == Some(index)).natural_width(ui))
             .collect();
-        let home_active = self.active.is_none() && !self.keymap_focused && self.gallery.is_none();
-        let home = DocTab {
-            title: "home",
-            icon: Some("house"),
-            active: home_active,
-            dirty: false,
-            closable: false,
-        };
-        let keymap = DocTab {
-            title: KEYMAP_TAB_LABEL,
-            icon: Some("keyboard"),
-            active: self.keymap_focused && self.active.is_none(),
-            dirty: false,
-            closable: true,
-        };
+        let home_active =
+            self.active.is_none() && self.page_focused.is_none() && self.gallery.is_none();
+        let pages: Vec<DocTab> = self
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| DocTab {
+                title: page.title(),
+                icon: Some(page.icon()),
+                active: self.page_focused == Some(index) && self.active.is_none(),
+                dirty: false,
+                closable: true,
+            })
+            .collect();
         let search_width = if bar.width() > SEARCH_FROM {
             SEARCH_WIDTH
         } else {
             28.0
         };
-        let home_width = home.natural_width(ui);
-        let keymap_width = self.keymap_page.is_some().then(|| keymap.natural_width(ui));
+        let page_widths: Vec<f32> = pages.iter().map(|page| page.natural_width(ui)).collect();
         let controls = ui_tab::BAR_HEIGHT // logo
-            + home_width
             + 36.0 // +
             + search_width
             + 3.0 * 30.0
             + 24.0
-            + keymap_width.unwrap_or(0.0);
+            + page_widths.iter().sum::<f32>();
         let fit = craft_ui::tabs::fit(
             &natural,
             self.active.unwrap_or(0),
@@ -119,13 +117,13 @@ impl ReaderApp {
         let mut run = None;
         let mut tab_menu = None;
         let mut drag = None;
-        let (mut open_keymap, mut close_keymap) = (false, false);
+        let (mut open_page, mut close_page) = (None, None);
         let mut x = bar.left();
         // The mark; it goes home.
         {
             let rect = Rect::from_min_size(pos2(x, bar.top()), vec2(40.0, bar.height()));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            if ui_tab::logo(&mut child).tip("home").clicked() {
+            if ui_tab::logo(&mut child, home_active).tip("home").clicked() {
                 select = Some(None);
             }
             x = rect.right();
@@ -134,8 +132,7 @@ impl ReaderApp {
             let rect = Rect::from_min_size(pos2(*x, bar.top()), vec2(width, bar.height()));
             *x = rect.right();
             let id = ui.id().with(match which {
-                BarTab::Home => ("bar-tab", u64::MAX),
-                BarTab::Keymap => ("bar-tab", u64::MAX - 1),
+                BarTab::Page(index) => ("bar-page", index as u64),
                 BarTab::Document(index) => ("bar-tab", ids[index]),
             });
             let response = craft_ui::tabs::Tab::new(id, tab.title, tab.active)
@@ -150,12 +147,6 @@ impl ReaderApp {
             let closed = close_response.is_some_and(|close| close.tip("close").clicked());
             (response, closed)
         };
-        {
-            let (response, _) = cell(ui, BarTab::Home, &home, home_width, &mut x);
-            if response.clicked() {
-                select = Some(None);
-            }
-        }
         for &(index, width) in &fit.shown {
             let tab = doc_tab(index, self.active == Some(index));
             let (response, closed) = cell(ui, BarTab::Document(index), &tab, width, &mut x);
@@ -182,12 +173,12 @@ impl ReaderApp {
                 }
             });
         }
-        if let Some(width) = keymap_width {
-            let (response, closed) = cell(ui, BarTab::Keymap, &keymap, width, &mut x);
+        for (index, (page, &width)) in pages.iter().zip(&page_widths).enumerate() {
+            let (response, closed) = cell(ui, BarTab::Page(index), page, width, &mut x);
             if closed || response.middle_clicked() {
-                close_keymap = true;
+                close_page = Some(index);
             } else if response.clicked() {
-                open_keymap = true;
+                open_page = Some(index);
             }
         }
         let rest = Rect::from_min_max(pos2(x, bar.top()), bar.max);
@@ -214,17 +205,9 @@ impl ReaderApp {
                 }
             });
         }
-        let tip = self
-            .keymap
-            .tip("open with system dialog", Command::OpenWithDialog);
-        if ui
-            .add_enabled_ui(!self.pickers.is_showing(), |ui| {
-                icons::button(ui, "plus", 28.0, false, &tip)
-            })
-            .inner
-            .clicked()
-        {
-            run = Some(Command::OpenWithDialog);
+        let tip = self.keymap.tip("new tab", Command::NewTab);
+        if icons::button(ui, "plus", 28.0, false, &tip).clicked() {
+            run = Some(Command::NewTab);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
@@ -291,10 +274,10 @@ impl ReaderApp {
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
         }
-        if close_keymap {
-            self.close_keymap_tab();
-        } else if open_keymap {
-            self.open_keymap_tab();
+        if let Some(index) = close_page {
+            self.close_page(index);
+        } else if let Some(index) = open_page {
+            self.focus_page(index);
         }
         if let Some((index, action)) = tab_menu {
             self.tab_menu_action(index, action, &ctx);

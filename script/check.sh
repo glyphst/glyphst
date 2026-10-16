@@ -138,6 +138,8 @@ if [[ ${tier} == screens ]]; then
         "03-translation @ --sidebar translation --translate-fake"
         "03-effects @ --sidebar effects"
         "04-home"
+        "04b-new-tab --command app.new_tab"
+        "04c-activity --command app.reading_activity"
         "05-empty @ --assistant-demo empty"
         "05-menu @ --assistant-demo menu"
         "05-running @ --assistant-demo running"

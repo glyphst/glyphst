@@ -296,6 +296,26 @@ impl Tokens {
         }
     }
 
+    /// A heatmap cell at `level` (0 to 4; pen tokens `heat-0` to `heat-4`):
+    /// an empty day, then the accent over the base at 25, 50, 75 and 100%.
+    pub fn heat(&self, level: u8) -> Color32 {
+        let empty = match self.kind {
+            ThemeKind::Dark => self.hover,
+            ThemeKind::Light => self.rule,
+        };
+        match level {
+            0 => empty.to_opaque(),
+            level => {
+                let t = f32::from(level.min(4)) / 4.0;
+                let [br, bg, bb, _] = self.bg.to_opaque().to_array();
+                let [ar, ag, ab, _] = self.accent.to_array();
+                let mix =
+                    |b: u8, a: u8| (f32::from(b) + (f32::from(a) - f32::from(b)) * t).round() as u8;
+                Color32::from_rgb(mix(br, ar), mix(bg, ag), mix(bb, ab))
+            }
+        }
+    }
+
     /// The tokens for a transparent window `opacity` opaque: the base layer
     /// and the docked panes show the desktop through. Everything raised
     /// over them (popovers, menus, dialogs, fields), highlights, text, lines
@@ -546,6 +566,29 @@ mod tests {
         assert_eq!(
             ThemePreference::System.resolve(None, None),
             ThemeKind::Light
+        );
+    }
+
+    /// The levels are the design's `heat-0` to `heat-4`.
+    #[test]
+    fn heat_levels_match_the_design() {
+        let dark = Tokens::for_kind(ThemeKind::Dark);
+        let light = Tokens::for_kind(ThemeKind::Light);
+        let hex = |tokens: &Tokens| -> Vec<u32> {
+            (0..5)
+                .map(|level| {
+                    let [r, g, b, _] = tokens.heat(level).to_array();
+                    u32::from_be_bytes([0, r, g, b])
+                })
+                .collect()
+        };
+        assert_eq!(
+            hex(&dark),
+            [0x22262B, 0x4A370D, 0x876009, 0xC38804, 0xFFB000]
+        );
+        assert_eq!(
+            hex(&light),
+            [0xDAD6CC, 0xE0CDAD, 0xD1AC74, 0xC28C3A, 0xB36B00]
         );
     }
 
