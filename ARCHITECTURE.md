@@ -41,7 +41,12 @@ one-level previews draw, in order, until the page itself is written. The
 page's display list (thumbnail, text, re-rasterized layers) is made after
 the page is sent. A page with raster layers is captured again from its list,
 because a list's replay culls operations (paths without points, contents of
-clips with no area) and the layers' ranges are numbered by the list. [`pdf-gpu`](crates/pdf-gpu)
+clips with no area) and the layers' ranges are numbered by the list. A
+captured page that took at least a second, with no raster layers, is kept
+in the [page cache](crates/pdf/src/vector_cache.rs) under the cache
+directory's `pages/` (2 GiB, least recently used first out), one file per
+document page, checked against the document's and the Reader's size and
+modification time, so reopening it skips MuPDF. [`pdf-gpu`](crates/pdf-gpu)
 prepares each page once per level of detail and draws it with a camera
 uniform (pan, zoom and quarter turns): fills are quads whose pixels integrate
 the path's coverage from its edges (HEPR's analytic fills, banded when long)

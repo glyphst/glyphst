@@ -74,13 +74,16 @@ of 100 files render, 1 differs from MuPDF by more than 1%; turned 90
 degrees, 20 of them differ from MuPDF as little as upright.
 
 Known gaps:
-- A very dense page is slow to finish loading: Lower Level (7.6M
-  strokes) shows previews of what MuPDF has interpreted from about
-  0.55 s, but the page itself is drawn after 11-13 s. MuPDF's run over
-  the page dominates (in a profile, reading and lexing the 51 MB content
-  stream 41%, inflate 15%), then capture and preparing levels (1.3 s).
-  Measure on the performance cores (`taskset -c 0-11`): a loader thread
-  on a low-power core takes twice as long.
+- A very dense page is slow to finish loading the first time: Lower
+  Level (7.6M strokes) shows previews of what MuPDF has interpreted from
+  about 0.5 s, but the page itself is drawn after about 11 s. MuPDF's run
+  over the page dominates (in a profile, reading and lexing the 51 MB
+  content stream 41%, inflate 15%), then preparing levels (1.3 s).
+  Reopened, it comes from the page cache: drawn after about 3.3 s
+  (decoding 0.6 s, preparing levels 1.4 s); caching the prepared levels
+  too (579 MiB for Lower Level) would cut that further. Measure on the
+  performance cores (`taskset -c 0-11`): a loader thread on a low-power
+  core takes twice as long.
 - Presenting a spread shows one page at a time.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
@@ -116,8 +119,8 @@ Known gaps:
 
 **Next step:** the user picks the next milestone. Candidates from the gaps
 above: restoring translation sessions from the cache, Mermaid diagrams in
-the assistant, and loading very dense pages sooner (MuPDF's display list
-dominates).
+the assistant, and a dense page's first load (MuPDF's interpretation
+dominates; only a faster content-stream reader would cut it).
 
 **Done when:** the chosen milestone works with tests, `check.sh quick`
 passes, and the bench still shows no frames over 25 ms.

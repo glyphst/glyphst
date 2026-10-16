@@ -5,6 +5,7 @@ mod render;
 pub mod test_pdf;
 pub mod text;
 pub mod vector;
+pub mod vector_cache;
 
 pub use document::{
     DocumentAuthenticationError, DocumentPassword, DocumentSnapshot, GlyphstDocument, PdfDocument,

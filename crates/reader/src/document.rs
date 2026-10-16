@@ -19,9 +19,10 @@ use glyphst_pdf::{
     DocumentSnapshot, GlyphstDocument,
     text::{PageLink, PageText, page_links},
     vector::{
-        ChunkOptions, LayerImage, PageRect, VectorChunk, capture_display_list, capture_page,
-        rasterize_layer,
+        ChunkOptions, LayerImage, PageRect, VectorChunk, VectorPage, capture_display_list,
+        capture_page, rasterize_layer,
     },
+    vector_cache::PageCache,
 };
 use glyphst_pdf_gpu::{Camera, PreparedPage, rotate, rotate_rect};
 use mupdf::{Colorspace, DisplayList, Matrix};
@@ -401,6 +402,10 @@ const CACHED_LISTS: usize = 8;
 const PREVIEW_DELAY: Duration = Duration::from_millis(300);
 /// ...and then more of it this often.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
+/// Pages whose capture took this long are kept on disk for reopening...
+const CACHE_AFTER: Duration = Duration::from_secs(1);
+/// ...within this much disk.
+const PAGE_CACHE_BYTES: u64 = 2 << 30;
 
 /// Where a page's preview parts go, from the thread preparing them.
 struct PartSink {
@@ -433,6 +438,17 @@ impl Loader {
             results: result_tx.clone(),
             ctx: ctx.clone(),
         };
+        // Reflowed documents lay pages out anew for each layout.
+        let cache = matches!(layout, DocumentLayout::Fixed)
+            .then(|| {
+                PageCache::open(
+                    glyphst_core::paths::cache_dir().join("pages"),
+                    &path,
+                    PAGE_CACHE_BYTES,
+                )
+            })
+            .flatten()
+            .map(Arc::new);
         thread::Builder::new()
             .name("page-loader".into())
             .spawn(move || {
@@ -463,9 +479,14 @@ impl Loader {
                                 continue;
                             }
                             let key = (page, source.version());
-                            if let Some(list) =
-                                load_page(document.inner(), page, &source, &mut send, &parts)
-                            {
+                            if let Some(list) = load_page(
+                                document.inner(),
+                                page,
+                                &source,
+                                &mut send,
+                                &parts,
+                                cache.as_ref(),
+                            ) {
                                 lists.retain(|(cached, _)| *cached != key);
                                 lists.push_back((key, list));
                                 if lists.len() > CACHED_LISTS {
@@ -571,6 +592,51 @@ impl Loader {
     }
 }
 
+/// Captures `loaded_page` ([`capture_page`]), sending what it has captured
+/// so far as [`Loaded::Part`]s, prepared on another thread, once it has
+/// taken [`PREVIEW_DELAY`].
+fn capture_with_parts(
+    loaded_page: &mupdf::Page,
+    page: usize,
+    version: u64,
+    parts: &PartSink,
+) -> Result<VectorPage> {
+    let (chunks, chunk_rx) = mpsc::channel::<VectorChunk>();
+    let options = ChunkOptions {
+        first: PREVIEW_DELAY,
+        interval: PREVIEW_INTERVAL,
+        sender: chunks,
+    };
+    let captured = AtomicBool::new(false);
+    let vector = thread::scope(|scope| {
+        scope.spawn(|| {
+            for chunk in chunk_rx {
+                // Parts left when capture is done would show no sooner
+                // than the page itself.
+                if captured.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let prepared = Box::new(PreparedPage::preview(&chunk));
+                drop(chunk);
+                let part = Loaded::Part {
+                    page,
+                    version,
+                    prepared,
+                };
+                if parts.results.send(part).is_err() {
+                    return;
+                }
+                parts.ctx.request_repaint();
+            }
+        });
+        let result = capture_page(loaded_page, Some(options));
+        captured.store(true, Ordering::Relaxed);
+        result
+    })?
+    .into_page();
+    Ok(vector)
+}
+
 /// A page ready to send, and what its list, thumbnail and text are made
 /// from after it.
 struct LoadedPage {
@@ -597,52 +663,38 @@ fn load_page(
     source: &PageSource,
     send: &mut dyn FnMut(Loaded) -> bool,
     parts: &PartSink,
+    cache: Option<&Arc<PageCache>>,
 ) -> Option<DisplayList> {
     let started = Instant::now();
     let version = source.version();
     let result = (|| -> Result<Option<LoadedPage>> {
         let loaded_page = source_page(document, page, source)?;
         let links = page_links(&loaded_page);
-        let (chunks, chunk_rx) = mpsc::channel::<VectorChunk>();
-        let options = ChunkOptions {
-            first: PREVIEW_DELAY,
-            interval: PREVIEW_INTERVAL,
-            sender: chunks,
+        let original = matches!(source, PageSource::Original);
+        let cached = cache
+            .filter(|_| original)
+            .and_then(|cache| cache.load(page));
+        let from_cache = cached.is_some();
+        let capturing = Instant::now();
+        let mut vector = match cached {
+            Some(vector) => vector,
+            None => capture_with_parts(&loaded_page, page, version, parts)?,
         };
-        let captured = AtomicBool::new(false);
-        let mut vector = thread::scope(|scope| {
-            scope.spawn(|| {
-                for chunk in chunk_rx {
-                    // Parts left when capture is done would show no sooner
-                    // than the page itself.
-                    if captured.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    let prepared = Box::new(PreparedPage::preview(&chunk));
-                    drop(chunk);
-                    let part = Loaded::Part {
-                        page,
-                        version,
-                        prepared,
-                    };
-                    if parts.results.send(part).is_err() {
-                        return;
-                    }
-                    parts.ctx.request_repaint();
-                }
-            });
-            let result = capture_page(&loaded_page, Some(options));
-            captured.store(true, Ordering::Relaxed);
-            result
-        })?
-        .into_page();
+        let capture_time = capturing.elapsed();
         let mut list = None;
         if vector.stats.raster_layers > 0 {
             let made = loaded_page.to_display_list(true)?;
             vector = capture_display_list(&made)?;
             list = Some(made);
         }
-        let sketch = Arc::new(PageSketch::from_vector(&vector));
+        // The loading animation's sketch is traced alongside preparing;
+        // on a dense page each takes a good part of a second.
+        let (sketch, prepared) = thread::scope(|scope| {
+            let sketch = scope.spawn(|| Arc::new(PageSketch::from_vector(&vector)));
+            let prepared = PreparedPage::new(&vector);
+            (sketch.join(), prepared)
+        });
+        let sketch = sketch.map_err(|_| anyhow::anyhow!("tracing the page's sketch failed"))?;
         if !send(Loaded::Sketch {
             page,
             version,
@@ -650,7 +702,6 @@ fn load_page(
         }) {
             return Ok(None);
         }
-        let prepared = PreparedPage::new(&vector);
         let mut layers = Vec::new();
         for (index, layer) in prepared.raster_layers.iter().enumerate() {
             let Some(list) = &list else { break };
@@ -672,11 +723,28 @@ fn load_page(
             links,
             seconds: started.elapsed().as_secs_f64(),
         };
+        let path_points = vector.stats.path_points;
+        if let Some(cache) = cache
+            && original
+            && !from_cache
+            && capture_time >= CACHE_AFTER
+            && vector.stats.raster_layers == 0
+        {
+            let cache = cache.clone();
+            thread::spawn(move || {
+                if let Err(error) = cache.store(page, &vector) {
+                    log::warn!("could not keep page {} for reopening: {error:#}", page + 1);
+                }
+            });
+        } else {
+            // Freeing millions of paths takes a while; the page goes first.
+            thread::spawn(move || drop(vector));
+        }
         Ok(Some(LoadedPage {
             loaded,
             page: loaded_page,
             list,
-            path_points: vector.stats.path_points,
+            path_points,
         }))
     })();
     match result {
