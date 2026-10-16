@@ -330,7 +330,7 @@ impl PreparedLevel {
             ..Self::default()
         };
         let mut tessellator = FillTessellator::new();
-        let mut polylines = Vec::new();
+        let mut polylines = Polylines::default();
         let mut raster_layer = 0;
         let mut image = 0;
         // Index ranges and push batches of the clips on the stencil stack.
@@ -366,7 +366,7 @@ impl PreparedLevel {
                 VectorItem::Stroke { path, style, color } => {
                     let start = level.segments.len() as u32;
                     flatten(path, tolerance, &mut polylines);
-                    for polyline in &mut polylines {
+                    for polyline in polylines.iter_mut() {
                         if tolerance > FLATTEN_TOLERANCE {
                             simplify(&mut polyline.points, tolerance);
                         }
@@ -497,7 +497,7 @@ impl PreparedLevel {
         path: &PagePath,
         even_odd: bool,
         color: [u8; 4],
-        polylines: &mut Vec<Polyline>,
+        polylines: &mut Polylines,
     ) -> Coverage {
         flatten(path, self.tolerance, polylines);
         let first = self.coverage_segments.len();
@@ -959,7 +959,7 @@ fn band_visits(level: &PreparedLevel, path: &CoveragePath, low: f32, high: f32) 
 /// rounded up. Paths are matched to `page`'s fills by flattening them again.
 fn curved_edge_counts(page: &VectorPage, level: &PreparedLevel) -> Vec<usize> {
     let mut costs = Vec::with_capacity(level.coverage_paths.len());
-    let mut polylines = Vec::new();
+    let mut polylines = Polylines::default();
     for draw in &page.draws {
         let Some(next) = level.coverage_paths.get(costs.len()) else {
             break;
@@ -1112,17 +1112,60 @@ struct Polyline {
     closed: bool,
 }
 
-fn flatten(path: &PagePath, tolerance: f32, out: &mut Vec<Polyline>) {
+/// Flattened polylines of one path at a time. Their point buffers are kept
+/// for the next path, so preparing millions of paths allocates few.
+#[derive(Debug, Default)]
+struct Polylines {
+    lines: Vec<Polyline>,
+    len: usize,
+    /// The polyline being built, kept with its buffer between paths.
+    spare: Polyline,
+}
+
+impl Polylines {
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Appends `line`, leaving an empty polyline with a reused buffer in
+    /// its place.
+    fn push(&mut self, line: &mut Polyline) {
+        if self.len == self.lines.len() {
+            self.lines.push(std::mem::take(line));
+        } else {
+            std::mem::swap(&mut self.lines[self.len], line);
+            line.points.clear();
+            line.closed = false;
+        }
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for Polylines {
+    type Target = [Polyline];
+
+    fn deref(&self) -> &[Polyline] {
+        &self.lines[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Polylines {
+    fn deref_mut(&mut self) -> &mut [Polyline] {
+        &mut self.lines[..self.len]
+    }
+}
+
+fn flatten(path: &PagePath, tolerance: f32, out: &mut Polylines) {
     out.clear();
     let mut points = path.points.iter().copied();
-    let mut current = Polyline::default();
+    let mut current = std::mem::take(&mut out.spare);
     let mut subpath_start = [0.0, 0.0];
     for verb in &path.verbs {
         match verb {
             PathVerb::MoveTo => {
                 let Some(point) = points.next() else { break };
                 if !current.points.is_empty() {
-                    out.push(std::mem::take(&mut current));
+                    out.push(&mut current);
                 }
                 subpath_start = point;
                 current.points.push(point);
@@ -1159,14 +1202,15 @@ fn flatten(path: &PagePath, tolerance: f32, out: &mut Vec<Polyline>) {
                         current.points.pop();
                     }
                     current.closed = true;
-                    out.push(std::mem::take(&mut current));
+                    out.push(&mut current);
                 }
             }
         }
     }
     if !current.points.is_empty() {
-        out.push(current);
+        out.push(&mut current);
     }
+    out.spare = current;
 }
 
 /// Douglas-Peucker simplification keeping every point farther than
@@ -1382,7 +1426,7 @@ mod tests {
     #[test]
     fn closed_polylines_drop_the_repeated_start_point() {
         use PathVerb::*;
-        let mut out = Vec::new();
+        let mut out = Polylines::default();
         flatten(
             &path(
                 &[MoveTo, LineTo, LineTo, LineTo, Close],
@@ -1399,7 +1443,7 @@ mod tests {
     #[test]
     fn curves_flatten_within_tolerance() {
         use PathVerb::*;
-        let mut out = Vec::new();
+        let mut out = Polylines::default();
         flatten(
             &path(
                 &[MoveTo, CubicTo],
