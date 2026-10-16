@@ -26,6 +26,8 @@ pub enum Command {
     NewTab,
     /// The reading activity tab (frame 04c).
     ReadingActivity,
+    /// The library tab (frame 04d).
+    Library,
     ToggleSidebar,
     ToggleStats,
     ThemeSystem,
@@ -149,7 +151,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -160,6 +162,7 @@ impl Command {
         Self::KeyboardShortcuts,
         Self::NewTab,
         Self::ReadingActivity,
+        Self::Library,
         Self::ToggleSidebar,
         Self::ToggleStats,
         Self::ThemeSystem,
@@ -227,6 +230,7 @@ impl Command {
             Self::KeyboardShortcuts => "app.keyboard_shortcuts",
             Self::NewTab => "app.new_tab",
             Self::ReadingActivity => "app.reading_activity",
+            Self::Library => "app.library",
             Self::ToggleTransparency => "app.toggle_transparency",
             Self::UiScaleUp => "app.ui_scale_up",
             Self::UiScaleDown => "app.ui_scale_down",
@@ -298,6 +302,7 @@ impl Command {
             Self::KeyboardShortcuts => "Keyboard shortcuts",
             Self::NewTab => "New tab",
             Self::ReadingActivity => "Reading activity",
+            Self::Library => "Library",
             Self::ToggleTransparency => "Toggle transparency",
             Self::UiScaleUp => "Larger interface",
             Self::UiScaleDown => "Smaller interface",
@@ -366,6 +371,7 @@ impl Command {
             Self::KeyboardShortcuts => "keyboard",
             Self::NewTab => "plus",
             Self::ReadingActivity => "activity",
+            Self::Library => "library",
             Self::ToggleTransparency => "eye",
             Self::UiScaleUp => "a-arrow-up",
             Self::UiScaleDown => "a-arrow-down",
@@ -429,6 +435,7 @@ impl Command {
             | Self::KeyboardShortcuts
             | Self::NewTab
             | Self::ReadingActivity
+            | Self::Library
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
@@ -544,6 +551,7 @@ impl Command {
             | Self::ThemeDark
             | Self::KeyboardShortcuts
             | Self::ReadingActivity
+            | Self::Library
             | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim
@@ -626,6 +634,7 @@ impl Command {
             | Self::KeyboardShortcuts
             | Self::NewTab
             | Self::ReadingActivity
+            | Self::Library
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem

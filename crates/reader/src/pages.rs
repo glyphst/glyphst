@@ -1,14 +1,19 @@
 //! Tabs that are not documents: the keyboard shortcuts, a new tab's
-//! launcher (frame 04b) and the reading activity (frame 04c). They sit in
+//! launcher (frame 04b), the reading activity (frame 04c) and the library
+//! (frame 04d). They sit in
 //! the tab bar after the documents and show in place of home; while one
 //! shows, `ReaderApp::active` is `None`.
 
-use crate::{activity_view::ActivityView, keymap_page::KeymapPage, launcher::Launcher};
+use crate::{
+    activity_view::ActivityView, keymap_page::KeymapPage, launcher::Launcher,
+    library_view::LibraryView,
+};
 
 pub enum Page {
     Keymap(KeymapPage),
     NewTab(Launcher),
     Activity(ActivityView),
+    Library(LibraryView),
 }
 
 impl Page {
@@ -17,6 +22,7 @@ impl Page {
             Self::Keymap(_) => "Keyboard shortcuts",
             Self::NewTab(_) => "new tab",
             Self::Activity(_) => "reading activity",
+            Self::Library(_) => "library",
         }
     }
 
@@ -25,6 +31,7 @@ impl Page {
             Self::Keymap(_) => "keyboard",
             Self::NewTab(_) => "plus",
             Self::Activity(_) => "activity",
+            Self::Library(_) => "library",
         }
     }
 

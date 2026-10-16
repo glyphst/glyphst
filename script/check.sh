@@ -140,6 +140,8 @@ if [[ ${tier} == screens ]]; then
         "04-home"
         "04b-new-tab --command app.new_tab"
         "04c-activity --command app.reading_activity"
+        "04d-library --command app.library"
+        "04e-home-narrow --window 960x900"
         "05-empty @ --assistant-demo empty"
         "05-menu @ --assistant-demo menu"
         "05-running @ --assistant-demo running"

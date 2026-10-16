@@ -16,7 +16,7 @@ use glyphst_core::{
 use glyphst_effects::EffectDef;
 use glyphst_library::{ActivityKind, DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
-use glyphst_ui::Tip;
+use glyphst_ui::{Tip, layout};
 
 use crate::{
     activity_view::{ActivityAction, ActivityView},
@@ -39,6 +39,7 @@ use crate::{
     keymap_page::KeymapPage,
     keys::{self, Keymap, KeymapPreset},
     launcher::{Launcher, LauncherAction, LauncherContext},
+    library_view::{LibraryAction, LibraryView, Mode as LibraryMode, TabContext as LibraryTab},
     overview::Overview,
     pages::Page,
     palette::{self, Item, Palette},
@@ -105,6 +106,9 @@ pub struct Launch {
     pub theme: Option<ThemePreference>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
+    /// The window's size in points, fixed (`--window`, for screenshots of
+    /// narrow layouts).
+    pub window: Option<[f32; 2]>,
     /// Shows the second document beside the first, on this side.
     pub split: Option<Zone>,
     /// Turns (quarter turns clockwise) and spreads the documents' pages,
@@ -686,6 +690,11 @@ impl ReaderApp {
         }
     }
 
+    /// The library tab.
+    pub(crate) fn open_library(&mut self) {
+        self.open_page(Page::Library(LibraryView::new("library-tab")));
+    }
+
     /// Closes page tab `index`; when it was shown, the document shown
     /// before it comes back (or home).
     pub(crate) fn close_page(&mut self, index: usize) {
@@ -720,6 +729,31 @@ impl ReaderApp {
                     self.open(&path, ctx, None);
                 }
             }
+            Page::Library(view) => {
+                let docs = docs();
+                let open_key = self.keymap.label(Command::OpenWithDialog);
+                let tokens = Tokens::get(ctx);
+                ui.painter().rect_filled(ui.max_rect(), 0, tokens.bg);
+                let action = layout::column(ui, layout::MAX_COLUMN, |ui, width| {
+                    ui.add_space(28.0);
+                    view.ui(
+                        ui,
+                        &docs,
+                        width,
+                        LibraryMode::Tab,
+                        Some(LibraryTab {
+                            picking: self.pickers.is_showing(),
+                            open_key: open_key.as_deref(),
+                        }),
+                    )
+                })
+                .0;
+                match action {
+                    Some(LibraryAction::Open(path)) => self.open(&path, ctx, None),
+                    Some(LibraryAction::OpenDialog) => self.pickers.open_documents(ctx),
+                    Some(LibraryAction::Tab) | None => {}
+                }
+            }
             Page::NewTab(launcher) => {
                 let action = launcher.ui(
                     ui,
@@ -729,7 +763,6 @@ impl ReaderApp {
                         covers: &mut self.covers,
                         picking: self.pickers.is_showing(),
                         open_key: self.keymap.label(Command::OpenWithDialog),
-                        palette_key: self.keymap.label(Command::Palette),
                     },
                 );
                 match action {
@@ -744,7 +777,7 @@ impl ReaderApp {
                     Some(LauncherAction::OpenDialog) => self.pickers.open_documents(ctx),
                     Some(LauncherAction::Home) => self.activate(None),
                     Some(LauncherAction::Activity) => self.open_activity(None),
-                    Some(LauncherAction::Palette) => self.palette.toggle(),
+                    Some(LauncherAction::Library) => self.open_library(),
                     None => {}
                 }
             }
@@ -2200,6 +2233,10 @@ impl ReaderApp {
             }
             Command::ReadingActivity => {
                 self.open_activity(None);
+                None
+            }
+            Command::Library => {
+                self.open_library();
                 None
             }
             Command::ToggleTransparency => {
@@ -3714,6 +3751,7 @@ impl eframe::App for ReaderApp {
                             }
                         }
                         HomeAction::Activity(day) => self.open_activity(day),
+                        HomeAction::Library => self.open_library(),
                     }
                 }
             });

@@ -16,19 +16,19 @@ use glyphst_ui::{
     Tip,
     button::Button,
     cover::PageCover,
-    field::TextField,
     heatmap::{self, Heatmap},
     key::Key,
+    layout,
     meter::Meter,
     motif,
     pane::{self, Action as PaneAction, Header},
-    segmented,
     thumb::PageThumb,
 };
 
 use crate::{
     covers::Covers,
     icons,
+    library_view::{LibraryAction, LibraryView, Mode},
     reading_days::{self, ReadingDays},
     theme::{self, Tokens},
 };
@@ -36,13 +36,14 @@ use crate::{
 /// A recent document's cover, and the room between covers.
 pub const COVER_WIDTH: f32 = 148.0;
 pub const COVER_GAP: f32 = 16.0;
-/// Room for the numbers beside home's heatmap.
+/// Room for the numbers beside home's heatmap, and the gap before them.
 const HEAT_STATS: f32 = 140.0;
-/// The main column's widest.
-const COLUMN: f32 = 980.0;
+const HEAT_GAP: f32 = 24.0;
+/// With fewer months than this beside the numbers, the numbers go under
+/// the map.
+const HEAT_MIN_MONTHS: u32 = 4;
 /// The activity pane's width.
 const ACTIVITY_WIDTH: f32 = 380.0;
-const ROW: f32 = 30.0;
 
 pub enum HomeAction {
     Open(PathBuf),
@@ -51,52 +52,36 @@ pub enum HomeAction {
     AskAbout(PathBuf),
     /// Opens the reading activity tab, at a day.
     Activity(Option<chrono::NaiveDate>),
+    /// Opens the library tab.
+    Library,
 }
 
-/// Which documents the library table lists.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Kind {
-    #[default]
-    All,
-    Pdf,
-    Epub,
-}
-
-/// The library table's order.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Sort {
-    #[default]
-    Opened,
-    Title,
-    Progress,
-}
-
-impl Sort {
-    const ALL: [Self; 3] = [Self::Opened, Self::Title, Self::Progress];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Opened => "opened",
-            Self::Title => "title",
-            Self::Progress => "progress",
-        }
-    }
-}
-
-#[derive(Default)]
 pub struct Home {
-    filter: String,
-    kind: Kind,
-    sort: Sort,
+    library: LibraryView,
     /// The activity pane is shown.
     activity_hidden: bool,
     heat: Option<Heat>,
+    /// The column's rect last frame (for tests of the layout).
+    pub(crate) content: Rect,
+}
+
+impl Default for Home {
+    fn default() -> Self {
+        Self {
+            library: LibraryView::new("home-library"),
+            activity_hidden: false,
+            heat: None,
+            content: Rect::NOTHING,
+        }
+    }
 }
 
 /// The heatmap's days, worked out again when a session is added, the day
 /// changes or the map's width does.
 struct Heat {
-    key: (usize, chrono::NaiveDate, usize),
+    key: (usize, chrono::NaiveDate, u32),
+    /// The months shown: 12 for the year of weeks.
+    months_shown: u32,
     days: ReadingDays,
     levels: Vec<Option<u8>>,
     months: Vec<(usize, &'static str)>,
@@ -104,11 +89,16 @@ struct Heat {
 }
 
 impl Heat {
-    fn new(library: &LibraryStore, today: chrono::NaiveDate, weeks: usize) -> Self {
+    fn new(library: &LibraryStore, today: chrono::NaiveDate, months: u32) -> Self {
         let sessions = library.reading_sessions();
-        let days = ReadingDays::weeks_to(sessions, today, weeks);
+        let days = if months >= 12 {
+            ReadingDays::weeks_to(sessions, today, 53)
+        } else {
+            ReadingDays::months_to(sessions, today, months)
+        };
         Self {
-            key: (sessions.len(), today, weeks),
+            key: (sessions.len(), today, months),
+            months_shown: months,
             levels: days.levels(),
             months: days.months(),
             streaks: reading_days::streaks(sessions, today),
@@ -157,6 +147,10 @@ impl Doc {
         }
     }
 
+    pub fn page_count(&self) -> Option<usize> {
+        self.pages
+    }
+
     /// `pdf · 15p`.
     pub fn kind_line(&self) -> String {
         match self.pages {
@@ -167,13 +161,15 @@ impl Doc {
 }
 
 impl Home {
-    pub fn ui(&mut self, ui: &mut egui::Ui, home: HomeContext<'_>) -> Option<HomeAction> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, mut home: HomeContext<'_>) -> Option<HomeAction> {
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0, tokens.bg);
         let docs = documents(home.library, home.page_counts);
-        let show_activity = !self.activity_hidden && full.width() > 900.0;
+        // The activity pane shows while the column keeps its minimum.
+        let show_activity = !self.activity_hidden
+            && full.width() - ACTIVITY_WIDTH >= layout::MIN_COLUMN + 2.0 * layout::GUTTER;
         let main = if show_activity {
             full.with_max_x(full.right() - ACTIVITY_WIDTH)
         } else {
@@ -188,66 +184,13 @@ impl Home {
             .id_salt("home")
             .auto_shrink(false)
             .show(&mut main_ui, |ui| {
-                let width = ui.available_width();
-                let column = (width - 96.0).clamp(240.0, COLUMN);
-                ui.horizontal(|ui| {
-                    ui.add_space(((width - column) / 2.0).max(16.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(column);
-                        ui.add_space(28.0);
-                        greeting(ui, &tokens, home.library, &docs);
-                        if let Some(error) = home.library.startup_error() {
-                            ui.add_space(16.0);
-                            notice(ui, &tokens, error);
-                        }
-                        ui.add_space(20.0);
-                        if let Some(chosen) = self.reading(ui, &tokens, home.library, &docs) {
-                            action = Some(chosen);
-                        }
-                        // The documents come most recently opened first.
-                        let continuing = docs
-                            .iter()
-                            .find(|doc| doc.opened.is_some() && doc.path.exists());
-                        if let Some(doc) = continuing {
-                            ui.add_space(24.0);
-                            let cover = home.covers.get(&doc.path);
-                            if let Some(chosen) =
-                                continue_card(ui, &tokens, home.library, doc, cover)
-                            {
-                                action = Some(chosen);
-                            }
-                        }
-                        let recent: Vec<&Doc> = docs
-                            .iter()
-                            .filter(|doc| doc.opened.is_some())
-                            .filter(|doc| Some(&doc.path) != continuing.map(|doc| &doc.path))
-                            .collect();
-                        if !recent.is_empty() {
-                            ui.add_space(24.0);
-                            // One row: as many covers as the column holds.
-                            let shown = covers_in(column).min(recent.len());
-                            motif::rule_title(
-                                ui,
-                                "recent",
-                                Some(&format!("{shown} of {}", recent.len())),
-                            );
-                            ui.add_space(8.0);
-                            if let Some(chosen) =
-                                cover_row(ui, home.covers, &recent[..shown], column)
-                            {
-                                action = Some(chosen);
-                            }
-                        }
-                        if let Some(chosen) = self.library(ui, &tokens, &docs) {
-                            action = Some(chosen);
-                        }
-                        if docs.is_empty() {
-                            ui.add_space(48.0);
-                            empty(ui, &tokens);
-                        }
-                        ui.add_space(48.0);
-                    });
+                let (chosen, content) = layout::column(ui, layout::MAX_COLUMN, |ui, column| {
+                    self.column(ui, &tokens, &mut home, &docs, column)
                 });
+                self.content = content;
+                if chosen.is_some() {
+                    action = chosen;
+                }
             });
         if show_activity {
             let rect = full.with_min_x(main.right());
@@ -270,191 +213,65 @@ impl Home {
         action
     }
 
-    /// The library as a table: filter, kind, order, and one row per
-    /// document.
-    fn library(&mut self, ui: &mut egui::Ui, tokens: &Tokens, docs: &[Doc]) -> Option<HomeAction> {
-        if docs.is_empty() {
-            return None;
-        }
+    /// Home's sections in the column, `column` wide.
+    fn column(
+        &mut self,
+        ui: &mut egui::Ui,
+        tokens: &Tokens,
+        home: &mut HomeContext<'_>,
+        docs: &[Doc],
+        column: f32,
+    ) -> Option<HomeAction> {
         let mut action = None;
         ui.add_space(28.0);
-        // Narrow columns put the controls under the title.
-        let narrow = ui.available_width() < 780.0;
-        if narrow {
-            motif::rule_title(ui, "library", Some(&docs.len().to_string()));
-            ui.add_space(8.0);
-        }
-        ui.horizontal(|ui| {
-            ui.set_width(ui.available_width());
-            if !narrow {
-                let title_width = (ui.available_width() - 540.0).max(120.0);
-                ui.allocate_ui(vec2(title_width, 20.0), |ui| {
-                    motif::rule_title(ui, "library", Some(&docs.len().to_string()));
-                });
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let sort = ui.add(Button::plain(&format!("{} ▾", self.sort.label())).small());
-                egui::Popup::menu(&sort).show(|ui| {
-                    glyphst_ui::menu::style(ui);
-                    for option in Sort::ALL {
-                        if glyphst_ui::menu::Item::new(option.label())
-                            .checked(self.sort == option)
-                            .show(ui)
-                            .clicked()
-                        {
-                            self.sort = option;
-                        }
-                    }
-                });
-                segmented::labels(
-                    ui,
-                    &mut self.kind,
-                    &[(Kind::All, "all"), (Kind::Pdf, "pdf"), (Kind::Epub, "epub")],
-                );
-                TextField::search(&mut self.filter, "filter by title or author")
-                    .shortcut("/")
-                    .width(ui.available_width().clamp(140.0, 260.0))
-                    .id(egui::Id::new("home-filter"))
-                    .show(ui);
-            });
-        });
-        if ui.input(|i| i.key_pressed(egui::Key::Slash))
-            && ui.ctx().memory(|memory| memory.focused().is_none())
-        {
-            ui.ctx()
-                .memory_mut(|memory| memory.request_focus(egui::Id::new("home-filter")));
-        }
-        ui.add_space(12.0);
-        let filter = self.filter.trim().to_lowercase();
-        let mut rows: Vec<&Doc> = docs
-            .iter()
-            .filter(|doc| match self.kind {
-                Kind::All => true,
-                Kind::Pdf => doc.kind == "pdf",
-                Kind::Epub => doc.kind == "epub",
-            })
-            .filter(|doc| {
-                filter.is_empty()
-                    || doc.title.to_lowercase().contains(&filter)
-                    || doc.authors.to_lowercase().contains(&filter)
-            })
-            .collect();
-        // The sorts are stable over a fixed order, so ties stay put.
-        match self.sort {
-            Sort::Opened => rows.sort_by_key(|doc| std::cmp::Reverse(doc.opened)),
-            Sort::Title => rows.sort_by_key(|doc| doc.title.to_lowercase()),
-            Sort::Progress => rows.sort_by(|a, b| {
-                b.progress()
-                    .unwrap_or(-1.0)
-                    .total_cmp(&a.progress().unwrap_or(-1.0))
-            }),
-        }
-        // Columns: title, authors, type, progress, opened.
-        let (header, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-        let columns = table_columns(header.x_range());
-        let font = theme::mono(10.0);
-        for (index, (title, x)) in [
-            ("title", columns[0]),
-            ("authors", columns[1]),
-            ("type", columns[2]),
-            ("progress", columns[3]),
-            ("opened", columns[4]),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let sorted = matches!(
-                (index, self.sort),
-                (0, Sort::Title) | (3, Sort::Progress) | (4, Sort::Opened)
-            );
-            let label = if sorted {
-                format!("{title} ↓")
-            } else {
-                title.to_owned()
-            };
-            ui.painter().text(
-                pos2(x + 8.0, header.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                font.clone(),
-                if sorted { tokens.text_2 } else { tokens.faint },
-            );
-        }
-        ui.painter()
-            .hline(header.x_range(), header.bottom() - 0.5, tokens.hairline());
-        if rows.is_empty() {
+        greeting(ui, tokens, home.library, docs);
+        if let Some(error) = home.library.startup_error() {
             ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("nothing matches")
-                    .font(theme::mono(11.0))
-                    .color(tokens.muted),
-            );
+            notice(ui, tokens, error);
         }
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let now = current_timestamp();
-        for doc in rows {
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-            if response.hovered() {
-                ui.painter().rect_filled(rect, 0, tokens.hover);
-            }
-            ui.painter()
-                .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
-            let y = rect.center().y;
-            let cell =
-                |ui: &egui::Ui, column: usize, text: &str, color: egui::Color32, size: f32| {
-                    let right = if column + 1 < columns.len() {
-                        columns[column + 1]
-                    } else {
-                        rect.right()
-                    };
-                    glyphst_ui::text::row(
-                        ui,
-                        pos2(columns[column] + 8.0, y),
-                        text.to_owned(),
-                        theme::mono(size),
-                        color,
-                        right - columns[column] - 16.0,
-                    );
-                };
-            cell(ui, 0, &doc.title, tokens.text, 12.0);
-            cell(ui, 1, &doc.authors, tokens.muted, 11.0);
-            cell(ui, 2, &doc.kind, tokens.muted, 11.0);
-            match doc.progress() {
-                Some(progress) if progress < 0.999 => {
-                    let label = doc.progress_label();
-                    Meter::new(progress)
-                        .bar()
-                        .width(110.0)
-                        .label(&label)
-                        .accent_label(true)
-                        .paint(
-                            ui,
-                            Rect::from_min_size(pos2(columns[3] + 8.0, y - 7.0), vec2(116.0, 14.0)),
-                        );
-                }
-                _ => {
-                    let label = doc.progress_label();
-                    let label = if label == "done" {
-                        "done ✓".to_owned()
-                    } else {
-                        label
-                    };
-                    cell(ui, 3, &label, tokens.muted, 11.0);
-                }
-            }
-            let opened = doc
-                .opened
-                .map_or_else(|| "new".to_owned(), |at| day(at, now));
-            cell(ui, 4, &opened, tokens.muted, 11.0);
-            if response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                action = Some(HomeAction::Open(doc.path.clone()));
+        ui.add_space(20.0);
+        if let Some(chosen) = self.reading(ui, tokens, home.library, docs, column) {
+            action = Some(chosen);
+        }
+        // The documents come most recently opened first.
+        let continuing = docs
+            .iter()
+            .find(|doc| doc.opened.is_some() && doc.path.exists());
+        if let Some(doc) = continuing {
+            ui.add_space(24.0);
+            let cover = home.covers.get(&doc.path);
+            if let Some(chosen) = continue_card(ui, tokens, home.library, doc, cover, column) {
+                action = Some(chosen);
             }
         }
+        let recent: Vec<&Doc> = docs
+            .iter()
+            .filter(|doc| doc.opened.is_some())
+            .filter(|doc| Some(&doc.path) != continuing.map(|doc| &doc.path))
+            .collect();
+        if !recent.is_empty() {
+            ui.add_space(24.0);
+            // One row: as many covers as the column holds.
+            let shown = covers_in(column).min(recent.len());
+            motif::rule_title(ui, "recent", Some(&format!("{shown} of {}", recent.len())));
+            ui.add_space(8.0);
+            if let Some(chosen) = cover_row(ui, home.covers, &recent[..shown], column) {
+                action = Some(chosen);
+            }
+        }
+        if docs.is_empty() {
+            ui.add_space(48.0);
+            empty(ui, tokens);
+        } else {
+            ui.add_space(28.0);
+            match self.library.ui(ui, docs, column, Mode::Home, None) {
+                Some(LibraryAction::Open(path)) => action = Some(HomeAction::Open(path)),
+                Some(LibraryAction::Tab) => action = Some(HomeAction::Library),
+                Some(LibraryAction::OpenDialog) => action = Some(HomeAction::OpenDialog),
+                None => {}
+            }
+        }
+        ui.add_space(48.0);
         action
     }
 
@@ -758,103 +575,172 @@ pub fn cover_row(
 }
 
 impl Home {
-    /// The last year's reading (frame 04): `── reading ── last 12 months`
-    /// and `[ activity → ]`, the heatmap with the totals beside it, and
-    /// under it the day pointed at and the legend.
+    /// The reading (frame 04): `── reading ── last 12 months` and
+    /// `[ activity → ]` on the column's right edge, the heatmap with its
+    /// numbers at the right (under it when even a few months would not fit
+    /// beside them), and under it the day pointed at and the legend. A
+    /// column too narrow for a year of weeks shows the last whole months
+    /// that fit (frame 04e).
     fn reading(
         &mut self,
         ui: &mut egui::Ui,
         tokens: &Tokens,
         library: &LibraryStore,
         docs: &[Doc],
+        width: f32,
     ) -> Option<HomeAction> {
         let mut action = None;
-        let width = ui.available_width();
         let today = Local::now().date_naive();
-        let weeks = Heatmap::weeks_in(width - HEAT_STATS - 24.0, 12.0).min(53);
+        let (months, beside) = heat_months(today, width);
         if self
             .heat
             .as_ref()
-            .is_none_or(|heat| heat.key != (library.reading_sessions().len(), today, weeks))
+            .is_none_or(|heat| heat.key != (library.reading_sessions().len(), today, months))
         {
-            self.heat = Some(Heat::new(library, today, weeks));
+            self.heat = Some(Heat::new(library, today, months));
         }
         let heat = self.heat.as_ref()?;
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(width - 120.0, 20.0), Sense::hover());
-            motif::paint_rule_title(ui, rect, "reading  ──  last 12 months", None, true);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(Button::bracket("activity →")).clicked() {
-                    action = Some(HomeAction::Activity(None));
-                }
-            });
-        });
-        ui.add_space(10.0);
-        let mut hovered = None;
-        let mut map_rect = egui::Rect::NOTHING;
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 24.0;
-            let map = Heatmap::new(&heat.levels)
-                .months(&heat.months)
-                .today(heat.days.index(today).unwrap_or(usize::MAX))
-                .show(ui);
-            hovered = map.hovered;
-            map_rect = map.response.rect;
-            if let Some(day) = map.clicked {
-                action = Some(HomeAction::Activity(Some(heat.days.date(day))));
-            }
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 12.0;
-                ui.add_space(18.0);
-                let (current, longest) = heat.streaks;
-                let days = heat.days.reading_days().max(1) as u64;
-                for (value, key) in [
-                    (hours(heat.days.total()), "in 12 months".to_owned()),
-                    (
-                        format!("{current} {}", if current == 1 { "day" } else { "days" }),
-                        format!("streak · best {longest}"),
-                    ),
-                    (
-                        minutes(heat.days.total() / days),
-                        "a reading day".to_owned(),
-                    ),
-                ] {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(
-                            egui::RichText::new(value)
-                                .font(theme::mono_strong(15.0))
-                                .color(tokens.text),
-                        );
-                        ui.label(
-                            egui::RichText::new(key)
-                                .font(theme::mono(10.0))
-                                .color(tokens.faint),
-                        );
-                    });
-                }
-            });
-        });
-        ui.add_space(6.0);
-        // The day pointed at (today otherwise) under the cells, the legend
-        // under the map's right edge.
-        let (row, _) = ui.allocate_exact_size(vec2(map_rect.width(), 12.0), Sense::hover());
-        let mut legend_ui = ui.new_child(
+        let span = if heat.months_shown == 1 {
+            "this month".to_owned()
+        } else {
+            format!("last {} months", heat.months_shown)
+        };
+        // The rule, and `[ activity → ]` on the right edge.
+        let (row, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+        let mut button_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(row)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
+        let button = button_ui.add(Button::bracket("activity →"));
+        if button.clicked() {
+            action = Some(HomeAction::Activity(None));
+        }
+        motif::paint_rule_title(
+            ui,
+            row.with_max_x(button.rect.left() - 12.0),
+            &format!("reading  ──  {span}"),
+            None,
+            true,
+        );
+        ui.add_space(10.0);
+        let map = Heatmap::new(&heat.levels)
+            .months(&heat.months)
+            .today(heat.days.index(today).unwrap_or(usize::MAX));
+        let map_size = map.size();
+        let stats_height = 3.0 * 47.0;
+        let height = if beside {
+            map_size.y.max(stats_height)
+        } else {
+            map_size.y
+        };
+        let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let mut map_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(area.min, map_size))
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+        );
+        let shown = map.show(&mut map_ui);
+        if let Some(day) = shown.clicked {
+            action = Some(HomeAction::Activity(Some(heat.days.date(day))));
+        }
+        let (current, longest) = heat.streaks;
+        let days = heat.days.reading_days().max(1) as u64;
+        let stats = [
+            (
+                hours(heat.days.total()),
+                format!("in {}", span.trim_start_matches("last ")),
+            ),
+            (
+                format!("{current} {}", if current == 1 { "day" } else { "days" }),
+                format!("streak · best {longest}"),
+            ),
+            (
+                minutes(heat.days.total() / days),
+                "a reading day".to_owned(),
+            ),
+        ];
+        let stat = |ui: &egui::Ui, at: egui::Pos2, value: &str, key: &str| {
+            ui.painter().text(
+                at,
+                Align2::LEFT_TOP,
+                value,
+                theme::mono_strong(15.0),
+                tokens.text,
+            );
+            ui.painter().text(
+                at + vec2(0.0, 22.0),
+                Align2::LEFT_TOP,
+                key,
+                theme::mono(10.0),
+                tokens.faint,
+            );
+        };
+        if beside {
+            let x = area.right() - HEAT_STATS;
+            for (index, (value, key)) in stats.iter().enumerate() {
+                stat(
+                    ui,
+                    pos2(x, area.top() + 18.0 + index as f32 * 47.0),
+                    value,
+                    key,
+                );
+            }
+        }
+        ui.add_space(6.0);
+        // The day pointed at (today otherwise), and the legend on the
+        // column's right edge.
+        let (foot, _) = ui.allocate_exact_size(vec2(width, 12.0), Sense::hover());
+        let mut legend_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(foot)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
         let legend = heatmap::legend(&mut legend_ui).rect;
-        let day = hovered.map_or(today, |day| heat.days.date(day));
+        let day = shown.hovered.map_or(today, |day| heat.days.date(day));
         glyphst_ui::text::row(
             ui,
-            pos2(row.left() + 30.0, row.center().y),
+            pos2(foot.left() + 30.0, foot.center().y),
             day_summary(library, docs, day),
             theme::mono(9.0),
             tokens.faint,
-            (legend.left() - row.left() - 46.0).max(0.0),
+            (legend.left() - foot.left() - 46.0).max(0.0),
         );
+        if !beside {
+            ui.add_space(12.0);
+            let (under, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+            let step = width / stats.len() as f32;
+            for (index, (value, key)) in stats.iter().enumerate() {
+                stat(
+                    ui,
+                    pos2(under.left() + index as f32 * step, under.top()),
+                    value,
+                    key,
+                );
+            }
+        }
         action
+    }
+}
+
+/// The months home's heatmap shows in a column `width` wide, and whether
+/// its numbers sit beside it: a year of weeks when it fits beside them,
+/// else the last whole months that fit, under them when fewer than
+/// [`HEAT_MIN_MONTHS`] would fit beside.
+fn heat_months(today: chrono::NaiveDate, width: f32) -> (u32, bool) {
+    let beside = Heatmap::weeks_in(width - HEAT_STATS - HEAT_GAP, 12.0);
+    if beside >= 53 {
+        return (12, true);
+    }
+    let months = reading_days::months_in(today, beside);
+    if months >= HEAT_MIN_MONTHS {
+        return (months, true);
+    }
+    let alone = Heatmap::weeks_in(width, 12.0);
+    if alone >= 53 {
+        (12, false)
+    } else {
+        (reading_days::months_in(today, alone), false)
     }
 }
 
@@ -970,47 +856,60 @@ fn greeting(ui: &mut egui::Ui, tokens: &Tokens, library: &LibraryStore, docs: &[
     }
 }
 
-/// The document to continue: its cover, title and place, `continue →`
-/// and `[ ask about it ]`.
+/// The document to continue: its cover, title (two lines at most) and
+/// place, and at the right edge `continue →` and `[ ask about it ]`.
 fn continue_card(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     library: &LibraryStore,
     doc: &Doc,
     cover: Option<crate::covers::CoverTexture>,
+    width: f32,
 ) -> Option<HomeAction> {
+    const COVER: f32 = 96.0;
+    const ACTIONS: f32 = 170.0;
+    const GAP: f32 = 20.0;
     let mut action = None;
     pane::card(ui.ctx())
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            // The margins and the card's 1pt edge on each side.
+            let inner = width - 34.0;
+            ui.set_width(inner);
+            let info = (inner - COVER - ACTIONS - 2.0 * GAP).max(120.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
                 let cover = PageThumb {
                     label: "",
                     current: false,
                     texture: cover.map(|(texture, _)| texture),
                     aspect: cover.map_or(96.0 / 124.0, |(_, aspect)| aspect.max(96.0 / 192.0)),
-                    width: 96.0,
+                    width: COVER,
                 }
                 .show(ui)
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if cover.clicked() {
                     action = Some(HomeAction::Open(doc.path.clone()));
                 }
-                ui.add_space(16.0);
                 ui.vertical(|ui| {
+                    ui.set_width(info);
                     ui.spacing_mut().item_spacing.y = 6.0;
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new("continue reading")
                             .font(theme::mono(10.0))
                             .color(tokens.accent_text),
                     );
-                    ui.label(
-                        egui::RichText::new(&doc.title)
-                            .font(theme::semibold(20.0))
-                            .color(tokens.text),
+                    let mut title = egui::text::LayoutJob::simple(
+                        doc.title.clone(),
+                        theme::semibold(20.0),
+                        tokens.text,
+                        info,
                     );
+                    title.wrap.max_rows = 2;
+                    title.wrap.break_anywhere = false;
+                    title.wrap.overflow_character = Some('…');
+                    ui.label(title);
                     let mut meta = Vec::new();
                     if !doc.authors.is_empty() {
                         meta.push(doc.authors.to_lowercase());
@@ -1022,16 +921,19 @@ fn continue_card(
                     if let Some(pages) = doc.pages {
                         meta.push(format!("{pages} pages"));
                     }
-                    ui.label(
-                        egui::RichText::new(meta.join(" · "))
-                            .font(theme::mono(11.0))
-                            .color(tokens.muted),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(meta.join(" · "))
+                                .font(theme::mono(11.0))
+                                .color(tokens.muted),
+                        )
+                        .truncate(),
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
                         if let Some(progress) = doc.progress() {
-                            ui.add(Meter::new(progress).bar().width(180.0));
+                            ui.add(Meter::new(progress).bar().width((info * 0.4).min(180.0)));
                         }
                         let today = {
                             let now = current_timestamp();
@@ -1045,26 +947,37 @@ fn continue_card(
                         if minutes_today >= 60 {
                             place.push_str(&format!(" · {} today", minutes(minutes_today)));
                         }
-                        ui.label(
-                            egui::RichText::new(place)
-                                .font(theme::mono(11.0))
-                                .color(tokens.muted),
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(place)
+                                    .font(theme::mono(11.0))
+                                    .color(tokens.muted),
+                            )
+                            .truncate(),
                         );
                     });
                 });
-                // The actions at the card's right edge.
-                ui.add_space((ui.available_width() - 150.0).max(0.0));
-                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                    ui.vertical(|ui| {
-                        ui.add_space(40.0);
+                // The actions on the card's right edge.
+                ui.vertical(|ui| {
+                    ui.set_width(ACTIONS);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                        ui.add_space(36.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(Button::primary("continue").trailing_icon("arrow-right"))
-                                .clicked()
-                            {
-                                action = Some(HomeAction::Open(doc.path.clone()));
-                            }
-                            ui.add(Key("enter"));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            Button::primary("continue")
+                                                .trailing_icon("arrow-right"),
+                                        )
+                                        .clicked()
+                                    {
+                                        action = Some(HomeAction::Open(doc.path.clone()));
+                                    }
+                                    ui.add(Key("enter"));
+                                },
+                            );
                         });
                         if ui.add(Button::bracket_muted("ask about it")).clicked() {
                             action = Some(HomeAction::AskAbout(doc.path.clone()));
@@ -1157,18 +1070,6 @@ fn drop_hint(ui: &egui::Ui, tokens: &Tokens, rect: Rect) {
     );
 }
 
-/// The columns' left edges across `x`.
-fn table_columns(x: egui::Rangef) -> [f32; 5] {
-    let width = x.span();
-    [
-        x.min,
-        x.min + width * 0.44,
-        x.min + width * 0.64,
-        x.min + width * 0.72,
-        x.min + width * 0.88,
-    ]
-}
-
 /// `pdf`, `epub`… from the file's extension.
 pub fn kind_of(path: &Path) -> String {
     path.extension()
@@ -1185,7 +1086,7 @@ fn title_of(path: &Path) -> String {
 }
 
 /// When a document was opened: `today`, `yesterday`, `mon`, `oct 02`.
-fn day(at: u64, now: u64) -> String {
+pub(crate) fn day(at: u64, now: u64) -> String {
     let (Some(then), Some(today)) = (
         Local.timestamp_opt(at as i64, 0).single(),
         Local.timestamp_opt(now as i64, 0).single(),
@@ -1288,6 +1189,78 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(paths(&library), first);
         }
+    }
+
+    /// A document with a very long name keeps home in its column: the
+    /// title wraps and ends in `…` instead of widening the sections.
+    #[test]
+    fn a_long_title_keeps_home_in_its_column() {
+        use glyphst_library::{DocumentPosition, HistoryEntry};
+        let dir = std::env::temp_dir().join(format!("glyphst-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!(
+            "{} Just for Fun the Story of an Accidental Revolutionary.pdf",
+            "Linus Torvalds David Diamond ".repeat(6)
+        );
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap();
+        let mut library = LibraryStore::memory();
+        library
+            .replace_history_entries(vec![HistoryEntry {
+                path: path.clone(),
+                opened: 5,
+                position: DocumentPosition::fixed(0.0, 0.0, 1.0, 3),
+            }])
+            .unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        theme::apply(&ctx, &theme::Appearance::default());
+        let mut covers = Covers::new(&ctx);
+        let mut home = Home::default();
+        for width in [1440.0, 900.0] {
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 900.0))),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    home.ui(
+                        ui,
+                        HomeContext {
+                            library: &library,
+                            page_counts: &BTreeMap::new(),
+                            picking: false,
+                            open_key: None,
+                            covers: &mut covers,
+                        },
+                    );
+                });
+                output.textures_delta.clear();
+            }
+            let main = if width - ACTIVITY_WIDTH >= layout::MIN_COLUMN + 2.0 * layout::GUTTER {
+                width - ACTIVITY_WIDTH
+            } else {
+                width
+            };
+            let column = layout::column_width(main, layout::MAX_COLUMN);
+            assert!(
+                home.content.width() <= column + 0.5,
+                "at {width}: {} wide in a {column} column",
+                home.content.width()
+            );
+            assert!(home.content.right() <= main, "at {width}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_shows_a_year_or_the_last_whole_months_that_fit() {
+        let today = chrono::NaiveDate::from_ymd_opt(2025, 10, 15).unwrap();
+        assert_eq!(heat_months(today, 1040.0), (12, true));
+        // 960 window: 864 column, 44 weeks beside the numbers.
+        assert_eq!(heat_months(today, 864.0), (10, true));
+        // Too narrow for four months beside: the numbers go under.
+        assert!(!heat_months(today, 400.0).1);
     }
 
     #[test]

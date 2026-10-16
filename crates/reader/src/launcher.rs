@@ -1,21 +1,21 @@
 //! The new tab (frame 04b): `What do you want to read?` over a field that
-//! takes a path (completed from the folder it names) or words matched
-//! against the library's titles and authors, the recent documents' first
-//! pages, rows to go elsewhere and a drop zone. Opening a document turns
-//! the tab into it.
+//! takes a path (completed from the folder it names) or words that filter
+//! the library table below, links to open a file or go elsewhere, and the
+//! recent documents' first pages. Opening a document turns the tab into
+//! it.
 
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
-use egui::{Rect, vec2};
 use glyphst_library::LibraryStore;
-use glyphst_ui::{field::TextField, key::Key, motif, row::ListRow};
+use glyphst_ui::{button::Button, field::TextField, key::Key, layout, motif, row::ListRow};
 
 use crate::{
     covers::Covers,
     home::{self, Doc, HomeAction},
+    library_view::{LibraryAction, LibraryView, Mode},
     theme::{self, Tokens},
 };
 
@@ -28,20 +28,31 @@ pub enum LauncherAction {
     Open(PathBuf),
     OpenDialog,
     Home,
+    Library,
     Activity,
-    Palette,
 }
 
-#[derive(Default)]
 pub struct Launcher {
     query: String,
-    /// The highlighted match.
+    /// The highlighted folder entry.
     selected: usize,
     /// The field has had the keys once (on the first frame).
     focused: bool,
+    library: LibraryView,
 }
 
-/// A match for the query: a document of the library, or a path.
+impl Default for Launcher {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            selected: 0,
+            focused: false,
+            library: LibraryView::new("launcher-library"),
+        }
+    }
+}
+
+/// A folder entry matching a path typed.
 #[derive(Clone, Debug, PartialEq)]
 struct Match {
     path: PathBuf,
@@ -56,7 +67,6 @@ pub struct LauncherContext<'a> {
     pub covers: &'a mut Covers,
     pub picking: bool,
     pub open_key: Option<String>,
-    pub palette_key: Option<String>,
 }
 
 /// Whether `query` is a path rather than words.
@@ -116,31 +126,6 @@ fn path_matches(query: &str) -> Vec<Match> {
     found
 }
 
-/// Library documents whose title, authors or file name hold every word of
-/// `query`.
-fn library_matches(docs: &[Doc], query: &str) -> Vec<Match> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    docs.iter()
-        .filter(|doc| {
-            let haystack = format!(
-                "{} {} {}",
-                doc.title,
-                doc.authors,
-                doc.path.file_name().unwrap_or_default().to_string_lossy()
-            )
-            .to_lowercase();
-            words.iter().all(|word| haystack.contains(word))
-        })
-        .take(MATCHES)
-        .map(|doc| Match {
-            path: doc.path.clone(),
-            title: doc.title.clone(),
-            meta: doc.kind_line(),
-            folder: false,
-        })
-        .collect()
-}
-
 impl Launcher {
     pub fn ui(
         &mut self,
@@ -153,156 +138,119 @@ impl Launcher {
         ui.painter().rect_filled(full, 0, tokens.bg);
         let docs = home::documents(context.library, context.page_counts);
         let query = self.query.trim().to_owned();
-        let matches = if query.is_empty() {
-            Vec::new()
-        } else if is_path(&query) {
+        let path = is_path(&query);
+        // Words filter the library below; a path lists its folder.
+        self.library.filter = if path { String::new() } else { query.clone() };
+        let matches = if path {
             path_matches(&self.query)
         } else {
-            library_matches(&docs, &query)
+            Vec::new()
         };
         self.selected = self.selected.min(matches.len().saturating_sub(1));
+        let first_doc = (!path && !query.is_empty())
+            .then(|| self.library.rows(&docs).first().map(|doc| doc.path.clone()))
+            .flatten();
         egui::ScrollArea::vertical()
             .id_salt("launcher")
             .auto_shrink(false)
             .show(ui, |ui| {
-                let width = ui.available_width();
-                let column = (width - 96.0).clamp(240.0, COLUMN);
-                ui.horizontal(|ui| {
-                    ui.add_space(((width - column) / 2.0).max(16.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(column);
-                        ui.spacing_mut().item_spacing.y = 12.0;
-                        ui.add_space((full.height() * 0.1).clamp(24.0, 96.0));
-                        motif::rule_title(ui, "new tab", None);
-                        ui.label(
-                            egui::RichText::new("What do you want to read?")
-                                .font(theme::semibold(22.0))
-                                .color(tokens.text),
-                        );
-                        let field_id = ui.id().with("launcher-field");
-                        let field =
-                            TextField::new(&mut self.query, "a path, a title or an author…")
-                                .icon("folder-search")
-                                .width(column)
-                                .id(field_id)
+                layout::column(ui, COLUMN, |ui, column| {
+                    ui.spacing_mut().item_spacing.y = 12.0;
+                    ui.add_space((full.height() * 0.07).clamp(24.0, 64.0));
+                    motif::rule_title(ui, "new tab", None);
+                    ui.label(
+                        egui::RichText::new("What do you want to read?")
+                            .font(theme::semibold(22.0))
+                            .color(tokens.text),
+                    );
+                    let field_id = ui.id().with("launcher-field");
+                    let field = TextField::new(&mut self.query, "a path, a title or an author…")
+                        .icon("folder-search")
+                        .width(column)
+                        .id(field_id)
+                        .show(ui);
+                    if !self.focused {
+                        field.request_focus();
+                        self.focused = true;
+                    }
+                    if field.changed() {
+                        self.selected = 0;
+                    }
+                    if let Some(chosen) = self.keys(ui, &field, &matches, first_doc.as_deref()) {
+                        action = Some(chosen);
+                    }
+                    hints(ui, &tokens);
+                    if let Some(chosen) = links(ui, &context) {
+                        action = Some(chosen);
+                    }
+                    ui.add_space(8.0);
+                    if path {
+                        motif::rule_title(ui, "in the folder", Some(&matches.len().to_string()));
+                        if matches.is_empty() {
+                            ui.label(
+                                egui::RichText::new("nothing matches")
+                                    .font(theme::mono(11.0))
+                                    .color(tokens.faint),
+                            );
+                        }
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for (index, found) in matches.iter().enumerate() {
+                            let icon = if found.folder { "folder" } else { "file-text" };
+                            let response = ListRow::new(&found.title)
+                                .icon(icon)
+                                .meta(found.meta.as_str())
+                                .active(index == self.selected)
                                 .show(ui);
-                        if !self.focused {
-                            field.request_focus();
-                            self.focused = true;
-                        }
-                        if field.changed() {
-                            self.selected = 0;
-                        }
-                        if let Some(chosen) = self.keys(ui, &field, &matches) {
-                            action = Some(chosen);
-                        }
-                        hints(ui, &tokens);
-                        ui.add_space(12.0);
-                        if !query.is_empty() {
-                            let title = if is_path(&query) {
-                                "in the folder"
-                            } else {
-                                "in the library"
-                            };
-                            motif::rule_title(ui, title, Some(&matches.len().to_string()));
-                            if matches.is_empty() {
-                                ui.label(
-                                    egui::RichText::new("nothing matches")
-                                        .font(theme::mono(11.0))
-                                        .color(tokens.faint),
-                                );
-                            }
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            for (index, found) in matches.iter().enumerate() {
-                                let icon = if found.folder { "folder" } else { "file-text" };
-                                let response = ListRow::new(&found.title)
-                                    .icon(icon)
-                                    .meta(found.meta.as_str())
-                                    .active(index == self.selected)
-                                    .show(ui);
-                                if response.clicked() {
-                                    action = self.choose(found);
-                                }
-                            }
-                            ui.spacing_mut().item_spacing.y = 12.0;
-                        } else {
-                            let recent: Vec<&Doc> =
-                                docs.iter().filter(|doc| doc.opened.is_some()).collect();
-                            if !recent.is_empty() {
-                                let shown = home::covers_in(column).min(recent.len());
-                                motif::rule_title(
-                                    ui,
-                                    "recent",
-                                    Some(&format!("{shown} of {}", recent.len())),
-                                );
-                                if let Some(HomeAction::Open(path)) =
-                                    home::cover_row(ui, context.covers, &recent[..shown], column)
-                                {
-                                    action = Some(LauncherAction::Open(path));
-                                }
+                            if response.clicked() {
+                                action = self.choose(found);
                             }
                         }
-                        ui.add_space(12.0);
-                        ui.horizontal_top(|ui| {
-                            ui.spacing_mut().item_spacing.x = 24.0;
-                            let zone_width = (column * 0.47).min(340.0);
-                            ui.vertical(|ui| {
-                                ui.set_width(column - zone_width - 24.0);
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                motif::rule_title(ui, "go to", None);
-                                for (icon, title, key, chosen) in [
-                                    ("library", "home and library", None, LauncherAction::Home),
-                                    (
-                                        "activity",
-                                        "reading activity",
-                                        None,
-                                        LauncherAction::Activity,
-                                    ),
-                                    (
-                                        "search",
-                                        "search the whole library",
-                                        context.palette_key.as_deref(),
-                                        LauncherAction::Palette,
-                                    ),
-                                ] {
-                                    let key = key.map(glyphst_ui::key::display);
-                                    if ListRow::new(title)
-                                        .icon(icon)
-                                        .key(key.as_deref())
-                                        .show(ui)
-                                        .clicked()
-                                    {
-                                        action = Some(chosen);
-                                    }
-                                }
-                            });
-                            let (zone, _) = ui
-                                .allocate_exact_size(vec2(zone_width, 176.0), egui::Sense::hover());
-                            if home::drop_zone(
+                        ui.spacing_mut().item_spacing.y = 12.0;
+                    } else if query.is_empty() {
+                        let recent: Vec<&Doc> =
+                            docs.iter().filter(|doc| doc.opened.is_some()).collect();
+                        if !recent.is_empty() {
+                            let shown = home::covers_in(column).min(recent.len());
+                            motif::rule_title(
                                 ui,
-                                &tokens,
-                                Rect::from_min_size(zone.min, zone.size()),
-                                context.picking,
-                                context.open_key.as_deref(),
-                                "launcher-open-row",
-                            ) {
+                                "recent",
+                                Some(&format!("{shown} of {}", recent.len())),
+                            );
+                            if let Some(HomeAction::Open(path)) =
+                                home::cover_row(ui, context.covers, &recent[..shown], column)
+                            {
+                                action = Some(LauncherAction::Open(path));
+                            }
+                        }
+                    }
+                    if !path && !docs.is_empty() {
+                        ui.add_space(8.0);
+                        match self.library.ui(ui, &docs, column, Mode::Launcher, None) {
+                            Some(LibraryAction::Open(path)) => {
+                                action = Some(LauncherAction::Open(path));
+                            }
+                            Some(LibraryAction::Tab) => action = Some(LauncherAction::Library),
+                            Some(LibraryAction::OpenDialog) => {
                                 action = Some(LauncherAction::OpenDialog);
                             }
-                        });
-                        ui.add_space(48.0);
-                    });
+                            None => {}
+                        }
+                    }
+                    ui.add_space(48.0);
                 });
             });
         action
     }
 
-    /// Up and down choose a match, Tab completes a path to it, Enter opens
-    /// it (or the path typed, when it is a document).
+    /// Up and down choose a folder entry, Tab completes a path to it, and
+    /// Enter opens it, the path typed when it is a document, or the first
+    /// document the words match.
     fn keys(
         &mut self,
         ui: &egui::Ui,
         field: &egui::Response,
         matches: &[Match],
+        first_doc: Option<&Path>,
     ) -> Option<LauncherAction> {
         if !field.has_focus() && !field.lost_focus() {
             return None;
@@ -335,6 +283,9 @@ impl Launcher {
                 field.request_focus();
                 return self.choose(&found);
             }
+            if let Some(path) = first_doc {
+                return Some(LauncherAction::Open(path.to_path_buf()));
+            }
         }
         None
     }
@@ -358,6 +309,35 @@ impl Launcher {
             Some(LauncherAction::Open(found.path.clone()))
         }
     }
+}
+
+/// `[ open file… ]` with its key, `[ library ]`, `[ reading activity ]`
+/// and `[ home ]`.
+fn links(ui: &mut egui::Ui, context: &LauncherContext<'_>) -> Option<LauncherAction> {
+    let mut action = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if ui
+            .add_enabled(!context.picking, Button::bracket("open file…"))
+            .clicked()
+        {
+            action = Some(LauncherAction::OpenDialog);
+        }
+        if let Some(key) = &context.open_key {
+            ui.add(Key(&glyphst_ui::key::display(key)));
+        }
+        for (label, chosen) in [
+            ("library", LauncherAction::Library),
+            ("reading activity", LauncherAction::Activity),
+            ("home", LauncherAction::Home),
+        ] {
+            ui.add_space(10.0);
+            if ui.add(Button::bracket_muted(label)).clicked() {
+                action = Some(chosen);
+            }
+        }
+    });
+    action
 }
 
 /// `enter open · tab complete path · ↑ ↓ choose`.

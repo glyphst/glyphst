@@ -47,6 +47,7 @@ mod home;
 mod keymap_page;
 mod keys;
 mod launcher;
+mod library_view;
 mod overview;
 mod pages;
 mod palette;
@@ -76,7 +77,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -90,6 +91,7 @@ fn parse_args() -> Result<Launch> {
         transition: None,
         theme: None,
         zoom: None,
+        window: None,
         split: None,
         overlay: None,
         wallpaper: None,
@@ -166,6 +168,16 @@ fn parse_args() -> Result<Launch> {
             }
             "--transition" => launch.transition = Some(value()?),
             "--zoom" => launch.zoom = Some(value()?.parse().context("--zoom takes a number")?),
+            "--window" => {
+                let size = value()?;
+                let (width, height) = size
+                    .split_once('x')
+                    .context("--window takes WIDTHxHEIGHT")?;
+                launch.window = Some([
+                    width.parse().context("--window width")?,
+                    height.parse().context("--window height")?,
+                ]);
+            }
             "--find" => launch.find = Some(value()?),
             "--translate-fake" => launch.translate_fake = true,
             "--translate-document" => launch.translate_document = true,
@@ -333,12 +345,17 @@ fn main() -> Result<()> {
             dirs::config_dir().map(|dir| dir.join("glyphst").join("reader-egui").join("app.ron"))
         })
         .flatten();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Glyphst Reader")
+        .with_app_id("glyphst-reader")
+        .with_inner_size(launch.window.unwrap_or([1440.0, 920.0]))
+        .with_min_inner_size([720.0, 480.0]);
+    // A fixed size, which tiling compositors keep.
+    if let Some(size) = launch.window {
+        viewport = viewport.with_min_inner_size(size).with_max_inner_size(size);
+    }
     let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Glyphst Reader")
-            .with_app_id("glyphst-reader")
-            .with_inner_size([1440.0, 920.0])
-            .with_min_inner_size([720.0, 480.0])
+        viewport: viewport
             .with_drag_and_drop(true)
             // Always able to show the desktop through, so transparency
             // turns on and off without a restart; opaque until it is on.

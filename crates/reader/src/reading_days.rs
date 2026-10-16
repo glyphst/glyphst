@@ -62,6 +62,12 @@ impl ReadingDays {
         Self::new(sessions, first, today)
     }
 
+    /// The `months` whole months up to `today`: from the 1st of the month
+    /// `months − 1` before today's.
+    pub fn months_to(sessions: &[ReadingSession], today: NaiveDate, months: u32) -> Self {
+        Self::new(sessions, first_of_months(today, months), today)
+    }
+
     /// Calendar year `year`, up to `today` when it is this year.
     pub fn year(sessions: &[ReadingSession], year: i32, today: NaiveDate) -> Self {
         let first = NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(today);
@@ -126,6 +132,31 @@ impl ReadingDays {
     pub fn reading_days(&self) -> usize {
         self.seconds.iter().filter(|&&s| s > 0).count()
     }
+}
+
+/// The 1st of the month `months − 1` before `today`'s.
+fn first_of_months(today: NaiveDate, months: u32) -> NaiveDate {
+    let back = months.saturating_sub(1);
+    let month0 = today.year() * 12 + today.month0() as i32 - back as i32;
+    NaiveDate::from_ymd_opt(month0.div_euclid(12), month0.rem_euclid(12) as u32 + 1, 1)
+        .unwrap_or(today)
+}
+
+/// How many weeks the grid of the last `months` months up to `today`
+/// takes.
+pub fn weeks_of_months(today: NaiveDate, months: u32) -> usize {
+    let first = first_of_months(today, months);
+    let start = first - Duration::days(i64::from(first.weekday().num_days_from_monday()));
+    ((today - start).num_days().max(0) as usize + 1).div_ceil(7)
+}
+
+/// The most whole months (up to 11) whose weeks fit in `weeks`; at least
+/// one.
+pub fn months_in(today: NaiveDate, weeks: usize) -> u32 {
+    (1..=11)
+        .rev()
+        .find(|&months| weeks_of_months(today, months) <= weeks)
+        .unwrap_or(1)
 }
 
 /// The current streak (days in a row up to today, or up to yesterday
@@ -296,6 +327,31 @@ mod tests {
         assert_eq!(months[0], (0, "jan"));
         assert_eq!(months[1].1, "feb");
         assert_eq!(months.len(), 12);
+    }
+
+    #[test]
+    fn the_last_months_start_on_the_first() {
+        let today = date(2025, 10, 15);
+        let days = ReadingDays::months_to(&[], today, 4);
+        assert_eq!(days.first, date(2025, 7, 1));
+        assert_eq!(days.start, date(2025, 6, 30), "the Monday before");
+        let levels = days.levels();
+        assert_eq!(levels[0], None, "june is outside");
+        assert_eq!(levels[1], Some(0));
+        assert_eq!(days.months()[0], (0, "jul"));
+        assert_eq!(weeks_of_months(today, 4), days.seconds.len() / 7);
+        // Across a year: ten months back from october is january.
+        assert_eq!(first_of_months(today, 10), date(2025, 1, 1));
+        assert_eq!(first_of_months(date(2025, 2, 3), 4), date(2024, 11, 1));
+    }
+
+    #[test]
+    fn as_many_whole_months_as_the_weeks_hold() {
+        let today = date(2025, 10, 15);
+        // 44 weeks hold january on (42 weeks), not december (46).
+        assert_eq!(months_in(today, 44), 10);
+        assert_eq!(months_in(today, 16), 4);
+        assert_eq!(months_in(today, 1), 1);
     }
 
     #[test]

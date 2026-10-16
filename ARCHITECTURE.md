@@ -171,9 +171,12 @@ move, or names the page for `G`/`gg`. The user's shortcuts replace a
 command's default keys in either preset and are kept by command id in the
 Reader's preferences. They are edited in the Keyboard shortcuts tab
 (`keymap_page.rs`), one of the page tabs (`pages.rs`) that sit in the tab
-strip after the documents, with new tabs (`launcher.rs`, frame 04b) and the
-reading activity (`activity_view.rs`, frame 04c): while one shows, no
-document is active, as on home (the `g` mark).
+strip after the documents, with new tabs (`launcher.rs`, frame 04b), the
+reading activity (`activity_view.rs`, frame 04c) and the library
+(`library_view.rs`, frame 04d, whose table home and the new tab embed):
+while one shows, no document is active, as on home (the `g` mark). These
+views lay their content out in `glyphst_ui::layout::column`, the centred
+column of the design's layout rules.
 
 Translation runs the domain services on worker threads: a selection becomes a
 card, and a PDF becomes a translation session whose pages (one-page PDFs

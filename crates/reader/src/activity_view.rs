@@ -10,7 +10,7 @@ use glyphst_ui::{
     button::Button,
     heatmap::{self, Heatmap},
     key::Key,
-    motif,
+    layout, motif,
     pane::Header,
     row::ListRow,
     segmented,
@@ -26,7 +26,6 @@ use crate::{
 const DAY_WIDTH: f32 = 380.0;
 /// The narrowest a number of the strip gets.
 const STAT_WIDTH: f32 = 128.0;
-const COLUMN: f32 = 980.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Range {
@@ -112,7 +111,8 @@ impl ActivityView {
         ui.painter().rect_filled(full, 0, tokens.bg);
         let today = Local::now().date_naive();
         let mut action = None;
-        let show_day = full.width() > 900.0;
+        // The day pane shows while the column keeps its minimum.
+        let show_day = full.width() - DAY_WIDTH >= layout::MIN_COLUMN + 2.0 * layout::GUTTER;
         let main = if show_day {
             full.with_max_x(full.right() - DAY_WIDTH)
         } else {
@@ -127,19 +127,13 @@ impl ActivityView {
             .id_salt("activity")
             .auto_shrink(false)
             .show(&mut main_ui, |ui| {
-                let width = ui.available_width();
-                let column = (width - 96.0).clamp(240.0, COLUMN);
-                ui.horizontal(|ui| {
-                    ui.add_space(((width - column) / 2.0).max(16.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(column);
-                        ui.spacing_mut().item_spacing.y = 20.0;
-                        ui.add_space(8.0);
-                        if let Some(chosen) = self.main(ui, &tokens, library, docs, today) {
-                            action = Some(chosen);
-                        }
-                        ui.add_space(28.0);
-                    });
+                layout::column(ui, layout::MAX_COLUMN, |ui, _| {
+                    ui.spacing_mut().item_spacing.y = 20.0;
+                    ui.add_space(8.0);
+                    if let Some(chosen) = self.main(ui, &tokens, library, docs, today) {
+                        action = Some(chosen);
+                    }
+                    ui.add_space(28.0);
                 });
             });
         if show_day {
