@@ -5,7 +5,7 @@
 //! covers are not rendered.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -164,23 +164,22 @@ impl Home {
                             ui.add_space(16.0);
                             notice(ui, &tokens, error);
                         }
+                        // The documents come most recently opened first.
                         let continuing = docs
                             .iter()
-                            .filter(|doc| doc.opened.is_some() && doc.path.exists())
-                            .max_by_key(|doc| doc.opened);
+                            .find(|doc| doc.opened.is_some() && doc.path.exists());
                         if let Some(doc) = continuing {
                             ui.add_space(24.0);
                             if let Some(chosen) = continue_card(ui, &tokens, home.library, doc) {
                                 action = Some(chosen);
                             }
                         }
-                        let mut recent: Vec<&Doc> = docs
+                        let recent: Vec<&Doc> = docs
                             .iter()
                             .filter(|doc| doc.opened.is_some())
                             .filter(|doc| Some(&doc.path) != continuing.map(|doc| &doc.path))
+                            .take(RECENT_LIMIT)
                             .collect();
-                        recent.sort_by_key(|doc| std::cmp::Reverse(doc.opened));
-                        recent.truncate(RECENT_LIMIT);
                         if !recent.is_empty() {
                             ui.add_space(24.0);
                             motif::rule_title(ui, "recent", Some(&recent.len().to_string()));
@@ -302,6 +301,7 @@ impl Home {
                     || doc.authors.to_lowercase().contains(&filter)
             })
             .collect();
+        // The sorts are stable over a fixed order, so ties stay put.
         match self.sort {
             Sort::Opened => rows.sort_by_key(|doc| std::cmp::Reverse(doc.opened)),
             Sort::Title => rows.sort_by_key(|doc| doc.title.to_lowercase()),
@@ -607,10 +607,10 @@ impl Home {
     }
 }
 
-/// The documents home lists: those opened before and those in the
-/// library, with what is known of each.
+/// The documents home lists, with what is known of each: those opened
+/// before, most recent first, then the rest of the library by path. The
+/// order is fixed, so equal times never trade places between frames.
 fn documents(library: &LibraryStore, page_counts: &BTreeMap<String, usize>) -> Vec<Doc> {
-    let mut docs: HashMap<PathBuf, Doc> = HashMap::new();
     let doc = |path: &Path| {
         let item = library.library_item_for_path(path);
         let authors = item
@@ -642,17 +642,28 @@ fn documents(library: &LibraryStore, page_counts: &BTreeMap<String, usize>) -> V
             opened: None,
         }
     };
-    for entry in library.history_entries() {
-        let mut found = doc(&entry.path);
-        found.page = entry.position.page.max(1);
-        found.opened = Some(entry.opened);
-        docs.insert(entry.path.clone(), found);
+    let mut history: Vec<_> = library.history_entries().iter().collect();
+    history.sort_by(|a, b| b.opened.cmp(&a.opened).then_with(|| a.path.cmp(&b.path)));
+    let mut seen = HashSet::new();
+    let mut docs = Vec::new();
+    for entry in history {
+        if seen.insert(entry.path.as_path()) {
+            let mut found = doc(&entry.path);
+            found.page = entry.position.page.max(1);
+            found.opened = Some(entry.opened);
+            docs.push(found);
+        }
     }
-    for attachment in library.library_attachments() {
-        docs.entry(attachment.path.clone())
-            .or_insert_with(|| doc(&attachment.path));
-    }
-    docs.into_values().collect()
+    let mut attachments: Vec<&Path> = library
+        .library_attachments()
+        .iter()
+        .map(|attachment| attachment.path.as_path())
+        .filter(|path| !seen.contains(path))
+        .collect();
+    attachments.sort();
+    attachments.dedup();
+    docs.extend(attachments.into_iter().map(doc));
+    docs
 }
 
 /// `── wed 15 oct ── 09:42 ──`, the greeting and the week's numbers, with
@@ -1027,6 +1038,35 @@ mod tests {
         assert_eq!(doc(1, None, None).progress_label(), "new");
         assert_eq!(doc(1, None, Some(1)).progress_label(), "—");
         assert_eq!(doc(4, Some(15), Some(1)).kind_line(), "pdf · 15p");
+    }
+
+    #[test]
+    fn documents_keep_one_order_when_times_tie() {
+        use glyphst_library::{DocumentPosition, HistoryEntry};
+        let mut library = LibraryStore::memory();
+        let entry = |path: &str, opened| HistoryEntry {
+            path: PathBuf::from(path),
+            opened,
+            position: DocumentPosition::fixed(0.0, 0.0, 1.0, 1),
+        };
+        library
+            .replace_history_entries(vec![
+                entry("/c.pdf", 5),
+                entry("/b.pdf", 9),
+                entry("/a.pdf", 5),
+            ])
+            .unwrap();
+        let paths = |library: &LibraryStore| -> Vec<PathBuf> {
+            documents(library, &BTreeMap::new())
+                .into_iter()
+                .map(|doc| doc.path)
+                .collect()
+        };
+        let first = paths(&library);
+        assert_eq!(first, ["/b.pdf", "/a.pdf", "/c.pdf"].map(PathBuf::from));
+        for _ in 0..20 {
+            assert_eq!(paths(&library), first);
+        }
     }
 
     #[test]
