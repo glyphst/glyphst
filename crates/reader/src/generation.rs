@@ -394,6 +394,10 @@ struct Run {
     sketch: Option<(Arc<PageSketch>, f32)>,
     /// The progress the page became ready at.
     ready: Option<f32>,
+    /// Whether anything is under the animation yet (the page or its
+    /// thumbnail). Until then there is no paper to hide, and the
+    /// background shows through.
+    drawn: bool,
     seen: u64,
 }
 
@@ -518,6 +522,7 @@ impl Generations {
         let ready = !state.loading || state.thumbnail;
         if let Some(run) = self.runs.get_mut(&key) {
             run.seen = frame;
+            run.drawn = ready;
             let p = run.progress(now);
             if run.sketch.is_none()
                 && let Some(sketch) = sketch
@@ -562,6 +567,7 @@ impl Generations {
                 seed: self.count as f32,
                 sketch: sketch.map(|sketch| (sketch.clone(), 0.0)),
                 ready: None,
+                drawn: ready,
                 seen: frame,
             },
         );
@@ -623,6 +629,9 @@ impl Generations {
         };
         let p = run.progress(self.clock(now));
         if self.reduce_motion {
+            if !run.drawn {
+                return;
+            }
             let shown = run.ready.map_or(0.0, |ready| {
                 ((p - ready) * DURATION / REDUCED_FADE).clamp(0.0, 1.0)
             });
@@ -962,23 +971,26 @@ impl<'a> Build<'a> {
         } else {
             scan_y.clamp(0.0, h)
         };
-        if revealing {
+        // Until its reveal a page already drawn is covered with the base,
+        // as a page being generated is in the design; one not drawn yet
+        // has nothing under it to cover.
+        if self.run.drawn {
+            if revealing {
+                painter.rect_filled(
+                    Rect::from_min_max(self.paper.min, self.at(w, cover_from)),
+                    0.0,
+                    self.tokens.bg.to_opaque().gamma_multiply(1.0 - fq),
+                );
+            }
             painter.rect_filled(
-                Rect::from_min_max(self.paper.min, self.at(w, cover_from)),
+                Rect::from_min_max(
+                    self.at(0.0, if revealing { cover_from } else { 0.0 }),
+                    self.paper.max,
+                ),
                 0.0,
-                self.tokens.bg.to_opaque().gamma_multiply(1.0 - fq),
+                self.tokens.bg.to_opaque(),
             );
         }
-        painter.rect_filled(
-            Rect::from_min_max(
-                self.at(0.0, if revealing { cover_from } else { 0.0 }),
-                self.paper.max,
-            ),
-            0.0,
-            // Until its reveal the page is the base, as a page being
-            // generated is in the design.
-            self.tokens.bg.to_opaque(),
-        );
 
         let parts = self.part_strokes();
         let clean = 1.0 - smooth(CLEAN[0], CLEAN[1], e);
@@ -1649,6 +1661,15 @@ mod tests {
             at(start, (MIN_BUILD + 0.36) * DURATION),
         );
         assert!(!generations.animating());
+    }
+
+    #[test]
+    fn a_page_is_covered_only_once_it_is_drawn() {
+        let start = Instant::now();
+        let mut generations = started(start);
+        assert!(!run(&generations).drawn, "no paper to hide while loading");
+        frame(&mut generations, state(false), at(start, 0.2 * DURATION));
+        assert!(run(&generations).drawn);
     }
 
     #[test]

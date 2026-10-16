@@ -712,7 +712,9 @@ fn snapshot(device: &wgpu::Device, format: wgpu::TextureFormat, size: [u32; 2]) 
 pub struct ViewCallback {
     pub rect: egui::Rect,
     pub tab: u64,
-    /// Every visible page; pages not resident yet get paper only.
+    /// Every visible page. Paper goes only under pages that can be drawn:
+    /// one still loading shows its generation over the background instead
+    /// of a blank sheet (frame 02b).
     pub draws: Vec<PageDraw>,
     pub page_color: [f32; 4],
     pub transition: Option<TransitionUse>,
@@ -724,7 +726,7 @@ pub struct ViewCallback {
 }
 
 impl ViewCallback {
-    fn paper_vertices(&self, size: [u32; 2]) -> Vec<u8> {
+    fn paper_vertices(&self, size: [u32; 2], drawable: impl Fn(usize) -> bool) -> Vec<u8> {
         let clip = |x: f32, y: f32| {
             [
                 x / size[0] as f32 * 2.0 - 1.0,
@@ -733,6 +735,7 @@ impl ViewCallback {
         };
         self.draws
             .iter()
+            .filter(|draw| drawable(draw.page))
             .flat_map(|draw| {
                 let [x0, y0, x1, y1] = draw.paper;
                 let (a, b, c, d) = (clip(x0, y0), clip(x1, y0), clip(x0, y1), clip(x1, y1));
@@ -816,7 +819,14 @@ impl CallbackTrait for ViewCallback {
             0,
             bytemuck_color(self.page_color).as_slice(),
         );
-        let paper = self.paper_vertices(size);
+        let paper = self.paper_vertices(size, |page| {
+            gpu.is_drawable(PageKey {
+                tab: self.tab,
+                page,
+            })
+        });
+        // Two f32 coordinates a vertex.
+        let paper_vertices = (paper.len() / 8) as u32;
         let paper = (!paper.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("paper"),
@@ -848,7 +858,7 @@ impl CallbackTrait for ViewCallback {
                 pass.set_pipeline(paper_pipeline);
                 pass.set_bind_group(0, &*paper_bind_group, &[]);
                 pass.set_vertex_buffer(0, paper.slice(..));
-                pass.draw(0..(self.draws.len() * 6) as u32, 0..1);
+                pass.draw(0..paper_vertices, 0..1);
             }
             for draw in &self.draws {
                 let key = PageKey {
