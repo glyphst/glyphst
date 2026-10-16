@@ -143,17 +143,26 @@ each pixel's edge reads): at 0.25x-1x a tracemonkey pixel sums 13-17
 edges of glyphs of 19-28 edges, so neither HEPR's cell index (13-18:
 HEPR itself indexes only paths of 24+ segments) nor quadratic edges
 (24-47 line-equivalents: coarse levels flatten a glyph into fewer lines
-than it has curves) would cut it. Yet the loop is the cost: returning
-full coverage without it brings the GPU p50 back to 0.38-0.44 ms. That is
-0.04-0.22 Mpx of ~15 edges, far below the GPU's arithmetic, and Mesa
-compiles `fs_vector` at SIMD16 with no spills. Reading four edges ahead
-(HEPR's latency hiding) and a 0.51 px quad margin (less overlap between
-neighbouring glyphs) did not help.
+than it has curves) would cut it. Mesa's per-draw times
+(`INTEL_MEASURE=draw`) at 0.5x put the text draw at 54-75 us with lyon
+and 577-909 us with coverage (first frames). Even with edges made up in
+the shader instead of read it takes 244-377 us. So it is arithmetic: each
+edge is ~30-40 instructions, and on this small GPU (Intel Arc, Meteor
+Lake) glyph triangles of a few pixels leave most of each SIMD16 thread
+empty. These did not help: reordering same-colour fills (pixel-shader
+ordering is not the cause), reading edges from a texture as HEPR does,
+reading four edges ahead, skipping pixels outside the path, and a tighter
+quad margin. One triangle per glyph instead of two may save ~10%.
+Tessellating fills under 8 px on the levels serving scales up to 1
+restores the GPU time below 0.5x (0.79 to 0.38 ms at 0.25x) but not at
+1x, and takes text further from MuPDF (0.06 to 0.21 at 0.25x). GPU time
+varies ~30% run to run with the clock (800-1,650 of 2,350 MHz):
+compare variants alternately, over several runs.
 
 Still to port or find:
-- Why ~15 edges a pixel cost 0.3 ms on Intel Arc (MTL): profile the pass
-  (Intel GPA or Mesa's `INTEL_DEBUG` perf output), and compare with lyon
-  fills for coarse text levels only.
+- HEPR's glyph raster atlas (`textRasterAtlas.ts`): each distinct glyph
+  drawn once at ~96 px and sampled when small, which needs glyph identity
+  (font and glyph id) kept through capture.
 - HEPR's cell index (`vectorCellIndex.ts`, `vectorCellShaders.ts`) for
   large drawing paths; it does not bound glyphs.
 - Per-pixel clip tests instead of stencil push/pop (`vectorClipShaders.ts`):
@@ -163,8 +172,9 @@ Still to port or find:
   stencil patterns (b6a755c), and smoothed one-pixel stroke coverage for
   thumbnails (178588b): GPU thumbnails of Murietta are darker than MuPDF's.
 
-**Next step:** profile where tracemonkey's coverage pass spends its time
-at 0.25x-1x, measured by `zoom_bench` GPU time on tracemonkey, Murietta
+**Next step:** the user decides between a glyph atlas for small text and
+accepting the text cost (about 0.2-0.35 ms GPU at 0.25x-1x, inside a
+120 Hz frame), measured by `zoom_bench` GPU time on tracemonkey, Murietta
 and Lower Level.
 
 **Done when:** tracemonkey's GPU p50 is within 10% of its 0.38 ms before
