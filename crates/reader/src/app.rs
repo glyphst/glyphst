@@ -561,7 +561,7 @@ impl ReaderApp {
             self.activate(Some(index));
             return;
         }
-        let mut restore = self.library.history_position(path);
+        let mut restore = self.library.history_position(path).map(sane_zoom);
         if let Some(page) = page {
             let mut position =
                 restore.unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, 1.0, page + 1));
@@ -1697,7 +1697,9 @@ impl ReaderApp {
         if !self.persist {
             return;
         }
-        let Some(tab) = self.tabs.get(index) else {
+        // A tab never shown (restored with the session, or behind another)
+        // was not read: its position and opening time stay as they were.
+        let Some(tab) = self.tabs.get(index).filter(|tab| tab.is_shown()) else {
             return;
         };
         let position = tab.position();
@@ -3858,6 +3860,17 @@ fn tabs_to_close(count: usize, index: usize, action: TabMenu) -> Vec<usize> {
     }
 }
 
+/// Remembered zoom, relative to fit width, that a document opens at; one
+/// outside it (a view saved before it had a size) opens at fit width.
+const SANE_ZOOM: std::ops::RangeInclusive<f32> = 0.25..=8.0;
+
+fn sane_zoom(mut position: DocumentPosition) -> DocumentPosition {
+    if !SANE_ZOOM.contains(&position.zoom) {
+        position.zoom = 1.0;
+    }
+    position
+}
+
 fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();
@@ -3870,6 +3883,16 @@ fn truncate(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remembered_zoom_out_of_range_opens_at_fit_width() {
+        let at = |zoom| sane_zoom(DocumentPosition::fixed(0.0, 120.0, zoom, 3));
+        assert_eq!(at(636.0).zoom, 1.0);
+        assert_eq!(at(0.01).zoom, 1.0);
+        assert_eq!(at(f32::NAN).zoom, 1.0);
+        assert_eq!(at(2.5).zoom, 2.5);
+        assert_eq!(at(636.0).page, 3, "the page stays");
+    }
 
     #[test]
     fn tab_menus_close_the_tabs_they_name_last_first() {

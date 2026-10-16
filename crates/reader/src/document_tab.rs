@@ -1087,6 +1087,12 @@ impl DocumentTab {
         }
     }
 
+    /// Whether the tab has been laid out in a view: until then it has no
+    /// reading position of its own.
+    pub fn is_shown(&self) -> bool {
+        self.fitted
+    }
+
     /// Device pixels per point that fit the widest page across the view.
     /// A reflowed column is laid out for the view, so it shows at its
     /// actual size (one page point per egui point) when it fits.
@@ -1158,6 +1164,13 @@ impl DocumentTab {
     /// relative to fit width. Reflowed documents also record the text at
     /// the top of the view, which outlives a change of layout.
     pub fn position(&self) -> DocumentPosition {
+        // Before its first frame the view is a placeholder: the position
+        // is still the one it opens at.
+        if !self.fitted
+            && let Some(restore) = &self.restore
+        {
+            return restore.clone();
+        }
         let top = self
             .layout
             .offsets
@@ -1682,6 +1695,18 @@ mod tests {
         for (a, b) in beside.draws.iter().zip(&under.draws) {
             assert_eq!(b.paper, a.paper);
         }
+    }
+
+    #[test]
+    fn a_tab_not_yet_shown_keeps_the_position_it_opens_at() {
+        let mut tab = tab(20);
+        let restore = DocumentPosition::fixed(0.0, 0.0, 1.5, 9);
+        tab.restore = Some(restore.clone());
+        assert!(!tab.is_shown());
+        assert_eq!(tab.position(), restore);
+        settle(&mut tab);
+        assert!(tab.is_shown());
+        assert_eq!(tab.position().page, 9);
     }
 
     #[test]
