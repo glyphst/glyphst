@@ -26,9 +26,11 @@ pub const HOVER: f32 = 30.0;
 /// Approach rate of the document's scroll and zoom: 95% in 0.17 s.
 pub const SCROLL: f64 = 18.0;
 
-/// The longest frame a value advances by, so a stalled frame doesn't make
-/// it jump.
-const MAX_STEP: f64 = 1.0 / 30.0;
+/// The longest frame a value advances by. A slow frame covers more of the
+/// way, as the clock says, so the motion keeps its pace; only a stall this
+/// long is cut short. (egui's `stable_dt`, which values here advance by, is
+/// a predicted frame after an idle one, never the idle gap.)
+const MAX_STEP: f64 = 0.1;
 /// How close a value snaps to its target: a thousandth of a point, or of
 /// a fraction's 0..1 (under a pixel on a long meter).
 const SNAP: f32 = 0.001;
@@ -64,6 +66,23 @@ pub fn is_reduced(ctx: &egui::Context) -> bool {
         .unwrap_or(false)
 }
 
+fn moving_id() -> egui::Id {
+    egui::Id::new("glyphst-motion-moving")
+}
+
+/// Asks for the next frame, and notes that something moved in this one.
+fn moved(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.insert_temp(moving_id(), true));
+    ctx.request_repaint();
+}
+
+/// Whether a value moved since this was last asked: the app counts such
+/// frames as animation, not idle ones.
+pub fn take_moving(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(moving_id()))
+        .unwrap_or(false)
+}
+
 /// The value kept under `id`, moved toward `target` at `rate` for this
 /// frame; asks for a repaint until it arrives. The first call returns
 /// `target`, so call it every frame, also while what it moves is hidden.
@@ -88,7 +107,7 @@ pub fn smooth(ctx: &egui::Context, id: egui::Id, target: f32, rate: f32) -> f32 
         *value
     });
     if value != target {
-        ctx.request_repaint();
+        moved(ctx);
     }
     value
 }
@@ -127,7 +146,7 @@ pub fn color(ctx: &egui::Context, id: egui::Id, target: egui::Color32) -> egui::
         (*value, *value != goal)
     });
     if moving {
-        ctx.request_repaint();
+        moved(ctx);
     }
     let [r, g, b, a] = value.map(|channel| channel.round() as u8);
     egui::Color32::from_rgba_premultiplied(r, g, b, a)
@@ -187,7 +206,7 @@ pub fn scroll_glide(
             },
         );
     });
-    ctx.request_repaint();
+    moved(ctx);
     Some(next)
 }
 

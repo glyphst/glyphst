@@ -77,6 +77,19 @@ pub fn pixel_size(rect: egui::Rect, pixels_per_point: f32) -> [u32; 2] {
     [size(rect.min.x, rect.max.x), size(rect.min.y, rect.max.y)]
 }
 
+/// The size of a view's target for a pane of `size` pixels in a window of
+/// `window` pixels: the pane's own while the shell rests. While a panel or
+/// bar slides the pane changes size every frame, and making a target takes
+/// a frame's time, so the target is the window's size (no pane outgrows it)
+/// from the slide's first frame until it has stopped.
+pub fn target_size(size: [u32; 2], window: [u32; 2], sliding: bool) -> [u32; 2] {
+    if sliding {
+        [size[0].max(window[0]), size[1].max(window[1])]
+    } else {
+        size
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FrameStats {
     pub encode_ms: f64,
@@ -1226,5 +1239,14 @@ mod tests {
         let rect = egui::Rect::from_min_max(egui::pos2(10.3, 0.0), egui::pos2(110.6, 50.0));
         assert_eq!(pixel_size(rect, 1.5), [151, 75]);
         assert_eq!(pixel_size(egui::Rect::NOTHING, 1.0), [1, 1]);
+    }
+
+    #[test]
+    fn a_sliding_shell_draws_into_a_window_sized_target() {
+        assert_eq!(target_size([1000, 800], [1600, 1000], false), [1000, 800]);
+        // Every size the pane takes while sliding fits the same target.
+        for width in (900..=1600).step_by(20) {
+            assert_eq!(target_size([width, 800], [1600, 1000], true), [1600, 1000]);
+        }
     }
 }

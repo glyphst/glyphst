@@ -54,22 +54,26 @@ impl ReaderApp {
         let ctx = ui.ctx().clone();
         let tokens = Tokens::get(&ctx);
         let presenting = self.tabs[active].present.is_some();
+        let sidebar_shown = motion::smooth_bool(
+            &ctx,
+            Id::new("stage-sidebar-shown"),
+            self.prefs.show_sidebar,
+            motion::PANEL,
+        );
+        let assistant_shown = motion::smooth_bool(
+            &ctx,
+            Id::new("stage-assistant-shown"),
+            self.assistant.open,
+            motion::PANEL,
+        );
+        let sliding = |shown: f32| shown > 0.0 && shown < 1.0;
+        self.shell_sliding |= sliding(sidebar_shown) || sliding(assistant_shown);
         let layout = ShellLayout::compute(ShellInput {
             area: ui.max_rect(),
             sidebar: Some(self.prefs.drawer_width),
-            sidebar_shown: motion::smooth_bool(
-                &ctx,
-                Id::new("stage-sidebar-shown"),
-                self.prefs.show_sidebar,
-                motion::PANEL,
-            ),
+            sidebar_shown,
             assistant: Some(self.prefs.assistant_width),
-            assistant_shown: motion::smooth_bool(
-                &ctx,
-                Id::new("stage-assistant-shown"),
-                self.assistant.open,
-                motion::PANEL,
-            ),
+            assistant_shown,
             present: presenting || self.zen,
         });
         // The focused pane's tab is always shown.

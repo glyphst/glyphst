@@ -228,10 +228,11 @@ pub struct ReaderApp {
     gamepads: Result<Gamepads, String>,
     pub(crate) frames: FrameTimes,
     continuous: bool,
+    /// A panel or bar of the shell is sliding this frame.
+    pub(crate) shell_sliding: bool,
     pub(crate) repaints: u64,
     /// Whether the window was fullscreen at the start of the frame.
     fullscreen: bool,
-    last_update: Instant,
     notices: glyphst_ui::overlay::Toasts,
     show_stats: bool,
     /// Zen mode: the pages alone, without the tabs, rail, drawers, dock or
@@ -436,9 +437,9 @@ impl ReaderApp {
             gamepads: Gamepads::new(),
             frames: FrameTimes::default(),
             continuous: false,
+            shell_sliding: false,
             repaints: 0,
             fullscreen: false,
-            last_update: Instant::now(),
             notices: Default::default(),
             show_stats: launch.harness.is_some(),
             zen: false,
@@ -3050,20 +3051,34 @@ impl ReaderApp {
                 capture_from: transition.take_capture(),
             });
         let page_color = tokens.page.to_normalized_gamma_f32();
+        // While the shell slides, the pages draw into a window-sized
+        // target, from the pane's corner and clipped to it.
+        let window = pixel_size(ctx.content_rect(), ppp);
+        let target = crate::gpu::target_size(size, window, self.shell_sliding);
+        let target_rect = egui::Rect::from_min_size(
+            rect.min,
+            egui::vec2(target[0] as f32, target[1] as f32) / ppp,
+        );
+        let mut draws = frame.draws.clone();
+        let viewport = pixel_size(target_rect, ppp);
+        for draw in &mut draws {
+            draw.camera.viewport = viewport;
+        }
         // Pages sit flat on the base layer: the design has no shadows.
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            ViewCallback {
-                rect,
-                tab: tab_id,
-                draws: frame.draws.clone(),
-                page_color,
-                transition,
-                overlay: self.effects_for(Some(active)).overlay,
-                time: self.started.elapsed().as_secs_f32(),
-                pointer: pointer.map(|[x, y]| [x as f32, y as f32]),
-            },
-        ));
+        ui.painter_at(rect)
+            .add(egui_wgpu::Callback::new_paint_callback(
+                target_rect,
+                ViewCallback {
+                    rect: target_rect,
+                    tab: tab_id,
+                    draws,
+                    page_color,
+                    transition,
+                    overlay: self.effects_for(Some(active)).overlay,
+                    time: self.started.elapsed().as_secs_f32(),
+                    pointer: pointer.map(|[x, y]| [x as f32, y as f32]),
+                },
+            ));
         let painter = ui.painter_at(rect);
         let maps: Vec<PageMap> = frame
             .draws
@@ -3739,8 +3754,9 @@ impl eframe::App for ReaderApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
-        let seconds = (now - self.last_update).as_secs_f64().min(0.1);
-        self.last_update = now;
+        // egui's frame time: after an idle frame, a predicted one rather
+        // than the idle gap, so an animation starting then doesn't leap.
+        let seconds = f64::from(ctx.input(|i| i.stable_dt)).min(0.1);
         self.repaints += 1;
         if !self.continuous {
             self.frames.idle();
@@ -3896,6 +3912,7 @@ impl eframe::App for ReaderApp {
             !presenting && !self.zen,
             glyphst_ui::motion::PANEL,
         );
+        self.shell_sliding = bars > 0.0 && bars < 1.0;
         if bars > 0.0 {
             let height = glyphst_ui::tab::BAR_HEIGHT;
             egui::Panel::top("tabs")
@@ -4014,6 +4031,7 @@ impl eframe::App for ReaderApp {
         // A pending overview advances one tile per frame, so keep drawing.
         let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
         let continuous = animating
+            || glyphst_ui::motion::take_moving(&ctx)
             || self.transition.is_some()
             || pad.is_active()
             || self.harness.is_some()
