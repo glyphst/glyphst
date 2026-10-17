@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Glyphst Reader
+GenericName=Document Reader
+Comment=Read PDF and EPUB documents
+Exec=glyphst-reader %F
+Icon=x-office-document
+Categories=Office;Viewer;
+MimeType=application/pdf;application/epub+zip;
+Terminal=false
+StartupNotify=true
+StartupWMClass=glyphst-reader

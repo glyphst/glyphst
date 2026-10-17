@@ -31,6 +31,7 @@
   libxfixes,
   libxi,
   libxrandr,
+  udev,
   vulkan-loader,
   wayland,
 }: let
@@ -47,22 +48,40 @@
     fontDirectories = [ ];
     includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
   };
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../.cargo
+      ../Cargo.lock
+      ../Cargo.toml
+      ../crates
+    ];
+  };
   # crane vendors every Cargo.lock source in its own directory and fetches Git
   # dependencies (craft-libs, merman) with builtins.fetchGit.
+  cargoVendorDir = craneLib.vendorCargoDeps {
+    inherit src;
+    # mupdf-sys copies its bundled MuPDF with fs::copy, which keeps the store's
+    # read-only mode, and then patches fitz/font.c in place. Make each copy
+    # owner-writable.
+    overrideVendorCargoPackage = p: drv:
+      if p.name == "mupdf-sys"
+      then
+        drv.overrideAttrs (_: {
+          postPatch = ''
+            substituteInPlace build.rs --replace-fail \
+              'fs::copy(&src_path, &dst_path)' \
+              'fs::copy(&src_path, &dst_path).and_then(|_| { let mut perms = fs::metadata(&dst_path)?.permissions(); let mode = std::os::unix::fs::PermissionsExt::mode(&perms) | 0o200; std::os::unix::fs::PermissionsExt::set_mode(&mut perms, mode); fs::set_permissions(&dst_path, perms) })'
+          '';
+        })
+      else drv;
+  };
   commonArgs = {
     pname = "glyphst-reader";
     version = workspaceCargo.workspace.package.version;
     strictDeps = true;
 
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../.cargo
-        ../Cargo.lock
-        ../Cargo.toml
-        ../crates
-      ];
-    };
+    inherit src cargoVendorDir;
 
     cargoExtraArgs = "--locked -p glyphst-reader";
     doCheck = false;
@@ -97,6 +116,7 @@
       libxi
       libxkbcommon
       libxrandr
+      udev
       vulkan-loader
       wayland
     ];
@@ -120,7 +140,7 @@ in
       '';
 
       meta = {
-        description = "A GPUI-based PDF and EPUB reader";
+        description = "A PDF and EPUB reader on egui and wgpu";
         license = lib.licenses.agpl3Only;
         mainProgram = "glyphst-reader";
         platforms = lib.platforms.linux;
