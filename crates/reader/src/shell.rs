@@ -26,8 +26,12 @@ pub struct ShellInput {
     pub area: Rect,
     /// The sidebar's width, when open.
     pub sidebar: Option<f32>,
+    /// How much of the sidebar shows (0..=1) while it slides in or out.
+    pub sidebar_shown: f32,
     /// The assistant's width, when open.
     pub assistant: Option<f32>,
+    /// How much of the assistant shows while it slides.
+    pub assistant_shown: f32,
     /// Present and zen modes give everything to the pages.
     pub present: bool,
 }
@@ -36,8 +40,12 @@ pub struct ShellInput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLayout {
     pub rail: Option<Rect>,
+    /// The panes at their whole width; while sliding they reach past
+    /// `inner`, which clips them.
     pub sidebar: Option<Rect>,
     pub assistant: Option<Rect>,
+    /// Right of the rail: what the panes show in.
+    pub inner: Rect,
     /// The breadcrumb over the reading column.
     pub breadcrumb: Option<Rect>,
     /// Where pages are laid out and drawn.
@@ -55,6 +63,7 @@ impl ShellLayout {
                 rail: None,
                 sidebar: None,
                 assistant: None,
+                inner: area,
                 breadcrumb: None,
                 reading: area,
                 overlay: false,
@@ -64,20 +73,34 @@ impl ShellLayout {
         let rail = Rect::from_min_size(area.min, vec2(RAIL_WIDTH.min(area.width()), area.height()));
         // Neither pane takes more than 45 % of the window.
         let widest = area.width() * 0.45;
-        let sidebar = input.sidebar.map(|width| {
-            let width = width.clamp(SIDEBAR_MIN, widest.max(SIDEBAR_MIN));
-            Rect::from_min_max(
-                pos2(rail.right(), area.top()),
-                pos2((rail.right() + width).min(area.right()), area.bottom()),
-            )
-        });
-        let assistant = input.assistant.map(|width| {
-            let width = width.clamp(ASSISTANT_MIN, widest.max(ASSISTANT_MIN));
-            Rect::from_min_max(
-                pos2((area.right() - width).max(rail.right()), area.top()),
-                area.right_bottom(),
-            )
-        });
+        let inner = Rect::from_min_max(pos2(rail.right(), area.top()), area.max);
+        let shown = |shown: f32| shown.clamp(0.0, 1.0);
+        let sidebar = input
+            .sidebar
+            .filter(|_| input.sidebar_shown > 0.0)
+            .map(|width| {
+                let width = width
+                    .clamp(SIDEBAR_MIN, widest.max(SIDEBAR_MIN))
+                    .min(inner.width());
+                let hidden = width * (1.0 - shown(input.sidebar_shown));
+                Rect::from_min_size(
+                    pos2(rail.right() - hidden, area.top()),
+                    vec2(width, area.height()),
+                )
+            });
+        let assistant = input
+            .assistant
+            .filter(|_| input.assistant_shown > 0.0)
+            .map(|width| {
+                let width = width
+                    .clamp(ASSISTANT_MIN, widest.max(ASSISTANT_MIN))
+                    .min(inner.width());
+                let hidden = width * (1.0 - shown(input.assistant_shown));
+                Rect::from_min_size(
+                    pos2(area.right() - width + hidden, area.top()),
+                    vec2(width, area.height()),
+                )
+            });
         let left = match sidebar {
             Some(sidebar) if !overlay => sidebar.right(),
             _ => rail.right(),
@@ -97,6 +120,7 @@ impl ShellLayout {
             rail: Some(rail),
             sidebar,
             assistant,
+            inner,
             breadcrumb: Some(breadcrumb),
             reading,
             overlay,
@@ -173,7 +197,9 @@ mod tests {
         ShellInput {
             area: Rect::from_min_size(pos2(0.0, 36.0), vec2(width, 800.0)),
             sidebar: None,
+            sidebar_shown: 1.0,
             assistant: None,
+            assistant_shown: 1.0,
             present: false,
         }
     }
@@ -205,6 +231,30 @@ mod tests {
         assert!(!open.reading.intersects(sidebar.shrink(0.5)));
         assert!(!open.reading.intersects(assistant.shrink(0.5)));
         assert_eq!(open.breadcrumb.unwrap().x_range(), open.reading.x_range());
+    }
+
+    #[test]
+    fn sliding_panes_push_the_pages_by_the_part_that_shows() {
+        let layout = ShellLayout::compute(ShellInput {
+            sidebar: Some(SIDEBAR_WIDTH),
+            sidebar_shown: 0.25,
+            assistant: Some(ASSISTANT_WIDTH),
+            assistant_shown: 0.5,
+            ..input(1440.0)
+        });
+        let (sidebar, assistant) = (layout.sidebar.unwrap(), layout.assistant.unwrap());
+        assert_eq!(sidebar.width(), SIDEBAR_WIDTH, "laid out whole");
+        assert_eq!(layout.reading.left(), RAIL_WIDTH + 75.0);
+        assert_eq!(sidebar.right(), layout.reading.left());
+        assert_eq!(layout.reading.right(), 1440.0 - 190.0);
+        assert_eq!(assistant.left(), layout.reading.right());
+        assert_eq!(layout.inner.left(), RAIL_WIDTH);
+        let hidden = ShellLayout::compute(ShellInput {
+            sidebar: Some(SIDEBAR_WIDTH),
+            sidebar_shown: 0.0,
+            ..input(1440.0)
+        });
+        assert_eq!(hidden.sidebar, None);
     }
 
     #[test]

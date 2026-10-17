@@ -57,11 +57,15 @@ impl DocTab<'_> {
     pub fn paint(&self, ui: &Ui, rect: Rect, response: &Response, close_hovered: bool) {
         let t = Tokens::get(ui.ctx());
         let hovered = response.hovered() || close_hovered;
-        if self.active {
-            ui.painter().rect_filled(rect, 0, t.surface);
+        let fill = if self.active {
+            t.surface
         } else if hovered {
-            ui.painter().rect_filled(rect, 0, t.hover);
-        }
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
         ui.painter()
             .vline(rect.right() - 0.5, rect.y_range(), t.hairline());
         if !self.active {

@@ -3889,15 +3889,42 @@ impl eframe::App for ReaderApp {
         self.presenting_edges(&ctx, presenting, now);
         // Zen mode is for reading a document; the home page leaves it.
         self.zen &= self.active.is_some();
-        if !presenting && !self.zen {
+        // The bars slide away for present and zen modes, and back.
+        let bars = glyphst_ui::motion::smooth_bool(
+            &ctx,
+            egui::Id::new("bars-shown"),
+            !presenting && !self.zen,
+            glyphst_ui::motion::PANEL,
+        );
+        if bars > 0.0 {
+            let height = glyphst_ui::tab::BAR_HEIGHT;
             egui::Panel::top("tabs")
-                .exact_size(glyphst_ui::tab::BAR_HEIGHT)
+                .exact_size(height * bars)
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| self.tab_strip(ui));
+                .show(ui, |ui| {
+                    let shown = ui.max_rect();
+                    let whole = egui::Rect::from_min_max(
+                        egui::pos2(shown.left(), shown.bottom() - height),
+                        shown.max,
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(whole), |ui| {
+                        ui.set_clip_rect(shown.intersect(ui.clip_rect()));
+                        self.tab_strip(ui);
+                    });
+                });
+            let height = glyphst_ui::status::HEIGHT;
             egui::Panel::bottom("status")
-                .exact_size(glyphst_ui::status::HEIGHT)
+                .exact_size(height * bars)
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| self.status_bar(ui));
+                .show(ui, |ui| {
+                    let shown = ui.max_rect();
+                    let whole =
+                        egui::Rect::from_min_size(shown.min, egui::vec2(shown.width(), height));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(whole), |ui| {
+                        ui.set_clip_rect(shown.intersect(ui.clip_rect()));
+                        self.status_bar(ui);
+                    });
+                });
         }
 
         let mut animating = false;

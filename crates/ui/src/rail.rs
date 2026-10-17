@@ -23,15 +23,19 @@ pub fn button(
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, tooltip)
     });
     let hovered = response.hovered();
+    let fill = if active || hovered {
+        t.hover
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
     if active {
-        ui.painter().rect_filled(rect, 0, t.hover);
         ui.painter().rect_filled(
             Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
             0,
             t.accent,
         );
-    } else if hovered {
-        ui.painter().rect_filled(rect, 0, t.hover);
     }
     let color = if active || hovered { t.text } else { t.faint };
     icons::paint(

@@ -209,10 +209,16 @@ pub fn bar(ui: &mut Ui, segments: Vec<Segment<'_>>) -> Vec<(&'static str, Respon
         }
         match segment.content {
             Content::Label { icon, text, accent } => {
-                if segment.clickable && response.hovered() {
-                    ui.painter()
-                        .rect_filled(cell.shrink2(vec2(1.0, 1.0)), 0, t.hover);
-                }
+                let fill = if segment.clickable && response.hovered() {
+                    t.hover
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                ui.painter().rect_filled(
+                    cell.shrink2(vec2(1.0, 1.0)),
+                    0,
+                    crate::motion::color(ui.ctx(), response.id, fill),
+                );
                 let hot = segment.clickable && response.hovered();
                 let (icon_color, text_color) = if accent {
                     (t.accent_text, t.accent_text)

@@ -477,6 +477,15 @@ impl Palette {
 
     /// Draws the palette over `hits`; returns the item chosen.
     pub fn show(&mut self, ctx: &egui::Context, hits: &[Hit], home: &Path) -> Option<Item> {
+        // The window dims behind the palette (frame 06a), and the palette
+        // rises into place.
+        let shown = glyphst_ui::motion::smooth_bool(
+            ctx,
+            egui::Id::new("command-palette-shown"),
+            self.open,
+            glyphst_ui::motion::PANEL,
+        );
+        glyphst_ui::overlay::fading_scrim(ctx, "command-palette-scrim", shown);
         if !self.open {
             return None;
         }
@@ -537,12 +546,13 @@ impl Palette {
         let screen = ctx.content_rect();
         let mut chosen = None;
         let previous_query = self.query.clone();
-        // The window dims behind the palette (frame 06a).
-        glyphst_ui::overlay::scrim(ctx, "command-palette-scrim");
         let response = egui::Area::new(egui::Id::new("command-palette"))
             .order(egui::Order::Foreground)
             .pivot(Align2::CENTER_TOP)
-            .fixed_pos(egui::pos2(screen.center().x, screen.top() + 72.0))
+            .fixed_pos(egui::pos2(
+                screen.center().x,
+                screen.top() + 72.0 + 8.0 * (1.0 - shown),
+            ))
             .show(ctx, |ui| {
                 glyphst_ui::pane::popover(ctx)
                     .inner_margin(egui::Margin::ZERO)
@@ -617,6 +627,11 @@ impl Palette {
                             .id_salt(("palette-hits", &typed))
                             .max_height(room.clamp(60.0, MAX_LIST_HEIGHT))
                             .show(ui, |ui| {
+                                let slide = glyphst_ui::row::Slide::under(
+                                    ui,
+                                    egui::Id::new(("palette-highlight", &typed)),
+                                );
+                                let mut highlighted_rect = None;
                                 for (index, hit) in hits.iter().enumerate() {
                                     // A rule title where a kind of result starts.
                                     let group = group_of(&hit.item);
@@ -651,7 +666,7 @@ impl Palette {
                                         row.scroll_to_me(None);
                                     }
                                     if highlighted {
-                                        ui.painter().rect_filled(rect, 0, tokens.accent_soft);
+                                        highlighted_rect = Some(rect);
                                     }
                                     let blocked = hit.blocked.is_some();
                                     let (color, icon_color) = if blocked {
@@ -759,6 +774,7 @@ impl Palette {
                                         chosen = Some(hit.item.clone());
                                     }
                                 }
+                                slide.paint(ui, highlighted_rect, 0, tokens.accent_soft);
                             });
                         if hits.is_empty() {
                             ui.add_space(10.0);

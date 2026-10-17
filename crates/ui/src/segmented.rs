@@ -58,12 +58,15 @@ pub fn show<T: PartialEq + Copy>(
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, *label)
         });
-        if selected {
-            ui.painter().rect_filled(cell, 1, t.hover);
+        let fill = if selected {
+            t.hover
         } else if response.hovered() && enabled {
-            ui.painter()
-                .rect_filled(cell, 1, Tokens::fade(t.hover, 0.6));
-        }
+            Tokens::fade(t.hover, 0.6)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(cell, 1, crate::motion::color(ui.ctx(), response.id, fill));
         let mut color = if selected || (response.hovered() && enabled) {
             t.text
         } else {

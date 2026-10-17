@@ -207,6 +207,7 @@ impl<'a> Button<'a> {
             color = t.faint;
         }
         let fill = if enabled { fill } else { Color32::TRANSPARENT };
+        let fill = crate::motion::color(ui.ctx(), response.id, fill);
         ui.painter()
             .rect(rect, t.ctl_radius(), fill, stroke, StrokeKind::Inside);
         if response.has_focus() {

@@ -34,6 +34,7 @@ pub fn button(ui: &mut Ui, icon: &str, on: bool, tip: &str, key: Option<&str>) -
     } else {
         egui::Color32::TRANSPARENT
     };
+    let fill = crate::motion::color(ui.ctx(), response.id, fill);
     ui.painter().rect_filled(rect, t.ctl_radius(), fill);
     if response.has_focus() {
         ui.painter().rect_stroke(

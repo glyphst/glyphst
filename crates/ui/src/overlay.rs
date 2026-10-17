@@ -93,6 +93,8 @@ pub struct Toasts {
     messages: Vec<Toast>,
     /// When the current message was first shown, in egui time.
     shown_at: Option<f64>,
+    /// It has had its time and is fading out.
+    leaving: bool,
 }
 
 impl Toasts {
@@ -108,6 +110,7 @@ impl Toasts {
             action: action.map(str::to_owned),
         });
         self.shown_at = None;
+        self.leaving = false;
     }
 
     pub fn latest(&self) -> Option<&str> {
@@ -117,6 +120,7 @@ impl Toasts {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.shown_at = None;
+        self.leaving = false;
     }
 
     /// Draws the latest message `lift` points above the bottom; returns the
@@ -125,15 +129,31 @@ impl Toasts {
         let toast = self.messages.last().cloned()?;
         let now = ctx.input(|i| i.time);
         let shown_at = *self.shown_at.get_or_insert(now);
+        // It fades out when its time is up, and follows the status bar
+        // as it comes and goes.
+        let shown = crate::motion::smooth_bool(
+            ctx,
+            egui::Id::new("toast-shown"),
+            !self.leaving,
+            crate::motion::PANEL,
+        );
+        if self.leaving && shown == 0.0 {
+            self.clear();
+            return None;
+        }
+        let lift =
+            crate::motion::smooth(ctx, egui::Id::new("toast-lift"), lift, crate::motion::PANEL);
         let t = Tokens::get(ctx);
         let screen = ctx.content_rect();
         let mut action_clicked = false;
         let area = egui::Area::new(egui::Id::new("toast"))
             .order(egui::Order::Tooltip)
             .sense(Sense::click())
+            .interactable(!self.leaving)
             .pivot(Align2::CENTER_BOTTOM)
-            .fixed_pos(screen.center_bottom() - vec2(0.0, lift))
+            .fixed_pos(screen.center_bottom() - vec2(0.0, lift - 8.0 * (1.0 - shown)))
             .show(ctx, |ui| {
+                ui.set_opacity(shown);
                 egui::Frame::new()
                     .fill(t.raised)
                     .stroke(t.edge())
@@ -170,15 +190,14 @@ impl Toasts {
             return toast.action;
         }
         if response.clicked() {
-            self.clear();
+            self.leaving = true;
             return None;
         }
         if response.hovered() {
             // Hovering restarts the clock, so a long message can be read.
             self.shown_at = Some(now);
         } else if now - shown_at > TOAST_SECONDS {
-            self.clear();
-            return None;
+            self.leaving = true;
         }
         ctx.request_repaint_after(Duration::from_millis(250));
         None
@@ -253,6 +272,29 @@ pub fn scrim(ctx: &egui::Context, id: &str) -> Response {
         .inner
 }
 
+/// A scrim that fades in and out with `shown` (0..=1); while it shows, a
+/// click on it is its response.
+pub fn fading_scrim(ctx: &egui::Context, id: &str, shown: f32) -> Option<Response> {
+    if shown <= 0.0 {
+        return None;
+    }
+    let t = Tokens::get(ctx);
+    let screen = ctx.content_rect();
+    let response = egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Middle)
+        .fade_in(false)
+        .interactable(shown >= 1.0)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter()
+                .rect_filled(rect, 0, t.scrim.gamma_multiply(shown));
+            response
+        })
+        .inner;
+    Some(response)
+}
+
 /// An icon sized for inline use in overlays.
 pub fn icon_rect(center: egui::Pos2) -> Rect {
     Rect::from_center_size(center, Vec2::splat(14.0))
@@ -283,7 +325,13 @@ mod tests {
         assert_eq!(toasts.latest(), Some("highlight saved"));
         run(&ctx, 1.0 + TOAST_SECONDS - 0.5, &mut toasts);
         assert!(toasts.latest().is_some());
-        run(&ctx, 1.0 + TOAST_SECONDS + 0.5, &mut toasts);
+        let mut time = 1.0 + TOAST_SECONDS + 0.5;
+        run(&ctx, time, &mut toasts);
+        assert!(toasts.latest().is_some(), "fading out");
+        for _ in 0..30 {
+            time += 1.0 / 60.0;
+            run(&ctx, time, &mut toasts);
+        }
         assert_eq!(toasts.latest(), None);
     }
 }

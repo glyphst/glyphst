@@ -310,6 +310,11 @@ impl Menu {
                         .id_salt("assistant-menu-scroll")
                         .max_height(ROW * VISIBLE_ROWS)
                         .show(ui, |ui| {
+                            let slide = glyphst_ui::row::Slide::under(
+                                ui,
+                                egui::Id::new(("assistant-menu-highlight", query)),
+                            );
+                            let mut selected_rect = None;
                             let mut group = "";
                             for (index, entry) in entries.iter().enumerate() {
                                 if headers && entry.group() != group {
@@ -328,6 +333,9 @@ impl Menu {
                                 }
                                 let selected = index == self.selected;
                                 let response = row(ui, entry, selected, query, headers, &tokens);
+                                if selected {
+                                    selected_rect = Some(response.rect);
+                                }
                                 if selected && !moved {
                                     response.scroll_to_me(None);
                                 }
@@ -338,6 +346,7 @@ impl Menu {
                                     clicked = Some(index);
                                 }
                             }
+                            slide.paint(ui, selected_rect, tokens.ctl_radius(), tokens.accent_soft);
                         });
                     // How to drive it.
                     ui.add_space(2.0);
@@ -372,11 +381,8 @@ fn row(
     grouped: bool,
     tokens: &Tokens,
 ) -> egui::Response {
+    // The selected row's fill slides along (`Slide`).
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-    if selected {
-        ui.painter()
-            .rect_filled(rect, tokens.ctl_radius(), tokens.accent_soft);
-    }
     crate::icons::paint(
         ui,
         Rect::from_center_size(rect.left_center() + vec2(16.0, 0.0), vec2(13.0, 13.0)),

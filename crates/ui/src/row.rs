@@ -17,11 +17,15 @@ pub fn list_row(ui: &mut Ui, height: f32, selected: bool) -> (Rect, Response) {
     let t = Tokens::get(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
-    if selected {
-        ui.painter().rect_filled(rect, 0, t.accent_soft);
+    let fill = if selected {
+        t.accent_soft
     } else if response.contains_pointer() {
-        ui.painter().rect_filled(rect, 0, t.hover);
-    }
+        t.hover
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
     (rect, response)
 }
 
@@ -71,6 +75,50 @@ pub fn take_moves(input: &mut egui::InputState) -> (bool, bool) {
         false
     });
     (up, down)
+}
+
+/// The highlighted row's fill in a list it slides along as the highlight
+/// moves: [`Slide::under`] before the rows keeps its place beneath them,
+/// [`Slide::paint`] after them puts it at the highlighted row. Call both
+/// in the list's content (inside its scroll area), so scrolling doesn't
+/// slide it.
+pub struct Slide {
+    shape: egui::layers::ShapeIdx,
+    id: egui::Id,
+    top: f32,
+}
+
+impl Slide {
+    pub fn under(ui: &Ui, id: egui::Id) -> Self {
+        Self {
+            shape: ui.painter().add(egui::Shape::Noop),
+            id,
+            top: ui.min_rect().top(),
+        }
+    }
+
+    /// Fills `rect` (the highlighted row's, if one is drawn) once the
+    /// fill has slid there.
+    pub fn paint(
+        self,
+        ui: &Ui,
+        rect: Option<Rect>,
+        radius: impl Into<egui::CornerRadius>,
+        fill: egui::Color32,
+    ) {
+        let Some(rect) = rect else {
+            return;
+        };
+        let y = crate::motion::smooth(
+            ui.ctx(),
+            self.id,
+            rect.top() - self.top,
+            crate::motion::HOVER,
+        );
+        let shown = rect.translate(vec2(0.0, self.top + y - rect.top()));
+        ui.painter()
+            .set(self.shape, egui::Shape::rect_filled(shown, radius, fill));
+    }
 }
 
 fn list_open_id() -> egui::Id {
@@ -176,11 +224,15 @@ impl<'a> ListRow<'a> {
     pub fn paint(&self, ui: &Ui, rect: Rect, response: &Response) {
         let t = Tokens::get(ui.ctx());
         let hovered = response.contains_pointer();
-        if self.active {
-            ui.painter().rect_filled(rect, 0, t.accent_soft);
+        let fill = if self.active {
+            t.accent_soft
         } else if hovered {
-            ui.painter().rect_filled(rect, 0, t.hover);
-        }
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
         let (icon_color, title_color, meta_color) = if self.active {
             (t.accent_text, t.text, t.accent_text)
         } else if hovered {
@@ -256,11 +308,15 @@ impl TreeRow<'_> {
             )
         });
         let hovered = response.contains_pointer();
-        if self.active {
-            ui.painter().rect_filled(rect, 0, t.accent_soft);
+        let fill = if self.active {
+            t.accent_soft
         } else if hovered {
-            ui.painter().rect_filled(rect, 0, t.hover);
-        }
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
         let font = theme::mono(12.0);
         let y = rect.center().y;
         let mut x = rect.left() + 12.0;

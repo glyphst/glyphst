@@ -229,6 +229,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("overview", &tab.path))
         .auto_shrink(false);
+    let mut target = None;
     if state.reveal {
         let top = (state.cursor / columns) as f32 * row_height;
         // Only when the cursor's row is out of view.
@@ -236,10 +237,24 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
             .offset
             .is_none_or(|view| top < view || top + row_height > view + rect.height());
         if hidden {
-            let centred = top - (rect.height() - row_height) / 2.0;
-            scroll = scroll.vertical_scroll_offset(centred.max(0.0));
+            let centred = (top - (rect.height() - row_height) / 2.0).max(0.0);
+            // It opens there, and glides after the cursor.
+            match state.offset {
+                Some(_) => target = Some(centred),
+                None => scroll = scroll.vertical_scroll_offset(centred),
+            }
         }
         state.reveal = false;
+    }
+    if let Some(offset) = state.offset
+        && let Some(offset) = glyphst_ui::motion::scroll_glide(
+            ui.ctx(),
+            egui::Id::new(("overview", &tab.path)),
+            offset,
+            target,
+        )
+    {
+        scroll = scroll.vertical_scroll_offset(offset);
     }
     let output = scroll.show_viewport(&mut child, |ui, viewport| {
         ui.set_height(rows as f32 * row_height + GAP);

@@ -5,7 +5,7 @@
 //! pages as Areas, so the pointer over them never reaches the pages.
 
 use egui::{Align2, Id, Order, Rect, pos2, vec2};
-use glyphst_ui::{overlay, rail as ui_rail, text as ui_text};
+use glyphst_ui::{motion, overlay, rail as ui_rail, text as ui_text};
 
 use super::*;
 use crate::{
@@ -56,8 +56,20 @@ impl ReaderApp {
         let presenting = self.tabs[active].present.is_some();
         let layout = ShellLayout::compute(ShellInput {
             area: ui.max_rect(),
-            sidebar: self.prefs.show_sidebar.then_some(self.prefs.drawer_width),
-            assistant: self.assistant.open.then_some(self.prefs.assistant_width),
+            sidebar: Some(self.prefs.drawer_width),
+            sidebar_shown: motion::smooth_bool(
+                &ctx,
+                Id::new("stage-sidebar-shown"),
+                self.prefs.show_sidebar,
+                motion::PANEL,
+            ),
+            assistant: Some(self.prefs.assistant_width),
+            assistant_shown: motion::smooth_bool(
+                &ctx,
+                Id::new("stage-assistant-shown"),
+                self.assistant.open,
+                motion::PANEL,
+            ),
             present: presenting || self.zen,
         });
         // The focused pane's tab is always shown.
@@ -235,6 +247,7 @@ impl ReaderApp {
                 ui,
                 "stage-sidebar",
                 rect,
+                layout.inner,
                 layout.overlay,
                 Edge::Right,
                 |app, ui| {
@@ -247,6 +260,7 @@ impl ReaderApp {
                 ui,
                 "stage-assistant",
                 rect,
+                layout.inner,
                 layout.overlay,
                 Edge::Left,
                 |app, ui| {
@@ -257,45 +271,53 @@ impl ReaderApp {
         (animating, drawn)
     }
 
-    /// Draws `add` in a pane at `rect`: in place when docked, or floating
+    /// Draws `add` in a pane at `rect`, shown where it is within `inner`
+    /// (all of it, unless it is sliding): in place when docked, or floating
     /// over the pages in a narrow window. `edge` is the side facing the
     /// pages, where the hairline and the resize handle go.
+    #[allow(clippy::too_many_arguments)]
     fn docked(
         &mut self,
         ui: &mut egui::Ui,
         id: &str,
         rect: Rect,
+        inner: Rect,
         overlay: bool,
         edge: Edge,
         add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
         let tokens = Tokens::get(ui.ctx());
+        let shown = rect.intersect(inner);
         let paint = |ui: &mut egui::Ui, app: &mut Self| {
-            ui.painter()
-                .rect_filled(rect, 0, tokens.surface.to_opaque());
+            let painter = ui.painter().with_clip_rect(shown);
+            painter.rect_filled(rect, 0, tokens.surface.to_opaque());
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
-            child.set_clip_rect(rect);
+            child.set_clip_rect(shown);
             add(app, &mut child);
             let x = match edge {
                 Edge::Left => rect.left() + 0.5,
                 Edge::Right => rect.right() - 0.5,
             };
-            ui.painter().vline(x, rect.y_range(), tokens.hairline());
+            painter.vline(x, rect.y_range(), tokens.hairline());
         };
         if overlay {
             egui::Area::new(Id::new(id))
                 .order(Order::Middle)
-                .fixed_pos(rect.min)
+                .fixed_pos(shown.min)
                 .show(ui.ctx(), |ui| {
-                    ui.set_min_size(rect.size());
+                    ui.set_min_size(shown.size());
                     paint(ui, self);
                 });
         } else {
             paint(ui, self);
+        }
+        // It is resized once it has slid in.
+        if shown != rect {
+            return;
         }
         let (width, min) = match edge {
             Edge::Right => (self.prefs.drawer_width, shell::SIDEBAR_MIN),

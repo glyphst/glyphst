@@ -288,6 +288,16 @@ the page can be drawn and then reveals it behind a scan line. It is egui
 shapes over the GPU view, so it never delays a page; with Reduce motion
 the page fades in instead.
 
+Motion that follows a target uses one exponential smoother,
+[`glyphst_ui::motion`](crates/ui/src/motion.rs): each frame closes
+`1 − e^(−rate·dt)` of the gap, so it doesn't depend on the frame rate and
+stays smooth when the target moves. The view's zoom and its glides (key
+steps and jumps; smooth scrolling setting) use `approach`; panels and bars
+sliding, the palette and scrims, list highlights, toasts and control fills
+keep a value per egui id with `smooth`, `smooth_bool`, `color` and
+`scroll_glide`. Direct input (drag, trackpad) never lags. Reduce motion,
+and the screenshot harness, make these values jump to their targets.
+
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, so glyph offsets in reflowed
 positions and highlight anchors saved by the GPUI Reader still resolve.

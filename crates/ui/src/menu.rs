@@ -96,9 +96,16 @@ impl<'a> Item<'a> {
             None => egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, self.label),
         });
         let hovered = (response.hovered() || response.has_focus()) && enabled;
-        if hovered {
-            ui.painter().rect_filled(rect, t.ctl_radius(), t.hover);
-        }
+        let fill = if hovered {
+            t.hover
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(
+            rect,
+            t.ctl_radius(),
+            crate::motion::color(ui.ctx(), response.id, fill),
+        );
         let (icon_color, color) = if !enabled {
             (t.faint, t.faint)
         } else if self.danger {

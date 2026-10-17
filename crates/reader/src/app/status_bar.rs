@@ -318,7 +318,14 @@ impl ReaderApp {
                 let response = ui.interact(track, ui.id().with("scrub"), Sense::click_and_drag());
                 let label = format!("{:.0}%", fraction * 100.0);
                 let meter = track.with_max_x(track.right() - 2.0);
-                Meter::new(fraction).bar().label(&label).paint(ui, meter);
+                // The bar fills smoothly as the page changes.
+                let shown = glyphst_ui::motion::smooth(
+                    ui.ctx(),
+                    ui.id().with("progress-fill"),
+                    fraction,
+                    glyphst_ui::motion::PANEL,
+                );
+                Meter::new(shown).bar().label(&label).paint(ui, meter);
                 let bar_right =
                     meter.right() - 8.0 - glyphst_ui::text::width(ui, &label, &theme::mono(11.0));
                 if response.hovered() || response.dragged() {

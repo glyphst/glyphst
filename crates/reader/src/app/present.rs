@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CursorIcon, PointerButton, Pos2, Rect, Shape, Stroke, pos2, vec2};
-use glyphst_ui::{ring, toolbox};
+use glyphst_ui::{motion, ring, toolbox};
 
 use super::ReaderApp;
 use crate::{
@@ -475,7 +475,12 @@ impl ReaderApp {
                     };
                     painter.rect_filled(screen, 0, fill);
                 } else {
-                    let read = crate::shell::read_fraction(current, pages);
+                    let read = motion::smooth(
+                        ctx,
+                        egui::Id::new("present-progress"),
+                        crate::shell::read_fraction(current, pages),
+                        motion::PANEL,
+                    );
                     painter.rect_filled(
                         Rect::from_min_size(
                             pos2(screen.left(), screen.bottom() - 2.0),
@@ -488,10 +493,19 @@ impl ReaderApp {
                         corner_chip(ui, screen, current, pages, clock.as_ref(), &tokens);
                     }
                 }
+                // The ring fades in where it opens.
+                let ring_shown = motion::smooth_bool(
+                    ctx,
+                    egui::Id::new("present-ring-shown"),
+                    state.ring.is_some(),
+                    motion::HOVER,
+                );
                 if let Some(RingGesture::Open { at, center }) = state.ring {
                     let latest = ctx.pointer_latest_pos().unwrap_or(at);
                     let pointer = present::virtual_pointer(center, state.ring_motion, at, latest);
-                    ring::paint(ui, center, &slots, pointer);
+                    let mut ring_ui = ui.new_child(egui::UiBuilder::new());
+                    ring_ui.multiply_opacity(ring_shown);
+                    ring::paint(&ring_ui, center, &slots, pointer);
                 }
                 if let Some(pos) = hover.filter(|_| !over_toolbox && state.ring.is_none()) {
                     paint_cursor(ui, state, pos, now);
@@ -500,18 +514,32 @@ impl ReaderApp {
 
         // The toolbox shows with the cursor, and fades once it rests.
         let idle = now.saturating_duration_since(state.moved) > TOOLBOX_IDLE;
+        let awake = !idle || over_toolbox;
+        let shown = motion::smooth_bool(
+            ctx,
+            egui::Id::new("present-toolbox-shown"),
+            awake,
+            motion::FADE,
+        );
+        let opacity = shown
+            * motion::smooth(
+                ctx,
+                egui::Id::new("present-toolbox-hover"),
+                if over_toolbox { 1.0 } else { 0.6 },
+                motion::HOVER,
+            );
         let mut clicked = Vec::new();
         state.toolbox.clear();
-        if state.mode != Mode::Hidden && state.blank.is_none() && !dialog && (!idle || over_toolbox)
-        {
+        if state.mode != Mode::Hidden && state.blank.is_none() && !dialog && shown > 0.0 {
             let mode = state.mode;
             let area = egui::Area::new(egui::Id::new("present-toolbox"))
                 .order(egui::Order::Foreground)
                 .fade_in(false)
+                .interactable(awake)
                 .pivot(Align2::LEFT_BOTTOM)
                 .fixed_pos(pos2(screen.left() + GUTTER, screen.bottom() - GUTTER))
                 .show(ctx, |ui| {
-                    ui.set_opacity(if over_toolbox { 1.0 } else { 0.6 });
+                    ui.set_opacity(opacity);
                     toolbox::frame(ctx)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -571,9 +599,11 @@ impl ReaderApp {
                 let colors = egui::Area::new(egui::Id::new("present-colors"))
                     .order(egui::Order::Foreground)
                     .fade_in(false)
+                    .interactable(awake)
                     .pivot(Align2::LEFT_BOTTOM)
                     .fixed_pos(pos2(pen.left(), area.response.rect.top() - 6.0))
                     .show(ctx, |ui| {
+                        ui.set_opacity(shown);
                         glyphst_ui::pane::popover(ctx)
                             .inner_margin(egui::Margin::symmetric(8, 7))
                             .show(ui, |ui| {

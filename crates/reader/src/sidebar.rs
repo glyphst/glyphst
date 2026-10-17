@@ -12,7 +12,7 @@ use glyphst_settings::TranslationProvider;
 use glyphst_ui::{
     Tip,
     button::Button,
-    menu as ui_menu, motif,
+    menu as ui_menu, motif, motion,
     pane::{Action, Header},
     row::{self as ui_row, ListRow},
     segmented,
@@ -1150,7 +1150,7 @@ fn outline(
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("outline", tab.id))
         .auto_shrink(false);
-    let mut scrolled = false;
+    let mut target = None;
     if let Some(strict) = view.reveal.take()
         && let (Some(entry), Some(row)) = (current, current_row)
     {
@@ -1163,9 +1163,24 @@ fn outline(
         if let Some(offset) =
             reveal_offset(row, sticky, OUTLINE_ROW, viewport, view.list.offset, strict)
         {
-            scroll = scroll.vertical_scroll_offset(offset);
-            scrolled = true;
+            // Opening the list puts it there; following the reading
+            // glides.
+            if strict {
+                scroll = scroll.vertical_scroll_offset(offset);
+            } else {
+                target = Some(offset);
+            }
         }
+    }
+    let mut scrolled = target.is_some();
+    if let Some(offset) = motion::scroll_glide(
+        ui.ctx(),
+        egui::Id::new(("outline", tab.id)),
+        view.list.offset,
+        target,
+    ) {
+        scroll = scroll.vertical_scroll_offset(offset);
+        scrolled = true;
     }
 
     let mut chosen = None;
@@ -1491,6 +1506,7 @@ fn pages(
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("pages", tab.id))
         .auto_shrink(false);
+    let mut target = None;
     if fresh || view.page != Some(current) {
         view.page = Some(current);
         let viewport = view.pages.viewport_or(ui);
@@ -1502,8 +1518,20 @@ fn pages(
             view.pages.offset,
             fresh,
         ) {
-            scroll = scroll.vertical_scroll_offset(offset);
+            if fresh {
+                scroll = scroll.vertical_scroll_offset(offset);
+            } else {
+                target = Some(offset);
+            }
         }
+    }
+    if let Some(offset) = motion::scroll_glide(
+        ui.ctx(),
+        egui::Id::new(("pages", tab.id)),
+        view.pages.offset,
+        target,
+    ) {
+        scroll = scroll.vertical_scroll_offset(offset);
     }
     let output = scroll.show_rows(ui, row_height, rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
