@@ -56,12 +56,13 @@ impl PageColumns {
 /// colours).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Colours {
-    /// The accent swatch over the design's neutrals.
+    /// Follow the background: a scheme from its solid colour or the
+    /// wallpaper's main colour, else (the theme's colour, an effect) the
+    /// accent swatch.
     #[default]
-    Preset,
-    /// A scheme from the background: its solid colour, or the wallpaper's
-    /// main colour.
     Background,
+    /// The accent swatch over the design's neutrals.
+    Preset,
     /// A scheme from `custom_colour`.
     Custom,
 }
@@ -396,7 +397,7 @@ mod tests {
         let mut storage = MemoryStorage::default();
         let prefs = Prefs {
             accent: Accent::Green,
-            colours: Colours::Background,
+            colours: Colours::Custom,
             custom_colour: [1, 2, 3],
             scheme_style: SchemeStyle::Expressive,
             scheme_contrast: Contrast::High,
@@ -417,6 +418,8 @@ mod tests {
         };
         prefs.save(&mut storage);
         assert_eq!(Prefs::load(Some(&storage)), prefs);
+        // The theme's colours follow the background unless chosen.
+        assert_eq!(Prefs::default().colours, Colours::Background);
         let huge = Prefs {
             ui_scale: 400.0,
             ..Prefs::default()

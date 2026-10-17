@@ -637,14 +637,16 @@ fn colours(ui: &mut egui::Ui, prefs: &mut Prefs, background_seed: Option<[u8; 3]
     ui_settings::group(ui, "colours", |group| {
         group.row(
             "colours from",
-            Some("a preset accent, or a scheme generated from the background or a colour"),
+            Some(
+                "a scheme from the background's colour or wallpaper, a preset accent, or a colour",
+            ),
             |ui| {
                 glyphst_ui::segmented::labels(
                     ui,
                     &mut prefs.colours,
                     &[
+                        (Colours::Background, "follow background"),
                         (Colours::Preset, "preset"),
-                        (Colours::Background, "background"),
                         (Colours::Custom, "custom"),
                     ],
                 );
@@ -672,12 +674,14 @@ fn colours(ui: &mut egui::Ui, prefs: &mut Prefs, background_seed: Option<[u8; 3]
                 Some(prefs.custom_colour)
             }
         };
-        if seed.is_none() {
+        let Some(seed) = seed else {
             group.note(
-                "The background has no colour of its own yet (it follows the theme, is an \
-                 effect, or its wallpaper is still being read), so the accent swatch stays.",
+                "The background has no colour of its own (it is the theme's, an effect, or a \
+                 wallpaper still being read), so the accent swatch colours the theme.",
             );
-        }
+            accent_row(group, prefs, &tokens);
+            return;
+        };
         group.row(
             "style",
             Some("Material You schemes; the first ones are the newest"),
@@ -717,29 +721,27 @@ fn colours(ui: &mut egui::Ui, prefs: &mut Prefs, background_seed: Option<[u8; 3]
                 );
             },
         );
-        if let Some(seed) = seed {
-            let scheme = Scheme {
-                seed,
-                style: prefs.scheme_style,
-                contrast: prefs.scheme_contrast,
-            };
-            group.row(
-                "scheme",
-                Some("accent, secondary, tertiary, base, raised and hairline"),
-                |ui| {
-                    for color in scheme.swatches(tokens.kind).into_iter().rev() {
-                        let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-                        ui.painter().rect(
-                            rect.shrink(2.0),
-                            tokens.ctl_radius(),
-                            color,
-                            tokens.edge(),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                },
-            );
-        }
+        let scheme = Scheme {
+            seed,
+            style: prefs.scheme_style,
+            contrast: prefs.scheme_contrast,
+        };
+        group.row(
+            "scheme",
+            Some("accent, secondary, tertiary, base, raised and hairline"),
+            |ui| {
+                for color in scheme.swatches(tokens.kind).into_iter().rev() {
+                    let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                    ui.painter().rect(
+                        rect.shrink(2.0),
+                        tokens.ctl_radius(),
+                        color,
+                        tokens.edge(),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            },
+        );
     });
 }
 
