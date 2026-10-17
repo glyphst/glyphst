@@ -1,7 +1,7 @@
 //! What the glyph design draws around the pages (frame 02a): corner ticks
 //! and a meta line (`p.4 — 612 × 792 pt — page 4 of 15`) on the page being
-//! read, and a column of page ticks at the pane's right edge, the current
-//! one long and numbered, to jump with.
+//! read, and a column of page ticks over the pages at the pane's right
+//! edge, the current one long and numbered, to jump with.
 
 use egui::{Align2, Rect, Sense, pos2};
 use glyphst_ui::{Tip, motif, text as ui_text};
@@ -11,10 +11,8 @@ use crate::text_overlay::PageMap;
 
 /// The ticks' column at the pane's right edge.
 const MINIMAP_WIDTH: f32 = 22.0;
-/// Room kept clear of pages at a pane's right for the ticks.
-pub(super) const MINIMAP_GUTTER: f32 = 26.0;
 /// Panes narrower than this have no ticks.
-pub(super) const MINIMAP_FROM: f32 = 360.0;
+const MINIMAP_FROM: f32 = 360.0;
 /// At most this many ticks; longer documents are sampled.
 const MAX_TICKS: usize = 120;
 
@@ -198,6 +196,17 @@ impl ReaderApp {
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let painter = ui.painter_at(rect);
+        // The ticks float over the pages (which take the pane's whole
+        // width), on a backing that keeps them legible on any page.
+        let backing = Tokens::fade(tokens.surface.to_opaque(), 0.82);
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(column.left(), column.top() - 4.0),
+                pos2(column.right() + 2.0, y_of(ticks - 1) + step / 2.0 + 4.0),
+            ),
+            tokens.ctl_radius(),
+            backing,
+        );
         let hover = response.hover_pos().map(|pos| {
             let tick = (((pos.y - column.top()) / step).floor().max(0.0) as usize).min(ticks - 1);
             (tick * pages / ticks).min(pages - 1)
@@ -216,11 +225,18 @@ impl ReaderApp {
         }
         let y = y_of(tick_of(current));
         painter.hline((x - 10.0)..=x, y, egui::Stroke::new(1.5, tokens.accent));
+        let number = (current + 1).to_string();
+        let width = ui_text::width(ui, &number, &theme::mono(9.0));
+        painter.rect_filled(
+            Rect::from_min_max(pos2(x - 17.0 - width, y - 7.0), pos2(x - 11.0, y + 7.0)),
+            tokens.ctl_radius(),
+            backing,
+        );
         ui_text::line(
             ui,
             pos2(x - 14.0, y),
             Align2::RIGHT_CENTER,
-            (current + 1).to_string(),
+            number,
             theme::mono(9.0),
             tokens.accent_text,
             40.0,

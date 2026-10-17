@@ -129,15 +129,9 @@ impl ReaderApp {
             } else {
                 pane
             };
-            // Pages are laid out clear of the page ticks at the right.
-            let content =
-                if presenting || self.zen || rect.width() < super::page_chrome::MINIMAP_FROM {
-                    rect
-                } else {
-                    rect.with_max_x(rect.right() - super::page_chrome::MINIMAP_GUTTER)
-                };
+            // Pages take the whole pane; the page ticks float over them.
             let mut view = PaneView {
-                rect: content,
+                rect,
                 draw: rect,
                 index,
                 focused,
