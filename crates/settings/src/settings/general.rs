@@ -255,6 +255,8 @@ impl WindowBackgroundMode {
 pub struct WindowSettings {
     pub opacity: f32,
     pub background: WindowBackgroundMode,
+    /// Fullscreen shows the theme instead of what is behind the window.
+    pub fullscreen_opaque: bool,
 }
 
 impl Default for WindowSettings {
@@ -264,6 +266,7 @@ impl Default for WindowSettings {
             // Transparency is off until turned on; then it starts at the
             // default opacity.
             background: WindowBackgroundMode::Opaque,
+            fullscreen_opaque: DEFAULT_FULLSCREEN_OPAQUE,
         }
     }
 }
@@ -325,6 +328,11 @@ impl WindowSettings {
         } else {
             MAX_WINDOW_OPACITY
         }
+    }
+
+    /// The window's opacity, full in fullscreen when that is opaque.
+    pub fn opacity_in(self, fullscreen: bool) -> f32 {
+        self.effective_opacity(!(fullscreen && self.fullscreen_opaque))
     }
 }
 

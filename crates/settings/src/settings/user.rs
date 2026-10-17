@@ -476,4 +476,41 @@ mod user_tests {
         assert!((saved.window.opacity - 0.8).abs() < 1e-6);
         fs::remove_dir_all(&directory).unwrap();
     }
+
+    #[test]
+    fn fullscreen_turns_a_transparent_window_opaque_unless_turned_off() {
+        let defaults = Settings::default();
+        assert_eq!(
+            defaults.window.fullscreen_opaque,
+            !cfg!(target_os = "windows")
+        );
+        let mut window = defaults.window;
+        window.set_transparent(true);
+        window.fullscreen_opaque = true;
+        assert!(window.opacity_in(false) < 1.0);
+        assert_eq!(window.opacity_in(true), 1.0);
+        window.fullscreen_opaque = false;
+        assert!(window.opacity_in(true) < 1.0);
+
+        let read = parse_settings("window { fullscreen_opaque #false; }").unwrap();
+        assert!(!read.window.fullscreen_opaque);
+        let read = parse_settings("window { fullscreen_opaque #true; }").unwrap();
+        assert!(read.window.fullscreen_opaque);
+
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-settings-fullscreen-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let path = directory.join("config.kdl");
+        let mut edited = Settings::default();
+        edited.window.fullscreen_opaque = !edited.window.fullscreen_opaque;
+        save_user_settings_to(&path, &edited, &BTreeSet::new()).unwrap();
+        let saved = load_settings(&path).unwrap();
+        assert_eq!(
+            saved.window.fullscreen_opaque,
+            edited.window.fullscreen_opaque
+        );
+        fs::remove_dir_all(&directory).unwrap();
+    }
 }

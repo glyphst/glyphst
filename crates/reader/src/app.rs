@@ -220,6 +220,8 @@ pub struct ReaderApp {
     pub(crate) frames: FrameTimes,
     continuous: bool,
     pub(crate) repaints: u64,
+    /// Whether the window was fullscreen at the start of the frame.
+    fullscreen: bool,
     last_update: Instant,
     notices: glyphst_ui::overlay::Toasts,
     show_stats: bool,
@@ -414,6 +416,7 @@ impl ReaderApp {
             frames: FrameTimes::default(),
             continuous: false,
             repaints: 0,
+            fullscreen: false,
             last_update: Instant::now(),
             notices: Default::default(),
             show_stats: launch.harness.is_some(),
@@ -1208,9 +1211,16 @@ impl ReaderApp {
             SidebarAction::SetColor(id, color) => self.set_annotation_color(id, color),
             SidebarAction::SetBody(id, body) => self.set_note_body(id, body),
             SidebarAction::Remove(id) => self.remove_annotation(id),
+            // The locate toggle: off keeps the outline still; on follows
+            // the current section again.
             SidebarAction::LocateOutline => {
                 if let Some(active) = self.active {
-                    self.tabs[active].outline_view.locate();
+                    let view = &mut self.tabs[active].outline_view;
+                    self.prefs.outline_follow = !view.following();
+                    view.set_follow(self.prefs.outline_follow);
+                    if self.prefs.outline_follow {
+                        view.locate();
+                    }
                 }
             }
             SidebarAction::Close => self.prefs.show_sidebar = false,
@@ -2027,11 +2037,11 @@ impl ReaderApp {
     }
 
     /// How opaque the window's surfaces are: below 1 while transparency is
-    /// on.
+    /// on, unless fullscreen turns it opaque.
     pub(crate) fn window_opacity(&self) -> f32 {
         self.user_settings
             .get()
-            .map_or(1.0, |settings| settings.window.effective_opacity(true))
+            .map_or(1.0, |settings| settings.window.opacity_in(self.fullscreen))
     }
 
     /// Turns the window's transparency on or off, in the settings file.
@@ -2092,7 +2102,7 @@ impl ReaderApp {
             {
                 let page = overview.cursor;
                 tab.overview = None;
-                actions.push(ViewAction::GoToPage(page));
+                actions.push(tab.overview_exit(page));
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 let tab = &mut self.tabs[active];
@@ -2280,8 +2290,12 @@ impl ReaderApp {
                             if tab.present.is_some() {
                                 tab.apply(ViewAction::TogglePresent, false);
                             }
-                            // The grid takes the room the sidebar had.
-                            self.prefs.show_sidebar = false;
+                            // The grid takes the room the sidebar had,
+                            // unless it lists search matches to step
+                            // through on the grid.
+                            if self.prefs.sidebar != SidebarTab::Search {
+                                self.prefs.show_sidebar = false;
+                            }
                             Some(Overview::new(tab.current_page()))
                         }
                     };
@@ -2548,12 +2562,19 @@ impl ReaderApp {
             } else {
                 self.palette_hits()
             };
+            self.palette.current = self
+                .active
+                .and_then(|active| self.tabs[active].current_outline_entry())
+                .map(Item::Section);
             match self.palette.show(ctx, &hits, &home) {
                 Some(Item::Command(command)) => self.run_or_notify(command, ctx),
                 Some(Item::Tab(index)) => self.activate(Some(index)),
                 Some(Item::Open(path)) => self.open(&path, ctx, None),
                 Some(Item::GoToPage(page)) => self.pending_actions.push(ViewAction::GoToPage(page)),
                 Some(Item::Settings(section)) => self.settings_window.show_section(section),
+                Some(Item::Section(index)) => {
+                    self.pending_actions.push(ViewAction::GoToEntry(index));
+                }
                 Some(Item::Browse(_)) | None => {}
             }
         }
@@ -2607,6 +2628,24 @@ impl ReaderApp {
             pages: self.active.map(|active| self.tabs[active].layout.len()),
             labels: self.present_labels(),
             presenting,
+            sections: self
+                .active
+                .map(|active| {
+                    let outline = &self.tabs[active].outline;
+                    outline
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, entry)| {
+                            Some(palette::Heading {
+                                index,
+                                title: entry.title.clone(),
+                                page: entry.page?,
+                                depth: entry.depth,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         palette::hits(&self.palette.query, &sources, self.palette.used())
     }
@@ -3628,9 +3667,10 @@ impl eframe::App for ReaderApp {
             self.frames.idle();
         }
         self.frames.tick();
+        self.fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         self.apply_theme(&ctx);
         let blur = self.user_settings.get().is_some_and(|settings| {
-            settings.window.blur() && settings.window.effective_opacity(true) < 1.0
+            settings.window.blur() && settings.window.opacity_in(self.fullscreen) < 1.0
         });
         self.window_blur
             .update(frame, blur, ctx.content_rect().size());

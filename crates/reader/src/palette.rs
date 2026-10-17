@@ -30,6 +30,10 @@ const MAX_PATH_HITS: usize = 500;
 const MAX_LIST_HEIGHT: f32 = 440.0;
 /// Commands remembered as recently run.
 const MAX_USED: usize = 8;
+/// Sections among the other hits of a query.
+const MAX_MIXED_SECTIONS: usize = 6;
+/// Sections an `@` query lists.
+const MAX_SECTION_HITS: usize = 500;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
@@ -42,6 +46,8 @@ pub enum Item {
     /// A page index (from 0).
     GoToPage(usize),
     Settings(Section),
+    /// An entry of the active document's outline, by index.
+    Section(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,9 +73,63 @@ pub struct Sources {
     pub pages: Option<usize>,
     /// Labels that follow the state (`End draw`), by command.
     pub labels: std::collections::HashMap<Command, &'static str>,
-    /// While presenting the palette holds commands and page numbers only:
-    /// no tabs, files or settings sections.
+    /// While presenting the palette holds commands, page numbers and
+    /// sections only: no tabs, files or settings sections.
     pub presenting: bool,
+    /// The active document's outline entries that have a page.
+    pub sections: Vec<Heading>,
+}
+
+/// An outline entry the palette can go to.
+pub struct Heading {
+    /// Its index in the outline.
+    pub index: usize,
+    pub title: String,
+    /// Its page (from 0).
+    pub page: usize,
+    pub depth: usize,
+}
+
+/// The hit that goes to `heading`; `indent` shows its depth.
+fn section_hit(heading: &Heading, indent: bool) -> Hit {
+    let indent = if indent { heading.depth } else { 0 };
+    Hit {
+        item: Item::Section(heading.index),
+        icon: "list-tree",
+        label: format!("{}{}", "  ".repeat(indent), heading.title),
+        detail: format!("p.{}", heading.page + 1),
+        blocked: None,
+    }
+}
+
+/// The sections whose titles match `needle`, best first, then in reading
+/// order.
+fn matching_sections<'a>(
+    needle: &str,
+    sections: &'a [Heading],
+) -> impl Iterator<Item = (usize, &'a Heading)> {
+    let mut found: Vec<(usize, usize, &Heading)> = sections
+        .iter()
+        .enumerate()
+        .filter_map(|(order, heading)| {
+            score(&heading.title, needle).map(|found| (found, order, heading))
+        })
+        .collect();
+    found.sort_by_key(|(found, order, _)| (*found, *order));
+    found
+        .into_iter()
+        .map(|(found, _, heading)| (found, heading))
+}
+
+/// What the query looks for once a leading `@` (sections only) is taken
+/// off, lower case.
+pub fn needle(query: &str) -> String {
+    let query = query.trim();
+    query
+        .strip_prefix('@')
+        .unwrap_or(query)
+        .trim()
+        .to_lowercase()
 }
 
 /// Where `needle` (lower case) matches `hay`: lower is better.
@@ -92,6 +152,16 @@ fn score(hay: &str, needle: &str) -> Option<usize> {
 /// The hits for `query`, best first; `used` holds recently run commands,
 /// latest first.
 pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
+    // `@` lists the outline: all of it in reading order, or the sections
+    // that match.
+    if query.trim_start().starts_with('@') {
+        let needle = needle(query);
+        let indent = needle.is_empty();
+        return matching_sections(&needle, &sources.sections)
+            .take(MAX_SECTION_HITS)
+            .map(|(_, heading)| section_hit(heading, indent))
+            .collect();
+    }
     let needle = query.trim().to_lowercase();
     // (score, kind order, hit)
     let mut ranked: Vec<(usize, usize, Hit)> = Vec::new();
@@ -143,6 +213,13 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
             },
         ));
     }
+    if !needle.is_empty() {
+        for (found, heading) in
+            matching_sections(&needle, &sources.sections).take(MAX_MIXED_SECTIONS)
+        {
+            ranked.push((found, MAX_USED + 2, section_hit(heading, false)));
+        }
+    }
     if sources.presenting {
         return finish(ranked, MAX_PRESENT_HITS);
     }
@@ -150,7 +227,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
         if let Some(found) = score(title, &needle) {
             ranked.push((
                 found,
-                MAX_USED + 2,
+                MAX_USED + 3,
                 Hit {
                     item: Item::Tab(index),
                     icon: "book-open",
@@ -166,7 +243,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
         if let Some(found) = score(&label, &needle) {
             ranked.push((
                 found,
-                MAX_USED + 3,
+                MAX_USED + 4,
                 Hit {
                     item: Item::Settings(section),
                     icon: section.icon(),
@@ -185,7 +262,7 @@ pub fn hits(query: &str, sources: &Sources, used: &[Command]) -> Vec<Hit> {
         if let Some(found) = score(&name, &needle) {
             ranked.push((
                 found,
-                MAX_USED + 4,
+                MAX_USED + 5,
                 Hit {
                     item: Item::Open(path.clone()),
                     icon: "clock",
@@ -317,6 +394,10 @@ pub struct Palette {
     rect: Option<Rect>,
     /// The path prompt's folder as last read, or `None` if it can't be.
     listing: Option<(PathBuf, Option<Listing>)>,
+    /// The section being read: an `@` query starts on it.
+    pub current: Option<Item>,
+    /// The query the highlight was last placed for.
+    placed: Option<String>,
 }
 
 impl Palette {
@@ -343,6 +424,7 @@ impl Palette {
         self.query.clear();
         self.rect = None;
         self.listing = None;
+        self.placed = None;
     }
 
     /// Replaces the query, with the caret after it.
@@ -418,6 +500,20 @@ impl Palette {
             self.close();
             return None;
         }
+        // A new `@` query starts on the section being read.
+        let mut placed = false;
+        if self.placed.as_deref() != Some(self.query.as_str()) {
+            self.placed = Some(self.query.clone());
+            if self.query.trim_start().starts_with('@')
+                && let Some(index) = self
+                    .current
+                    .as_ref()
+                    .and_then(|current| hits.iter().position(|hit| &hit.item == current))
+            {
+                self.highlight = index;
+                placed = true;
+            }
+        }
         let keyed = self.highlight;
         if down {
             self.highlight += 1;
@@ -427,7 +523,7 @@ impl Palette {
         }
         self.highlight = self.highlight.min(hits.len().saturating_sub(1));
         // The list follows the highlight the keys moved.
-        let follow = (up || down) && self.highlight != keyed;
+        let follow = placed || ((up || down) && self.highlight != keyed);
         if tab
             && let Some(query) = hits
                 .get(self.highlight)
@@ -457,7 +553,10 @@ impl Palette {
                             let (prompt, hint) = if path_mode {
                                 ("~", "type a path to a document…")
                             } else {
-                                (">", "type a command, a page number or a document…")
+                                (
+                                    ">",
+                                    "type a command, a page number, a document or @section…",
+                                )
                             };
                             ui.label(
                                 egui::RichText::new(prompt)
@@ -508,7 +607,7 @@ impl Palette {
                         ui.painter()
                             .hline(line.x_range(), line.top(), tokens.hairline());
                         ui.add_space(4.0);
-                        let typed = self.query.trim().to_lowercase();
+                        let typed = needle(&self.query);
                         // The room under the field and over the foot. A new
                         // query starts at the top, with its first hit.
                         let room = screen.bottom() - ui.cursor().top() - 28.0 - 32.0;
@@ -663,6 +762,10 @@ impl Palette {
                             ui.add_space(10.0);
                             let empty = if path_mode {
                                 "no documents or folders match"
+                            } else if self.query.trim() == "@" {
+                                "this document has no sections"
+                            } else if self.query.trim_start().starts_with('@') {
+                                "no sections match"
                             } else {
                                 "nothing matches"
                             };
@@ -684,8 +787,11 @@ impl Palette {
                             .rect_filled(foot, 0, tokens.surface.to_opaque());
                         ui.painter()
                             .hline(foot.x_range(), foot.top(), tokens.hairline());
+                        let sections = self.query.trim_start().starts_with('@');
                         let keys = if path_mode {
                             "↑↓ move   ↲ open   tab complete   esc close"
+                        } else if sections {
+                            "↑↓ move   ↲ go   esc close"
                         } else {
                             "↑↓ move   ↲ run   esc close"
                         };
@@ -700,7 +806,11 @@ impl Palette {
                             ui.painter().text(
                                 foot.right_center() - vec2(14.0, 0.0),
                                 Align2::RIGHT_CENTER,
-                                "a number goes to a page",
+                                if sections {
+                                    "@ sections only"
+                                } else {
+                                    "@ sections   a number goes to a page"
+                                },
                                 theme::mono(10.0),
                                 tokens.faint,
                             );
@@ -737,6 +847,7 @@ fn group_of(item: &Item) -> &'static str {
         Item::Open(_) | Item::Browse(_) => "files",
         Item::GoToPage(_) => "pages",
         Item::Settings(_) => "settings",
+        Item::Section(_) => "sections",
     }
 }
 
@@ -965,6 +1076,106 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    /// An outline whose odd entries have no page, so indices skip.
+    fn outline() -> Vec<Heading> {
+        [
+            ("Abstract", 0, 0),
+            ("1 Introduction", 0, 1),
+            ("3 Model architecture", 0, 2),
+            ("3.2 Attention", 1, 3),
+            ("4 Why self-attention", 0, 6),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(order, (title, depth, page))| Heading {
+            index: order * 2,
+            title: title.into(),
+            page,
+            depth,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn an_at_lists_the_outline_and_filters_it() {
+        let mut sources = sources(true);
+        sources.sections = outline();
+        let all = hits("@", &sources, &[]);
+        assert_eq!(all.len(), 5);
+        assert!(all.iter().all(|hit| group_of(&hit.item) == "sections"));
+        // In reading order, indented by depth, with the outline's index.
+        assert_eq!(all[3].label, "  3.2 Attention");
+        assert_eq!(all[3].item, Item::Section(6));
+        assert_eq!(all[3].detail, "p.4");
+        // Matches first, then the looser ones in reading order.
+        let labels: Vec<String> = hits("@ att", &sources, &[])
+            .into_iter()
+            .map(|hit| hit.label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "3.2 Attention",
+                "4 Why self-attention",
+                "Abstract",
+                "3 Model architecture"
+            ]
+        );
+        assert!(hits("@zzz", &sources, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_query_finds_a_few_sections_among_the_commands() {
+        let mut sources = sources(true);
+        sources.sections = outline();
+        let found = hits("attention", &sources, &[]);
+        let sections: Vec<&Hit> = found
+            .iter()
+            .filter(|hit| matches!(hit.item, Item::Section(_)))
+            .collect();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].label, "3.2 Attention");
+        assert!(
+            !hits("", &sources, &[])
+                .iter()
+                .any(|hit| matches!(hit.item, Item::Section(_)))
+        );
+        sources.sections = (0..20)
+            .map(|index| Heading {
+                index,
+                title: format!("Attention {index}"),
+                page: index,
+                depth: 0,
+            })
+            .collect();
+        let found = hits("attention", &sources, &[]);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|hit| matches!(hit.item, Item::Section(_)))
+                .count(),
+            MAX_MIXED_SECTIONS
+        );
+    }
+
+    #[test]
+    fn an_at_starts_on_the_section_being_read() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut sources = sources(true);
+        sources.sections = outline();
+        let mut palette = Palette::default();
+        palette.toggle();
+        palette.query = "@".into();
+        palette.current = Some(Item::Section(6));
+        let hits = hits(&palette.query, &sources, &[]);
+        frame(&ctx, &mut palette, &hits, Vec::new());
+        assert_eq!(
+            frame(&ctx, &mut palette, &hits, vec![key(Key::Enter)]),
+            Some(Item::Section(6))
+        );
     }
 
     #[test]

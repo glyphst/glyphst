@@ -118,14 +118,16 @@ if [[ ${tier} == screens ]]; then
     reader="${repo}/target/debug/glyphst-reader"
     dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one, `%` for a dense drawing; a `--screenshot-*`
-    # argument picks the kind of shot instead of a plain one).
+    # for the second one, `%` for a dense drawing and `@@` for a plain `@`;
+    # a `--screenshot-*` argument picks the kind of shot instead of a plain
+    # one).
     states=(
         "01-gallery --gallery"
         "02a-reader @ --sidebar outline --assistant-demo done"
         "02b-generating @ --screenshot-generating"
         "02d-find @ --find the"
         "02e-overview @ --command view.page_overview"
+        "02e-overview-find @ --sidebar search --find the --command view.page_overview"
         "02f-split @ # --split right"
         "02g-present @ --command view.present"
         "02h-present-tools @ --command view.present --screenshot-present-tools"
@@ -151,6 +153,7 @@ if [[ ${tier} == screens ]]; then
         "05-history @ --assistant-demo history"
         "05-edit @ --assistant-demo edit"
         "06a-palette @ --palette tra"
+        "06a-palette-sections @ --palette @@"
         "06b-path-prompt @ --command app.open"
         "07a-appearance @ --settings appearance"
         "07-reading @ --settings reading"
@@ -168,6 +171,7 @@ if [[ ${tier} == screens ]]; then
             for arg in ${rest}; do
                 case ${arg} in
                     @) args+=("${document}") ;;
+                    @@) args+=("@") ;;
                     \#) args+=("${second}") ;;
                     %) args+=("${dense}") ;;
                     --screenshot-*) shot=${arg} ;;

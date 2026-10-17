@@ -1125,6 +1125,21 @@ impl DocumentTab {
             .saturating_sub(1)
     }
 
+    /// Where leaving the page overview on `page` goes: to the current
+    /// search match when it is on that page, else to the page.
+    pub fn overview_exit(&self, page: usize) -> ViewAction {
+        if let Some(found) = self.find.current_match()
+            && found.page == page
+            && let Some(rect) = self
+                .text
+                .get(page)
+                .and_then(|text| text.selection_rects(found.range.clone()).first().copied())
+        {
+            return ViewAction::Reveal { page, rect };
+        }
+        ViewAction::GoToPage(page)
+    }
+
     /// The outline entry being read: the last one whose destination is at
     /// or above the middle of the view (of the page, presenting).
     pub fn current_outline_entry(&self) -> Option<usize> {
@@ -1561,66 +1576,71 @@ fn current_entry_for_anchor(
 }
 
 #[cfg(test)]
+/// A tab without a document behind it: layout and view logic only.
+pub(crate) fn test_tab(pages: usize) -> DocumentTab {
+    let ctx = egui::Context::default();
+    let path = PathBuf::from("/nonexistent.pdf");
+    DocumentTab {
+        id: 1,
+        path: path.clone(),
+        title: "t".into(),
+        document_layout: DocumentLayout::Fixed,
+        layout: Layout::new(vec![[0.0, 0.0, 600.0, 800.0]; pages]),
+        view: View::new(1.0),
+        viewport: [1.0, 1.0],
+        pixels_per_point: 1.0,
+        inset: 0.0,
+        inset_right: 0.0,
+        fitted: false,
+        restore: None,
+        modified: None,
+        loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
+        indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
+        thumbnails: HashMap::new(),
+        thumbnails_wanted: Vec::new(),
+        freed_textures: Vec::new(),
+        sketches: HashMap::new(),
+        grid_images: HashMap::new(),
+        overview: None,
+        overview_zoom: 1.0,
+        dense_pages: HashSet::new(),
+        failed: HashMap::new(),
+        ready: VecDeque::new(),
+        loading_since: HashMap::new(),
+        ready_parts: VecDeque::new(),
+        ready_layers: VecDeque::new(),
+        layers: HashMap::new(),
+        last_view: ([0.0; 2], 0.0, None),
+        outline: Vec::new(),
+        metadata: Vec::new(),
+        outline_view: OutlineView::default(),
+        outline_pick: None,
+        present: None,
+        ink: Default::default(),
+        load_seconds: Vec::new(),
+        text: DocText::new(pages),
+        text_requested: vec![false; pages],
+        links: HashMap::new(),
+        selection: None,
+        find: Find::default(),
+        annotations: Annotations::default(),
+        back: Vec::new(),
+        forward: Vec::new(),
+        pending_anchor: None,
+        reflow_mismatch: None,
+        translation: None,
+        loaded_version: HashMap::new(),
+        text_version: vec![0; pages],
+        original_text: HashMap::new(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A tab without a document behind it: layout and view logic only.
     fn tab(pages: usize) -> DocumentTab {
-        let ctx = egui::Context::default();
-        let path = PathBuf::from("/nonexistent.pdf");
-        DocumentTab {
-            id: 1,
-            path: path.clone(),
-            title: "t".into(),
-            document_layout: DocumentLayout::Fixed,
-            layout: Layout::new(vec![[0.0, 0.0, 600.0, 800.0]; pages]),
-            view: View::new(1.0),
-            viewport: [1.0, 1.0],
-            pixels_per_point: 1.0,
-            inset: 0.0,
-            inset_right: 0.0,
-            fitted: false,
-            restore: None,
-            modified: None,
-            loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
-            indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),
-            thumbnails: HashMap::new(),
-            thumbnails_wanted: Vec::new(),
-            freed_textures: Vec::new(),
-            sketches: HashMap::new(),
-            grid_images: HashMap::new(),
-            overview: None,
-            overview_zoom: 1.0,
-            dense_pages: HashSet::new(),
-            failed: HashMap::new(),
-            ready: VecDeque::new(),
-            loading_since: HashMap::new(),
-            ready_parts: VecDeque::new(),
-            ready_layers: VecDeque::new(),
-            layers: HashMap::new(),
-            last_view: ([0.0; 2], 0.0, None),
-            outline: Vec::new(),
-            metadata: Vec::new(),
-            outline_view: OutlineView::default(),
-            outline_pick: None,
-            present: None,
-            ink: Default::default(),
-            load_seconds: Vec::new(),
-            text: DocText::new(pages),
-            text_requested: vec![false; pages],
-            links: HashMap::new(),
-            selection: None,
-            find: Find::default(),
-            annotations: Annotations::default(),
-            back: Vec::new(),
-            forward: Vec::new(),
-            pending_anchor: None,
-            reflow_mismatch: None,
-            translation: None,
-            loaded_version: HashMap::new(),
-            text_version: vec![0; pages],
-            original_text: HashMap::new(),
-        }
+        test_tab(pages)
     }
 
     fn settle(tab: &mut DocumentTab) -> TabFrame {

@@ -202,6 +202,12 @@ impl Settings {
             {
                 settings.window.background = value;
             }
+            if let Some(value) = window
+                .get_arg("fullscreen_opaque")
+                .and_then(KdlValue::as_bool)
+            {
+                settings.window.fullscreen_opaque = value;
+            }
         }
 
         if let Some(tabs) = document.get("tabs").and_then(KdlNode::children)
@@ -674,6 +680,11 @@ impl Settings {
             window_children,
             "appearance",
             self.window.background.as_str(),
+        );
+        push_value_node(
+            window_children,
+            "fullscreen_opaque",
+            self.window.fullscreen_opaque,
         );
         document.nodes_mut().push(window);
 

@@ -54,9 +54,10 @@ impl Overview {
         }
     }
 
-    /// Handles a view action while the grid shows: the keys move the
-    /// cursor and zoom the cells. Returns the action back when it is for
-    /// the document instead (a link, Back), which closes the grid.
+    /// Handles a view action while the grid shows: the keys and search
+    /// matches move the cursor and the zoom keys size the cells. Returns
+    /// the action back when it is for the document instead (a link, Back),
+    /// which closes the grid.
     pub fn apply(
         &mut self,
         action: ViewAction,
@@ -72,7 +73,9 @@ impl Overview {
             ViewAction::HalfPage(direction) => {
                 direction as isize * ((page_rows / 2).max(1) * columns) as isize
             }
-            ViewAction::GoToPage(page) => {
+            // A search match comes into view as the cursor's page, and the
+            // grid stays.
+            ViewAction::GoToPage(page) | ViewAction::Reveal { page, .. } => {
                 self.cursor = page.min(count.saturating_sub(1));
                 self.reveal = true;
                 return None;
@@ -97,8 +100,7 @@ impl Overview {
             | ViewAction::GoTo { .. }
             | ViewAction::GoToEntry(_)
             | ViewAction::Back
-            | ViewAction::Forward
-            | ViewAction::Reveal { .. } => return Some(action),
+            | ViewAction::Forward => return Some(action),
         };
         self.cursor = move_cursor(self.cursor, delta, count);
         self.reveal = true;
@@ -287,6 +289,40 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                 } else {
                     glyphst_ui::thumb::paint_placeholder_lines(ui, paper);
                 }
+                // Search matches, tinted as on the page.
+                let found = tab.find.on_page(page);
+                let matches = found.len();
+                if let Some(text) = tab.text.get(page) {
+                    let offset = tab.layout.offsets[page];
+                    let to_paper = |point: [f32; 2]| {
+                        let at = tab.layout.to_document(page, point);
+                        paper.min
+                            + egui::vec2(
+                                (at[0] - offset[0]) as f32 * scale,
+                                (at[1] - offset[1]) as f32 * scale,
+                            )
+                    };
+                    for index in found {
+                        let (tint, edge) =
+                            crate::find::match_tint(&tokens, tab.find.current == Some(index));
+                        for rect in text.selection_rects(tab.find.matches[index].range.clone()) {
+                            let rect = egui::Rect::from_two_pos(
+                                to_paper([rect[0], rect[1]]),
+                                to_paper([rect[2], rect[3]]),
+                            )
+                            .intersect(paper);
+                            painter.rect_filled(rect, 0, tint);
+                            if let Some(edge) = edge {
+                                painter.rect_stroke(
+                                    rect.expand(1.0),
+                                    0,
+                                    edge,
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                        }
+                    }
+                }
                 // A small accent mark on pages with notes.
                 let noted = notes.get(&page).copied().unwrap_or(0);
                 if noted > 0 {
@@ -305,8 +341,17 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                     painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
                 }
                 let number = format!("{:0width$}", page + 1);
-                let (label, color) = if page == current {
+                let found = match matches {
+                    0 => String::new(),
+                    1 => "1 match".to_owned(),
+                    _ => format!("{matches} matches"),
+                };
+                let (label, color) = if page == current && matches > 0 {
+                    (format!("{number} ● current · {found}"), tokens.accent_text)
+                } else if page == current {
                     (format!("{number} ● current"), tokens.accent_text)
+                } else if matches > 0 {
+                    (format!("{number} {found}"), tokens.accent_text)
                 } else if noted > 0 {
                     let unit = if noted == 1 { "note" } else { "notes" };
                     (format!("{number} {noted} {unit}"), tokens.faint)
@@ -378,6 +423,19 @@ mod tests {
             grid.apply(ViewAction::Back, 30, &mut zoom),
             Some(ViewAction::Back)
         );
+    }
+
+    #[test]
+    fn a_search_match_moves_the_cursor_and_keeps_the_grid() {
+        let mut zoom = 1.0;
+        let mut grid = Overview::new(0);
+        let reveal = ViewAction::Reveal {
+            page: 12,
+            rect: [0.0, 0.0, 10.0, 10.0],
+        };
+        assert_eq!(grid.apply(reveal, 30, &mut zoom), None);
+        assert_eq!(grid.cursor, 12);
+        assert!(grid.reveal);
     }
 
     #[test]

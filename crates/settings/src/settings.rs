@@ -29,6 +29,11 @@ const MAX_UI_FONT_WEIGHT: f32 = 900.0;
 const DEFAULT_WINDOW_OPACITY: f32 = 0.94;
 const MIN_WINDOW_OPACITY: f32 = 0.1;
 const MAX_WINDOW_OPACITY: f32 = 1.0;
+/// Whether a transparent window turns opaque in fullscreen. Wayland
+/// compositors must hide what is behind a translucent fullscreen window
+/// (xdg-shell; niri paints black there) and macOS gives it a Space of its
+/// own, so the panes would only show black; Windows still shows the desktop.
+const DEFAULT_FULLSCREEN_OPAQUE: bool = !cfg!(target_os = "windows");
 const DEFAULT_QUICK_ASK_TRANSPARENCY: f32 = 23.0 / 255.0;
 const DEFAULT_QUICK_ASK_TEXT_SIZE: f32 = 13.0;
 pub const DEFAULT_PAGE_IMAGE_LIMIT: usize = 8;

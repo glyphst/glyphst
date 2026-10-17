@@ -466,6 +466,29 @@ fn option(ui: &mut egui::Ui, label: &str, on: &mut bool, tip: &str) -> bool {
     response.clicked()
 }
 
+/// Where to start the context `before` a match so that, after a leading
+/// "…", it fits in `room` (`measure` gives a text's width): as much of
+/// its end as fits.
+fn centred_start(before: &[char], room: f32, measure: impl Fn(&str) -> f32) -> usize {
+    let fits = |start: usize| {
+        let text: String = std::iter::once('…')
+            .chain(before[start..].iter().copied())
+            .collect();
+        measure(&text) <= room
+    };
+    // Widths shrink as the start moves right: find the first that fits.
+    let (mut low, mut high) = (0, before.len());
+    while low < high {
+        let middle = (low + high) / 2;
+        if fits(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
 /// The Search tab (frame 03): the query with its options, then the
 /// matches grouped by page under `── p.4 ──── 3`, each a line of context
 /// with the match in accent. Returns the index of a match to go to.
@@ -571,22 +594,67 @@ pub fn search_panel(find: &mut Find, ui: &mut egui::Ui, now: Instant) -> Option<
                             color: tokens.accent_text,
                             ..Default::default()
                         };
-                        let mut job = egui::text::LayoutJob::default();
                         let chars: Vec<char> = found.context.chars().collect();
                         let part = |range: Range<usize>| chars[range].iter().collect::<String>();
                         let matched = found.context_match.start.min(chars.len())
                             ..found.context_match.end.min(chars.len());
-                        job.append("…", 0.0, normal.clone());
-                        job.append(&part(0..matched.start), 0.0, normal.clone());
-                        job.append(&part(matched.clone()), 0.0, strong);
-                        job.append(&part(matched.end..chars.len()), 0.0, normal);
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 8.0);
-                        let galley = ui.painter().layout_job(job);
-                        ui.painter().galley(
-                            egui::pos2(rect.left() + 4.0, rect.center().y - galley.size().y / 2.0),
-                            galley,
-                            tokens.text_2,
+                        let text = rect.shrink2(egui::vec2(4.0, 0.0));
+                        let painter = ui.painter();
+                        let middle = text.center().y;
+                        let shown = painter.layout_no_wrap(
+                            part(matched.clone()),
+                            strong.font_id.clone(),
+                            strong.color,
                         );
+                        let half = (text.width() - shown.size().x) / 2.0;
+                        if half > 0.0 {
+                            // The match in the middle of the row, whatever
+                            // its width: the context before it is cut from
+                            // the left and the context after from the right.
+                            let before = &chars[..matched.start];
+                            let measure = |text: &str| glyphst_ui::text::width(ui, text, &font);
+                            let start = centred_start(before, half, measure);
+                            let before: String = std::iter::once('…')
+                                .chain(before[start..].iter().copied())
+                                .collect();
+                            let left = text.center().x - shown.size().x / 2.0;
+                            let galley = painter.layout_no_wrap(before, font.clone(), normal.color);
+                            painter.galley(
+                                egui::pos2(left - galley.size().x, middle - galley.size().y / 2.0),
+                                galley,
+                                normal.color,
+                            );
+                            let mut after = egui::text::LayoutJob::single_section(
+                                part(matched.end..chars.len()),
+                                normal.clone(),
+                            );
+                            after.wrap = egui::text::TextWrapping::truncate_at_width(half);
+                            let galley = painter.layout_job(after);
+                            painter.galley(
+                                egui::pos2(left + shown.size().x, middle - galley.size().y / 2.0),
+                                galley,
+                                normal.color,
+                            );
+                            painter.galley(
+                                egui::pos2(left, middle - shown.size().y / 2.0),
+                                shown,
+                                strong.color,
+                            );
+                        } else {
+                            // A match wider than the row starts at its left.
+                            let mut job = egui::text::LayoutJob::default();
+                            job.append("…", 0.0, normal.clone());
+                            job.append(&part(0..matched.start), 0.0, normal.clone());
+                            job.append(&part(matched.clone()), 0.0, strong);
+                            job.append(&part(matched.end..chars.len()), 0.0, normal);
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(text.width());
+                            let galley = painter.layout_job(job);
+                            painter.galley(
+                                egui::pos2(text.left(), middle - galley.size().y / 2.0),
+                                galley,
+                                tokens.text_2,
+                            );
+                        }
                         if response.clicked() {
                             go = Some(index);
                         }
@@ -621,6 +689,19 @@ mod tests {
     use glyphst_pdf::text::Glyph;
 
     use super::*;
+
+    #[test]
+    fn the_context_before_a_centred_match_keeps_what_fits() {
+        // One unit a character, "…" included.
+        let measure = |text: &str| text.chars().count() as f32;
+        let before: Vec<char> = "and apply a ".chars().collect();
+        // Half the row holds "…" and the last seven characters.
+        assert_eq!(centred_start(&before, 8.0, measure), before.len() - 7);
+        // A short context is kept whole.
+        assert_eq!(centred_start(&before, 40.0, measure), 0);
+        // No room keeps none of it.
+        assert_eq!(centred_start(&before, 0.5, measure), before.len());
+    }
 
     fn page(text: &str) -> Arc<PageText> {
         Arc::new(PageText {

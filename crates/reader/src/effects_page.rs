@@ -27,8 +27,22 @@ pub enum Action {
     NewEffect,
 }
 
-/// Card sizes in Settings and in the drawer.
-const CARD: Vec2 = vec2(168.0, 100.0);
+/// The narrowest card in Settings; cards stretch to fill each row.
+const MIN_CARD_WIDTH: f32 = 150.0;
+/// A card's height for its width.
+const CARD_ASPECT: f32 = 100.0 / 168.0;
+/// The room between cards in a row (frame 07).
+const GAP: f32 = 12.0;
+
+/// The card size that fills a row `width` wide with as many cards as fit
+/// at `MIN_CARD_WIDTH` or wider.
+fn fill_card(width: f32) -> Vec2 {
+    let columns = ((width + GAP) / (MIN_CARD_WIDTH + GAP)).floor().max(1.0);
+    // A point less, so rounding never wraps the last card.
+    let card = ((width - (columns - 1.0) * GAP) / columns).floor() - 1.0;
+    let card = card.max(48.0);
+    vec2(card, (card * CARD_ASPECT).round())
+}
 
 /// One card: a choice, its label and what its preview draws.
 struct Card {
@@ -59,7 +73,7 @@ fn gallery(
 ) -> Option<Choice> {
     let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+        ui.spacing_mut().item_spacing = vec2(GAP, 8.0);
         for card in cards {
             if card_ui(ui, salt, kind, card, *selected == card.choice, size, time) {
                 clicked = Some(card.choice.clone());
@@ -283,13 +297,14 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 Vec::new(),
             );
             let selected = Choice::Effect(prefs.background.clone());
+            let card = fill_card(ui.available_width());
             if let Some(Choice::Effect(id)) = gallery(
                 ui,
                 "settings-background",
                 EffectKind::Background,
                 &cards,
                 &selected,
-                CARD,
+                card,
                 time,
             ) {
                 prefs.background = id;
@@ -353,13 +368,14 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 vec![off_card()],
             );
             let selected = as_choice(prefs.transition.as_deref());
+            let card = fill_card(ui.available_width());
             match gallery(
                 ui,
                 "settings-transition",
                 EffectKind::Transition,
                 &cards,
                 &selected,
-                CARD,
+                card,
                 time,
             ) {
                 Some(Choice::Effect(id)) => prefs.transition = Some(id),
@@ -382,13 +398,14 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 vec![off_card()],
             );
             let selected = as_choice(prefs.overlay.as_deref());
+            let card = fill_card(ui.available_width());
             match gallery(
                 ui,
                 "settings-overlay",
                 EffectKind::Overlay,
                 &cards,
                 &selected,
-                CARD,
+                card,
                 time,
             ) {
                 Some(Choice::Effect(id)) => prefs.overlay = Some(id),
@@ -500,9 +517,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
     };
     // Tiles three to a row.
     let tile = |ui: &egui::Ui| {
-        let width = ((ui.available_width() - 2.0 * 10.0) / 3.0)
-            .floor()
-            .max(48.0);
+        let width = ((ui.available_width() - 2.0 * GAP) / 3.0).floor().max(48.0);
         vec2(width, (width * 0.6).round())
     };
     egui::ScrollArea::vertical()
@@ -685,6 +700,17 @@ pub fn open_folder(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_cards_fill_the_row() {
+        // Frame 07: four cards fill the 684 px page; five would not fit.
+        let card = fill_card(684.0);
+        assert_eq!(card, vec2(161.0, (161.0 * CARD_ASPECT).round()));
+        // Three at 500, still no narrower than the minimum.
+        assert_eq!(fill_card(500.0).x, 157.0);
+        // One card takes a narrow row.
+        assert_eq!(fill_card(120.0).x, 119.0);
+    }
 
     #[test]
     fn new_effects_get_their_own_file_and_id() {

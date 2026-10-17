@@ -157,7 +157,23 @@ impl ReaderApp {
                 if tab.overview.is_some() {
                     if let Some(page) = overview::show(ui, rect, tab) {
                         tab.overview = None;
-                        tab.apply(ViewAction::GoToPage(page), false);
+                        let exit = tab.overview_exit(page);
+                        tab.apply(exit, false);
+                    }
+                    // Search works on the grid too: its matches move the
+                    // cursor.
+                    let enter_leaves = self.keymap.preset() == KeymapPreset::Vim;
+                    let tab = &mut self.tabs[index];
+                    if focused
+                        && tab.overview.is_some()
+                        && tab.find.open
+                        && let Some(action) =
+                            find::find_bar(&mut tab.find, rect, ui.ctx(), now, enter_leaves)
+                    {
+                        match action {
+                            FindBarAction::Step(forward) => self.find_step(forward),
+                            FindBarAction::Close => tab.find.close(),
+                        }
                     }
                     continue;
                 }
@@ -309,7 +325,14 @@ impl ReaderApp {
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
         painter.hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
         let tab = &self.tabs[active];
-        let meta = if tab.overview.is_some() {
+        let meta = if tab.overview.is_some() && !tab.find.matches.is_empty() {
+            format!(
+                "overview · {} matches on {} pages · {:.0}%",
+                tab.find.matches.len(),
+                tab.find.matched_pages(),
+                tab.overview_zoom * 100.0
+            )
+        } else if tab.overview.is_some() {
             format!(
                 "overview · {} pages · {:.0}%",
                 tab.layout.len(),
@@ -683,6 +706,9 @@ impl ReaderApp {
         let mut book_changed = false;
         let title = self.tabs[active].title.clone();
         let time = self.started.elapsed().as_secs_f32();
+        self.tabs[active]
+            .outline_view
+            .set_follow(self.prefs.outline_follow);
         let mut requests = sidebar::header(
             ui,
             &self.tabs[active],

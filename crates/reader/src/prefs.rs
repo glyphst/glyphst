@@ -84,6 +84,8 @@ pub struct Prefs {
     pub sidebar: SidebarTab,
     /// Columns of thumbnails in the Pages sidebar.
     pub page_columns: PageColumns,
+    /// The outline scrolls to follow the section being read.
+    pub outline_follow: bool,
     /// Widths of the left drawer and the assistant, in points.
     pub drawer_width: f32,
     pub assistant_width: f32,
@@ -134,6 +136,7 @@ impl Default for Prefs {
             show_sidebar: true,
             sidebar: SidebarTab::default(),
             page_columns: PageColumns::default(),
+            outline_follow: true,
             drawer_width: crate::shell::SIDEBAR_WIDTH,
             assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,

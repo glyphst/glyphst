@@ -598,6 +598,20 @@ fn appearance(
                         }
                     });
                 });
+                let mut opaque = window.fullscreen_opaque;
+                group.row(
+                    "opaque in fullscreen",
+                    Some(
+                        "fullscreen hides the desktop behind the window, so show the theme instead",
+                    ),
+                    |ui| {
+                        ui.add_enabled_ui(transparent, |ui| {
+                            if ui.add(Switch(&mut opaque)).changed() {
+                                window.fullscreen_opaque = opaque;
+                            }
+                        });
+                    },
+                );
                 if window != before {
                     user.edit(|settings| settings.window = window);
                 }

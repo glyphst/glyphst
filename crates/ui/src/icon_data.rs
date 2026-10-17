@@ -154,6 +154,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("list", include_bytes!("../assets/icons/list.svg")),
     ("list-todo", include_bytes!("../assets/icons/list-todo.svg")),
     ("list-tree", include_bytes!("../assets/icons/list-tree.svg")),
+    ("locate", include_bytes!("../assets/icons/locate.svg")),
     (
         "locate-fixed",
         include_bytes!("../assets/icons/locate-fixed.svg"),

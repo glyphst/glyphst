@@ -173,10 +173,13 @@ pub struct SidebarState {
 
 /// A tab's outline and thumbnail lists, after the GPUI Reader's: the
 /// outline follows the section being read until it is scrolled away from
-/// by hand, and the thumbnails follow the page.
+/// by hand or following is turned off, and the thumbnails follow the page.
 #[derive(Default)]
 pub struct OutlineView {
     collapsed: HashSet<usize>,
+    /// Following is turned off (the locate toggle): the list stays where it
+    /// is while the document scrolls.
+    unfollowed: bool,
     /// Scrolling the current entry out of the list by hand stops following
     /// it until it is located again or an entry is chosen.
     paused: bool,
@@ -196,7 +199,12 @@ pub struct OutlineView {
 impl OutlineView {
     /// Whether the outline follows the section being read.
     pub fn following(&self) -> bool {
-        !self.paused
+        !self.paused && !self.unfollowed
+    }
+
+    /// Turns following on or off; turning it on doesn't locate.
+    pub fn set_follow(&mut self, on: bool) {
+        self.unfollowed = !on;
     }
 
     /// Follows the section being read again and centres it.
@@ -878,12 +886,12 @@ pub fn header(
     let following = tab.outline_view.following();
     match which {
         SidebarTab::Outline if !tab.outline.is_empty() => {
-            let tip = if following {
-                "following the current section"
+            let (icon, tip) = if following {
+                ("locate-fixed", "stop following the current section")
             } else {
-                "locate the current section"
+                ("locate", "follow the current section")
             };
-            header = header.action(Action::new("locate-fixed", tip).selected(following));
+            header = header.action(Action::new(icon, tip).selected(following));
             chosen.push(SidebarAction::LocateOutline);
         }
         SidebarTab::Pages => {
@@ -894,6 +902,15 @@ pub fn header(
             header = header.action(Action::new(icon, tip));
             chosen.push(SidebarAction::Command(Command::PageColumns));
             header = header.action(Action::new("maximize-2", "page overview"));
+            chosen.push(SidebarAction::Command(Command::PageOverview));
+        }
+        SidebarTab::Search => {
+            let (icon, tip) = if tab.overview.is_some() {
+                ("minimize-2", "leave page overview")
+            } else {
+                ("maximize-2", "show matches in page overview")
+            };
+            header = header.action(Action::new(icon, tip));
             chosen.push(SidebarAction::Command(Command::PageOverview));
         }
         SidebarTab::Bookmarks => {
@@ -1098,11 +1115,11 @@ fn outline(
     let entries = &tab.outline;
     let view = &mut tab.outline_view;
     let filtering = !filter.is_empty();
-    if view.list.shown(ui.ctx()) {
+    if view.list.shown(ui.ctx()) && !view.unfollowed {
         view.locate();
     }
     let changed = std::mem::replace(&mut view.current, current) != current;
-    if !view.paused
+    if view.following()
         && let Some(entry) = current
     {
         let expanded = !filtering && expand_ancestors(entries, &mut view.collapsed, entry);
@@ -1275,7 +1292,9 @@ fn outline(
     if let Some(index) = chosen {
         actions.push(SidebarAction::View(ViewAction::GoToEntry(index)));
         view.current = Some(index);
-        view.locate();
+        if !view.unfollowed {
+            view.locate();
+        }
     }
 }
 
@@ -1897,6 +1916,50 @@ fn note_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turning_following_off_keeps_the_outline_where_it_is() {
+        let mut tab = crate::document_tab::test_tab(60);
+        tab.outline = (0..60)
+            .map(|page| crate::document::OutlineEntry {
+                title: format!("section {page}"),
+                page: Some(page),
+                y: None,
+                depth: 0,
+                parent: None,
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        let draw = |tab: &mut DocumentTab| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| super::outline(ui, tab, "", &mut Vec::new()));
+            output.textures_delta.clear();
+        };
+        assert!(tab.outline_view.following());
+        tab.outline_view.set_follow(false);
+        // Reading on to section 50 leaves the list at the top.
+        tab.view.origin[1] = tab.layout.offsets[50][1];
+        for _ in 0..3 {
+            draw(&mut tab);
+        }
+        assert_eq!(tab.current_outline_entry(), Some(50));
+        assert!(!tab.outline_view.following());
+        assert_eq!(tab.outline_view.list.offset, 0.0);
+        // Turned on again, it scrolls to the section being read.
+        tab.outline_view.set_follow(true);
+        tab.outline_view.locate();
+        for _ in 0..3 {
+            draw(&mut tab);
+        }
+        assert!(tab.outline_view.following());
+        assert!(tab.outline_view.list.offset > 0.0);
+    }
 
     #[test]
     fn only_the_branch_of_a_row_toggles_it() {
