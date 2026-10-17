@@ -1,5 +1,5 @@
-//! Scripted runs for unattended checks: a zoom, scroll and find benchmark
-//! that prints JSON, and in-app screenshots (egui's own capture of this
+//! Scripted runs for unattended checks: a zoom, scroll, sidebar and find
+//! benchmark that prints JSON, and in-app screenshots (egui's own capture of this
 //! window), optionally with a search, a selection or a sidebar tab shown.
 //! Both exit when done and neither saves preferences or library history.
 
@@ -23,6 +23,10 @@ const BENCH_SCROLL_STEP: f64 = 40.0;
 /// Frames to wait once the pages are drawn, so loading has settled; long
 /// enough for raster layers to be refreshed for the view (150 ms).
 const SETTLE_FRAMES: u32 = 40;
+/// Frames between the sidebar's toggles, enough for a slide to settle.
+const BENCH_SIDEBAR_FRAMES: usize = 40;
+/// Times the sidebar slides in or out.
+const BENCH_SIDEBAR_TOGGLES: usize = 6;
 /// The benchmark searches for this word; it is common in English books.
 const BENCH_QUERY: &str = "the";
 /// The find run gives up after this many frames.
@@ -83,6 +87,8 @@ enum Phase {
     Settle(u32),
     Zoom(usize),
     Scroll(usize),
+    /// The sidebar sliding in and out, with motion on.
+    Sidebar(usize),
     Find(usize),
     Done,
 }
@@ -92,6 +98,9 @@ pub struct Bench {
     last_frame: Option<Instant>,
     zoom: Vec<Duration>,
     scroll: Vec<Duration>,
+    sidebar: Vec<Duration>,
+    /// View targets made while the sidebar slid.
+    sidebar_targets: u64,
     find: Vec<Duration>,
     find_started: Option<Instant>,
     find_ms: Option<f64>,
@@ -106,12 +115,22 @@ impl Default for Bench {
             last_frame: None,
             zoom: Vec::new(),
             scroll: Vec::new(),
+            sidebar: Vec::new(),
+            sidebar_targets: 0,
             find: Vec::new(),
             find_started: None,
             find_ms: None,
             max_encode_ms: 0.0,
             peak_gpu_bytes: 0,
         }
+    }
+}
+
+impl Harness {
+    /// Whether motion runs: only while the benchmark slides the sidebar;
+    /// screenshots are taken of settled frames.
+    pub fn moves(&self) -> bool {
+        matches!(self, Self::Bench(bench) if matches!(bench.phase, Phase::Sidebar(_)))
     }
 }
 
@@ -256,6 +275,7 @@ impl ReaderApp {
         self.prepare_translation(ctx);
         let interval = bench.last_frame.replace(now).map(|last| now - last);
         let stats = self.with_gpu(|gpu| gpu.stats.clone()).unwrap_or_default();
+        let targets_made = self.with_gpu(|gpu| gpu.targets_made).unwrap_or(0);
         bench.max_encode_ms = bench.max_encode_ms.max(stats.encode_ms);
         bench.peak_gpu_bytes = bench.peak_gpu_bytes.max(stats.gpu_bytes);
         let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
@@ -297,9 +317,25 @@ impl ReaderApp {
                 }
                 tab.view.scroll_by_pixels(0.0, BENCH_SCROLL_STEP);
                 if frame + 1 >= BENCH_SCROLL_FRAMES || tab.layout.len() == 1 {
-                    Phase::Find(0)
+                    Phase::Sidebar(0)
                 } else {
                     Phase::Scroll(frame + 1)
+                }
+            }
+            Phase::Sidebar(frame) => {
+                if frame == 0 {
+                    bench.sidebar_targets = targets_made;
+                } else {
+                    bench.sidebar.extend(interval);
+                }
+                if frame % BENCH_SIDEBAR_FRAMES == 0 {
+                    self.prefs.show_sidebar = !self.prefs.show_sidebar;
+                }
+                if frame + 1 >= BENCH_SIDEBAR_FRAMES * BENCH_SIDEBAR_TOGGLES {
+                    bench.sidebar_targets = targets_made - bench.sidebar_targets;
+                    Phase::Find(0)
+                } else {
+                    Phase::Sidebar(frame + 1)
                 }
             }
             // Searches the whole document while frames keep coming.
@@ -350,6 +386,11 @@ impl ReaderApp {
             "first_part_ms": self.first_part_ms,
             "zoom": summarize(&bench.zoom),
             "scroll": summarize(&bench.scroll),
+            "sidebar": {
+                "slides": BENCH_SIDEBAR_TOGGLES,
+                "targets_made": bench.sidebar_targets,
+                "frames": summarize(&bench.sidebar),
+            },
             "find": {
                 "query": BENCH_QUERY,
                 "complete_ms": bench.find_ms,

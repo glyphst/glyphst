@@ -64,7 +64,7 @@ cargo run --release -p glyphst-pdf-gpu --example zoom_view -- page.pdf   # inter
 ```
 
 The Reader runs the same checks unattended in its own window, saving
-nothing: `--bench` prints zoom, scroll and whole-document search frame
+nothing: `--bench` prints zoom, scroll, sidebar-slide and whole-document search frame
 times as JSON, and `--screenshot PATH`, `--screenshot-turn PATH` and
 `--screenshot-switch PATH` (two documents) capture the window, the latter two
 halfway through a transition; `--screenshot-generating PATH` and

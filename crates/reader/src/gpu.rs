@@ -202,6 +202,8 @@ pub struct ReaderGpu {
     previews: HashMap<String, PreparedEffect>,
     backdrop: Option<PreparedEffect>,
     pub stats: FrameStats,
+    /// View targets made so far (the benchmark counts them).
+    pub targets_made: u64,
 }
 
 impl ReaderGpu {
@@ -316,6 +318,7 @@ impl ReaderGpu {
             previews: HashMap::new(),
             backdrop: None,
             stats: FrameStats::default(),
+            targets_made: 0,
         };
         render_state.renderer.write().callback_resources.insert(gpu);
     }
@@ -663,6 +666,13 @@ impl ReaderGpu {
     /// The view of `tab` with a target of `size`, made or remade.
     fn view(&mut self, device: &wgpu::Device, tab: u64, size: [u32; 2]) -> &mut ViewState {
         let format = self.format;
+        if self
+            .views
+            .get(&tab)
+            .is_none_or(|view| view.target.size() != size)
+        {
+            self.targets_made += 1;
+        }
         let view = self.views.entry(tab).or_insert_with(|| ViewState {
             target: OffscreenTarget::new(device, format, size, VIEW_TARGET_USAGE),
             snapshot: None,

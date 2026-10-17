@@ -3749,7 +3749,7 @@ impl eframe::App for ReaderApp {
         self.fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         self.apply_theme(&ctx);
         // Screenshots are taken of settled frames.
-        let reduce_motion = self.harness.is_some()
+        let reduce_motion = self.harness.as_ref().is_some_and(|h| !h.moves())
             || self
                 .user_settings
                 .get()
