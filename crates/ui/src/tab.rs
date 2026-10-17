@@ -1,7 +1,7 @@
 //! Document tabs (pen components `tab` and `tab/active`): 36pt cells split
-//! by hairlines; the active one is `surface` with a `▌` accent mark, the
-//! title in full text and a dirty dot; others are faint on the base. Laid
-//! out with `craft_ui::tabs`, painted here.
+//! by hairlines; the active one is `surface` with a `▌` accent mark in the
+//! icon's place, the title in full text and a dirty dot; others are faint
+//! on the base. Laid out with `craft_ui::tabs`, painted here.
 
 use egui::{Align2, Rect, Response, Ui, Vec2, vec2};
 
@@ -12,6 +12,10 @@ use crate::{
 
 /// The tab bar's height.
 pub const BAR_HEIGHT: f32 = 36.0;
+
+/// The icon's room before the title, 13pt and a gap; the active tab's
+/// mark takes the same room, so a tab keeps its width when activated.
+const ICON_SLOT: f32 = 21.0;
 
 /// What a tab shows.
 pub struct DocTab<'a> {
@@ -27,15 +31,15 @@ impl DocTab<'_> {
     /// The width the tab wants for its title.
     pub fn natural_width(&self, ui: &Ui) -> f32 {
         let mut width = 12.0 + text::width(ui, self.title, &theme::mono(12.0)) + 10.0;
-        width += if self.active { 16.0 } else { 0.0 };
-        width += if self.icon.is_some() && !self.active {
-            21.0
-        } else {
-            0.0
-        };
+        width += if self.has_slot() { ICON_SLOT } else { 0.0 };
         width += if self.dirty { 14.0 } else { 0.0 };
         width += if self.closable { 20.0 } else { 0.0 };
         width.clamp(80.0, 240.0)
+    }
+
+    /// Whether the tab shows an icon or the active mark before its title.
+    fn has_slot(&self) -> bool {
+        self.icon.is_some() || self.active
     }
 
     /// The close button's rect in a tab at `rect`.
@@ -68,11 +72,10 @@ impl DocTab<'_> {
         let mut x = rect.left() + 12.0;
         if self.active {
             ui.painter().rect_filled(
-                Rect::from_center_size(egui::pos2(x + 2.5, y), vec2(4.0, 13.0)),
+                Rect::from_center_size(egui::pos2(x + 6.5, y), vec2(4.0, 13.0)),
                 0,
                 t.accent,
             );
-            x += 16.0;
         } else if let Some(icon) = self.icon {
             icons::paint(
                 ui,
@@ -81,7 +84,9 @@ impl DocTab<'_> {
                 13.0,
                 t.faint,
             );
-            x += 21.0;
+        }
+        if self.has_slot() {
+            x += ICON_SLOT;
         }
         let close = self.close_rect(rect);
         let mut right = close.map_or(rect.right() - 10.0, |close| close.left() - 4.0);
@@ -159,4 +164,26 @@ pub fn logo(ui: &mut Ui, active: bool) -> Response {
         t.accent,
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activating_a_tab_keeps_its_width() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let tab = |active| DocTab {
+                title: "attention.pdf",
+                icon: Some("file-text"),
+                active,
+                dirty: false,
+                closable: true,
+            };
+            assert_eq!(tab(true).natural_width(ui), tab(false).natural_width(ui));
+        });
+        output.textures_delta.clear();
+    }
 }
