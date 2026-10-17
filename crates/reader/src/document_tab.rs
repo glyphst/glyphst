@@ -80,6 +80,8 @@ pub enum ViewAction {
     FitWidth,
     /// The fit with margins: 100%.
     FitMargins,
+    /// The page being read whole in the view, centred.
+    FitPage,
     TogglePresent,
     ZoomIn,
     ZoomOut,
@@ -1161,6 +1163,25 @@ impl DocumentTab {
         self.go_to_page(page);
     }
 
+    /// The page being read whole in the view with margins, centred. A
+    /// reflowed book has no pages to fit, so it fits the width.
+    fn fit_page(&mut self) {
+        if self.is_reflowed() {
+            self.fit_width();
+            return;
+        }
+        let page = self.current_page();
+        let [width, height] = self.layout.page_size(page);
+        let gap = 2.0 * PAGE_GAP;
+        let scale = (self.viewport[0] / (width + gap)).min(self.viewport[1] / (height + gap));
+        self.view = View::new(scale);
+        let [x, y] = self.layout.offsets[page];
+        self.view.origin = [
+            x + width / 2.0 - self.viewport[0] / 2.0 / scale,
+            y + height / 2.0 - self.viewport[1] / 2.0 / scale,
+        ];
+    }
+
     /// The fit with margins, the first press of fit width; at it, the
     /// second press puts the widest page edge to edge.
     fn fit_margins_or_strict(&mut self) {
@@ -1383,6 +1404,7 @@ impl DocumentTab {
             }
             ViewAction::FitWidth => self.fit_margins_or_strict(),
             ViewAction::FitMargins => self.fit_width(),
+            ViewAction::FitPage => self.fit_page(),
             ViewAction::TogglePresent => {
                 self.present = match self.present {
                     Some(page) => {
@@ -2065,6 +2087,25 @@ mod tests {
             !tab.can_go_back(),
             "stepping through matches keeps no history"
         );
+    }
+
+    #[test]
+    fn fit_page_shows_the_whole_page_being_read() {
+        let mut tab = tab(5);
+        settle(&mut tab);
+        tab.go_to_page(2);
+        tab.apply(ViewAction::FitPage, false);
+        settle(&mut tab);
+        let scale = tab.view.scale;
+        let [_, height] = tab.layout.page_size(2);
+        assert!(
+            height * scale <= tab.viewport[1],
+            "the page fits the height"
+        );
+        let top = tab.layout.offsets[2][1];
+        assert!(tab.view.origin[1] <= top);
+        assert!(tab.view.origin[1] + tab.viewport[1] / scale >= top + height);
+        assert_eq!(tab.current_page(), 2);
     }
 
     #[test]

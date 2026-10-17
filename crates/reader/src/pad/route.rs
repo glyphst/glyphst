@@ -86,10 +86,13 @@ impl Router {
             }
         }
         let owner = owner(state);
-        // The stick moves through lists; on a document it scrolls.
-        self.stick = match owner {
-            Owner::Keys => stick_dir(frame.axes.left, self.stick),
-            _ => None,
+        // The stick moves through lists and the page overview; on a
+        // document it scrolls.
+        let grid = owner == Owner::Document && state.overview;
+        self.stick = if owner == Owner::Keys || grid {
+            stick_dir(frame.axes.left, self.stick)
+        } else {
+            None
         };
         let dpad = self.held.iter().rev().find_map(|button| button.dir());
         let (repeated, wake) = self.repeat.update(dpad.or(self.stick), now);
@@ -124,15 +127,28 @@ impl Router {
                             routed.keys.push((egui::Key::Escape, none));
                         }
                         // A opens the overview's page, as Enter does.
-                        PadEvent::Pressed(PadButton::South) if state.overview => {
+                        PadEvent::Pressed(PadButton::South) if grid => {
                             routed.keys.push((egui::Key::Enter, none));
                         }
+                        // On the overview the d-pad moves a cell at a time.
+                        PadEvent::Pressed(button) if grid && button.dir().is_some() => {}
                         event => events.push(event.clone()),
                     }
                 }
                 let fired = self.presses.update(keymap, &events, now);
                 routed.commands = fired.commands;
                 routed.wake = earliest(routed.wake, fired.wake);
+                if grid {
+                    // The triggers size the cells instead.
+                    routed.document.scroll = [0.0, 0.0];
+                    routed.commands.extend(dirs.iter().map(|&dir| match dir {
+                        Dir::Up => Command::ScrollUp,
+                        Dir::Down => Command::ScrollDown,
+                        Dir::Left => Command::ScrollLeft,
+                        Dir::Right => Command::ScrollRight,
+                    }));
+                    return routed;
+                }
                 // A held d-pad repeats what it scrolls or turns.
                 if let Some(dir) = repeated
                     && !pressed.contains(&dir.button())
@@ -314,6 +330,26 @@ mod tests {
             "A opens the overview's page"
         );
         assert_eq!(routed.commands, [], "rather than fitting the width");
+    }
+
+    #[test]
+    fn on_the_overview_the_stick_and_dpad_move_a_cell_at_a_time() {
+        let mut router = Router::default();
+        let overview = RouteState {
+            overview: true,
+            ..DOCUMENT
+        };
+        let mut pushed = frame(tap(PadButton::Right));
+        pushed.axes.left = egui::vec2(0.0, 0.9);
+        pushed.axes.right_trigger = 1.0;
+        let routed = router.route(&pushed, &overview, &keymap(), Instant::now());
+        assert_eq!(routed.commands, [Command::ScrollRight, Command::ScrollDown]);
+        assert_eq!(
+            routed.document.scroll,
+            [0.0, 0.0],
+            "the stick doesn't scroll"
+        );
+        assert!(routed.document.zoom > 0.0, "the triggers zoom the grid");
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     FitWidth,
+    /// The whole page in the view.
+    FitPage,
     RotateClockwise,
     RotateCounterclockwise,
     ToggleSpread,
@@ -178,7 +180,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 77] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -216,6 +218,7 @@ impl Command {
         Self::ZoomIn,
         Self::ZoomOut,
         Self::FitWidth,
+        Self::FitPage,
         Self::RotateClockwise,
         Self::RotateCounterclockwise,
         Self::ToggleSpread,
@@ -297,6 +300,7 @@ impl Command {
             Self::ZoomIn => "view.zoom_in",
             Self::ZoomOut => "view.zoom_out",
             Self::FitWidth => "view.fit_width",
+            Self::FitPage => "view.fit_page",
             Self::RotateClockwise => "view.rotate_clockwise",
             Self::RotateCounterclockwise => "view.rotate_counterclockwise",
             Self::ToggleSpread => "view.two_page_spread",
@@ -382,6 +386,7 @@ impl Command {
             Self::ZoomIn => "Zoom in",
             Self::ZoomOut => "Zoom out",
             Self::FitWidth => "Fit width",
+            Self::FitPage => "Fit page",
             Self::RotateClockwise => "Rotate clockwise",
             Self::RotateCounterclockwise => "Rotate counterclockwise",
             Self::ToggleSpread => "Two-page spread",
@@ -403,7 +408,7 @@ impl Command {
             Self::FindPrevious => "Find previous",
             Self::SelectPage => "Select the page's text",
             Self::RegionSelect => "Select a region of the page",
-            Self::Bookmark => "Bookmark this page",
+            Self::Bookmark => "Bookmark this page, or remove its bookmark",
             Self::TranslateSelection => "Translate the selection",
             Self::TranslateDocument => "Translate the document",
             Self::ShowTranslated => "Show translated or original pages",
@@ -463,6 +468,7 @@ impl Command {
             Self::ZoomIn => "zoom-in",
             Self::ZoomOut => "zoom-out",
             Self::FitWidth => "scan",
+            Self::FitPage => "maximize-2",
             Self::RotateClockwise => "rotate-cw",
             Self::RotateCounterclockwise => "rotate-ccw",
             Self::ToggleSpread => "book-open",
@@ -541,6 +547,7 @@ impl Command {
             Self::ZoomIn
             | Self::ZoomOut
             | Self::FitWidth
+            | Self::FitPage
             | Self::RotateClockwise
             | Self::RotateCounterclockwise
             | Self::ToggleSpread
@@ -670,6 +677,7 @@ impl Command {
             | Self::ToggleSpread
             | Self::PageColumns
             | Self::Outline
+            | Self::FitPage
             | Self::McpConfig => &[],
         }
     }
@@ -811,6 +819,7 @@ impl Command {
                 | Self::ZoomIn
                 | Self::ZoomOut
                 | Self::FitWidth
+                | Self::FitPage
                 | Self::RotateClockwise
                 | Self::RotateCounterclockwise
                 | Self::Present

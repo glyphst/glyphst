@@ -160,6 +160,14 @@ impl ReaderApp {
                 for action in std::mem::take(&mut view.actions) {
                     tab.apply(action, false);
                 }
+                // The pad's triggers size the cells.
+                if let Some(pad) = view.pad.filter(|pad| pad.zoom != 0.0) {
+                    let range = overview::GRID_ZOOM_RANGE;
+                    let factor = (f64::from(pad.zoom) * seconds).exp() as f32;
+                    tab.overview_zoom =
+                        (tab.overview_zoom * factor).clamp(*range.start(), *range.end());
+                    animating = true;
+                }
                 if tab.overview.is_some() {
                     if let Some(page) = overview::show(ui, rect, tab) {
                         tab.overview = None;

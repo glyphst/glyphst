@@ -1181,9 +1181,49 @@ impl ReaderApp {
         }
     }
 
-    fn add_bookmark(&mut self) {
+    /// Bookmarks the page being read, or removes its bookmark. From the
+    /// pad a toast says which, rather than the sidebar opening.
+    fn toggle_bookmark(&mut self) {
         let Some(active) = self.active else {
             return;
+        };
+        let page = self.tabs[active].position().page.max(1);
+        let existing = self.tabs[active]
+            .annotations
+            .bookmarks
+            .iter()
+            .find(|bookmark| bookmark.position.page.max(1) == page)
+            .map(|bookmark| bookmark.id);
+        let pad = self.last_input == glyphst_ui::pad_glyph::InputDevice::Pad;
+        match existing {
+            Some(id) => {
+                let result = self.library.remove_bookmark(id);
+                let removed = matches!(result, Ok(true));
+                self.after_edit(result);
+                if removed {
+                    self.notices
+                        .push(format!("Removed the bookmark on p. {page}"));
+                }
+            }
+            None if pad => {
+                self.add_bookmark_quietly();
+                self.notices.push(format!("Bookmarked p. {page}"));
+            }
+            None => self.add_bookmark(),
+        }
+    }
+
+    fn add_bookmark(&mut self) {
+        if self.add_bookmark_quietly() {
+            self.prefs.show_sidebar = true;
+            self.prefs.sidebar = SidebarTab::Bookmarks;
+        }
+    }
+
+    /// Bookmarks the page being read; whether there was one to.
+    fn add_bookmark_quietly(&mut self) -> bool {
+        let Some(active) = self.active else {
+            return false;
         };
         let tab = &self.tabs[active];
         let (path, position, title) = (tab.path.clone(), tab.position(), tab.words_at_top(8));
@@ -1193,8 +1233,7 @@ impl ReaderApp {
             self.log_activity(ActivityKind::Bookmark, &path, format!("p.{page}"), 0);
         }
         self.after_edit(result.map(|_| true));
-        self.prefs.show_sidebar = true;
-        self.prefs.sidebar = SidebarTab::Bookmarks;
+        true
     }
 
     fn apply_sidebar(
@@ -2532,6 +2571,7 @@ impl ReaderApp {
             Command::ZoomIn => view(ViewAction::ZoomIn),
             Command::ZoomOut => view(ViewAction::ZoomOut),
             Command::FitWidth => view(ViewAction::FitWidth),
+            Command::FitPage => view(ViewAction::FitPage),
             Command::RotateClockwise | Command::RotateCounterclockwise => {
                 let turn = if command == Command::RotateClockwise {
                     1
@@ -2631,7 +2671,7 @@ impl ReaderApp {
                 None
             }
             Command::Bookmark => {
-                self.add_bookmark();
+                self.toggle_bookmark();
                 None
             }
             Command::TranslateSelection => {
