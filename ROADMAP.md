@@ -39,7 +39,8 @@ and the abandoned Files app in M5). It has:
   AI providers' order and AI and OCR connection tests.
 - **M6:** the effects manager: Settings › Effects with live preview cards
   for backgrounds, transitions and page tints, parameter sliders, an image
-  wallpaper (Wallpaper, Soft and Parallax backgrounds) and the effects
+  wallpaper (now one Wallpaper background with dim, blur and parallax,
+  set in Appearance) and the effects
   folder (open it, write a commented starter effect, see load errors);
   user effects reload when their files change; the Effects drawer gives a
   book its own background, transition and tint; page tints Sepia, Night

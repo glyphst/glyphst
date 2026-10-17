@@ -49,6 +49,9 @@ i18n-embed-fl = "0.10"
 kdl = "6"
 log = "0.4"
 lyon_tessellation = "1"
+# Material You colour schemes from a seed colour or a wallpaper (a port of
+# material-color-utilities, as matugen uses); MIT OR Apache-2.0.
+material-colors = { version = "0.5", features = ["quantize"] }
 mupdf = "0.8"
 redb = "4"
 # Pattern search in documents (already in the tree); MIT OR Apache-2.0.

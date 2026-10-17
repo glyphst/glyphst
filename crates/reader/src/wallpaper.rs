@@ -1,5 +1,6 @@
 //! The wallpaper image backgrounds can draw: decoded, fitted and
 //! mipmapped on a worker thread, then handed to the GPU on a later frame.
+//! The worker also finds the colour a generated theme is built on.
 
 use std::{
     path::PathBuf,
@@ -8,12 +9,17 @@ use std::{
 
 /// The longest side a wallpaper keeps; larger images are scaled down.
 pub const MAX_SIDE: u32 = 3840;
+/// The longest side of the copy its seed colour is found in, as
+/// Material's own image path does.
+const SEED_SIDE: u32 = 128;
 
 /// A wallpaper ready for the GPU: premultiplied RGBA8 and its mip chain.
 pub struct WallpaperImage {
     pub rgba: Vec<u8>,
     pub size: [u32; 2],
     pub mips: Vec<(Vec<u8>, [u32; 2])>,
+    /// The colour a theme is best built on (`None` without opaque pixels).
+    pub seed: Option<[u8; 3]>,
 }
 
 /// A wallpaper being read.
@@ -66,11 +72,19 @@ fn read(path: &std::path::Path) -> Result<WallpaperImage, String> {
             image::imageops::FilterType::Triangle,
         )
     };
+    let [seed_width, seed_height] = fit([fit_width, fit_height], SEED_SIDE);
+    let small = image::imageops::thumbnail(&image, seed_width, seed_height);
+    let seed = glyphst_ui::scheme::seed_from_pixels(small.as_raw());
     let mut rgba = image.into_raw();
     premultiply(&mut rgba);
     let size = [fit_width, fit_height];
     let mips = glyphst_pdf_gpu::prepare::mip_chain(&rgba, size);
-    Ok(WallpaperImage { rgba, size, mips })
+    Ok(WallpaperImage {
+        rgba,
+        size,
+        mips,
+        seed,
+    })
 }
 
 /// `size` scaled down to fit `max` on its longer side, at least 1×1.

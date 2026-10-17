@@ -341,7 +341,7 @@ fn the_template_and_every_builtin_compile() {
     let (device, _queue) = require_device!();
     let mut registry = EffectRegistry::new(&device, FORMAT);
     assert!(registry.errors().is_empty(), "{:?}", registry.errors());
-    for id in [IMAGE, IMAGE_SOFT, IMAGE_PARALLAX, SEPIA, NIGHT, PAPER] {
+    for id in [IMAGE, SEPIA, NIGHT, PAPER] {
         assert!(registry.find(id).is_some(), "{id} missing");
     }
     assert!(registry.find(IMAGE).unwrap().image);

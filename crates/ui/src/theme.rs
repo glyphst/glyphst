@@ -2,13 +2,17 @@
 //! frame 00 Direction): mono chrome, sans prose, hairline panes, one accent,
 //! dark first with a paper light theme, radius 0 / 2 / 4 and no shadows.
 //! Field names follow the pen variables (`text-2` is `text_2`). Every
-//! component reads [`Tokens::get`].
+//! component reads [`Tokens::get`]. A [`Palette`] generated from a seed
+//! colour tints the same tokens (see [`crate::scheme`]).
 
 use craft_ui::theme::WidgetPalette;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
-use crate::fonts;
+use crate::{
+    fonts,
+    scheme::{self, Palettes, Scheme},
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeKind {
@@ -101,6 +105,21 @@ impl Accent {
     }
 }
 
+/// Where the colours come from: a preset accent over the design's neutrals,
+/// or a scheme generated from a seed colour (Settings → Appearance →
+/// colours).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Palette {
+    Preset(Accent),
+    Generated(Scheme),
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self::Preset(Accent::default())
+    }
+}
+
 /// Row height and padding (Settings → Appearance → density).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Density {
@@ -134,7 +153,7 @@ impl Density {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Appearance {
     pub kind: ThemeKind,
-    pub accent: Accent,
+    pub palette: Palette,
     /// How opaque the window's base layer is: 1 unless transparent.
     pub opacity: f32,
     pub density: Density,
@@ -149,7 +168,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             kind: ThemeKind::Light,
-            accent: Accent::Amber,
+            palette: Palette::default(),
             opacity: 1.0,
             density: Density::Default,
             ui_scale: BASE_SCALE,
@@ -293,6 +312,68 @@ impl Tokens {
                 ornaments: true,
                 opacity: 1.0,
             },
+        }
+    }
+
+    /// The tokens of `palette`: a preset's, or the design's tokens drawn
+    /// from a generated scheme.
+    pub fn from_palette(kind: ThemeKind, palette: Palette) -> Self {
+        match palette {
+            Palette::Preset(accent) => Self::new(kind, accent),
+            Palette::Generated(scheme) => Self::generated(kind, &scheme),
+        }
+    }
+
+    /// The amber tokens with each colour replaced by the scheme's palette
+    /// at the same tone: surfaces and text from the neutral palette,
+    /// hairlines and secondary text from the neutral variant, the accent
+    /// from the primary. Tones (L*) fix luminance, so every pair keeps the
+    /// design's contrast; [`scheme::Contrast`] moves secondary text and
+    /// hairlines towards the text. Status colours keep their meaning.
+    fn generated(kind: ThemeKind, scheme: &Scheme) -> Self {
+        let base = Self::new(kind, Accent::Amber);
+        let Palettes {
+            primary,
+            neutral,
+            neutral_variant,
+            ..
+        } = scheme.palettes(kind == ThemeKind::Dark);
+        let spread = scheme.contrast.spread();
+        let text = scheme::tone(base.text);
+        let toward_text = |color: Color32| {
+            let tone = scheme::tone(color);
+            tone + (text - tone) * spread
+        };
+        let n = |color: Color32| Palettes::at(&neutral, scheme::tone(color));
+        let nv = |color: Color32| Palettes::at(&neutral_variant, toward_text(color));
+        let a = |color: Color32| Palettes::at(&primary, scheme::tone(color));
+        let scrim = {
+            let [r, g, b, alpha] = base.scrim.to_srgba_unmultiplied();
+            let [r, g, b, _] = n(Color32::from_rgb(r, g, b)).to_array();
+            Color32::from_rgba_unmultiplied(r, g, b, alpha)
+        };
+        Self {
+            bg: n(base.bg),
+            surface: n(base.surface),
+            raised: n(base.raised),
+            hover: n(base.hover),
+            rule: nv(base.rule),
+            rule_strong: nv(base.rule_strong),
+            text: n(base.text),
+            text_2: nv(base.text_2),
+            muted: nv(base.muted),
+            faint: nv(base.faint),
+            accent: a(base.accent),
+            accent_text: a(base.accent_text),
+            accent_soft: a(base.accent_soft),
+            on_accent: if kind == ThemeKind::Dark {
+                n(base.on_accent)
+            } else {
+                base.on_accent
+            },
+            scrim,
+            dot: nv(base.dot),
+            ..base
         }
     }
 
@@ -464,7 +545,8 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
         ThemeKind::Light => egui::Theme::Light,
         ThemeKind::Dark => egui::Theme::Dark,
     });
-    let mut t = Tokens::new(appearance.kind, appearance.accent).with_opacity(appearance.opacity);
+    let mut t =
+        Tokens::from_palette(appearance.kind, appearance.palette).with_opacity(appearance.opacity);
     t.density = appearance.density;
     t.ornaments = appearance.ornaments;
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(TOKENS_ID), t));
@@ -646,11 +728,36 @@ mod tests {
         x.max(y) / x.min(y)
     }
 
+    /// Every preset, and schemes from saturated, pastel, near-grey,
+    /// yellow and blue seeds in every style and contrast.
+    fn palettes() -> Vec<Palette> {
+        let mut palettes: Vec<Palette> = Accent::ALL.into_iter().map(Palette::Preset).collect();
+        for seed in [
+            [0xE0, 0x30, 0x30],
+            [0xF4, 0xC6, 0xD8],
+            [0x80, 0x82, 0x85],
+            [0xF2, 0xD0, 0x2A],
+            [0x1A, 0x4F, 0xD0],
+            [0x10, 0x60, 0x40],
+        ] {
+            for style in scheme::SchemeStyle::ALL {
+                for contrast in scheme::Contrast::ALL {
+                    palettes.push(Palette::Generated(Scheme {
+                        seed,
+                        style,
+                        contrast,
+                    }));
+                }
+            }
+        }
+        palettes
+    }
+
     #[test]
     fn reading_text_is_readable_on_every_surface() {
         for kind in [ThemeKind::Light, ThemeKind::Dark] {
-            for accent in Accent::ALL {
-                let t = Tokens::new(kind, accent);
+            for accent in palettes() {
+                let t = Tokens::from_palette(kind, accent);
                 for (name, fg) in [("text", t.text), ("text_2", t.text_2), ("muted", t.muted)] {
                     for bg in [t.bg, t.surface, t.raised, t.hover, t.accent_soft] {
                         let ratio = contrast(fg, bg);
@@ -680,10 +787,12 @@ mod tests {
     #[test]
     fn faint_keeps_the_designs_contrast_on_panes() {
         for kind in [ThemeKind::Light, ThemeKind::Dark] {
-            let t = Tokens::for_kind(kind);
-            for bg in [t.bg, t.surface] {
-                let ratio = contrast(t.faint, bg);
-                assert!(ratio >= 2.5, "{kind:?} faint on {bg:?}: {ratio:.2}:1");
+            for palette in palettes() {
+                let t = Tokens::from_palette(kind, palette);
+                for bg in [t.bg, t.surface] {
+                    let ratio = contrast(t.faint, bg);
+                    assert!(ratio >= 2.5, "{kind:?} {palette:?} faint: {ratio:.2}:1");
+                }
             }
         }
     }
@@ -693,8 +802,8 @@ mod tests {
     #[test]
     fn labels_on_accent_fills_are_readable() {
         for kind in [ThemeKind::Light, ThemeKind::Dark] {
-            for accent in Accent::ALL {
-                let t = Tokens::new(kind, accent);
+            for accent in palettes() {
+                let t = Tokens::from_palette(kind, accent);
                 let ratio = contrast(t.on_accent, t.accent);
                 assert!(ratio >= 4.0, "{kind:?} {accent:?} on_accent: {ratio:.2}:1");
             }
@@ -706,7 +815,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut appearance = Appearance {
             kind: ThemeKind::Dark,
-            accent: Accent::Blue,
+            palette: Palette::Preset(Accent::Blue),
             density: Density::Compact,
             ornaments: false,
             ..Appearance::default()
@@ -727,6 +836,31 @@ mod tests {
         let visuals = &ctx.global_style().visuals;
         assert_eq!(visuals.window_fill.a(), 255);
         assert_eq!(Tokens::get(&ctx).opacity, 0.6);
+    }
+
+    /// A generated theme keeps the design's lightness and takes its hue
+    /// from the seed.
+    #[test]
+    fn a_generated_theme_tints_the_designs_tones() {
+        let blue = Palette::Generated(Scheme {
+            seed: [0x1A, 0x4F, 0xD0],
+            style: scheme::SchemeStyle::Vibrant,
+            contrast: scheme::Contrast::Standard,
+        });
+        for kind in [ThemeKind::Light, ThemeKind::Dark] {
+            let (preset, generated) = (Tokens::for_kind(kind), Tokens::from_palette(kind, blue));
+            for (name, a, b) in [
+                ("bg", preset.bg, generated.bg),
+                ("text", preset.text, generated.text),
+                ("accent", preset.accent, generated.accent),
+            ] {
+                let (a, b) = (scheme::tone(a), scheme::tone(b));
+                assert!((a - b).abs() < 1.0, "{kind:?} {name}: {a:.1} vs {b:.1}");
+            }
+            let [r, _, b, _] = generated.accent.to_array();
+            assert!(b > r, "{kind:?} accent {:?} is blue", generated.accent);
+            assert_eq!(generated.err, preset.err);
+        }
     }
 
     #[test]

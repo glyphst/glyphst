@@ -13,6 +13,7 @@ use glyphst_ui::{
     field::TextField,
     motif,
     row::ListRow,
+    scheme::{Contrast, Scheme, SchemeStyle},
     settings as ui_settings,
     slider::Slider,
     theme::{Accent, Density},
@@ -21,7 +22,7 @@ use glyphst_ui::{
 
 use crate::{
     icons,
-    prefs::Prefs,
+    prefs::{Colours, Prefs},
     settings_providers::ProviderPages,
     theme::{self, ThemeKind, ThemePreference, Tokens},
     user_settings::{Persistence, UserSettings},
@@ -103,15 +104,16 @@ impl Section {
     fn keywords(self) -> &'static str {
         match self {
             Self::Appearance => {
-                "theme dark light system accent colour font chrome prose ui scale size density \
-                 transparency opacity blur glyph ornaments"
+                "theme dark light system accent colour color scheme palette generate material \
+                 font chrome prose ui scale size density transparency opacity blur glyph \
+                 ornaments background wallpaper image dim parallax animation"
             }
             Self::Reading => "session reopen sidebar drawer vim keys motion",
             Self::Presenting => {
                 "present presentation slides full screen fullscreen timer clock talk length \
                  countdown ring tools right click draw pen eraser laser page number"
             }
-            Self::Effects => "background transition tint wallpaper animation folder",
+            Self::Effects => "transition tint folder shader",
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
             Self::Ai => "ai model provider key agent claude codex mcp assistant",
@@ -124,7 +126,9 @@ impl Section {
             Self::Appearance => "How Glyphst looks. Changes apply to every window immediately.",
             Self::Reading => "What opens at start, and what shows while you read.",
             Self::Presenting => "Full screen, the pointer, ink and the timer while you present.",
-            Self::Effects => "Backgrounds, page transitions and tints for every book.",
+            Self::Effects => {
+                "Page transitions and tints for every book. The background is in Appearance."
+            }
             Self::Translation => "The service that translates selections and documents.",
             Self::Ocr => "Recognizing the text of scanned pages.",
             Self::Ai => "Models and providers for the assistant and AI translation.",
@@ -150,6 +154,8 @@ pub struct SettingsWindow {
     pub effects_actions: Vec<crate::effects_page::Action>,
     /// The Keyboard shortcuts row was clicked: the app opens their tab.
     pub open_shortcuts: bool,
+    /// A group of the page to scroll to once drawn (scripted runs).
+    pub scroll_to: Option<String>,
     /// The settings search.
     query: String,
     /// Installed families for the font pickers (chrome, prose), read once.
@@ -172,6 +178,8 @@ pub struct SettingsContext<'a> {
     /// Whether the compositor can blur behind the window; `None` until
     /// known.
     pub blur_supported: Option<bool>,
+    /// The background's own colour, for a scheme generated from it.
+    pub background_seed: Option<[u8; 3]>,
 }
 
 impl SettingsWindow {
@@ -398,7 +406,7 @@ impl SettingsWindow {
         &mut self,
         ui: &mut egui::Ui,
         current: Section,
-        app: SettingsContext<'_>,
+        mut app: SettingsContext<'_>,
         _tokens: &Tokens,
     ) {
         let mut description = current.description().to_string();
@@ -424,13 +432,14 @@ impl SettingsWindow {
                 ui.set_width(ui.available_width() - 4.0);
                 match current {
                     Section::Appearance => {
+                        // The effect backgrounds' previews are animated.
+                        ui.ctx().request_repaint();
                         if appearance(
                             ui,
-                            app.prefs,
-                            app.user,
-                            app.system_theme,
-                            app.blur_supported,
+                            &mut app,
                             families,
+                            &mut self.effects_actions,
+                            &mut self.scroll_to,
                         ) {
                             self.section = Some(Section::Effects);
                         }
@@ -461,17 +470,18 @@ impl SettingsWindow {
     }
 }
 
-/// The Appearance page (frame 07a); returns whether the Effects link was
-/// clicked.
+/// The Appearance page (frame 07a, and the background and colours below
+/// it); returns whether the Effects link was clicked.
 fn appearance(
     ui: &mut egui::Ui,
-    prefs: &mut Prefs,
-    user: &mut UserSettings,
-    system: Option<ThemeKind>,
-    blur_supported: Option<bool>,
+    app: &mut SettingsContext<'_>,
     families: &(Vec<String>, Vec<String>),
+    actions: &mut Vec<crate::effects_page::Action>,
+    scroll_to: &mut Option<String>,
 ) -> bool {
-    let tokens = Tokens::get(ui.ctx());
+    let (system, blur_supported) = (app.system_theme, app.blur_supported);
+    let prefs = &mut *app.prefs;
+    let user = &mut *app.user;
     ui_settings::group(ui, "", |group| {
         let caption = match (prefs.theme, system) {
             (ThemePreference::System, Some(ThemeKind::Dark)) => {
@@ -494,35 +504,6 @@ fn appearance(
                 ],
             );
         });
-        group.row(
-            "accent",
-            Some("used for focus, selection and progress"),
-            |ui| {
-                ui.label(
-                    RichText::new(prefs.accent.label())
-                        .font(theme::mono(11.0))
-                        .color(tokens.muted),
-                );
-                for accent in Accent::ALL.into_iter().rev() {
-                    let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-                    let chosen = prefs.accent == accent;
-                    ui.painter().rect(
-                        rect.shrink(2.0),
-                        tokens.ctl_radius(),
-                        accent.swatch(),
-                        if chosen {
-                            egui::Stroke::new(1.5, tokens.text)
-                        } else {
-                            tokens.edge()
-                        },
-                        egui::StrokeKind::Outside,
-                    );
-                    if response.tip(accent.label()).clicked() {
-                        prefs.accent = accent;
-                    }
-                }
-            },
-        );
         group.row(
             "chrome font",
             Some("menus, tabs, labels and numbers"),
@@ -625,9 +606,169 @@ fn appearance(
             },
         );
     });
+    let mut jump = |ui: &mut egui::Ui, group: &str| {
+        if scroll_to.as_deref() == Some(group) {
+            let at = egui::Rect::from_min_size(ui.cursor().min, vec2(1.0, 1.0));
+            ui.scroll_to_rect(at, Some(egui::Align::Min));
+            *scroll_to = None;
+        }
+    };
+    jump(ui, "background");
+    crate::effects_page::background_group(
+        ui,
+        crate::effects_page::BackgroundGroup {
+            prefs,
+            effects: app.effects,
+            time: app.time,
+            actions,
+        },
+    );
+    jump(ui, "colours");
+    colours(ui, prefs, app.background_seed);
     ui.add_space(8.0);
-    ui.add(Button::bracket("backgrounds, page transitions and tints →"))
+    ui.add(Button::bracket("page transitions and tints →"))
         .clicked()
+}
+
+/// Settings › Appearance › colours: the accent swatches, or a scheme
+/// generated from the background or a colour of the user's.
+fn colours(ui: &mut egui::Ui, prefs: &mut Prefs, background_seed: Option<[u8; 3]>) {
+    let tokens = Tokens::get(ui.ctx());
+    ui_settings::group(ui, "colours", |group| {
+        group.row(
+            "colours from",
+            Some("a preset accent, or a scheme generated from the background or a colour"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut prefs.colours,
+                    &[
+                        (Colours::Preset, "preset"),
+                        (Colours::Background, "background"),
+                        (Colours::Custom, "custom"),
+                    ],
+                );
+            },
+        );
+        let seed = match prefs.colours {
+            Colours::Preset => {
+                accent_row(group, prefs, &tokens);
+                return;
+            }
+            Colours::Background => background_seed,
+            Colours::Custom => {
+                group.row("colour", Some("the seed the scheme grows from"), |ui| {
+                    let [r, g, b] = prefs.custom_colour;
+                    ui.label(
+                        RichText::new(format!("#{r:02x}{g:02x}{b:02x}"))
+                            .font(theme::mono(11.0))
+                            .color(tokens.muted),
+                    );
+                    egui::widgets::color_picker::color_edit_button_srgb(
+                        ui,
+                        &mut prefs.custom_colour,
+                    );
+                });
+                Some(prefs.custom_colour)
+            }
+        };
+        if seed.is_none() {
+            group.note(
+                "The background has no colour of its own yet (it follows the theme, is an \
+                 effect, or its wallpaper is still being read), so the accent swatch stays.",
+            );
+        }
+        group.row(
+            "style",
+            Some("Material You schemes; the first ones are the newest"),
+            |ui| {
+                egui::ComboBox::from_id_salt("scheme-style")
+                    .selected_text(
+                        RichText::new(prefs.scheme_style.label()).font(theme::mono(12.0)),
+                    )
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        glyphst_ui::menu::style(ui);
+                        for style in SchemeStyle::ALL {
+                            let label = RichText::new(format!(
+                                "{} — {}",
+                                style.label(),
+                                style.description()
+                            ))
+                            .font(theme::mono(12.0));
+                            ui.selectable_value(&mut prefs.scheme_style, style, label);
+                        }
+                    });
+            },
+        );
+        group.row(
+            "contrast",
+            Some("secondary text and hairlines move towards the text"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut prefs.scheme_contrast,
+                    &Contrast::ALL.map(|contrast| (contrast, contrast.label())),
+                );
+            },
+        );
+        if let Some(seed) = seed {
+            let scheme = Scheme {
+                seed,
+                style: prefs.scheme_style,
+                contrast: prefs.scheme_contrast,
+            };
+            group.row(
+                "scheme",
+                Some("accent, secondary, tertiary, base, raised and hairline"),
+                |ui| {
+                    for color in scheme.swatches(tokens.kind).into_iter().rev() {
+                        let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                        ui.painter().rect(
+                            rect.shrink(2.0),
+                            tokens.ctl_radius(),
+                            color,
+                            tokens.edge(),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                },
+            );
+        }
+    });
+}
+
+/// The accent swatches.
+fn accent_row(group: &mut ui_settings::Group<'_>, prefs: &mut Prefs, tokens: &Tokens) {
+    group.row(
+        "accent",
+        Some("used for focus, selection and progress"),
+        |ui| {
+            ui.label(
+                RichText::new(prefs.accent.label())
+                    .font(theme::mono(11.0))
+                    .color(tokens.muted),
+            );
+            for accent in Accent::ALL.into_iter().rev() {
+                let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                let chosen = prefs.accent == accent;
+                ui.painter().rect(
+                    rect.shrink(2.0),
+                    tokens.ctl_radius(),
+                    accent.swatch(),
+                    if chosen {
+                        egui::Stroke::new(1.5, tokens.text)
+                    } else {
+                        tokens.edge()
+                    },
+                    egui::StrokeKind::Outside,
+                );
+                if response.tip(accent.label()).clicked() {
+                    prefs.accent = accent;
+                }
+            }
+        },
+    );
 }
 
 /// A family from `families` in a combo box.
@@ -880,6 +1021,7 @@ mod tests {
                         chatgpt: &chatgpt,
                         system_theme: Some(ThemeKind::Dark),
                         blur_supported: Some(false),
+                        background_seed: None,
                     },
                 );
             });
@@ -941,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn the_effects_page_shows_a_live_card_per_effect() {
+    fn effect_galleries_show_a_live_card_per_effect() {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::embedded());
         let def = |id: &str, kind, user| EffectDef {
@@ -984,7 +1126,7 @@ mod tests {
         };
         let errors = ["wave.wgsl: line 3".to_string()];
         let mut actions = Vec::new();
-        let mut output = ctx.run_ui(input, |ui| {
+        let mut output = ctx.run_ui(input.clone(), |ui| {
             crate::effects_page::settings_page(
                 ui,
                 crate::effects_page::SettingsPage {
@@ -998,13 +1140,31 @@ mod tests {
             );
         });
         output.textures_delta.clear();
-        // Cards draw live previews: one per effect, none for "None".
-        let previews = output
-            .shapes
-            .iter()
-            .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
-            .count();
-        assert_eq!(previews, effects.len());
+        // Cards draw live previews: one per transition and tint, none for
+        // "None"; backgrounds are in Appearance.
+        let previews = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
+                .count()
+        };
+        assert_eq!(previews(&output), 2);
+        // Appearance › background: an effect background shows the gallery
+        // of effects, without the solid colour and the wallpaper.
+        let mut output = ctx.run_ui(input.clone(), |ui| {
+            crate::effects_page::background_group(
+                ui,
+                crate::effects_page::BackgroundGroup {
+                    prefs: &mut prefs,
+                    effects: &effects,
+                    time: 1.0,
+                    actions: &mut actions,
+                },
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(previews(&output), 1);
         assert_eq!(actions, []);
     }
 }

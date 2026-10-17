@@ -13,7 +13,10 @@ use crate::{
     sidebar::SidebarTab,
     theme::{Accent, Density, ThemePreference},
 };
-use glyphst_ui::fonts::FontChoice;
+use glyphst_ui::{
+    fonts::FontChoice,
+    scheme::{Contrast, SchemeStyle},
+};
 
 /// The egui Reader's key before it became the only Reader, so preferences
 /// carry over.
@@ -49,11 +52,41 @@ impl PageColumns {
     }
 }
 
+/// Where the theme's colours come from (Settings › Appearance ›
+/// colours).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Colours {
+    /// The accent swatch over the design's neutrals.
+    #[default]
+    Preset,
+    /// A scheme from the background: its solid colour, or the wallpaper's
+    /// main colour.
+    Background,
+    /// A scheme from `custom_colour`.
+    Custom,
+}
+
+/// The colour a wallpaper's scheme is built on, found once per image.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WallpaperSeed {
+    pub path: String,
+    pub seed: [u8; 3],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
     pub theme: ThemePreference,
     pub accent: Accent,
+    pub colours: Colours,
+    /// The seed of `Colours::Custom`, sRGB.
+    pub custom_colour: [u8; 3],
+    /// How a generated scheme builds on its seed.
+    pub scheme_style: SchemeStyle,
+    pub scheme_contrast: Contrast,
+    /// The chosen wallpaper's seed, kept so the theme needn't wait for the
+    /// image to load.
+    pub wallpaper_seed: Option<WallpaperSeed>,
     pub density: Density,
     /// The chrome's base size in points (`theme::BASE_SCALE` is the
     /// design's).
@@ -70,6 +103,9 @@ pub struct Prefs {
     pub transition: Option<String>,
     /// Effect id of the background behind pages.
     pub background: String,
+    /// The animated background last chosen, restored when Appearance's
+    /// background goes back to animated.
+    pub animated_background: Option<String>,
     /// Frames per second an animated background may repaint at.
     pub background_fps: u32,
     /// Effect id of the tint over pages, or `None` for none.
@@ -120,6 +156,11 @@ impl Default for Prefs {
         Self {
             theme: ThemePreference::System,
             accent: Accent::default(),
+            colours: Colours::default(),
+            custom_colour: [0x5B, 0x7D, 0xB1],
+            scheme_style: SchemeStyle::default(),
+            scheme_contrast: Contrast::default(),
+            wallpaper_seed: None,
             density: Density::default(),
             ui_scale: glyphst_ui::theme::BASE_SCALE,
             glyph_ornaments: true,
@@ -128,6 +169,7 @@ impl Default for Prefs {
             reopen_last_session: true,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),
+            animated_background: None,
             background_fps: 30,
             overlay: None,
             wallpaper: None,
@@ -219,8 +261,43 @@ impl Prefs {
         prefs
             .effect_params
             .retain(|_, values| values.iter().all(|value| value.is_finite()));
+        prefs.merge_wallpaper_effects();
         book_effects::trim(&mut prefs.books);
         prefs
+    }
+
+    /// The soft and parallax wallpapers became settings of the one
+    /// wallpaper effect (dim, blur, parallax, depth): their choices and
+    /// values move to it.
+    fn merge_wallpaper_effects(&mut self) {
+        const SOFT: &str = "image-soft";
+        const PARALLAX: &str = "image-parallax";
+        let image = glyphst_effects::IMAGE;
+        let soft = self.effect_params.remove(SOFT);
+        let parallax = self.effect_params.remove(PARALLAX);
+        // Old values in each one's manifest order, else its defaults.
+        let merged = match self.background.as_str() {
+            SOFT => {
+                let [blur, dim, ..] = soft.unwrap_or([4.0, 0.35, 0.0, 0.0]);
+                Some([dim, blur, 0.0, 0.03])
+            }
+            PARALLAX => {
+                let [depth, blur, ..] = parallax.unwrap_or([0.03, 1.0, 0.0, 0.0]);
+                Some([0.0, blur, 1.0, depth])
+            }
+            _ => None,
+        };
+        if let Some(values) = merged {
+            self.background = image.into();
+            self.effect_params.insert(image.into(), values);
+        }
+        for book in self.books.values_mut() {
+            if let book_effects::Choice::Effect(id) = &mut book.background
+                && (id == SOFT || id == PARALLAX)
+            {
+                *id = image.into();
+            }
+        }
     }
 
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
@@ -319,6 +396,14 @@ mod tests {
         let mut storage = MemoryStorage::default();
         let prefs = Prefs {
             accent: Accent::Green,
+            colours: Colours::Background,
+            custom_colour: [1, 2, 3],
+            scheme_style: SchemeStyle::Expressive,
+            scheme_contrast: Contrast::High,
+            wallpaper_seed: Some(WallpaperSeed {
+                path: "/w.jpg".into(),
+                seed: [9, 8, 7],
+            }),
             density: Density::Compact,
             ui_scale: 15.0,
             glyph_ornaments: false,
@@ -341,6 +426,38 @@ mod tests {
             Prefs::load(Some(&storage)).ui_scale,
             *glyphst_ui::theme::UI_SCALE_RANGE.end()
         );
+    }
+
+    #[test]
+    fn soft_and_parallax_wallpapers_become_the_wallpaper_with_their_values() {
+        let load = |json: &str| {
+            let mut storage = MemoryStorage::default();
+            storage.set_string(STORAGE_KEY, json.into());
+            Prefs::load(Some(&storage))
+        };
+        let soft = load(
+            r#"{"background":"image-soft","effect_params":{"image-soft":[6,0.5,0,0]},
+                "books":{"a.pdf":{"background":{"effect":"image-parallax"}}}}"#,
+        );
+        assert_eq!(soft.background, glyphst_effects::IMAGE);
+        assert_eq!(
+            soft.effect_params[glyphst_effects::IMAGE],
+            [0.5, 6.0, 0.0, 0.03]
+        );
+        assert!(!soft.effect_params.contains_key("image-soft"));
+        assert_eq!(
+            soft.books["a.pdf"].background,
+            book_effects::Choice::Effect(glyphst_effects::IMAGE.into())
+        );
+        let parallax = load(r#"{"background":"image-parallax"}"#);
+        assert_eq!(parallax.background, glyphst_effects::IMAGE);
+        assert_eq!(
+            parallax.effect_params[glyphst_effects::IMAGE],
+            [0.0, 1.0, 1.0, 0.03]
+        );
+        // The plain wallpaper's dim keeps its place.
+        let plain = load(r#"{"background":"image","effect_params":{"image":[0.4,0,0,0]}}"#);
+        assert_eq!(plain.effect_params[glyphst_effects::IMAGE][0], 0.4);
     }
 
     #[test]

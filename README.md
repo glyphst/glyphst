@@ -78,7 +78,9 @@ colours, `--gallery` shows every component of the design instead of home,
 `--split right|down` shows the second document beside the
 first, `--rotate 90|180|270` and `--spread` turn and spread the pages
 (without remembering it), and `--overlay ID|none` and `--wallpaper PATH`
-set the page tint and the wallpaper; `--find TEXT`, `--select-page N`
+set the page tint and the wallpaper; `--colours preset|background|custom`
+picks where the theme's colours come from, and `--opacity O` makes the
+window transparent at that opacity; `--find TEXT`, `--select-page N`
 (or `--select-pages A-B`), `--sidebar TAB` and `--font-size PT` (EPUB)
 show a search, a selection, a
 sidebar tab or a reflowed size in the screenshot. `--translate-fake`
@@ -91,7 +93,8 @@ once the documents are open, and `--select-region PAGE:X0,Y0,X1,Y1` draws a
 region (in page points) as the region tool would.
 `--palette QUERY` opens the command palette and `--settings SECTION` the
 settings window (`appearance`, `reading`, `effects`, `translation`, `ocr`,
-`ai`), or with `shortcuts` the Keyboard shortcuts tab. Scripted runs keep
+`ai`; `appearance:background` and `appearance:colours` scroll to that
+group), or with `shortcuts` the Keyboard shortcuts tab. Scripted runs keep
 settings and keys in memory.
 
 ### Writing an effect

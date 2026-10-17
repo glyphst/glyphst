@@ -1,7 +1,8 @@
-//! The effects manager: galleries of live preview cards for backgrounds,
-//! transitions and page tints, with parameter sliders, the wallpaper and
-//! the effects folder (Settings › Effects), and the same cards for one
-//! book's own choices (the Effects drawer).
+//! The effects manager: galleries of live preview cards for transitions
+//! and page tints, with parameter sliders and the effects folder
+//! (Settings › Effects); the background behind the pages (Settings ›
+//! Appearance › background); and the same cards for one book's own
+//! choices (the Effects drawer).
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -287,77 +288,6 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
     let find = |id: &str| effects.iter().find(|def| def.id == id);
     let has_wallpaper = prefs.wallpaper.is_some();
 
-    glyphst_ui::settings::group(ui, "Background", |group| {
-        group.full(|ui| {
-            let cards = cards_for(
-                effects,
-                EffectKind::Background,
-                &prefs.effect_params,
-                has_wallpaper,
-                Vec::new(),
-            );
-            let selected = Choice::Effect(prefs.background.clone());
-            let card = fill_card(ui.available_width());
-            if let Some(Choice::Effect(id)) = gallery(
-                ui,
-                "settings-background",
-                EffectKind::Background,
-                &cards,
-                &selected,
-                card,
-                time,
-            ) {
-                prefs.background = id;
-            }
-            if let Some(def) = find(&prefs.background) {
-                params_editor(ui, def, &mut prefs.effect_params);
-            }
-        });
-        let name = prefs
-            .wallpaper
-            .as_deref()
-            .and_then(|path| Path::new(path).file_name())
-            .map(|name| name.to_string_lossy().into_owned());
-        let description = match &name {
-            Some(name) => format!("{name}. Wallpaper backgrounds draw it; others ignore it."),
-            None => "None. Wallpaper backgrounds draw it; others ignore it.".into(),
-        };
-        group.row("Wallpaper", Some(&description), |ui| {
-            if name.is_some()
-                && ui
-                    .add(glyphst_ui::button::Button::plain("clear").icon("x"))
-                    .clicked()
-            {
-                prefs.wallpaper = None;
-            }
-            if ui
-                .add(glyphst_ui::button::Button::plain("choose…").icon("folder-open"))
-                .clicked()
-            {
-                actions.push(Action::ChooseWallpaper);
-            }
-        });
-        group.row(
-            "Animation rate",
-            Some("Frames per second for animated backgrounds."),
-            |ui| {
-                let mut fps = prefs.background_fps as f32;
-                if ui
-                    .add(
-                        Slider::new(&mut fps, 1.0..=120.0)
-                            .step(1.0)
-                            .width(180.0)
-                            .label("animation rate")
-                            .format(Some(Box::new(|value| format!("{value:.0} fps")))),
-                    )
-                    .changed()
-                {
-                    prefs.background_fps = fps.round() as u32;
-                }
-            },
-        );
-    });
-
     glyphst_ui::settings::group(ui, "Page transition", |group| {
         group.full(|ui| {
             let cards = cards_for(
@@ -461,6 +391,252 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
             });
         }
     });
+}
+
+/// What fills the window behind the pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The solid effect in the theme's base colour.
+    Theme,
+    /// The solid effect in a colour of the user's.
+    Colour,
+    Wallpaper,
+    /// Any other background effect: the built-in animated ones and the
+    /// user's.
+    Effect,
+}
+
+impl Source {
+    fn of(prefs: &Prefs) -> Self {
+        match prefs.background.as_str() {
+            glyphst_effects::SOLID if prefs.effect_params.contains_key(glyphst_effects::SOLID) => {
+                Self::Colour
+            }
+            glyphst_effects::SOLID => Self::Theme,
+            glyphst_effects::IMAGE => Self::Wallpaper,
+            _ => Self::Effect,
+        }
+    }
+}
+
+/// What Settings › Appearance › background needs.
+pub struct BackgroundGroup<'a> {
+    pub prefs: &'a mut Prefs,
+    pub effects: &'a [EffectDef],
+    pub time: f32,
+    pub actions: &'a mut Vec<Action>,
+}
+
+/// Settings › Appearance › background: the source, then its settings (a
+/// colour; the wallpaper with its dim, blur and parallax; or the gallery
+/// of effect backgrounds).
+pub fn background_group(ui: &mut egui::Ui, page: BackgroundGroup<'_>) {
+    let tokens = Tokens::get(ui.ctx());
+    let BackgroundGroup {
+        prefs,
+        effects,
+        time,
+        actions,
+    } = page;
+    let find = |id: &str| effects.iter().find(|def| def.id == id);
+    let solid = glyphst_effects::SOLID;
+    glyphst_ui::settings::group(ui, "background", |group| {
+        let mut source = Source::of(prefs);
+        let before = source;
+        group.row(
+            "source",
+            Some("what fills the window behind the pages"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut source,
+                    &[
+                        (Source::Theme, "theme"),
+                        (Source::Colour, "colour"),
+                        (Source::Wallpaper, "wallpaper"),
+                        (Source::Effect, "effect"),
+                    ],
+                );
+            },
+        );
+        if source != before {
+            match source {
+                Source::Theme => {
+                    prefs.background = solid.into();
+                    prefs.effect_params.remove(solid);
+                }
+                Source::Colour => {
+                    prefs.background = solid.into();
+                    let [r, g, b] = tokens.bg_rgb();
+                    prefs.effect_params.insert(solid.into(), [r, g, b, 0.0]);
+                }
+                Source::Wallpaper => prefs.background = glyphst_effects::IMAGE.into(),
+                Source::Effect => {
+                    let last = prefs
+                        .animated_background
+                        .clone()
+                        .filter(|id| find(id).is_some());
+                    let first = choosable(effects, EffectKind::Background)
+                        .find(|def| def.id != solid && def.id != glyphst_effects::IMAGE)
+                        .map(|def| def.id.clone());
+                    if let Some(id) = last.or(first) {
+                        prefs.background = id;
+                    }
+                }
+            }
+        }
+        match source {
+            Source::Theme => {}
+            Source::Colour => {
+                group.row("colour", None, |ui| {
+                    let values = prefs
+                        .effect_params
+                        .entry(solid.into())
+                        .or_insert([0.3; MAX_PARAMS]);
+                    let mut rgb = [values[0], values[1], values[2]]
+                        .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    ui.label(
+                        RichText::new(format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]))
+                            .font(theme::mono(11.0))
+                            .color(tokens.muted),
+                    );
+                    if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                        for (value, channel) in values.iter_mut().zip(rgb) {
+                            *value = f32::from(channel) / 255.0;
+                        }
+                    }
+                });
+            }
+            Source::Wallpaper => {
+                wallpaper_rows(group, prefs, find(glyphst_effects::IMAGE), actions)
+            }
+            Source::Effect => {
+                let has_wallpaper = prefs.wallpaper.is_some();
+                group.full(|ui| {
+                    let cards: Vec<Card> = cards_for(
+                        effects,
+                        EffectKind::Background,
+                        &prefs.effect_params,
+                        has_wallpaper,
+                        Vec::new(),
+                    )
+                    .into_iter()
+                    .filter(|card| {
+                        !matches!(&card.choice, Choice::Effect(id)
+                            if id == solid || id == glyphst_effects::IMAGE)
+                    })
+                    .collect();
+                    let selected = Choice::Effect(prefs.background.clone());
+                    let card = fill_card(ui.available_width());
+                    if let Some(Choice::Effect(id)) = gallery(
+                        ui,
+                        "settings-background",
+                        EffectKind::Background,
+                        &cards,
+                        &selected,
+                        card,
+                        time,
+                    ) {
+                        prefs.animated_background = Some(id.clone());
+                        prefs.background = id;
+                    }
+                    if let Some(def) = find(&prefs.background) {
+                        params_editor(ui, def, &mut prefs.effect_params);
+                    }
+                });
+                group.row(
+                    "animation rate",
+                    Some("frames per second for animated backgrounds"),
+                    |ui| {
+                        let mut fps = prefs.background_fps as f32;
+                        if ui
+                            .add(
+                                Slider::new(&mut fps, 1.0..=120.0)
+                                    .step(1.0)
+                                    .width(180.0)
+                                    .label("animation rate")
+                                    .format(Some(Box::new(|value| format!("{value:.0} fps")))),
+                            )
+                            .changed()
+                        {
+                            prefs.background_fps = fps.round() as u32;
+                        }
+                    },
+                );
+            }
+        }
+    });
+}
+
+/// The wallpaper's file, then its dim, blur and parallax (the wallpaper
+/// effect's parameters, in manifest order).
+fn wallpaper_rows(
+    group: &mut glyphst_ui::settings::Group<'_>,
+    prefs: &mut Prefs,
+    def: Option<&EffectDef>,
+    actions: &mut Vec<Action>,
+) {
+    let name = prefs
+        .wallpaper
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    group.row(
+        "wallpaper",
+        Some(name.as_deref().unwrap_or("no image chosen")),
+        |ui| {
+            if ui
+                .add(Button::plain("choose…").icon("folder-open"))
+                .clicked()
+            {
+                actions.push(Action::ChooseWallpaper);
+            }
+            if name.is_some() && ui.add(Button::plain("clear").icon("x")).clicked() {
+                prefs.wallpaper = None;
+            }
+        },
+    );
+    let Some(def) = def else {
+        return;
+    };
+    let mut values = prefs.effect_params.get(&def.id).map_or_else(
+        || def.default_params(),
+        |values| def.sanitize_params(*values),
+    );
+    let before = values;
+    let slider = |ui: &mut egui::Ui, value: &mut f32, index: usize, label: &str| {
+        if let Some(ParamKind::Float { min, max }) = def.params.get(index).map(|param| &param.kind)
+        {
+            let (min, max) = (*min, *max);
+            ui.add(Slider::new(value, min..=max).width(200.0).label(label));
+        }
+    };
+    group.row("dim", Some("darkens it, so pages stand out"), |ui| {
+        slider(ui, &mut values[0], 0, "dim");
+    });
+    group.row("blur", Some("softens the image behind the pages"), |ui| {
+        slider(ui, &mut values[1], 1, "blur");
+    });
+    let mut parallax = values[2] >= 0.5;
+    group.row(
+        "parallax",
+        Some("drifts a little against the pointer"),
+        |ui| {
+            if ui.add(Switch(&mut parallax)).changed() {
+                values[2] = if parallax { 1.0 } else { 0.0 };
+            }
+        },
+    );
+    if parallax {
+        group.row("depth", Some("how far it drifts"), |ui| {
+            slider(ui, &mut values[3], 3, "depth");
+        });
+    }
+    if values != before {
+        prefs
+            .effect_params
+            .insert(def.id.clone(), def.sanitize_params(values));
+    }
 }
 
 /// What the Effects tab needs: one book's choices, the defaults' names,

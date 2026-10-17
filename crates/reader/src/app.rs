@@ -45,7 +45,7 @@ use crate::{
     palette::{self, Item, Palette},
     panes::{self, Panes},
     pickers::{Pickers, is_document},
-    prefs::{LastSession, Prefs, SessionFile},
+    prefs::{Colours, LastSession, Prefs, SessionFile},
     quick_ask::{self, QuickAsk},
     region::{self, Region},
     settings_window::{Section, SettingsContext, SettingsWindow},
@@ -107,6 +107,8 @@ pub struct Launch {
     /// A transparent window at this opacity, in memory (`--opacity`, for
     /// screenshots of glass).
     pub opacity: Option<f32>,
+    /// Where the theme's colours come from (`--colours`).
+    pub colours: Option<crate::prefs::Colours>,
     pub theme: Option<ThemePreference>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
@@ -143,6 +145,8 @@ pub struct Launch {
     /// section, or the keyboard shortcuts tab.
     pub palette: Option<String>,
     pub settings: Option<Section>,
+    /// A group of the section to scroll to (`--settings appearance:colours`).
+    pub settings_group: Option<String>,
     pub shortcuts: bool,
     /// Shows frame 01 of the design (every component) instead of home.
     pub gallery: bool,
@@ -358,6 +362,9 @@ impl ReaderApp {
         if let Some(theme) = launch.theme {
             prefs.theme = theme;
         }
+        if let Some(colours) = launch.colours {
+            prefs.colours = colours;
+        }
         if let Some(transition) = launch.transition {
             prefs.transition = (transition != "none").then_some(transition);
         }
@@ -503,6 +510,7 @@ impl ReaderApp {
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
+            app.settings_window.scroll_to = launch.settings_group;
             // Scripted runs show the fake model's list.
             if section == Section::Ai
                 && launch.ai_fake
@@ -2036,13 +2044,59 @@ impl ReaderApp {
     pub(crate) fn appearance(&self, kind: ThemeKind) -> theme::Appearance {
         theme::Appearance {
             kind,
-            accent: self.prefs.accent,
+            palette: self.palette(),
             opacity: self.window_opacity(),
             density: self.prefs.density,
             ui_scale: self.prefs.ui_scale,
             ornaments: self.prefs.glyph_ornaments,
             fonts: self.prefs.fonts.clone(),
         }
+    }
+
+    /// Where the colours come from: the accent swatch, or a scheme from the
+    /// background or the custom colour. A background with no colour of its
+    /// own (the theme's, an animated one, a wallpaper not yet read) keeps
+    /// the swatch.
+    pub(crate) fn palette(&self) -> theme::Palette {
+        let seed = match self.prefs.colours {
+            Colours::Preset => None,
+            Colours::Background => self.background_seed(),
+            Colours::Custom => Some(self.prefs.custom_colour),
+        };
+        match seed {
+            Some(seed) => theme::Palette::Generated(glyphst_ui::scheme::Scheme {
+                seed,
+                style: self.prefs.scheme_style,
+                contrast: self.prefs.scheme_contrast,
+            }),
+            None => theme::Palette::Preset(self.prefs.accent),
+        }
+    }
+
+    /// The colour of the default background a scheme can be built on: a
+    /// solid colour the user set, or the wallpaper's seed.
+    pub(crate) fn background_seed(&self) -> Option<[u8; 3]> {
+        let prefs = &self.prefs;
+        if prefs.background == glyphst_effects::SOLID {
+            let [r, g, b, _] = prefs.effect_params.get(glyphst_effects::SOLID)?;
+            return Some(
+                [*r, *g, *b].map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8),
+            );
+        }
+        let draws_wallpaper = prefs.background == glyphst_effects::IMAGE
+            || self
+                .with_gpu(|gpu| {
+                    gpu.effects()
+                        .find(&prefs.background)
+                        .is_some_and(|def| def.image)
+                })
+                .unwrap_or(false);
+        let wallpaper = prefs.wallpaper.as_deref()?;
+        prefs
+            .wallpaper_seed
+            .as_ref()
+            .filter(|seed| draws_wallpaper && seed.path == wallpaper)
+            .map(|seed| seed.seed)
     }
 
     /// How opaque the window's surfaces are: below 1 while transparency is
@@ -2590,6 +2644,7 @@ impl ReaderApp {
         if self.settings_window.open {
             let effects = self.effect_defs();
             let errors = self.effect_errors();
+            let background_seed = self.background_seed();
             self.settings_window.show(
                 ctx,
                 SettingsContext {
@@ -2602,6 +2657,7 @@ impl ReaderApp {
                     chatgpt: &self.chatgpt,
                     system_theme: self.system_theme,
                     blur_supported: self.window_blur.support().known(),
+                    background_seed,
                 },
             );
             if std::mem::take(&mut self.settings_window.open_shortcuts) {
@@ -4010,6 +4066,11 @@ impl ReaderApp {
             match result {
                 Ok(image) => {
                     self.with_gpu(|gpu| gpu.set_wallpaper(&device, &queue, Some(&image)));
+                    self.prefs.wallpaper_seed =
+                        image.seed.map(|seed| crate::prefs::WallpaperSeed {
+                            path: path.clone(),
+                            seed,
+                        });
                 }
                 Err(error) => {
                     self.with_gpu(|gpu| gpu.set_wallpaper(&device, &queue, None));

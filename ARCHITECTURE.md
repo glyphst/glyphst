@@ -104,7 +104,9 @@ kinds are chosen in the Reader: the background behind the whole stage
 and mipmapped on a worker thread), the page transition (the incoming
 book's) and the page tint, an overlay that each view draws from its pages
 into a tinted image before the content effect, so tints survive
-transitions and splits. Defaults are set in Settings › Effects, with
+transitions and splits. Defaults are set in Settings (the background in
+Appearance as a theme colour, a colour, the wallpaper with its dim, blur
+and parallax, or an effect; transitions and tints in Effects), with
 parameters per effect; a book's own choices (the Effects drawer) live in
 the Reader's preferences by document path, not in the library, whose
 formats are compatibility contracts. Preview cards are paint callbacks
@@ -120,8 +122,12 @@ status bar, list and tree rows, menus, covers, chat pieces, page
 thumbnails, settings rows) plus the glyph motifs (rule titles, tree
 branches, meter glyphs, corner ticks, dot fields). Components read
 `Tokens::get` only; screens pick no colours, radii or fonts of their own.
-`theme::apply` takes an `Appearance` (theme, accent, opacity, density, ui
-scale, ornaments, fonts) and `fonts::install` puts the chosen chrome and
+`theme::apply` takes an `Appearance` (theme, palette, opacity, density, ui
+scale, ornaments, fonts). The palette is an accent swatch or a scheme
+generated (`scheme.rs`, with `material-colors`) from the background's
+colour, the wallpaper's (found by the wallpaper worker) or a custom one:
+Material You palettes drawn at each design token's tone, so contrast
+stays the design's. `fonts::install` puts the chosen chrome and
 prose families (bundled JetBrains Mono and Inter, or installed ones found
 through fontconfig) ahead of egui's faces and a system CJK fallback; with
 ornaments off the motifs draw plain labels. `--gallery` draws every

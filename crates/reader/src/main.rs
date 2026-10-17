@@ -78,9 +78,9 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] [--colours preset|background|custom] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
+                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH]";
 
@@ -97,6 +97,7 @@ fn parse_args() -> Result<Launch> {
         overlay: None,
         wallpaper: None,
         opacity: None,
+        colours: None,
         arrangement: None,
         find: None,
         page: None,
@@ -112,6 +113,7 @@ fn parse_args() -> Result<Launch> {
         agent: None,
         palette: None,
         settings: None,
+        settings_group: None,
         shortcuts: false,
         gallery: false,
         commands: Vec::new(),
@@ -232,8 +234,22 @@ fn parse_args() -> Result<Launch> {
                         .with_context(|| format!("unknown command {id}"))?,
                 );
             }
-            "--settings" => {
+            "--colours" => {
                 let name = value()?;
+                launch.colours = Some(match name.as_str() {
+                    "preset" => prefs::Colours::Preset,
+                    "background" => prefs::Colours::Background,
+                    "custom" => prefs::Colours::Custom,
+                    _ => bail!("--colours takes preset, background or custom, not {name}"),
+                });
+            }
+            "--settings" => {
+                let value = value()?;
+                let (name, group) = match value.split_once(':') {
+                    Some((name, group)) => (name.to_string(), Some(group.to_string())),
+                    None => (value, None),
+                };
+                launch.settings_group = group;
                 // The shortcuts have their own tab.
                 if name.eq_ignore_ascii_case("shortcuts") {
                     launch.shortcuts = true;

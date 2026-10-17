@@ -50,6 +50,7 @@ pub mod pane;
 pub mod rail;
 pub mod ring;
 pub mod row;
+pub mod scheme;
 pub mod segmented;
 pub mod settings;
 pub mod slider;

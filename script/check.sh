@@ -117,8 +117,25 @@ if [[ ${tier} == screens ]]; then
     step reader-build cargo build --locked -p glyphst-reader
     reader="${repo}/target/debug/glyphst-reader"
     dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
+    # A dusk gradient (navy to orange, with a teal band) as the wallpaper,
+    # written as a binary PPM so no image tool is needed.
+    wallpaper=${GLYPHST_SCREENS_WALLPAPER:-${run_dir}/wallpaper.ppm}
+    if [[ ! -e ${wallpaper} ]]; then
+        LC_ALL=C awk 'BEGIN {
+            w = 480; h = 300; printf "P6\n%d %d\n255\n", w, h
+            for (y = 0; y < h; y++) {
+                t = y / (h - 1)
+                for (x = 0; x < w; x++) {
+                    band = exp(-((t - 0.55) * 8) ^ 2) * (0.6 + 0.4 * x / w)
+                    r = 24 + 200 * t ^ 1.6; g = 36 + 70 * t + 90 * band; b = 80 - 40 * t + 70 * band
+                    printf "%c%c%c", r, g, b
+                }
+            }
+        }' > "${wallpaper}"
+    fi
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one, `%` for a dense drawing and `@@` for a plain `@`;
+    # for the second one, `%` for a dense drawing, `^` for the wallpaper
+    # and `@@` for a plain `@`;
     # a `--screenshot-*` argument picks the kind of shot instead of a plain
     # one).
     states=(
@@ -156,6 +173,9 @@ if [[ ${tier} == screens ]]; then
         "06a-palette-sections @ --palette @@"
         "06b-path-prompt @ --command app.open"
         "07a-appearance @ --settings appearance"
+        "07a-background @ --settings appearance:background --background image --wallpaper ^ --colours background"
+        "07a-colours @ --settings appearance:colours --background image --wallpaper ^ --colours background"
+        "02a-wallpaper-theme @ --background image --wallpaper ^ --colours background"
         "07-reading @ --settings reading"
         "07-presenting @ --settings presenting"
         "07-effects @ --settings effects"
@@ -175,6 +195,7 @@ if [[ ${tier} == screens ]]; then
                     @@) args+=("@") ;;
                     \#) args+=("${second}") ;;
                     %) args+=("${dense}") ;;
+                    ^) args+=("${wallpaper}") ;;
                     --screenshot-*) shot=${arg} ;;
                     *) args+=("${arg}") ;;
                 esac

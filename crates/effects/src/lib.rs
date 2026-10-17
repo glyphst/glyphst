@@ -40,8 +40,6 @@ pub const CROSSFADE: &str = "crossfade";
 pub const SOLID: &str = "solid";
 pub const AURORA: &str = "aurora";
 pub const IMAGE: &str = "image";
-pub const IMAGE_SOFT: &str = "image-soft";
-pub const IMAGE_PARALLAX: &str = "image-parallax";
 pub const SEPIA: &str = "sepia";
 pub const NIGHT: &str = "night";
 pub const PAPER: &str = "paper";
@@ -52,18 +50,13 @@ pub const GENERATE: &str = "generate";
 pub const MAX_PARAMS: usize = 4;
 
 const PRELUDE: &str = include_str!("prelude.wgsl");
-const BUILTIN: [(&str, &str); 15] = [
+const BUILTIN: [(&str, &str); 13] = [
     ("present.wgsl", include_str!("builtin/present.wgsl")),
     ("crossfade.wgsl", include_str!("builtin/crossfade.wgsl")),
     ("slide_over.wgsl", include_str!("builtin/slide_over.wgsl")),
     ("solid.wgsl", include_str!("builtin/solid.wgsl")),
     ("aurora.wgsl", include_str!("builtin/aurora.wgsl")),
     ("image.wgsl", include_str!("builtin/image.wgsl")),
-    ("image_soft.wgsl", include_str!("builtin/image_soft.wgsl")),
-    (
-        "image_parallax.wgsl",
-        include_str!("builtin/image_parallax.wgsl"),
-    ),
     ("sepia.wgsl", include_str!("builtin/sepia.wgsl")),
     ("night.wgsl", include_str!("builtin/night.wgsl")),
     ("paper.wgsl", include_str!("builtin/paper.wgsl")),
