@@ -297,6 +297,12 @@ sliding, the palette and scrims, list highlights, toasts and control fills
 keep a value per egui id with `smooth`, `smooth_bool`, `color` and
 `scroll_glide`. Direct input (drag, trackpad) never lags. Reduce motion,
 and the screenshot harness, make these values jump to their targets.
+A page view draws into a window-sized target and shows its top-left
+part; effects read that part (`EffectInputs::extent`, applied by the
+prelude's `fx_sample_from`/`fx_sample_to`). So a pane changing size (a
+panel sliding, a split dragged) never makes a new target, which costs a
+frame; `--bench` slides the sidebar and counts them, and
+`--screenshot-slide` captures a slide midway.
 
 Page text comes from MuPDF structured text ([`pdf::text`](crates/pdf/src/text.rs))
 with whitespace kept and ligatures expanded, so glyph offsets in reflowed

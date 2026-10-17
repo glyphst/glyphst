@@ -78,16 +78,11 @@ pub fn pixel_size(rect: egui::Rect, pixels_per_point: f32) -> [u32; 2] {
 }
 
 /// The size of a view's target for a pane of `size` pixels in a window of
-/// `window` pixels: the pane's own while the shell rests. While a panel or
-/// bar slides the pane changes size every frame, and making a target takes
-/// a frame's time, so the target is the window's size (no pane outgrows it)
-/// from the slide's first frame until it has stopped.
-pub fn target_size(size: [u32; 2], window: [u32; 2], sliding: bool) -> [u32; 2] {
-    if sliding {
-        [size[0].max(window[0]), size[1].max(window[1])]
-    } else {
-        size
-    }
+/// `window` pixels: the window's, so a pane that changes size (a panel
+/// sliding, a split being dragged) draws into the same image; the pane
+/// shows its top-left part (effects read it as `EffectInputs::extent`).
+pub fn target_size(size: [u32; 2], window: [u32; 2]) -> [u32; 2] {
+    [size[0].max(window[0]), size[1].max(window[1])]
 }
 
 #[derive(Clone, Debug, Default)]
@@ -734,6 +729,9 @@ fn snapshot(device: &wgpu::Device, format: wgpu::TextureFormat, size: [u32; 2]) 
 /// The per-frame paint callback of a document view.
 pub struct ViewCallback {
     pub rect: egui::Rect,
+    /// The image the pages draw into, in pixels (`target_size`); `rect`
+    /// shows its top-left part.
+    pub target: [u32; 2],
     pub tab: u64,
     /// Every visible page. Paper goes only under pages that can be drawn:
     /// one still loading shows its generation over the background instead
@@ -783,6 +781,12 @@ impl CallbackTrait for ViewCallback {
         };
         let started = Instant::now();
         let size = pixel_size(self.rect, screen.pixels_per_point);
+        let target = [self.target[0].max(size[0]), self.target[1].max(size[1])];
+        // The part of the target the pane shows, for the effects.
+        let extent = [
+            size[0] as f32 / target[0] as f32,
+            size[1] as f32 / target[1] as f32,
+        ];
         let frame = gpu.frame;
         let mut encoder = device.create_command_encoder(&Default::default());
 
@@ -792,18 +796,18 @@ impl CallbackTrait for ViewCallback {
         let capture = self.transition.as_ref().and_then(|t| t.capture_from);
         let outgoing = capture
             .and_then(|from| gpu.views.get(&from))
-            .filter(|view| view.target.size() == size)
+            .filter(|view| view.target.size() == target)
             .map(|view| view.image().clone());
         let format = gpu.format;
-        let view = gpu.view(device, self.tab, size);
+        let view = gpu.view(device, self.tab, target);
         view.last_drawn = frame;
         if capture.is_some() {
             if view
                 .snapshot
                 .as_ref()
-                .is_none_or(|snapshot| snapshot.size != size)
+                .is_none_or(|snapshot| snapshot.size != target)
             {
-                view.snapshot = Some(snapshot(device, format, size));
+                view.snapshot = Some(snapshot(device, format, target));
             }
             let snapshot = view.snapshot.as_ref().expect("made above");
             match outgoing {
@@ -811,8 +815,8 @@ impl CallbackTrait for ViewCallback {
                     texture.as_image_copy(),
                     snapshot.texture.as_image_copy(),
                     wgpu::Extent3d {
-                        width: size[0],
-                        height: size[1],
+                        width: target[0],
+                        height: target[1],
                         depth_or_array_layers: 1,
                     },
                 ),
@@ -842,7 +846,7 @@ impl CallbackTrait for ViewCallback {
             0,
             bytemuck_color(self.page_color).as_slice(),
         );
-        let paper = self.paper_vertices(size, |page| {
+        let paper = self.paper_vertices(target, |page| {
             gpu.is_drawable(PageKey {
                 tab: self.tab,
                 page,
@@ -923,6 +927,7 @@ impl CallbackTrait for ViewCallback {
                 direction: 1.0,
                 params: overlay.params,
                 opacity: 1.0,
+                extent,
             };
             effects.prepare(device, &overlay.id, &inputs)
         });
@@ -931,9 +936,9 @@ impl CallbackTrait for ViewCallback {
             if view
                 .tinted
                 .as_ref()
-                .is_none_or(|tinted| tinted.size != size)
+                .is_none_or(|tinted| tinted.size != target)
             {
-                view.tinted = Some(snapshot(device, *format, size));
+                view.tinted = Some(snapshot(device, *format, target));
             }
             let tinted = view.tinted.as_ref().expect("made above");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -952,6 +957,8 @@ impl CallbackTrait for ViewCallback {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The pane's part only, where the pages are.
+            pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             effects.draw(&tint, &mut pass);
         }
         let image = match (&view.tinted, view.shows_tinted) {
@@ -974,6 +981,7 @@ impl CallbackTrait for ViewCallback {
                 direction,
                 params,
                 opacity: 1.0,
+                extent,
             };
             effects
                 .prepare(device, id, &effect_inputs)
@@ -1128,6 +1136,7 @@ impl CallbackTrait for PreviewCallback {
             direction: 1.0,
             params: self.effect.params,
             opacity: 1.0,
+            extent: [1.0; 2],
         };
         match gpu.effects.prepare(device, &self.effect.id, &inputs) {
             Some(prepared) => gpu.previews.insert(self.key.clone(), prepared),
@@ -1201,6 +1210,7 @@ impl CallbackTrait for BackdropCallback {
             direction: 1.0,
             params: self.background.params,
             opacity: self.opacity,
+            extent: [1.0; 2],
         };
         gpu.backdrop = gpu
             .effects
@@ -1242,11 +1252,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sliding_shell_draws_into_a_window_sized_target() {
-        assert_eq!(target_size([1000, 800], [1600, 1000], false), [1000, 800]);
-        // Every size the pane takes while sliding fits the same target.
+    fn every_pane_size_draws_into_the_window_sized_target() {
         for width in (900..=1600).step_by(20) {
-            assert_eq!(target_size([width, 800], [1600, 1000], true), [1600, 1000]);
+            assert_eq!(target_size([width, 800], [1600, 1000]), [1600, 1000]);
         }
+        // A pane larger than the window (while it shrinks) keeps its size.
+        assert_eq!(target_size([1700, 800], [1600, 1000]), [1700, 1000]);
     }
 }

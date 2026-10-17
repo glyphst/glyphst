@@ -311,6 +311,9 @@ struct Uniforms {
     direction: f32,
     opacity: f32,
     params: [f32; 4],
+    extent: [f32; 2],
+    /// Pads the struct to WGSL's 16-byte size.
+    _pad: [f32; 2],
 }
 
 /// Per-draw values of an effect.
@@ -328,6 +331,10 @@ pub struct EffectInputs<'a> {
     /// How opaque the effect is drawn, 1 for fully: a transparent window's
     /// background takes its opacity.
     pub opacity: f32,
+    /// The part of `from` and `to` in use, from their top left, as a
+    /// fraction of their size: a view draws into a window-sized image and
+    /// shows the pane's part of it.
+    pub extent: [f32; 2],
 }
 
 struct CompiledEffect {
@@ -592,6 +599,8 @@ impl EffectRegistry {
             direction: inputs.direction,
             opacity: inputs.opacity.clamp(0.0, 1.0),
             params: inputs.params,
+            extent: inputs.extent.map(|extent| extent.clamp(0.0, 1.0)),
+            _pad: [0.0; 2],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("effect_uniforms"),

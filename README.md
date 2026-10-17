@@ -71,8 +71,9 @@ latter two halfway through a transition; `--screenshot-generating PATH` and
 `--screenshot-revealing PATH` replay the loading animation over the drawn
 pages and capture it while the page's parts are traced, and halfway
 through the reveal; `--screenshot-present-tools PATH` (with `--command
-view.present`) sets out presenting's ink, toolbox and tool ring first.
-`--zoom Z`, `--page N`, `--background ID` and
+view.present`) sets out presenting's ink, toolbox and tool ring first;
+`--screenshot-slide PATH` captures the sidebar partway through sliding
+in or out, the pages resizing with it. `--zoom Z`, `--page N`, `--background ID` and
 `--transition ID|none` set up the run, `--theme system|light|dark` its
 colours, `--gallery` shows every component of the design instead of home,
 `--split right|down` shows the second document beside the

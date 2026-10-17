@@ -77,10 +77,12 @@ fn render(
     to: &wgpu::Texture,
     progress: f32,
 ) -> Vec<u8> {
-    render_at(device, queue, registry, id, from, to, progress, 1.0)
+    render_at(
+        device, queue, registry, id, from, to, progress, 1.0, [1.0; 2],
+    )
 }
 
-/// [`render`] drawn `opacity` opaque.
+/// [`render`] drawn `opacity` opaque, reading `extent` of the inputs.
 #[allow(clippy::too_many_arguments)]
 fn render_at(
     device: &wgpu::Device,
@@ -91,6 +93,7 @@ fn render_at(
     to: &wgpu::Texture,
     progress: f32,
     opacity: f32,
+    extent: [f32; 2],
 ) -> Vec<u8> {
     let target = solid_texture(device, queue, [0, 0, 0, 0]);
     let target_view = target.create_view(&Default::default());
@@ -113,6 +116,7 @@ fn render_at(
                 direction: 1.0,
                 params: def.default_params(),
                 opacity,
+                extent,
             },
         )
         .unwrap();
@@ -175,8 +179,12 @@ fn a_background_drawn_half_opaque_is_premultiplied() {
     let (device, queue) = require_device!();
     let registry = EffectRegistry::new(&device, FORMAT);
     let blank = solid_texture(&device, &queue, [0, 0, 0, 0]);
-    let opaque = render_at(&device, &queue, &registry, SOLID, &blank, &blank, 0.0, 1.0);
-    let half = render_at(&device, &queue, &registry, SOLID, &blank, &blank, 0.0, 0.5);
+    let opaque = render_at(
+        &device, &queue, &registry, SOLID, &blank, &blank, 0.0, 1.0, [1.0; 2],
+    );
+    let half = render_at(
+        &device, &queue, &registry, SOLID, &blank, &blank, 0.0, 0.5, [1.0; 2],
+    );
     assert_eq!(opaque[3], 255);
     assert!((126..=129).contains(&half[3]), "alpha {}", half[3]);
     for channel in 0..3 {
@@ -282,6 +290,34 @@ fn transitions_start_at_the_outgoing_view_and_end_at_the_incoming_one() {
             &end[..4]
         );
     }
+}
+
+#[test]
+fn effects_read_only_the_extent_of_their_images() {
+    let (device, queue) = require_device!();
+    let registry = EffectRegistry::new(&device, FORMAT);
+    // An image twice the target's size: its top-left quarter (the part in
+    // use) is red, the rest blue.
+    let size = SIZE * 2;
+    let pixels: Vec<u8> = (0..size * size)
+        .flat_map(|index| {
+            let (x, y) = (index % size, index / size);
+            if x < SIZE && y < SIZE {
+                [200, 30, 30, 255]
+            } else {
+                [30, 30, 200, 255]
+            }
+        })
+        .collect();
+    let image = texture_from(&device, &queue, &pixels, [size, size]);
+    let shown = render_at(
+        &device, &queue, &registry, PRESENT, &image, &image, 0.0, 1.0, [0.5; 2],
+    );
+    assert!(
+        shown.chunks_exact(4).all(|p| p == [200, 30, 30, 255]),
+        "{:?}",
+        &shown[..8]
+    );
 }
 
 #[test]

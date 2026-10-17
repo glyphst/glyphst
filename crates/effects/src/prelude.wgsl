@@ -18,6 +18,10 @@ struct EffectUniforms {
     opacity: f32,
     // The effect's parameters, in manifest order.
     params: vec4<f32>,
+    // The part of fx_from and fx_to in use, from their top left, as a
+    // fraction of their size (a view draws into a window-sized image).
+    // fx_sample_from and fx_sample_to apply it.
+    extent: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> fx: EffectUniforms;
@@ -47,12 +51,12 @@ fn fx_inside(uv: vec2<f32>) -> bool {
 }
 
 fn fx_sample_from(uv: vec2<f32>) -> vec4<f32> {
-    let color = textureSampleLevel(fx_from, fx_sampler, uv, 0.0);
+    let color = textureSampleLevel(fx_from, fx_sampler, uv * fx.extent, 0.0);
     return select(vec4<f32>(0.0), color, fx_inside(uv));
 }
 
 fn fx_sample_to(uv: vec2<f32>) -> vec4<f32> {
-    let color = textureSampleLevel(fx_to, fx_sampler, uv, 0.0);
+    let color = textureSampleLevel(fx_to, fx_sampler, uv * fx.extent, 0.0);
     return select(vec4<f32>(0.0), color, fx_inside(uv));
 }
 

@@ -20,7 +20,10 @@
 // Uniforms (prelude): fx.resolution and fx.pointer (pixels; -1 outside),
 // fx.time (seconds), fx.progress, fx.direction (+1 forward, -1 back) and
 // fx.params (the params above, in order). Return premultiplied RGBA; the
-// prelude multiplies it by a transparent window's opacity.
+// prelude multiplies it by a transparent window's opacity. Read the page
+// images with fx_sample_from(uv) and fx_sample_to(uv): they show only part
+// of their textures (fx.extent), so a direct textureSample must scale uv
+// by fx.extent.
 
 fn effect(uv: vec2<f32>, pixel: vec2<f32>) -> vec4<f32> {
     let t = fx.time * fx.params.x;

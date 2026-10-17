@@ -53,11 +53,16 @@ pub enum ShotKind {
     /// Presenting's tools (frame 02h): ink on the page, the laser's
     /// toolbox with the pen's colours, and the ring open.
     PresentTools,
+    /// Partway through the sidebar sliding in or out, with motion on: the
+    /// pages are resizing with the pane.
+    SidebarSlide,
 }
 
 /// Progress of a replayed loading animation at which `Generating` is
 /// taken, and at which the pages of `Revealing` become ready.
 const GENERATING_AT: f32 = 0.6;
+/// Frames into the sidebar's slide at which `SidebarSlide` is taken.
+const SLIDE_SHOT_FRAMES: u32 = 4;
 /// The reveal's progress (in the animation's ending) at which
 /// `Revealing` is taken: the scan line is about two thirds down.
 const REVEALING_AT: f32 = 0.84;
@@ -68,6 +73,8 @@ pub struct Screenshot {
     ready_frames: u32,
     started: bool,
     requested: bool,
+    /// Frames since the sidebar started sliding (`SidebarSlide`).
+    slide_frames: u32,
 }
 
 impl Screenshot {
@@ -78,6 +85,7 @@ impl Screenshot {
             ready_frames: 0,
             started: false,
             requested: false,
+            slide_frames: 0,
         }
     }
 }
@@ -127,10 +135,13 @@ impl Default for Bench {
 }
 
 impl Harness {
-    /// Whether motion runs: only while the benchmark slides the sidebar;
-    /// screenshots are taken of settled frames.
+    /// Whether motion runs: only while the benchmark or a screenshot
+    /// slides the sidebar; other screenshots are taken of settled frames.
     pub fn moves(&self) -> bool {
-        matches!(self, Self::Bench(bench) if matches!(bench.phase, Phase::Sidebar(_)))
+        match self {
+            Self::Bench(bench) => matches!(bench.phase, Phase::Sidebar(_)),
+            Self::Screenshot(shot) => shot.kind == ShotKind::SidebarSlide && shot.started,
+        }
     }
 }
 
@@ -442,6 +453,14 @@ impl ReaderApp {
             }
             return true;
         }
+        // Partway through the slide, whatever is still loading.
+        if shot.kind == ShotKind::SidebarSlide && shot.started {
+            shot.slide_frames += 1;
+            if shot.slide_frames == SLIDE_SHOT_FRAMES {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            return false;
+        }
         let layers_pending = self
             .active
             .is_some_and(|active| self.tabs[active].layers_pending());
@@ -492,6 +511,11 @@ impl ReaderApp {
                     return false;
                 }
                 true
+            }
+            ShotKind::SidebarSlide => {
+                self.prefs.show_sidebar = !self.prefs.show_sidebar;
+                shot.started = true;
+                false
             }
             ShotKind::Generating | ShotKind::Revealing => {
                 let revealing = shot.kind == ShotKind::Revealing;
