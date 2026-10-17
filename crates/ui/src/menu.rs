@@ -11,10 +11,12 @@ use crate::{
     theme::{self, Tokens},
 };
 
-/// An item: icon, label and key. Returns its response.
+/// An item: icon, label and key, and optionally a line of detail under
+/// the label. Returns its response.
 #[must_use = "call `.show(ui)`"]
 pub struct Item<'a> {
     label: &'a str,
+    detail: Option<&'a str>,
     icon: Option<&'a str>,
     key: Option<&'a str>,
     checked: Option<bool>,
@@ -26,12 +28,20 @@ impl<'a> Item<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
             label,
+            detail: None,
             icon: None,
             key: None,
             checked: None,
             danger: false,
             width: None,
         }
+    }
+
+    /// A second line under the label, cut to the row's width: the row
+    /// keeps one height whatever the text or the pointer.
+    pub fn detail(mut self, detail: &'a str) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn icon(mut self, icon: impl Into<Option<&'a str>>) -> Self {
@@ -76,7 +86,8 @@ impl<'a> Item<'a> {
         let width = self
             .width
             .unwrap_or_else(|| natural.max(ui.available_width()).max(180.0));
-        let (rect, response) = ui.allocate_exact_size(vec2(width, t.row(26.0)), Sense::click());
+        let height = if self.detail.is_some() { 40.0 } else { 26.0 };
+        let (rect, response) = ui.allocate_exact_size(vec2(width, t.row(height)), Sense::click());
         let enabled = ui.is_enabled();
         response.widget_info(|| match self.checked {
             Some(checked) => {
@@ -134,14 +145,25 @@ impl<'a> Item<'a> {
             right -= text::width(ui, &key, &theme::mono(10.0)) + 12.0;
         }
         // Menus write their entries in lower case, as the design does.
+        let label_y = if self.detail.is_some() { y - 8.0 } else { y };
         text::row(
             ui,
-            egui::pos2(x, y),
+            egui::pos2(x, label_y),
             self.label.to_lowercase(),
             font,
             color,
             right - x,
         );
+        if let Some(detail) = self.detail {
+            text::row(
+                ui,
+                egui::pos2(x, y + 8.0),
+                detail,
+                theme::mono(10.0),
+                if enabled { t.muted } else { t.faint },
+                right - x,
+            );
+        }
         response
     }
 }
@@ -171,4 +193,37 @@ pub fn style(ui: &mut Ui) {
     let spacing = ui.spacing_mut();
     spacing.item_spacing = vec2(0.0, 0.0);
     spacing.button_padding = vec2(8.0, 4.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug where a picker's rows grew and shrank under the pointer:
+    /// rows with a detail keep one height, hovered or not.
+    #[test]
+    fn rows_with_a_detail_keep_their_height_under_the_pointer() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let detail = "a long description that would wrap in a narrow menu, and then some more";
+        let mut heights = Vec::new();
+        for pointer in [None, Some(egui::pos2(20.0, 12.0))] {
+            let input = egui::RawInput {
+                events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                ui.set_width(200.0);
+                for label in ["tonal spot", "expressive"] {
+                    let response = Item::new(label).detail(detail).checked(false).show(ui);
+                    heights.push(response.rect.height());
+                }
+            });
+            output.textures_delta.clear();
+        }
+        assert!(
+            heights.windows(2).all(|pair| pair[0] == pair[1]),
+            "{heights:?}"
+        );
+    }
 }

@@ -687,16 +687,21 @@ fn colours(ui: &mut egui::Ui, prefs: &mut Prefs, background_seed: Option<[u8; 3]
                         RichText::new(prefs.scheme_style.label()).font(theme::mono(12.0)),
                     )
                     .width(240.0)
+                    .height(420.0)
                     .show_ui(ui, |ui| {
                         glyphst_ui::menu::style(ui);
+                        // Rows of one height: the description is a cut
+                        // second line, so the pointer never reflows them.
                         for style in SchemeStyle::ALL {
-                            let label = RichText::new(format!(
-                                "{} — {}",
-                                style.label(),
-                                style.description()
-                            ))
-                            .font(theme::mono(12.0));
-                            ui.selectable_value(&mut prefs.scheme_style, style, label);
+                            if glyphst_ui::menu::Item::new(style.label())
+                                .detail(style.description())
+                                .checked(prefs.scheme_style == style)
+                                .width(340.0)
+                                .show(ui)
+                                .clicked()
+                            {
+                                prefs.scheme_style = style;
+                            }
                         }
                     });
             },
