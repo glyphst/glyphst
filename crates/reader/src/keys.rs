@@ -432,12 +432,14 @@ impl Keymap {
     /// presses from egui's input. A press that starts or continues a
     /// sequence, or adds to a count, waits in `pending`; Escape drops what
     /// is pending. While `typing`, only single shortcuts typing can't
-    /// produce fire, and only for commands that allow it. While
-    /// `presenting`, presenting's keys come first; otherwise they are off.
+    /// produce fire, and only for commands that allow it; with a list open
+    /// its moves (Ctrl+N, Ctrl+P) are left to it. While `presenting`,
+    /// presenting's keys come first; otherwise they are off.
     pub fn take_pressed(
         &self,
         ctx: &egui::Context,
         typing: bool,
+        list_open: bool,
         presenting: bool,
         pending: &mut Pending,
     ) -> Vec<Pressed> {
@@ -460,6 +462,9 @@ impl Keymap {
                     return true;
                 }
                 if typing {
+                    if list_open && glyphst_ui::row::Move::of(*key, *modifiers).is_some() {
+                        return true;
+                    }
                     let found = self.bindings.iter().find(|(binding, command)| {
                         let [shortcut] = binding.strokes() else {
                             return false;
@@ -846,7 +851,13 @@ mod tests {
             };
             let mut pressed = Vec::new();
             let mut output = ctx.run_ui(input, |ui| {
-                pressed = keymap.take_pressed(ui.ctx(), false, presenting, &mut Pending::default());
+                pressed = keymap.take_pressed(
+                    ui.ctx(),
+                    false,
+                    false,
+                    presenting,
+                    &mut Pending::default(),
+                );
             });
             output.textures_delta.clear();
             pressed
@@ -867,6 +878,31 @@ mod tests {
         assert_eq!(draw, [(keys("D"), Command::PresentDraw)]);
         let spread = keymap.conflicts(&keys("D"), Command::ToggleSpread);
         assert_eq!(spread, [(keys("D"), Command::ToggleSpread)]);
+    }
+
+    #[test]
+    fn an_open_list_keeps_ctrl_n_and_ctrl_p_for_its_moves() {
+        let keymap = standard(&Overrides::new());
+        let press = |key, list_open| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![self::key(key, Modifiers::CTRL)],
+                ..Default::default()
+            };
+            let (mut pressed, mut left) = (Vec::new(), 0);
+            let mut output = ctx.run_ui(input, |ui| {
+                pressed =
+                    keymap.take_pressed(ui.ctx(), true, list_open, false, &mut Pending::default());
+                left = ui.input(|input| input.events.len());
+            });
+            output.textures_delta.clear();
+            let pressed: Vec<Command> =
+                pressed.into_iter().map(|pressed| pressed.command).collect();
+            (pressed, left)
+        };
+        assert_eq!(press(Key::N, false), (vec![Command::NewTab], 0));
+        assert_eq!(press(Key::N, true), (vec![], 1), "left for the list");
+        assert_eq!(press(Key::P, true), (vec![], 1));
     }
 
     #[test]
@@ -909,7 +945,7 @@ mod tests {
         let mut pressed = Vec::new();
         let mut left = 0;
         let mut output = ctx.run_ui(input, |ui| {
-            pressed = keymap.take_pressed(ui.ctx(), typing, false, pending);
+            pressed = keymap.take_pressed(ui.ctx(), typing, false, false, pending);
             left = ui.input(|input| input.events.len());
         });
         output.textures_delta.clear();

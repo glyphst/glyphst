@@ -2145,10 +2145,13 @@ impl ReaderApp {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
+        // A list drawn last frame (the palette, the @ menu, the launcher)
+        // takes Ctrl+N and Ctrl+P.
+        let list_open = glyphst_ui::row::take_list_open(ctx) || self.palette.open;
         let presenting = self.presenting.is_some();
-        let pressed = self
-            .keymap
-            .take_pressed(ctx, typing, presenting, &mut self.pending_keys);
+        let pressed =
+            self.keymap
+                .take_pressed(ctx, typing, list_open, presenting, &mut self.pending_keys);
         for keys::Pressed { command, count } in pressed {
             if let Err(reason) = self.run_counted(command, count, ctx)
                 && self.active.is_some()

@@ -236,8 +236,9 @@ impl Menu {
         (range, entries)
     }
 
-    /// Moves the highlight with the arrow keys; returns the entry Enter or
-    /// Tab chose, and whether Esc closed the menu.
+    /// Moves the highlight with the arrow keys or Ctrl+P and Ctrl+N;
+    /// returns the entry Enter or Tab chose, and whether Esc closed the
+    /// menu.
     pub fn keys(&mut self, ui: &egui::Ui, count: usize) -> (Option<usize>, bool) {
         if count == 0 {
             self.selected = 0;
@@ -246,13 +247,15 @@ impl Menu {
         self.selected = self.selected.min(count - 1);
         let key = |i: &mut egui::InputState, key| i.consume_key(egui::Modifiers::NONE, key);
         let (up, down, accept, close) = ui.input_mut(|i| {
+            let (up, down) = glyphst_ui::row::take_moves(i);
             (
-                key(i, egui::Key::ArrowUp),
-                key(i, egui::Key::ArrowDown),
+                up,
+                down,
                 key(i, egui::Key::Enter) || key(i, egui::Key::Tab),
                 key(i, egui::Key::Escape),
             )
         });
+        glyphst_ui::row::mark_list_open(ui.ctx());
         if up {
             self.selected = (self.selected + count - 1) % count;
         }

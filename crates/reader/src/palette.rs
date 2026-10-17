@@ -488,14 +488,16 @@ impl Palette {
                     .pointer
                     .interact_pos()
                     .is_some_and(|pos| self.rect.is_some_and(|rect| !rect.contains(pos)));
+            let (up, down) = glyphst_ui::row::take_moves(input);
             (
                 input.consume_key(egui::Modifiers::NONE, Key::Escape),
-                input.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
-                input.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                up,
+                down,
                 path_mode && input.consume_key(egui::Modifiers::NONE, Key::Tab),
                 outside,
             )
         });
+        glyphst_ui::row::mark_list_open(ctx);
         if escape || outside {
             self.close();
             return None;
@@ -1076,6 +1078,31 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_move_the_highlight_like_the_arrows() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let listing: Listing = (0..5)
+            .map(|index| (format!("book-{index}.pdf"), false))
+            .collect();
+        let hits = path_hits("~/", Path::new("/home/reader"), &listing);
+        let mut palette = Palette::default();
+        palette.open_path(&ctx, "~/".into());
+        frame(&ctx, &mut palette, &hits, Vec::new());
+        let ctrl = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        for pressed in [Key::N, Key::N, Key::P] {
+            frame(&ctx, &mut palette, &hits, vec![ctrl(pressed)]);
+        }
+        let chosen = frame(&ctx, &mut palette, &hits, vec![key(Key::Enter)]);
+        assert_eq!(chosen, Some(hits[1].item.clone()));
     }
 
     /// An outline whose odd entries have no page, so indices skip.

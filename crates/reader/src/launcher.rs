@@ -242,9 +242,9 @@ impl Launcher {
         action
     }
 
-    /// Up and down choose a folder entry, Tab completes a path to it, and
-    /// Enter opens it, the path typed when it is a document, or the first
-    /// document the words match.
+    /// Up and down (or Ctrl+P and Ctrl+N) choose a folder entry, Tab
+    /// completes a path to it, and Enter opens it, the path typed when it
+    /// is a document, or the first document the words match.
     fn keys(
         &mut self,
         ui: &egui::Ui,
@@ -256,13 +256,15 @@ impl Launcher {
             return None;
         }
         let (up, down, tab, enter) = ui.input_mut(|input| {
+            let (up, down) = glyphst_ui::row::take_moves(input);
             (
-                input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                up,
+                down,
                 input.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
                 input.key_pressed(egui::Key::Enter),
             )
         });
+        glyphst_ui::row::mark_list_open(ui.ctx());
         if up {
             self.selected = self.selected.saturating_sub(1);
         }

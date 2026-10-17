@@ -25,6 +25,70 @@ pub fn list_row(ui: &mut Ui, height: f32, selected: bool) -> (Rect, Response) {
     (rect, response)
 }
 
+/// A highlight move in a list of rows: the arrow keys, or Ctrl+P and Ctrl+N
+/// as in Emacs and most pickers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    Up,
+    Down,
+}
+
+impl Move {
+    /// The move a key press makes in a list. Ctrl is the physical key, so
+    /// Cmd+N stays New tab on macOS.
+    pub fn of(key: egui::Key, modifiers: egui::Modifiers) -> Option<Self> {
+        let plain = !modifiers.ctrl && !modifiers.command;
+        let ctrl = modifiers.ctrl && !modifiers.alt && !modifiers.shift && !modifiers.mac_cmd;
+        match key {
+            egui::Key::ArrowUp if plain => Some(Self::Up),
+            egui::Key::ArrowDown if plain => Some(Self::Down),
+            egui::Key::P if ctrl => Some(Self::Up),
+            egui::Key::N if ctrl => Some(Self::Down),
+            _ => None,
+        }
+    }
+}
+
+/// Takes this frame's list moves from `input`: whether it moved up, and
+/// whether down.
+pub fn take_moves(input: &mut egui::InputState) -> (bool, bool) {
+    let (mut up, mut down) = (false, false);
+    input.events.retain(|event| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        match Move::of(*key, *modifiers) {
+            Some(Move::Up) => up = true,
+            Some(Move::Down) => down = true,
+            None => return true,
+        }
+        false
+    });
+    (up, down)
+}
+
+fn list_open_id() -> egui::Id {
+    egui::Id::new("glyphst-list-open")
+}
+
+/// Says a list with keyboard moves is open this frame, so the app's
+/// shortcuts leave its keys to it next frame.
+pub fn mark_list_open(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.insert_temp(list_open_id(), true));
+}
+
+/// Whether a list said it was open since this was last asked.
+pub fn take_list_open(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(list_open_id()))
+        .unwrap_or(false)
+}
+
 /// A list row the width of the pane.
 #[must_use = "call `.show(ui)`"]
 pub struct ListRow<'a> {
