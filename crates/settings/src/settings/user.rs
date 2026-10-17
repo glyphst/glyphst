@@ -2,9 +2,9 @@
 //! the system credential store, keychain items in the form the former GPUI
 //! apps wrote, so keys saved by them are still found.
 //!
-//! The Reader edits only the provider sections (`ai`, `translation`,
-//! `ocr`); saving re-reads the file and replaces just those, so the other
-//! sections the file has (written by the GPUI apps) survive.
+//! The file holds the window and the AI, translation and OCR providers;
+//! the Reader keeps its other preferences in its own store. Sections the
+//! GPUI apps wrote are ignored, and saving leaves them out.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -188,28 +188,16 @@ pub fn save_user_settings(
     save_user_settings_to(&config_path(), edited, config_owned)
 }
 
-/// Writes the sections the Reader edits (`ai`, `translation`, `ocr` and
-/// `window`) from `edited` into the settings file at `path`, keeping
-/// everything else as the file has it now
-/// (or as the legacy state file has it, when there is no config yet).
-/// Secrets outside `config_owned` are left out: they belong in the
-/// keychain. The file is replaced atomically, readable by the user only.
+/// Writes `edited` (the window and the providers) to the settings file
+/// at `path`. Secrets outside `config_owned` are left out: they belong in
+/// the keychain. The file is replaced atomically, readable by the user
+/// only.
 pub fn save_user_settings_to(
     path: &Path,
     edited: &Settings,
     config_owned: &BTreeSet<ProviderSecretId>,
 ) -> Result<()> {
-    let mut settings = if path.is_file() {
-        load_settings(path)?
-    } else if path == config_path() && state_path().is_file() {
-        load_settings(&state_path())?
-    } else {
-        Settings::default()
-    };
-    settings.ai = edited.ai.clone();
-    settings.translation = edited.translation.clone();
-    settings.ocr = edited.ocr.clone();
-    settings.window = edited.window;
+    let mut settings = edited.clone();
     for id in settings.provider_secret_ids() {
         if !config_owned.contains(&id) {
             settings.set_provider_secret(id, String::new());
@@ -381,7 +369,7 @@ mod user_tests {
     }
 
     #[test]
-    fn saving_replaces_only_the_provider_sections_and_keeps_keychain_keys_out() {
+    fn saving_drops_the_gpui_sections_and_keeps_keychain_keys_out() {
         let directory =
             std::env::temp_dir().join(format!("glyphst-settings-save-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
@@ -389,8 +377,11 @@ mod user_tests {
         let deepl = ProviderSecretId::TranslationApiKey(TranslationProvider::DeepL);
         let google = ProviderSecretId::TranslationApiKey(TranslationProvider::Google);
 
+        // A file the GPUI Reader wrote, with sections the Reader ignores.
         let mut loaded = parse_settings(
             r#"
+            scroll { smooth #false }
+            keymap "vim"
             translation {
                 provider "deepl"
                 providers {
@@ -401,12 +392,6 @@ mod user_tests {
         )
         .unwrap();
         let config_owned = config_owned_secret_ids(&loaded);
-        save_user_settings_to(&path, &loaded, &config_owned).unwrap();
-
-        // The GPUI Reader changes another section meanwhile.
-        let mut on_disk = load_settings(&path).unwrap();
-        on_disk.keymap_preset = KeymapPreset::Vim;
-        write_kdl(&path, on_disk.to_kdl_string()).unwrap();
 
         loaded.translation.active_provider = TranslationProvider::Google;
         loaded.set_provider_secret(deepl, "edited-in-config");
@@ -414,7 +399,6 @@ mod user_tests {
         save_user_settings_to(&path, &loaded, &config_owned).unwrap();
 
         let saved = load_settings(&path).unwrap();
-        assert_eq!(saved.keymap_preset, KeymapPreset::Vim, "kept");
         assert_eq!(
             saved.translation.active_provider,
             TranslationProvider::Google
@@ -423,6 +407,10 @@ mod user_tests {
         assert!(saved.provider_secret(google).is_none_or(str::is_empty));
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("for-the-keychain"));
+        assert!(
+            !text.contains("scroll") && !text.contains("keymap"),
+            "{text}"
+        );
 
         #[cfg(unix)]
         {

@@ -1,195 +1,26 @@
 use super::*;
 
+/// The settings the Reader keeps in `config.kdl`: the window, and the AI,
+/// translation and OCR providers. Its other preferences live in its own
+/// store.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
-    pub behavior: BehaviorSettings,
-    pub document_view: DocumentViewSettings,
-    pub restore_on_startup: RestoreOnStartup,
-    pub path_chooser: PathChooserBackend,
-    pub reading: EpubReaderPreferences,
-    pub document_theme: DocumentThemeSettings,
-    pub font: FontSettings,
     pub window: WindowSettings,
-    pub tab_bar_visibility: TabBarVisibility,
-    pub new_tab: NewTabSettings,
-    pub language: AppLanguage,
     pub ai: AiSettings,
     pub translation: TranslationSettings,
     pub ocr: OcrSettings,
-    pub keymap_preset: KeymapPreset,
-    pub keybinding_overrides: Vec<KeyBindingOverride>,
-    pub theme: ThemeSelection,
-    pub overrides: PartialTheme,
 }
 
 impl Settings {
     pub fn sanitize(&mut self) {
-        self.behavior.sanitize();
-        self.reading = self.reading.sanitized();
-        self.font.sanitize();
         self.window.sanitize();
         self.ai.sanitize();
         self.translation.sanitize();
         self.ocr.sanitize();
-        self.overrides.sanitize();
-        self.theme.sanitize();
-        self.keybinding_overrides.retain_mut(|binding| {
-            binding.action = binding.action.trim().to_string();
-            binding.keystrokes = binding.keystrokes.trim().to_string();
-            binding.context = binding
-                .context
-                .as_deref()
-                .map(str::trim)
-                .filter(|context| !context.is_empty())
-                .map(str::to_string);
-            !binding.action.is_empty()
-        });
     }
 
     pub(super) fn from_document(document: &KdlDocument) -> Self {
         let mut settings = Self::default();
-
-        if let Some(theme_node) = document.get("theme") {
-            settings.theme = ThemeSelection::from_kdl_node(theme_node);
-        }
-
-        if let Some(language) = document
-            .get_arg("language")
-            .and_then(KdlValue::as_string)
-            .and_then(AppLanguage::from_str)
-        {
-            settings.language = language;
-        }
-
-        if let Some(preset) = document
-            .get_arg("keymap")
-            .and_then(KdlValue::as_string)
-            .and_then(KeymapPreset::from_str)
-        {
-            settings.keymap_preset = preset;
-        }
-
-        if let Some(backend) = document
-            .get_arg("path_chooser")
-            .and_then(KdlValue::as_string)
-            .and_then(PathChooserBackend::from_str)
-        {
-            settings.path_chooser = backend;
-        }
-
-        if let Some(font) = document.get("font").and_then(KdlNode::children) {
-            if let Some(value) = font.get_arg("ui_font_family").and_then(KdlValue::as_string) {
-                settings.font.ui_font_family = value.to_string();
-            }
-            if let Some(value) = font.get_arg("ui_font_size").and_then(value_to_f32) {
-                settings.font.ui_font_size = value;
-            }
-            if let Some(value) = font.get_arg("ui_font_weight").and_then(value_to_f32) {
-                settings.font.ui_font_weight = value;
-            }
-            if let Some(fallbacks) = font.get("ui_font_fallbacks") {
-                settings.font.ui_font_fallbacks = fallbacks
-                    .entries()
-                    .iter()
-                    .filter(|entry| entry.name().is_none())
-                    .filter_map(|entry| entry.value().as_string().map(str::to_string))
-                    .collect();
-            }
-        }
-
-        if let Some(zoom) = document.get("zoom").and_then(KdlNode::children) {
-            if let Some(value) = zoom.get_arg("default").and_then(value_to_f32) {
-                settings.behavior.default_zoom = value;
-            }
-            if let Some(value) = zoom.get_arg("step").and_then(value_to_f32) {
-                settings.behavior.zoom_step = value;
-            }
-        }
-
-        if let Some(scroll) = document.get("scroll").and_then(KdlNode::children)
-            && let Some(value) = scroll.get_arg("smooth").and_then(KdlValue::as_bool)
-        {
-            settings.behavior.smooth_scrolling = value;
-        }
-
-        if let Some(motion) = document.get("motion").and_then(KdlNode::children)
-            && let Some(value) = motion.get_arg("reduce").and_then(KdlValue::as_bool)
-        {
-            settings.behavior.reduce_motion = value;
-        }
-
-        if let Some(session) = document.get("session").and_then(KdlNode::children)
-            && let Some(value) = session
-                .get_arg("restore_on_startup")
-                .and_then(KdlValue::as_string)
-                .and_then(RestoreOnStartup::from_str)
-        {
-            settings.restore_on_startup = value;
-        }
-
-        if let Some(document_view) = document.get("document_view").and_then(KdlNode::children)
-            && let Some(value) = document_view
-                .get_arg("progress_display")
-                .and_then(KdlValue::as_string)
-                .and_then(DocumentProgressDisplay::from_str)
-        {
-            settings.document_view.progress_display = value;
-        }
-
-        if let Some(reading) = document.get("reading").and_then(KdlNode::children) {
-            if let Some(value) = reading.get_arg("font_size").and_then(value_to_f32) {
-                settings.reading.font_size = value;
-            }
-            if let Some(value) = reading.get_arg("line_height").and_then(value_to_f32) {
-                settings.reading.line_height = value;
-            }
-            if let Some(value) = reading.get_arg("horizontal_margin").and_then(value_to_f32) {
-                settings.reading.horizontal_margin = value;
-            }
-            if let Some(value) = reading.get_arg("max_content_width").and_then(value_to_f32) {
-                settings.reading.max_content_width = value;
-            }
-            if let Some(value) = reading
-                .get_arg("theme")
-                .and_then(KdlValue::as_string)
-                .and_then(EpubTheme::parse)
-            {
-                settings.reading.theme = value;
-            }
-            if let Some(value) = reading
-                .get_arg("publisher_styles")
-                .and_then(KdlValue::as_bool)
-            {
-                settings.reading.use_publisher_styles = value;
-            }
-        }
-
-        if let Some(document_theme) = document.get("document_theme").and_then(KdlNode::children)
-            && let Some(value) = document_theme
-                .get_arg("follow_app_theme")
-                .and_then(KdlValue::as_bool)
-        {
-            settings.document_theme.follow_app_theme = value;
-        }
-
-        if let Some(panes) = document.get("panes").and_then(KdlNode::children)
-            && let Some(value) = panes.get_arg("dim_inactive").and_then(KdlValue::as_bool)
-        {
-            settings.behavior.dim_inactive_panes = value;
-        }
-
-        if let Some(copy) = document.get("copy").and_then(KdlNode::children) {
-            if let Some(value) = copy
-                .get_arg("format")
-                .and_then(KdlValue::as_string)
-                .and_then(CopyFormat::from_str)
-            {
-                settings.behavior.copy_format = value;
-            }
-            if let Some(value) = copy.get_arg("semantic").and_then(KdlValue::as_bool) {
-                settings.behavior.semantic_copy = value;
-            }
-        }
 
         if let Some(window) = document.get("window").and_then(KdlNode::children) {
             if let Some(value) = window.get_arg("opacity").and_then(value_to_f32) {
@@ -208,24 +39,6 @@ impl Settings {
             {
                 settings.window.fullscreen_opaque = value;
             }
-        }
-
-        if let Some(tabs) = document.get("tabs").and_then(KdlNode::children)
-            && let Some(value) = tabs
-                .get_arg("visibility")
-                .and_then(KdlValue::as_string)
-                .and_then(TabBarVisibility::from_str)
-        {
-            settings.tab_bar_visibility = value;
-        }
-
-        if let Some(new_tab) = document.get("new_tab").and_then(KdlNode::children)
-            && let Some(value) = new_tab
-                .get_arg("view_mode")
-                .and_then(KdlValue::as_string)
-                .and_then(NewTabViewMode::from_str)
-        {
-            settings.new_tab.view_mode = value;
         }
 
         if let Some(ai) = document.get("ai").and_then(KdlNode::children) {
@@ -525,153 +338,12 @@ impl Settings {
             }
         }
 
-        if let Some(overrides) = document.get("theme-overrides").and_then(KdlNode::children) {
-            settings.overrides = PartialTheme::from_document(overrides);
-        }
-
-        if let Some(keybindings) = document.get("keybindings").and_then(KdlNode::children) {
-            settings.keybinding_overrides = keybindings
-                .nodes()
-                .iter()
-                .filter_map(|node| {
-                    let keymap = node
-                        .get("keymap")
-                        .and_then(KdlValue::as_string)
-                        .and_then(KeymapPreset::from_str)?;
-                    let keystrokes = node
-                        .get("keys")
-                        .and_then(KdlValue::as_string)
-                        .or_else(|| node.get(0).and_then(KdlValue::as_string))?;
-                    Some(KeyBindingOverride {
-                        keymap,
-                        action: node.name().value().to_string(),
-                        keystrokes: keystrokes.to_string(),
-                        context: node
-                            .get("context")
-                            .and_then(KdlValue::as_string)
-                            .map(str::to_string),
-                    })
-                })
-                .collect();
-        }
-
         settings.sanitize();
         settings
     }
 
     pub fn to_kdl_string(&self) -> String {
         let mut document = KdlDocument::new();
-
-        let mut zoom = KdlNode::new("zoom");
-        let zoom_children = zoom.ensure_children();
-        push_value_node(zoom_children, "default", self.behavior.default_zoom as f64);
-        push_value_node(zoom_children, "step", self.behavior.zoom_step as f64);
-        document.nodes_mut().push(zoom);
-
-        let mut scroll = KdlNode::new("scroll");
-        let scroll_children = scroll.ensure_children();
-        push_value_node(scroll_children, "smooth", self.behavior.smooth_scrolling);
-        document.nodes_mut().push(scroll);
-
-        let mut motion = KdlNode::new("motion");
-        let motion_children = motion.ensure_children();
-        push_value_node(motion_children, "reduce", self.behavior.reduce_motion);
-        document.nodes_mut().push(motion);
-
-        let mut session = KdlNode::new("session");
-        let session_children = session.ensure_children();
-        push_value_node(
-            session_children,
-            "restore_on_startup",
-            self.restore_on_startup.as_str(),
-        );
-        document.nodes_mut().push(session);
-
-        let mut document_view = KdlNode::new("document_view");
-        let document_view_children = document_view.ensure_children();
-        push_value_node(
-            document_view_children,
-            "progress_display",
-            self.document_view.progress_display.as_str(),
-        );
-        document.nodes_mut().push(document_view);
-
-        let mut reading = KdlNode::new("reading");
-        let reading_children = reading.ensure_children();
-        push_value_node(reading_children, "font_size", self.reading.font_size as f64);
-        push_value_node(
-            reading_children,
-            "line_height",
-            self.reading.line_height as f64,
-        );
-        push_value_node(
-            reading_children,
-            "horizontal_margin",
-            self.reading.horizontal_margin as f64,
-        );
-        push_value_node(
-            reading_children,
-            "max_content_width",
-            self.reading.max_content_width as f64,
-        );
-        push_value_node(reading_children, "theme", self.reading.theme.as_str());
-        push_value_node(
-            reading_children,
-            "publisher_styles",
-            self.reading.use_publisher_styles,
-        );
-        document.nodes_mut().push(reading);
-
-        let mut document_theme = KdlNode::new("document_theme");
-        let document_theme_children = document_theme.ensure_children();
-        push_value_node(
-            document_theme_children,
-            "follow_app_theme",
-            self.document_theme.follow_app_theme,
-        );
-        document.nodes_mut().push(document_theme);
-
-        let mut panes = KdlNode::new("panes");
-        let panes_children = panes.ensure_children();
-        push_value_node(
-            panes_children,
-            "dim_inactive",
-            self.behavior.dim_inactive_panes,
-        );
-        document.nodes_mut().push(panes);
-
-        let mut copy = KdlNode::new("copy");
-        let copy_children = copy.ensure_children();
-        push_value_node(copy_children, "format", self.behavior.copy_format.as_str());
-        push_value_node(copy_children, "semantic", self.behavior.semantic_copy);
-        document.nodes_mut().push(copy);
-
-        self.theme.clone().write_to_document(&mut document);
-        push_value_node(&mut document, "language", self.language.as_str());
-        push_value_node(&mut document, "keymap", self.keymap_preset.as_str());
-        push_value_node(&mut document, "path_chooser", self.path_chooser.as_str());
-
-        let mut font = KdlNode::new("font");
-        let font_children = font.ensure_children();
-        push_value_node(
-            font_children,
-            "ui_font_family",
-            self.font.ui_font_family.clone(),
-        );
-        push_value_node(font_children, "ui_font_size", self.font.ui_font_size as f64);
-        push_value_node(
-            font_children,
-            "ui_font_weight",
-            self.font.ui_font_weight as f64,
-        );
-        if !self.font.ui_font_fallbacks.is_empty() {
-            let mut fallbacks = KdlNode::new("ui_font_fallbacks");
-            for fallback in &self.font.ui_font_fallbacks {
-                fallbacks.push(fallback.clone());
-            }
-            font_children.nodes_mut().push(fallbacks);
-        }
-        document.nodes_mut().push(font);
 
         let mut window = KdlNode::new("window");
         let window_children = window.ensure_children();
@@ -687,24 +359,6 @@ impl Settings {
             self.window.fullscreen_opaque,
         );
         document.nodes_mut().push(window);
-
-        let mut tabs = KdlNode::new("tabs");
-        let tabs_children = tabs.ensure_children();
-        push_value_node(
-            tabs_children,
-            "visibility",
-            self.tab_bar_visibility.as_str(),
-        );
-        document.nodes_mut().push(tabs);
-
-        let mut new_tab = KdlNode::new("new_tab");
-        let new_tab_children = new_tab.ensure_children();
-        push_value_node(
-            new_tab_children,
-            "view_mode",
-            self.new_tab.view_mode.as_str(),
-        );
-        document.nodes_mut().push(new_tab);
 
         if self.ai != AiSettings::default() {
             let mut ai = KdlNode::new("ai");
@@ -911,28 +565,6 @@ impl Settings {
                 ocr_children.nodes_mut().push(providers);
             }
             document.nodes_mut().push(ocr);
-        }
-
-        if !self.keybinding_overrides.is_empty() {
-            let mut keybindings = KdlNode::new("keybindings");
-            let keybinding_children = keybindings.ensure_children();
-            for binding in &self.keybinding_overrides {
-                let mut node = KdlNode::new(binding.action.clone());
-                node.push(KdlEntry::new_prop("keys", binding.keystrokes.clone()));
-                node.push(KdlEntry::new_prop("keymap", binding.keymap.as_str()));
-                if let Some(context) = binding.context.as_ref() {
-                    node.push(KdlEntry::new_prop("context", context.clone()));
-                }
-                keybinding_children.nodes_mut().push(node);
-            }
-            document.nodes_mut().push(keybindings);
-        }
-
-        if !self.overrides.is_empty() {
-            let mut overrides = KdlNode::new("theme-overrides");
-            self.overrides
-                .write_to_document(overrides.ensure_children());
-            document.nodes_mut().push(overrides);
         }
 
         document.autoformat();

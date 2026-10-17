@@ -20,10 +20,6 @@ pub fn settings_file() -> PathBuf {
     config_path()
 }
 
-pub fn user_themes_dir() -> PathBuf {
-    crate::app_paths::config_dir().join("themes")
-}
-
 pub(super) fn state_path() -> PathBuf {
     crate::app_paths::state_dir().join("config.kdl")
 }

@@ -3089,7 +3089,6 @@ dependencies = [
  "oo7",
  "pollster 0.4.0",
  "rust-embed",
- "serde_json",
  "uuid",
 ]
 

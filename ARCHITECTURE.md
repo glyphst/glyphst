@@ -81,15 +81,15 @@ data-defined effects). It replaced a GPUI Reader in October 2026 and keeps
 that Reader's data: the settings file, the provider keys in the system
 credential store (items in the form GPUI wrote, through the `settings`
 crate's `keychain` feature), and the redb library, which one process holds
-at a time (a second Reader opens documents without history). Its settings
-window edits only the provider sections (AI, translation, OCR) and the
-window's transparency: a save re-reads the file and replaces just those, so
-the file's other sections survive; keys the file held stay in it and other
-keys go to the keychain.
+at a time (a second Reader opens documents without history). The settings
+file holds only the provider sections (AI, translation, OCR) and the
+window's transparency; the sections only the GPUI Reader read are ignored
+and dropped on the next save. Keys the file held stay in it and other keys
+go to the keychain.
 Scripted runs and fake providers keep settings and keys in memory. Its own
 preferences (theme and the rest of Settings › Appearance, transition,
-background, keyboard shortcuts, last session with its panes, page counts
-for home) live in eframe storage under the config directory
+background, smooth scrolling and reduce motion, keyboard shortcuts, last
+session with its panes, page counts for home) live in eframe storage under the config directory
 (`glyphst/reader-egui/app.ron`, the path from before the switch); scripted
 runs (`--bench`, `--screenshot…`) save nothing and leave the library
 unwritten.

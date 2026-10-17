@@ -18,7 +18,6 @@ i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 kdl.workspace = true
 rust-embed.workspace = true
-serde_json.workspace = true
 uuid.workspace = true
 pollster = { workspace = true, optional = true }
 

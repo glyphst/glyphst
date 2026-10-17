@@ -1,11 +1,8 @@
 use std::{collections::HashMap, sync::LazyLock};
 
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
-use i18n_embed::unic_langid::LanguageIdentifier;
-use i18n_embed::{DefaultLocalizer, DesktopLanguageRequester, LanguageLoader, Localizer};
+use i18n_embed::{DefaultLocalizer, LanguageLoader, Localizer};
 use rust_embed::RustEmbed;
-
-use crate::settings::AppLanguage;
 
 #[derive(RustEmbed)]
 #[folder = "i18n/"]
@@ -39,18 +36,6 @@ pub fn localizer() -> Box<dyn Localizer> {
     Box::new(DefaultLocalizer::new(&*LANGUAGE_LOADER, &Localizations))
 }
 
-pub fn select_language(language: AppLanguage) {
-    let requested_languages = match language {
-        AppLanguage::System => DesktopLanguageRequester::requested_languages(),
-        AppLanguage::English => explicit_language("en"),
-        AppLanguage::SimplifiedChinese => explicit_language("zh-CN"),
-    };
-
-    if let Err(error) = localizer().select(&requested_languages) {
-        eprintln!("failed to load localizations: {error:#}");
-    }
-}
-
 /// The translation service language code corresponding to the currently
 /// selected UI locale. Unsupported UI locales use the English fallback.
 pub fn ui_translation_language_code() -> &'static str {
@@ -59,16 +44,6 @@ pub fn ui_translation_language_code() -> &'static str {
         "zh-hans"
     } else {
         "en"
-    }
-}
-
-fn explicit_language(language: &str) -> Vec<LanguageIdentifier> {
-    match language.parse() {
-        Ok(language) => vec![language],
-        Err(error) => {
-            eprintln!("failed to parse language identifier {language:?}: {error:#}");
-            DesktopLanguageRequester::requested_languages()
-        }
     }
 }
 
@@ -82,6 +57,8 @@ pub fn tr_with_number(message_id: &str, argument: &str, value: usize) -> String 
 
 #[cfg(test)]
 mod tests {
+    use i18n_embed::unic_langid::LanguageIdentifier;
+
     use super::*;
 
     #[test]
