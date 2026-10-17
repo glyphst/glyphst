@@ -359,15 +359,17 @@ fn main() -> Result<()> {
     }
     let launch = parse_args()?;
     // Scripted runs keep no preferences, so they cannot change the user's.
-    let persistence_path = launch
-        .harness
-        .is_none()
-        .then(|| {
-            // The path of the egui Reader's preferences before it became the
-            // only Reader, so they carry over.
-            dirs::config_dir().map(|dir| dir.join("glyphst").join("reader-egui").join("app.ron"))
-        })
-        .flatten();
+    // They get a file of their own, removed on exit: without a path eframe
+    // falls back to a shared default file, and each run would start at the
+    // window size the last one left there.
+    let scratch_path = launch.harness.is_some().then(|| {
+        std::env::temp_dir().join(format!("glyphst-reader-harness-{}.ron", std::process::id()))
+    });
+    let persistence_path = scratch_path.clone().or_else(|| {
+        // The path of the egui Reader's preferences before it became the
+        // only Reader, so they carry over.
+        dirs::config_dir().map(|dir| dir.join("glyphst").join("reader-egui").join("app.ron"))
+    });
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Glyphst Reader")
         .with_app_id("glyphst-reader")
@@ -388,10 +390,14 @@ fn main() -> Result<()> {
         persistence_path,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "glyphst-reader",
         native,
         Box::new(move |cc| Ok(Box::new(ReaderApp::new(cc, launch)?))),
     )
-    .map_err(|error| anyhow::anyhow!("{error}"))
+    .map_err(|error| anyhow::anyhow!("{error}"));
+    if let Some(path) = scratch_path {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }

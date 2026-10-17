@@ -35,9 +35,11 @@ pages through `pdf-gpu`), with artcraft's craft-ui components.
 ## Verification and documentation
 
 Workspace-wide rules (single active session, check tiers, disk) are in
-`../AGENTS.md`. Run `script/check.sh quick` for code changes,
-`script/check.sh corpus` for page rendering changes and `script/check.sh
-gate` before a PR. Documentation-only edits need link/content checks.
+`../AGENTS.md`. Run `script/check.sh quick` for code changes, plus
+`script/check.sh screens <frames> --theme dark` for the frames a UI change
+touches, `script/check.sh corpus` for page rendering changes, and
+`script/check.sh gate` with the full `screens` before a PR.
+Documentation-only edits need link/content checks.
 
 Keep docs about current contracts and next actions; put run summaries in the
 commit message or PR, not in the source tree.

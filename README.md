@@ -51,7 +51,12 @@ script/check.sh quick          # fmt, clippy, tests
 script/check.sh gate           # + doctests, cargo audit, release Reader build
 script/check.sh corpus         # GPU page rendering against MuPDF on sample PDFs
 script/check.sh screens        # every design frame in both themes, as PNGs
+script/check.sh screens 02d --theme dark   # only the named frames
 ```
+
+Screens run in a private headless sway (`script/headless-session.sh`), four
+Readers at a time, so no window reaches the desktop and they keep going while
+the screen is locked.
 
 The `corpus` tier renders page 1 of up to `GLYPHST_PDF_CORPUS_LIMIT` (100) PDFs
 from `GLYPHST_PDF_CORPUS` (default: the pdf.js test corpus under `../bak`),

@@ -8,16 +8,24 @@
 #                           (GLYPHST_PDF_CORPUS, default: ../bak pdf.js corpus;
 #                           GLYPHST_PDF_CORPUS_LIMIT files, default 100), and
 #                           20 of them turned 90 degrees
-#   script/check.sh screens screenshots of every frame of design/main.pen in
-#                           both themes, from a running Reader (needs the
-#                           desktop session); GLYPHST_SCREENS_DOC and
+#   script/check.sh screens [NAME...]
+#                           screenshots of the frames of design/main.pen from
+#                           Reader runs in a private headless sway, so no
+#                           window reaches the desktop; NAMEs pick states by
+#                           name or prefix (02d, 03-search, 07a), all by
+#                           default; GLYPHST_SCREENS_DOC and
 #                           GLYPHST_SCREENS_DOC2 are the PDFs shown (default:
 #                           the first two of ../pdf-samples)
 #
 # Options:
-#   --keep-going  run every step and report all failures
+#   --keep-going      run every step and report all failures
+#   --theme T         screens: dark or light only (default: both)
+#   --jobs N          screens: Readers running at once (default: 4 headless,
+#                     1 on the desktop)
+#   --desktop         screens: run on the desktop session instead
 #
-# Each run writes step logs and summary.json to target/check-reports/<tier>-<time>/.
+# Each run writes step logs and summary.json to target/check-reports/<tier>-<time>/;
+# the newest ten runs of each tier are kept.
 
 set -euo pipefail
 
@@ -27,19 +35,51 @@ if [[ -z ${IN_NIX_SHELL:-} ]] && command -v nix > /dev/null; then
     exec nix develop "${repo}" --command "$0" "$@"
 fi
 
+arguments=("$@")
 tier=${1:-}
 shift || true
 keep_going=0
-for argument in "$@"; do
-    case ${argument} in
+desktop=0
+parallel=
+themes=(dark light)
+names=()
+while (($# > 0)); do
+    case $1 in
         --keep-going) keep_going=1 ;;
-        *) printf 'unknown option: %s\n' "${argument}" >&2; exit 2 ;;
+        --desktop) desktop=1 ;;
+        --theme)
+            [[ ${2:-} == dark || ${2:-} == light ]] || {
+                printf -- '--theme takes dark or light\n' >&2
+                exit 2
+            }
+            themes=("$2")
+            shift
+            ;;
+        --jobs)
+            [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || {
+                printf -- '--jobs takes a positive number\n' >&2
+                exit 2
+            }
+            parallel=$2
+            shift
+            ;;
+        -*) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
+        *) names+=("$1") ;;
     esac
+    shift
 done
 case ${tier} in
     quick | gate | corpus | screens) ;;
-    *) sed -n '2,18p' "$0" >&2; exit 2 ;;
+    *) sed -n '2,28p' "$0" >&2; exit 2 ;;
 esac
+if [[ ${tier} != screens ]] && ((${#names[@]} > 0)); then
+    printf 'only screens takes names: %s\n' "${names[*]}" >&2
+    exit 2
+fi
+# Screens run in a private compositor so the Readers never take the desktop.
+if [[ ${tier} == screens && ${desktop} == 0 && -z ${GLYPHST_HEADLESS:-} ]]; then
+    exec "${repo}/script/headless-session.sh" "$0" "${arguments[@]}"
+fi
 
 cd "${repo}"
 # App tests are quick, so the unoptimized dev profile (without debug info)
@@ -48,6 +88,8 @@ export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 
 run_dir="${repo}/target/check-reports/${tier}-$(date +%Y%m%dT%H%M%S)"
 mkdir -p "${run_dir}"
+find "${repo}/target/check-reports" -mindepth 1 -maxdepth 1 -name "${tier}-*" \
+    | sort | head -n -10 | xargs -r rm -rf --
 started_at=$(date +%s)
 failures=()
 steps_json=()
@@ -66,6 +108,13 @@ write_summary() {
 }
 
 finish() {
+    local running
+    running=$(jobs -pr)
+    if [[ -n ${running} ]]; then
+        # shellcheck disable=SC2086
+        kill ${running} 2> /dev/null || true
+        wait 2> /dev/null || true
+    fi
     if ((${#failures[@]} == 0)); then
         write_summary pass
         printf '\ncheck %s passed in %ds (%s)\n' "${tier}" "$(($(date +%s) - started_at))" "${run_dir}"
@@ -79,11 +128,16 @@ finish() {
 step() {
     local name=$1
     shift
-    local log="${run_dir}/${name}.log" begin status=0
+    local begin status=0
     begin=$(date +%s)
     printf '%-22s ' "${name}"
-    "$@" > "${log}" 2>&1 || status=$?
-    local seconds=$(($(date +%s) - begin))
+    "$@" > "${run_dir}/${name}.log" 2>&1 || status=$?
+    record "${name}" "${status}" "$(($(date +%s) - begin))"
+}
+
+# Records a finished step (name, exit status, seconds) after its name was printed.
+record() {
+    local name=$1 status=$2 seconds=$3 log="${run_dir}/${1}.log"
     steps_json+=("{\"name\":\"${name}\",\"exit\":${status},\"seconds\":${seconds}}")
     if ((status == 0)); then
         printf 'ok    %5ds\n' "${seconds}"
@@ -114,7 +168,6 @@ if [[ ${tier} == screens ]]; then
     second=${GLYPHST_SCREENS_DOC2:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 2p)}
     shots="${run_dir}/screens"
     mkdir -p "${shots}"
-    step reader-build cargo build --locked -p glyphst-reader
     reader="${repo}/target/debug/glyphst-reader"
     dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
     # A dusk gradient (navy to orange, with a teal band) as the wallpaper,
@@ -186,7 +239,55 @@ if [[ ${tier} == screens ]]; then
         "07-shortcuts --settings shortcuts"
         "07-shortcuts-glass --settings shortcuts --opacity 0.5"
     )
-    for theme in dark light; do
+    if ((${#names[@]} > 0)); then
+        chosen=()
+        for wanted in "${names[@]}"; do
+            found=0
+            for state in "${states[@]}"; do
+                if [[ ${state%% *} == "${wanted}"* ]]; then
+                    chosen+=("${state}")
+                    found=1
+                fi
+            done
+            if ((found == 0)); then
+                printf 'no screens state starts with %s; states:\n' "${wanted}" >&2
+                printf '  %s\n' "${states[@]%% *}" >&2
+                exit 2
+            fi
+        done
+        states=("${chosen[@]}")
+    fi
+    parallel=${parallel:-$([[ -n ${GLYPHST_HEADLESS:-} ]] && echo 4 || echo 1)}
+    step reader-build cargo build --locked -p glyphst-reader
+
+    # Runs one shot (name, image, then the Reader's command) in the
+    # background, leaving its exit status and seconds in name.status.
+    shoot() {
+        local name=$1 image=$2 begin status=0
+        shift 2
+        begin=$(date +%s)
+        "$@" > "${run_dir}/${name}.log" 2>&1 || status=$?
+        # The Reader exits cleanly even when it could not save the image.
+        if ((status == 0)) && [[ ! -s ${image} ]]; then
+            printf 'no image at %s\n' "${image}" >> "${run_dir}/${name}.log"
+            status=1
+        fi
+        printf '%d %d\n' "${status}" "$(($(date +%s) - begin))" > "${run_dir}/${name}.status"
+    }
+    # Reports finished shots in order, up to the first one still running.
+    shot_names=()
+    reported=0
+    report() {
+        local status seconds
+        while ((reported < ${#shot_names[@]})) \
+            && [[ -e ${run_dir}/${shot_names[reported]}.status ]]; do
+            read -r status seconds < "${run_dir}/${shot_names[reported]}.status"
+            printf '%-22s ' "${shot_names[reported]}"
+            reported=$((reported + 1))
+            record "${shot_names[reported - 1]}" "${status}" "${seconds}"
+        done
+    }
+    for theme in "${themes[@]}"; do
         for state in "${states[@]}"; do
             read -r name rest <<< "${state}"
             args=()
@@ -202,10 +303,19 @@ if [[ ${tier} == screens ]]; then
                     *) args+=("${arg}") ;;
                 esac
             done
-            step "${theme}-${name}" "${reader}" "${args[@]}" --theme "${theme}" \
-                "${shot}" "${shots}/${theme}-${name}.png"
+            while (($(jobs -pr | wc -l) >= parallel)); do
+                wait -n || true
+                report
+            done
+            image="${shots}/${theme}-${name}.png"
+            shot_names+=("${theme}-${name}")
+            shoot "${theme}-${name}" "${image}" "${reader}" "${args[@]}" \
+                --theme "${theme}" "${shot}" "${image}" &
+            report
         done
     done
+    wait
+    report
     finish
 fi
 step fmt cargo fmt --all -- --check
