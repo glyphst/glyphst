@@ -76,7 +76,11 @@ type PickedView = ([f64; 2], f64, Option<usize>);
 pub enum ViewAction {
     PreviousPage,
     NextPage,
+    /// Fits the widest page edge to edge; again, back to the fit with
+    /// margins.
     FitWidth,
+    /// The fit with margins: 100%.
+    FitMargins,
     TogglePresent,
     ZoomIn,
     ZoomOut,
@@ -1107,9 +1111,43 @@ impl DocumentTab {
         }
     }
 
+    /// Device pixels per point that put the widest page edge to edge,
+    /// without the margins of [`Self::fit_scale`].
+    pub fn strict_fit_scale(&self) -> f64 {
+        let fit = self.viewport[0] / self.layout.width.max(1.0);
+        if self.is_reflowed() {
+            fit.min(self.pixels_per_point)
+        } else {
+            fit
+        }
+    }
+
+    /// Whether the view rests at `scale` (not zooming towards another).
+    fn at_scale(&self, scale: f64) -> bool {
+        self.view.target_scale == self.view.scale && (self.view.scale / scale - 1.0).abs() < 1e-3
+    }
+
+    fn at_strict_fit(&self) -> bool {
+        // Reflowed text can have both fits the same: it is at the margins'.
+        self.at_scale(self.strict_fit_scale()) && !self.at_scale(self.fit_scale())
+    }
+
+    /// The fit with margins (100%).
     fn fit_width(&mut self) {
         let page = self.current_page();
         self.view = View::new(self.fit_scale());
+        self.go_to_page(page);
+    }
+
+    /// The widest page edge to edge, the first press of fit width; the
+    /// second goes back to the margins.
+    fn fit_width_or_margins(&mut self) {
+        if self.at_strict_fit() {
+            self.fit_width();
+            return;
+        }
+        let page = self.current_page();
+        self.view = View::new(self.strict_fit_scale());
         self.go_to_page(page);
     }
 
@@ -1172,7 +1210,8 @@ impl DocumentTab {
         if self.present.is_some() {
             self.present = Some(page);
         }
-        self.view.origin[0] = -PAGE_GAP;
+        // At the strict fit the pages start at the view's edge.
+        self.view.origin[0] = if self.at_strict_fit() { 0.0 } else { -PAGE_GAP };
         self.view.origin[1] = self.layout.offsets[page][1] - PAGE_GAP;
     }
 
@@ -1316,7 +1355,8 @@ impl DocumentTab {
                     }
                 }
             }
-            ViewAction::FitWidth => self.fit_width(),
+            ViewAction::FitWidth => self.fit_width_or_margins(),
+            ViewAction::FitMargins => self.fit_width(),
             ViewAction::TogglePresent => {
                 self.present = match self.present {
                     Some(page) => {
@@ -1383,16 +1423,19 @@ impl DocumentTab {
 
     /// Advances the view for this frame and lists what to draw.
     pub fn frame(&mut self, viewport: [u32; 2], input: ViewInput<'_>, turning: bool) -> TabFrame {
-        // A view at fit width stays at fit width when it narrows or widens
-        // (a side panel opening).
-        let at_fit = self.fitted
-            && self.view.target_scale == self.view.scale
-            && (self.view.scale / self.fit_scale() - 1.0).abs() < 1e-3;
+        // A view at either fit stays at it when it narrows or widens (a
+        // side panel opening).
+        let at_fit = self.fitted && self.at_scale(self.fit_scale());
+        let at_strict = self.fitted && self.at_strict_fit();
         let width = (f64::from(viewport[0]) - self.inset - self.inset_right).max(1.0);
         let resized = width != self.viewport[0];
         self.viewport = [width, f64::from(viewport[1])];
-        if at_fit && resized {
-            let fit = self.fit_scale();
+        if (at_fit || at_strict) && resized {
+            let fit = if at_strict {
+                self.strict_fit_scale()
+            } else {
+                self.fit_scale()
+            };
             self.view.anchor = [0.0; 2];
             self.view.set_scale(fit);
             self.view.target_scale = fit;
@@ -1940,6 +1983,44 @@ mod tests {
             !tab.can_go_back(),
             "stepping through matches keeps no history"
         );
+    }
+
+    #[test]
+    fn fit_width_fits_edge_to_edge_then_with_margins() {
+        let mut tab = tab(5);
+        settle(&mut tab);
+        let fit = |tab: &mut DocumentTab, action| {
+            tab.apply(action, false);
+        };
+        // From a zoom, the first press puts the page edge to edge.
+        tab.view.set_scale(tab.fit_scale() * 2.0);
+        tab.view.target_scale = tab.view.scale;
+        fit(&mut tab, ViewAction::FitWidth);
+        assert!((tab.view.scale - tab.strict_fit_scale()).abs() < 1e-9);
+        assert!(tab.strict_fit_scale() > tab.fit_scale());
+        assert_eq!(tab.view.origin[0], 0.0);
+        // Turning a page keeps the pages at the edge.
+        tab.go_to_page(3);
+        assert_eq!(tab.view.origin[0], 0.0);
+        // Again: the margins, which is 100%.
+        fit(&mut tab, ViewAction::FitWidth);
+        assert!((tab.view.scale - tab.fit_scale()).abs() < 1e-9);
+        assert_eq!(tab.view.origin[0], -PAGE_GAP);
+        // The zoom label's reset is always the margins.
+        fit(&mut tab, ViewAction::FitWidth);
+        fit(&mut tab, ViewAction::FitMargins);
+        assert!((tab.view.scale - tab.fit_scale()).abs() < 1e-9);
+        // A strict fit stays strict when the view narrows.
+        fit(&mut tab, ViewAction::FitWidth);
+        tab.frame(
+            [700, 900],
+            ViewInput {
+                zoom: 1.0,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!((tab.view.scale - tab.strict_fit_scale()).abs() < 1e-9);
     }
 
     #[test]

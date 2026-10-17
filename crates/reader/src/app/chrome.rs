@@ -204,7 +204,7 @@ impl ReaderApp {
             && let Some(breadcrumb) = layout.breadcrumb
             && self.breadcrumb(ui, breadcrumb, active)
         {
-            self.tabs[active].apply(ViewAction::FitWidth, false);
+            self.tabs[active].apply(ViewAction::FitMargins, false);
         }
         if split {
             self.pane_dividers(ui, &dividers);
@@ -221,7 +221,7 @@ impl ReaderApp {
             Some(PaneHeaderAction::FitWidth(id)) => {
                 self.focus_tab(id);
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-                    tab.apply(ViewAction::FitWidth, false);
+                    tab.apply(ViewAction::FitMargins, false);
                 }
             }
             None => {}
@@ -983,7 +983,7 @@ fn zoom_label(
     let response = ui
         .interact(rect, Id::new(("zoom-label", tab.id)), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .tip("back to 100% (fit width)");
+        .tip("back to 100% (fit width with margins)");
     let color = if response.hovered() {
         tokens.text
     } else {

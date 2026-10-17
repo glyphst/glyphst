@@ -161,10 +161,16 @@ impl ReaderApp {
             ("find", keymap.tip("find", Command::Find)),
             ("zoom-out", keymap.tip("zoom out", Command::ZoomOut)),
             ("zoom-in", keymap.tip("zoom in", Command::ZoomIn)),
-            ("fit", keymap.tip("fit width", Command::FitWidth)),
+            (
+                "fit",
+                keymap.tip(
+                    "fit width edge to edge (again: with margins)",
+                    Command::FitWidth,
+                ),
+            ),
             (
                 "zoom-reset",
-                keymap.tip("back to 100% (fit width)", Command::FitWidth),
+                "back to 100% (fit width with margins)".to_string(),
             ),
             (
                 "spread",
@@ -482,7 +488,7 @@ impl ReaderApp {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .tip(&zoom_reset);
                 if response.clicked() {
-                    report.borrow_mut().actions.push(ViewAction::FitWidth);
+                    report.borrow_mut().actions.push(ViewAction::FitMargins);
                 }
                 ui.painter().text(
                     reset.center(),

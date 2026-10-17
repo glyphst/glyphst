@@ -90,7 +90,7 @@ impl Overview {
                 self.reveal = true;
                 return None;
             }
-            ViewAction::FitWidth => {
+            ViewAction::FitWidth | ViewAction::FitMargins => {
                 *zoom = 1.0;
                 self.reveal = true;
                 return None;
