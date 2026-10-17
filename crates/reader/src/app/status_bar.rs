@@ -163,10 +163,7 @@ impl ReaderApp {
             ("zoom-in", keymap.tip("zoom in", Command::ZoomIn)),
             (
                 "fit",
-                keymap.tip(
-                    "fit width edge to edge (again: with margins)",
-                    Command::FitWidth,
-                ),
+                keymap.tip("fit width (again: edge to edge)", Command::FitWidth),
             ),
             (
                 "zoom-reset",

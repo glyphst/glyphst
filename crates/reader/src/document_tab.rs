@@ -76,8 +76,7 @@ type PickedView = ([f64; 2], f64, Option<usize>);
 pub enum ViewAction {
     PreviousPage,
     NextPage,
-    /// Fits the widest page edge to edge; again, back to the fit with
-    /// margins.
+    /// Fits the width with margins; again, the widest page edge to edge.
     FitWidth,
     /// The fit with margins: 100%.
     FitMargins,
@@ -1139,10 +1138,10 @@ impl DocumentTab {
         self.go_to_page(page);
     }
 
-    /// The widest page edge to edge, the first press of fit width; the
-    /// second goes back to the margins.
-    fn fit_width_or_margins(&mut self) {
-        if self.at_strict_fit() {
+    /// The fit with margins, the first press of fit width; at it, the
+    /// second press puts the widest page edge to edge.
+    fn fit_margins_or_strict(&mut self) {
+        if !self.at_scale(self.fit_scale()) {
             self.fit_width();
             return;
         }
@@ -1355,7 +1354,7 @@ impl DocumentTab {
                     }
                 }
             }
-            ViewAction::FitWidth => self.fit_width_or_margins(),
+            ViewAction::FitWidth => self.fit_margins_or_strict(),
             ViewAction::FitMargins => self.fit_width(),
             ViewAction::TogglePresent => {
                 self.present = match self.present {
@@ -1986,15 +1985,19 @@ mod tests {
     }
 
     #[test]
-    fn fit_width_fits_edge_to_edge_then_with_margins() {
+    fn fit_width_fits_with_margins_then_edge_to_edge() {
         let mut tab = tab(5);
         settle(&mut tab);
         let fit = |tab: &mut DocumentTab, action| {
             tab.apply(action, false);
         };
-        // From a zoom, the first press puts the page edge to edge.
+        // From a zoom, the first press is the fit with margins: 100%.
         tab.view.set_scale(tab.fit_scale() * 2.0);
         tab.view.target_scale = tab.view.scale;
+        fit(&mut tab, ViewAction::FitWidth);
+        assert!((tab.view.scale - tab.fit_scale()).abs() < 1e-9);
+        assert_eq!(tab.view.origin[0], -PAGE_GAP);
+        // Again: the page edge to edge.
         fit(&mut tab, ViewAction::FitWidth);
         assert!((tab.view.scale - tab.strict_fit_scale()).abs() < 1e-9);
         assert!(tab.strict_fit_scale() > tab.fit_scale());
@@ -2002,10 +2005,9 @@ mod tests {
         // Turning a page keeps the pages at the edge.
         tab.go_to_page(3);
         assert_eq!(tab.view.origin[0], 0.0);
-        // Again: the margins, which is 100%.
+        // A third press goes back to the margins.
         fit(&mut tab, ViewAction::FitWidth);
         assert!((tab.view.scale - tab.fit_scale()).abs() < 1e-9);
-        assert_eq!(tab.view.origin[0], -PAGE_GAP);
         // The zoom label's reset is always the margins.
         fit(&mut tab, ViewAction::FitWidth);
         fit(&mut tab, ViewAction::FitMargins);
