@@ -39,7 +39,6 @@ mod document_tab;
 mod effects_page;
 mod fake_providers;
 mod find;
-mod gamepad;
 mod generation;
 mod gpu;
 mod harness;
@@ -49,6 +48,7 @@ mod keys;
 mod launcher;
 mod library_view;
 mod overview;
+mod pad;
 mod pages;
 mod palette;
 mod panes;
@@ -80,7 +80,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] [--colours preset|background|custom] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
+                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
@@ -118,6 +118,8 @@ fn parse_args() -> Result<Launch> {
         gallery: false,
         commands: Vec::new(),
         select_region: None,
+        pad_demo: None,
+        pad_family: pad::Family::Generic,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -227,6 +229,13 @@ fn parse_args() -> Result<Launch> {
                 };
                 let page: usize = page.parse().context(usage)?;
                 launch.select_region = Some((page.max(1), [x0, y0, x1, y1]));
+            }
+            "--pad-demo" => launch.pad_demo = Some(value()?),
+            "--pad-family" => {
+                let name = value()?;
+                launch.pad_family = pad::Family::parse(&name).with_context(|| {
+                    format!("--pad-family takes generic, xbox, ps, nintendo or steam, not {name}")
+                })?;
             }
             "--command" => {
                 let id = value()?;

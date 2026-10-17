@@ -149,6 +149,8 @@ impl ReaderApp {
     /// Starts the search and selection a screenshot asked for; returns
     /// whether they are still waiting for text.
     fn prepare_text_shot(&mut self, ctx: &egui::Context, now: Instant) -> bool {
+        // A scripted pad plays once the pages are drawn.
+        self.pads.play();
         let Some(active) = self.active else {
             // Without a document, commands for the app's own tabs (a new
             // tab, the reading activity) run straight away.

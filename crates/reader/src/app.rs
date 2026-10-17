@@ -27,7 +27,6 @@ use crate::{
     document::{Arrangement, FrameTimes, THUMBNAIL_SCALE},
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
-    gamepad::{GamepadInput, Gamepads},
     generation::{Generations, PageState},
     gpu::{
         EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse, UPLOAD_BYTES_PER_FRAME,
@@ -41,6 +40,10 @@ use crate::{
     launcher::{Launcher, LauncherAction, LauncherContext},
     library_view::{LibraryAction, LibraryView, Mode as LibraryMode, TabContext as LibraryTab},
     overview::Overview,
+    pad::{
+        GamepadInput, Pads,
+        route::{self, RouteState, Router},
+    },
     pages::Page,
     palette::{self, Item, Palette},
     panes::{self, Panes},
@@ -154,6 +157,10 @@ pub struct Launch {
     pub commands: Vec<Command>,
     /// Scripted runs: a region drawn on a page (from 1) at startup.
     pub select_region: Option<(usize, [f32; 4])>,
+    /// Scripted runs: a pad playing these steps (`--pad-demo`) instead of
+    /// the real pads, as this family (`--pad-family`).
+    pub pad_demo: Option<String>,
+    pub pad_family: crate::pad::Family,
 }
 
 /// One pane's frame of the document view.
@@ -225,7 +232,14 @@ pub struct ReaderApp {
     /// The animations over pages that are slow to load.
     pub(crate) generations: Generations,
     started: Instant,
-    gamepads: Result<Gamepads, String>,
+    pub(crate) pads: Pads,
+    pad_router: Router,
+    /// This frame's pad input for the document, routed before the frame.
+    pad_input: GamepadInput,
+    /// Where the pointer was when the pad was last used: moving it away
+    /// makes the pointer the last input again.
+    pad_pointer: Option<egui::Pos2>,
+    last_input: glyphst_ui::pad_glyph::InputDevice,
     pub(crate) frames: FrameTimes,
     continuous: bool,
     pub(crate) repaints: u64,
@@ -353,6 +367,22 @@ impl ReaderApp {
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
         let persist = launch.harness.is_none();
+        // Screens never read the real pads, so a pad on the desk can't
+        // change them.
+        let pads = match &launch.pad_demo {
+            Some(script) => Pads::scripted(
+                crate::pad::Script::parse(script, launch.pad_family)
+                    .map_err(|error| anyhow::anyhow!("--pad-demo: {error}"))?,
+            ),
+            None if !persist => Pads::scripted(crate::pad::Script::default()),
+            None => Pads::start(&cc.egui_ctx),
+        };
+        let mut pads = pads;
+        // Screens play a script once the pages are drawn; by hand it plays
+        // at once.
+        if persist {
+            pads.play();
+        }
         let mut prefs = Prefs::load(cc.storage);
         // Before the first frame: every text style names these families.
         crate::fonts::install(&cc.egui_ctx, &prefs.fonts);
@@ -432,7 +462,11 @@ impl ReaderApp {
             transition: None,
             generations: Generations::default(),
             started: Instant::now(),
-            gamepads: Gamepads::new(),
+            pads,
+            pad_router: Router::default(),
+            pad_input: GamepadInput::default(),
+            pad_pointer: None,
+            last_input: Default::default(),
             frames: FrameTimes::default(),
             continuous: false,
             repaints: 0,
@@ -2121,6 +2155,30 @@ impl ReaderApp {
             .edit(|settings| settings.window.set_transparent(!on));
     }
 
+    /// Notes a key or a click as the last input, for the hints that follow
+    /// it. A pointer moved only slightly since the pad was used doesn't count.
+    fn note_input_device(&mut self, events: &[egui::Event]) {
+        use glyphst_ui::pad_glyph::InputDevice;
+        for event in events {
+            match event {
+                egui::Event::Key { pressed: true, .. } | egui::Event::Text(_) => {
+                    self.last_input = InputDevice::Keyboard;
+                }
+                egui::Event::PointerButton { pressed: true, .. }
+                | egui::Event::MouseWheel { .. } => {
+                    self.last_input = InputDevice::Pointer;
+                }
+                egui::Event::PointerMoved(at)
+                    if self.last_input == InputDevice::Pad
+                        && self.pad_pointer.is_none_or(|from| from.distance(*at) > 4.0) =>
+                {
+                    self.last_input = InputDevice::Pointer;
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn global_actions(&mut self, ctx: &egui::Context) -> Vec<ViewAction> {
         let mut actions = Vec::new();
         if self.active.is_some() {
@@ -2877,12 +2935,7 @@ impl ReaderApp {
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
         }
-        let gamepads = match &self.gamepads {
-            Ok(pads) if pads.connected().is_empty() => "none connected".to_string(),
-            Ok(pads) => pads.connected().join(", "),
-            Err(error) => format!("unavailable ({error})"),
-        };
-        ui.label(format!("Gamepad: {gamepads}"));
+        ui.label(format!("Gamepad: {}", self.pads.status()));
     }
 
     /// A pane's document view: input, layout, loading, the GPU callback
@@ -3727,6 +3780,32 @@ fn present_palette(command: Command) -> bool {
 }
 
 impl eframe::App for ReaderApp {
+    /// Routes the pads before the frame reads its input, so the keys they
+    /// press reach every widget as typed ones do.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.note_input_device(&raw_input.events);
+        let frame = self.pads.frame();
+        let state = RouteState {
+            recording: self.pages.iter().any(Page::is_recording),
+            modal: self.settings_window.open || self.palette.open,
+            document: self.active.is_some(),
+            overview: self
+                .active
+                .is_some_and(|active| self.tabs[active].overview.is_some()),
+        };
+        let routed = self.pad_router.route(&frame, &state, Instant::now());
+        raw_input.events.extend(route::key_events(&routed.keys));
+        self.pad_input = routed.document;
+        if let Some(wait) = routed.wake {
+            ctx.request_repaint_after(wait);
+        }
+        if frame.used() {
+            self.last_input = glyphst_ui::pad_glyph::InputDevice::Pad;
+            self.pad_pointer = ctx.input(|i| i.pointer.latest_pos());
+        }
+        glyphst_ui::pad_glyph::set_input(ctx, self.last_input);
+    }
+
     /// The window is transparent-capable, and the panels paint every pixel:
     /// opaque, or as translucent as the window's opacity.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -3864,10 +3943,7 @@ impl eframe::App for ReaderApp {
         self.upload_ready_layers();
         self.watch_effects(&ctx, now);
         self.update_wallpaper(&ctx);
-        let pad = match &mut self.gamepads {
-            Ok(pads) => pads.poll(),
-            Err(_) => GamepadInput::default(),
-        };
+        let pad = std::mem::take(&mut self.pad_input);
         let mut actions = self.global_actions(&ctx);
         actions.extend(pad.actions.iter().copied());
         actions.append(&mut self.pending_actions);
