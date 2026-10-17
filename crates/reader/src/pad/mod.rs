@@ -16,8 +16,6 @@ use egui::Vec2;
 pub use repeat::{Dir, Repeat};
 pub use script::Script;
 
-use crate::document_tab::ViewAction;
-
 /// Stick positions below this magnitude are ignored.
 const DEADZONE: f32 = 0.15;
 /// View pixels per second at full stick deflection.
@@ -249,12 +247,11 @@ pub struct GamepadInput {
     pub scroll: [f32; 2],
     /// Zoom rate in natural-log units per second; positive zooms in.
     pub zoom: f32,
-    pub actions: Vec<ViewAction>,
 }
 
 impl GamepadInput {
     pub fn is_active(&self) -> bool {
-        self.scroll != [0.0, 0.0] || self.zoom != 0.0 || !self.actions.is_empty()
+        self.scroll != [0.0, 0.0] || self.zoom != 0.0
     }
 
     /// The left stick scrolls and the triggers zoom.
@@ -265,7 +262,6 @@ impl GamepadInput {
                 axis_speed(axes.left.y) * MAX_SCROLL_SPEED,
             ],
             zoom: (axes.right_trigger - axes.left_trigger) * MAX_ZOOM_RATE,
-            actions: Vec::new(),
         }
     }
 }

@@ -149,6 +149,8 @@ pub struct Prefs {
     pub shortcuts: Overrides,
     /// Which default keys commands have.
     pub keymap: KeymapPreset,
+    /// Gamepad buttons the user changed: command id to buttons.
+    pub pad_shortcuts: Overrides,
     /// Presenting makes the window fullscreen (and leaving puts it back).
     pub present_fullscreen: bool,
     /// The page number shows in the presentation's corner (the timer
@@ -202,6 +204,7 @@ impl Default for Prefs {
             translate_as_read: false,
             shortcuts: Overrides::new(),
             keymap: KeymapPreset::Standard,
+            pad_shortcuts: Overrides::new(),
             present_fullscreen: true,
             present_page_number: false,
             talk_minutes: 0,
@@ -273,6 +276,7 @@ impl Prefs {
             };
         }
         prefs.shortcuts = keys::sanitize(&prefs.shortcuts);
+        prefs.pad_shortcuts = crate::pad_keys::sanitize(&prefs.pad_shortcuts);
         prefs
             .effect_params
             .retain(|_, values| values.iter().all(|value| value.is_finite()));

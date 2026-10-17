@@ -1,13 +1,17 @@
 //! Who takes the pad this frame. A window in front (settings, the palette)
 //! and the views without a document get keys, so their lists and buttons
-//! work as they do from the keyboard. A document gets the pad itself:
-//! scrolling, zoom and its actions. B is Escape everywhere, and runs
+//! work as they do from the keyboard. A document gets the pad itself: the
+//! sticks and triggers scroll and zoom, and its buttons run the commands
+//! bound to them ([`crate::pad_keys`]). B is Escape everywhere, and runs
 //! Escape's cancel chain.
 
 use std::time::{Duration, Instant};
 
 use super::{Dir, GamepadInput, PadButton, PadEvent, PadFrame, Repeat, repeat::stick_dir};
-use crate::document_tab::ViewAction;
+use crate::{
+    commands::Command,
+    pad_keys::{PadChord, PadKeymap, PadPresses},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
@@ -44,7 +48,9 @@ pub struct Routed {
     /// Keys to press, before the frame reads its input.
     pub keys: Vec<(egui::Key, egui::Modifiers)>,
     pub document: GamepadInput,
-    /// When a held direction repeats next.
+    /// Commands the document's buttons ran.
+    pub commands: Vec<Command>,
+    /// When a held direction repeats, or a held button becomes a hold.
     pub wake: Option<Duration>,
 }
 
@@ -54,10 +60,17 @@ pub struct Router {
     held: Vec<PadButton>,
     repeat: Repeat,
     stick: Option<Dir>,
+    presses: PadPresses,
 }
 
 impl Router {
-    pub fn route(&mut self, frame: &PadFrame, state: &RouteState, now: Instant) -> Routed {
+    pub fn route(
+        &mut self,
+        frame: &PadFrame,
+        state: &RouteState,
+        keymap: &PadKeymap,
+        now: Instant,
+    ) -> Routed {
         let mut pressed = Vec::new();
         for event in &frame.events {
             match event {
@@ -93,54 +106,69 @@ impl Router {
             ..Routed::default()
         };
         match owner {
-            Owner::Nobody => {}
-            Owner::Keys => {
-                let none = egui::Modifiers::NONE;
-                for dir in dirs {
-                    routed.keys.push((arrow(dir), none));
-                }
-                for button in pressed {
-                    match button {
-                        PadButton::South => routed.keys.push((egui::Key::Enter, none)),
-                        PadButton::East => routed.keys.push((egui::Key::Escape, none)),
-                        PadButton::RightBumper => routed.keys.push((egui::Key::Tab, none)),
-                        PadButton::LeftBumper => {
-                            routed.keys.push((egui::Key::Tab, egui::Modifiers::SHIFT));
-                        }
-                        _ => {}
-                    }
+            Owner::Nobody | Owner::Keys => {
+                // The bindings still see releases, so nothing stays held.
+                self.presses
+                    .update(&PadKeymap::default(), &frame.events, now);
+                if owner == Owner::Keys {
+                    routed.keys = keys(&dirs, &pressed);
                 }
             }
             Owner::Document => {
                 routed.document = GamepadInput::motion(&frame.axes);
-                let actions = &mut routed.document.actions;
-                for dir in dirs {
-                    actions.push(match dir {
-                        Dir::Up => ViewAction::Step(-1),
-                        Dir::Down => ViewAction::Step(1),
-                        Dir::Left => ViewAction::PreviousPage,
-                        Dir::Right => ViewAction::NextPage,
-                    });
-                }
-                for button in pressed {
-                    match button {
-                        PadButton::LeftBumper => actions.push(ViewAction::PreviousPage),
-                        PadButton::RightBumper => actions.push(ViewAction::NextPage),
-                        PadButton::Start => actions.push(ViewAction::TogglePresent),
+                let none = egui::Modifiers::NONE;
+                let mut events = Vec::new();
+                for event in &frame.events {
+                    match event {
+                        PadEvent::Pressed(PadButton::East) => {
+                            routed.keys.push((egui::Key::Escape, none));
+                        }
                         // A opens the overview's page, as Enter does.
-                        PadButton::South if state.overview => {
-                            routed.keys.push((egui::Key::Enter, egui::Modifiers::NONE));
+                        PadEvent::Pressed(PadButton::South) if state.overview => {
+                            routed.keys.push((egui::Key::Enter, none));
                         }
-                        PadButton::South => actions.push(ViewAction::FitWidth),
-                        PadButton::East => {
-                            routed.keys.push((egui::Key::Escape, egui::Modifiers::NONE));
-                        }
-                        _ => {}
+                        event => events.push(event.clone()),
                     }
+                }
+                let fired = self.presses.update(keymap, &events, now);
+                routed.commands = fired.commands;
+                routed.wake = earliest(routed.wake, fired.wake);
+                // A held d-pad repeats what it scrolls or turns.
+                if let Some(dir) = repeated
+                    && !pressed.contains(&dir.button())
+                    && self.presses.repeats(dir.button())
+                    && let Some(command) = keymap.command(PadChord::tap(dir.button()))
+                    && command.counted()
+                {
+                    routed.commands.push(command);
                 }
             }
         }
         routed
+    }
+}
+
+/// The keys a frame presses: arrows, A Enter, B Escape and the bumpers
+/// Tab.
+fn keys(dirs: &[Dir], pressed: &[PadButton]) -> Vec<(egui::Key, egui::Modifiers)> {
+    let none = egui::Modifiers::NONE;
+    let mut keys: Vec<_> = dirs.iter().map(|&dir| (arrow(dir), none)).collect();
+    for button in pressed {
+        match button {
+            PadButton::South => keys.push((egui::Key::Enter, none)),
+            PadButton::East => keys.push((egui::Key::Escape, none)),
+            PadButton::RightBumper => keys.push((egui::Key::Tab, none)),
+            PadButton::LeftBumper => keys.push((egui::Key::Tab, egui::Modifiers::SHIFT)),
+            _ => {}
+        }
+    }
+    keys
+}
+
+fn earliest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -170,7 +198,7 @@ pub fn key_events(keys: &[(egui::Key, egui::Modifiers)]) -> impl Iterator<Item =
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pad::Axes;
+    use crate::{keys::Overrides, pad::Axes};
 
     fn frame(events: Vec<PadEvent>) -> PadFrame {
         PadFrame {
@@ -181,6 +209,10 @@ mod tests {
 
     fn tap(button: PadButton) -> Vec<PadEvent> {
         vec![PadEvent::Pressed(button), PadEvent::Released(button)]
+    }
+
+    fn keymap() -> PadKeymap {
+        PadKeymap::new(&Overrides::new())
     }
 
     const DOCUMENT: RouteState = RouteState {
@@ -226,7 +258,7 @@ mod tests {
         events.extend(tap(PadButton::RightBumper));
         let mut frame = frame(events);
         frame.axes.left = egui::vec2(0.0, 0.3);
-        let routed = router.route(&frame, &state, Instant::now());
+        let routed = router.route(&frame, &state, &keymap(), Instant::now());
         assert_eq!(
             routed.keys,
             [
@@ -236,6 +268,7 @@ mod tests {
             ]
         );
         assert_eq!(routed.document, GamepadInput::default(), "no scrolling");
+        assert_eq!(routed.commands, []);
     }
 
     #[test]
@@ -243,65 +276,97 @@ mod tests {
         let start = Instant::now();
         let mut router = Router::default();
         let state = RouteState::default();
+        let keymap = keymap();
         let mut pushed = frame(Vec::new());
         pushed.axes.left = egui::vec2(0.0, -0.9);
         let up = vec![(egui::Key::ArrowUp, egui::Modifiers::NONE)];
-        assert_eq!(router.route(&pushed, &state, start).keys, up);
-        let held = router.route(&pushed, &state, start + Duration::from_millis(100));
+        assert_eq!(router.route(&pushed, &state, &keymap, start).keys, up);
+        let held = router.route(&pushed, &state, &keymap, start + Duration::from_millis(100));
         assert_eq!(held.keys, []);
         assert_eq!(held.wake, Some(Duration::from_millis(250)));
-        assert_eq!(
-            router
-                .route(&pushed, &state, start + Duration::from_millis(360))
-                .keys,
-            up
-        );
+        let later = start + Duration::from_millis(360);
+        assert_eq!(router.route(&pushed, &state, &keymap, later).keys, up);
     }
 
     #[test]
-    fn on_a_document_the_pad_turns_pages_and_b_is_escape() {
+    fn on_a_document_buttons_run_their_commands_and_b_is_escape() {
         let mut router = Router::default();
+        let keymap = keymap();
         let mut events = tap(PadButton::RightBumper);
         events.extend(tap(PadButton::Down));
         events.extend(tap(PadButton::East));
-        let routed = router.route(&frame(events), &DOCUMENT, Instant::now());
-        assert_eq!(
-            routed.document.actions,
-            [ViewAction::Step(1), ViewAction::NextPage]
-        );
+        let routed = router.route(&frame(events), &DOCUMENT, &keymap, Instant::now());
+        assert_eq!(routed.commands, [Command::NextPage, Command::ScrollDown]);
         assert_eq!(routed.keys, [(egui::Key::Escape, egui::Modifiers::NONE)]);
         let overview = RouteState {
             overview: true,
             ..DOCUMENT
         };
-        let routed = router.route(&frame(tap(PadButton::South)), &overview, Instant::now());
+        let routed = router.route(
+            &frame(tap(PadButton::South)),
+            &overview,
+            &keymap,
+            Instant::now(),
+        );
         assert_eq!(
             routed.keys,
             [(egui::Key::Enter, egui::Modifiers::NONE)],
             "A opens the overview's page"
         );
-        assert_eq!(routed.document.actions, []);
+        assert_eq!(routed.commands, [], "rather than fitting the width");
     }
 
     #[test]
     fn a_held_dpad_repeats_and_a_disconnect_lets_go() {
         let start = Instant::now();
         let mut router = Router::default();
+        let keymap = keymap();
         let pressed = router.route(
             &frame(vec![PadEvent::Pressed(PadButton::Down)]),
             &DOCUMENT,
+            &keymap,
             start,
         );
-        assert_eq!(pressed.document.actions, [ViewAction::Step(1)]);
+        assert_eq!(pressed.commands, [Command::ScrollDown]);
         let later = start + Duration::from_millis(400);
-        let repeated = router.route(&frame(Vec::new()), &DOCUMENT, later);
-        assert_eq!(repeated.document.actions, [ViewAction::Step(1)]);
+        let repeated = router.route(&frame(Vec::new()), &DOCUMENT, &keymap, later);
+        assert_eq!(repeated.commands, [Command::ScrollDown]);
         let gone = router.route(
             &frame(vec![PadEvent::Disconnected(0)]),
             &DOCUMENT,
+            &keymap,
             later + Duration::from_millis(400),
         );
-        assert_eq!(gone.document.actions, []);
+        assert_eq!(gone.commands, []);
+    }
+
+    #[test]
+    fn a_press_held_into_a_window_is_let_go_there() {
+        let mut router = Router::default();
+        let keymap = keymap();
+        let now = Instant::now();
+        router.route(
+            &frame(vec![PadEvent::Pressed(PadButton::Select)]),
+            &DOCUMENT,
+            &keymap,
+            now,
+        );
+        let modal = RouteState {
+            modal: true,
+            ..DOCUMENT
+        };
+        router.route(
+            &frame(vec![PadEvent::Released(PadButton::Select)]),
+            &modal,
+            &keymap,
+            now,
+        );
+        let routed = router.route(&frame(tap(PadButton::RightBumper)), &DOCUMENT, &keymap, now);
+        assert_eq!(
+            routed.commands,
+            [Command::NextPage],
+            "select is no longer held, so this is no chord"
+        );
     }
 
     #[test]

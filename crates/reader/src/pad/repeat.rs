@@ -22,6 +22,18 @@ pub enum Dir {
     Right,
 }
 
+impl Dir {
+    /// The d-pad button for it.
+    pub fn button(self) -> super::PadButton {
+        match self {
+            Self::Up => super::PadButton::Up,
+            Self::Down => super::PadButton::Down,
+            Self::Left => super::PadButton::Left,
+            Self::Right => super::PadButton::Right,
+        }
+    }
+}
+
 /// A stick as a direction: its stronger axis once it is pushed far
 /// enough. `held` is the direction it gave last frame.
 pub fn stick_dir(stick: Vec2, held: Option<Dir>) -> Option<Dir> {

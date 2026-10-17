@@ -168,6 +168,18 @@ so nothing reloads, and the library's document preferences keep both. A
 document reloads in place (same tab, same position) on the Reload command
 or when its file changed while the window was in the background.
 
+Gamepads (`pad/`) are read on a thread that owns gilrs, blocks on pad
+events and wakes the app, so a press on an idle window lands at once. Before
+each frame (`raw_input_hook`) the events are routed: while a shortcut is
+recorded nothing gets them; with settings or the palette in front, and on
+views without a document, the pad presses keys (d-pad and stick as arrows
+that repeat, A Enter, B Escape, bumpers Tab), so every list and button works
+as from the keyboard; on a document the left stick scrolls, the triggers
+zoom and the buttons run commands through `pad_keys.rs` (taps, holds and
+`select+` chords, each command's defaults in `commands.rs`, the user's in the
+prefs), with B fixed as Escape. Scripted runs never read real pads:
+`--pad-demo` plays a scripted pad once the pages are drawn.
+
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette
 (Ctrl+K), menus and buttons all run commands through one dispatcher. Default

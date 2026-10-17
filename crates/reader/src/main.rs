@@ -49,6 +49,7 @@ mod launcher;
 mod library_view;
 mod overview;
 mod pad;
+mod pad_keys;
 mod pages;
 mod palette;
 mod panes;

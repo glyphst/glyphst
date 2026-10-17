@@ -234,8 +234,11 @@ pub struct ReaderApp {
     started: Instant,
     pub(crate) pads: Pads,
     pad_router: Router,
-    /// This frame's pad input for the document, routed before the frame.
+    pub(crate) pad_keymap: crate::pad_keys::PadKeymap,
+    /// This frame's pad input for the document, routed before the frame,
+    /// and the commands its buttons ran.
     pad_input: GamepadInput,
+    pad_commands: Vec<Command>,
     /// Where the pointer was when the pad was last used: moving it away
     /// makes the pointer the last input again.
     pad_pointer: Option<egui::Pos2>,
@@ -464,7 +467,9 @@ impl ReaderApp {
             started: Instant::now(),
             pads,
             pad_router: Router::default(),
+            pad_keymap: Default::default(),
             pad_input: GamepadInput::default(),
+            pad_commands: Vec::new(),
             pad_pointer: None,
             last_input: Default::default(),
             frames: FrameTimes::default(),
@@ -2281,6 +2286,7 @@ impl ReaderApp {
     /// The keymap for the preferences' preset and shortcuts.
     pub(crate) fn rebuild_keymap(&mut self) {
         self.keymap = Keymap::new(self.prefs.keymap, &self.prefs.shortcuts);
+        self.pad_keymap = crate::pad_keys::PadKeymap::new(&self.prefs.pad_shortcuts);
         self.pending_keys.clear();
     }
 
@@ -2399,6 +2405,12 @@ impl ReaderApp {
             }
             Command::ToggleSidebar => {
                 self.prefs.show_sidebar = !self.prefs.show_sidebar;
+                None
+            }
+            Command::Outline => {
+                let shown = self.prefs.show_sidebar && self.prefs.sidebar == SidebarTab::Outline;
+                self.prefs.show_sidebar = !shown;
+                self.prefs.sidebar = SidebarTab::Outline;
                 None
             }
             Command::ToggleStats => {
@@ -3793,9 +3805,12 @@ impl eframe::App for ReaderApp {
                 .active
                 .is_some_and(|active| self.tabs[active].overview.is_some()),
         };
-        let routed = self.pad_router.route(&frame, &state, Instant::now());
+        let routed = self
+            .pad_router
+            .route(&frame, &state, &self.pad_keymap, Instant::now());
         raw_input.events.extend(route::key_events(&routed.keys));
         self.pad_input = routed.document;
+        self.pad_commands.extend(routed.commands);
         if let Some(wait) = routed.wake {
             ctx.request_repaint_after(wait);
         }
@@ -3944,8 +3959,14 @@ impl eframe::App for ReaderApp {
         self.watch_effects(&ctx, now);
         self.update_wallpaper(&ctx);
         let pad = std::mem::take(&mut self.pad_input);
+        for command in std::mem::take(&mut self.pad_commands) {
+            if let Err(reason) = self.run(command, &ctx)
+                && command.needs() != Needs::Document
+            {
+                self.notices.push(reason.to_string());
+            }
+        }
         let mut actions = self.global_actions(&ctx);
-        actions.extend(pad.actions.iter().copied());
         actions.append(&mut self.pending_actions);
         if let Some(active) = self.active {
             let tab = &mut self.tabs[active];

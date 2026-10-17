@@ -65,6 +65,8 @@ pub enum Command {
     ToggleFullscreen,
     Zen,
     PageOverview,
+    /// The sidebar on the document's outline, or not.
+    Outline,
     /// One or two columns of thumbnails in the Pages sidebar.
     PageColumns,
     SplitRight,
@@ -176,7 +178,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 76] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -222,6 +224,7 @@ impl Command {
         Self::ToggleFullscreen,
         Self::Zen,
         Self::PageOverview,
+        Self::Outline,
         Self::PageColumns,
         Self::SplitRight,
         Self::SplitDown,
@@ -302,6 +305,7 @@ impl Command {
             Self::ToggleFullscreen => "view.fullscreen",
             Self::Zen => "view.zen",
             Self::PageOverview => "view.page_overview",
+            Self::Outline => "view.outline",
             Self::PageColumns => "view.page_columns",
             Self::SplitRight => "view.split_right",
             Self::SplitDown => "view.split_down",
@@ -386,6 +390,7 @@ impl Command {
             Self::ToggleFullscreen => "Toggle full screen",
             Self::Zen => "Zen mode: hide everything but the pages",
             Self::PageOverview => "Page overview",
+            Self::Outline => "Contents",
             Self::PageColumns => "Pages in one or two columns",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
@@ -466,6 +471,7 @@ impl Command {
             Self::ToggleFullscreen => "expand",
             Self::Zen => "eye-off",
             Self::PageOverview => "layout-grid",
+            Self::Outline => "list-tree",
             Self::PageColumns => "rows-2",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
@@ -543,6 +549,7 @@ impl Command {
             | Self::ToggleFullscreen
             | Self::Zen
             | Self::PageOverview
+            | Self::Outline
             | Self::PageColumns
             | Self::SplitRight
             | Self::SplitDown
@@ -662,6 +669,7 @@ impl Command {
             | Self::ClosePane
             | Self::ToggleSpread
             | Self::PageColumns
+            | Self::Outline
             | Self::McpConfig => &[],
         }
     }
@@ -699,6 +707,25 @@ impl Command {
             Self::FindPrevious => &["Shift+N", "Shift+F3"],
             Self::Bookmark => &["M"],
             _ => self.standard_keys(),
+        }
+    }
+
+    /// The pad buttons that run it unless the user changed them, in
+    /// `pad_keys` notation. The sticks, the triggers and B are fixed.
+    pub fn default_pad(self) -> &'static [&'static str] {
+        match self {
+            Self::NextPage => &["rb", "right"],
+            Self::PreviousPage => &["lb", "left"],
+            Self::ScrollDown => &["down"],
+            Self::ScrollUp => &["up"],
+            Self::FirstPage => &["select+lb"],
+            Self::LastPage => &["select+rb"],
+            Self::FitWidth => &["south"],
+            Self::Bookmark => &["west"],
+            Self::PageOverview => &["north"],
+            Self::Outline => &["select"],
+            Self::Present => &["start"],
+            _ => &[],
         }
     }
 
