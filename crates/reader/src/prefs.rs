@@ -100,6 +100,10 @@ pub struct Prefs {
     /// (on the page they were left at either way).
     pub remember_zoom: bool,
     pub reopen_last_session: bool,
+    /// Keys and jumps glide the view to where they go.
+    pub smooth_scrolling: bool,
+    /// Motion becomes short fades: slides and glides jump, pages fade in.
+    pub reduce_motion: bool,
     /// Effect id of the transition between views, or `None` for a cut.
     pub transition: Option<String>,
     /// Effect id of the background behind pages.
@@ -174,6 +178,8 @@ impl Default for Prefs {
             fonts: FontChoice::default(),
             remember_zoom: true,
             reopen_last_session: true,
+            smooth_scrolling: true,
+            reduce_motion: false,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             background: glyphst_effects::SOLID.into(),
             animated_background: None,
@@ -526,6 +532,7 @@ mod tests {
             "unknown commands and keys are dropped"
         );
         assert!(prefs.reopen_last_session, "missing fields take defaults");
+        assert!(prefs.smooth_scrolling && !prefs.reduce_motion);
         assert_eq!(prefs.keymap, KeymapPreset::Standard);
 
         storage.set_string(STORAGE_KEY, "not json".into());

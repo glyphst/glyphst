@@ -446,7 +446,7 @@ impl SettingsWindow {
                             self.section = Some(Section::Effects);
                         }
                     }
-                    Section::Reading => reading(ui, app.prefs, app.user),
+                    Section::Reading => reading(ui, app.prefs),
                     Section::Presenting => presenting(ui, app.prefs),
                     Section::Effects => {
                         // The previews are animated.
@@ -809,7 +809,7 @@ fn font_choice(ui: &mut egui::Ui, id: &str, chosen: &mut String, families: &[Str
         });
 }
 
-fn reading(ui: &mut egui::Ui, prefs: &mut Prefs, user: &mut UserSettings) {
+fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
     ui_settings::group(ui, "", |group| {
         group.row(
             "reopen the last session",
@@ -846,17 +846,6 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs, user: &mut UserSettings) {
                 }
             },
         );
-        if let Some(mut reduce) = user.draft().map(|settings| settings.behavior.reduce_motion) {
-            group.row(
-                "reduce motion",
-                Some("replace page transitions and generation with short fades"),
-                |ui| {
-                    if ui.add(Switch(&mut reduce)).changed() {
-                        user.edit(|settings| settings.behavior.reduce_motion = reduce);
-                    }
-                },
-            );
-        }
     });
 }
 

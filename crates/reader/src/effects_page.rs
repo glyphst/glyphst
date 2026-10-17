@@ -337,6 +337,23 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
         });
     });
 
+    glyphst_ui::settings::group(ui, "Motion", |group| {
+        group.row(
+            "smooth scrolling",
+            Some("keys and jumps glide to where they go"),
+            |ui| {
+                ui.add(Switch(&mut prefs.smooth_scrolling));
+            },
+        );
+        group.row(
+            "reduce motion",
+            Some("replace all motion with short fades"),
+            |ui| {
+                ui.add(Switch(&mut prefs.reduce_motion));
+            },
+        );
+    });
+
     glyphst_ui::settings::group(ui, "Your effects", |group| {
         let folder_text = folder.map(|folder| folder.display().to_string());
         group.row(
@@ -697,7 +714,8 @@ fn wallpaper_rows(
 }
 
 /// What the Effects tab needs: one book's choices, the defaults' names,
-/// and the settings it shares with Settings (parameters, reduce motion).
+/// and the settings it shares with Settings (parameters, smooth scrolling
+/// and reduce motion).
 pub struct BookPage<'a> {
     pub title: &'a str,
     pub book: &'a mut BookEffects,
@@ -707,6 +725,7 @@ pub struct BookPage<'a> {
     pub effects: &'a [EffectDef],
     pub params: &'a mut BTreeMap<String, [f32; MAX_PARAMS]>,
     pub has_wallpaper: bool,
+    pub smooth_scrolling: &'a mut bool,
     pub reduce_motion: &'a mut bool,
     pub time: f32,
 }
@@ -716,12 +735,11 @@ pub struct BookPage<'a> {
 pub struct BookChanges {
     pub book: bool,
     pub params: bool,
-    pub reduce_motion: bool,
 }
 
 /// The Effects tab (frame 03): this book's background as tiles, its tint
-/// and the parameters in play as sliders, the page transition, and
-/// reduce motion.
+/// and the parameters in play as sliders, the page transition, smooth
+/// scrolling and reduce motion.
 pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
     let BookPage {
         title,
@@ -732,6 +750,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
         effects,
         params,
         has_wallpaper,
+        smooth_scrolling,
         reduce_motion,
         time,
     } = page;
@@ -870,19 +889,22 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
                 }
             });
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.set_min_height(24.0);
-                ui.label(
-                    RichText::new("reduce motion")
-                        .font(theme::mono(12.0))
-                        .color(tokens.text_2),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(Switch(reduce_motion)).changed() {
-                        changes.reduce_motion = true;
-                    }
+            for (label, on) in [
+                ("smooth scrolling", smooth_scrolling),
+                ("reduce motion", reduce_motion),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(24.0);
+                    ui.label(
+                        RichText::new(label)
+                            .font(theme::mono(12.0))
+                            .color(tokens.text_2),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(Switch(on));
+                    });
                 });
-            });
+            }
             if !book.is_default() {
                 ui.add_space(6.0);
                 if ui

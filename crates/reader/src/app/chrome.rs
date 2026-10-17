@@ -118,11 +118,7 @@ impl ReaderApp {
         let mut actions = Some(actions);
         let (mut animating, mut drawn) = (false, true);
         let mut keep = Vec::new();
-        let reduce_motion = self
-            .user_settings
-            .get()
-            .is_some_and(|settings| settings.behavior.reduce_motion);
-        self.generations.begin_frame(reduce_motion);
+        self.generations.begin_frame(self.prefs.reduce_motion);
         let mut header_action = None;
         for &(id, pane) in &panes {
             let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
@@ -774,10 +770,6 @@ impl ReaderApp {
             // The previews are animated.
             ctx.request_repaint();
             let find = |id: Option<&str>| id.and_then(|id| effects.iter().find(|def| def.id == id));
-            let mut reduce_motion = self
-                .user_settings
-                .get()
-                .is_some_and(|settings| settings.behavior.reduce_motion);
             let changes = crate::effects_page::book_page(
                 &mut body,
                 crate::effects_page::BookPage {
@@ -789,15 +781,12 @@ impl ReaderApp {
                     effects: &effects,
                     params: &mut self.prefs.effect_params,
                     has_wallpaper: self.prefs.wallpaper.is_some(),
-                    reduce_motion: &mut reduce_motion,
+                    smooth_scrolling: &mut self.prefs.smooth_scrolling,
+                    reduce_motion: &mut self.prefs.reduce_motion,
                     time,
                 },
             );
             book_changed = changes.book;
-            if changes.reduce_motion {
-                self.user_settings
-                    .edit(|settings| settings.behavior.reduce_motion = reduce_motion);
-            }
         } else {
             requests.extend(sidebar::show(
                 &mut body,

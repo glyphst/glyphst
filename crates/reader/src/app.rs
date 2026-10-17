@@ -2974,11 +2974,7 @@ impl ReaderApp {
             gamepad: pad,
             seconds,
             now: Some(now),
-            smooth: !glyphst_ui::motion::is_reduced(&ctx)
-                && self
-                    .user_settings
-                    .get()
-                    .is_none_or(|settings| settings.behavior.smooth_scrolling),
+            smooth: !glyphst_ui::motion::is_reduced(&ctx) && self.prefs.smooth_scrolling,
         };
         let turning = self.transition.is_some();
         self.tabs[active].pixels_per_point = f64::from(ppp);
@@ -3765,11 +3761,8 @@ impl eframe::App for ReaderApp {
         self.fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         self.apply_theme(&ctx);
         // Screenshots are taken of settled frames.
-        let reduce_motion = self.harness.as_ref().is_some_and(|h| !h.moves())
-            || self
-                .user_settings
-                .get()
-                .is_some_and(|settings| settings.behavior.reduce_motion);
+        let reduce_motion =
+            self.harness.as_ref().is_some_and(|h| !h.moves()) || self.prefs.reduce_motion;
         glyphst_ui::motion::set_reduced(&ctx, reduce_motion);
         let blur = self.user_settings.get().is_some_and(|settings| {
             settings.window.blur() && settings.window.opacity_in(self.fullscreen) < 1.0
