@@ -10,6 +10,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "a-arrow-up",
         include_bytes!("../assets/icons/a-arrow-up.svg"),
     ),
+    (
+        "a-large-small",
+        include_bytes!("../assets/icons/a-large-small.svg"),
+    ),
     ("activity", include_bytes!("../assets/icons/activity.svg")),
     (
         "arrow-down",
@@ -33,6 +37,23 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/arrow-up-down.svg"),
     ),
     ("at-sign", include_bytes!("../assets/icons/at-sign.svg")),
+    ("battery", include_bytes!("../assets/icons/battery.svg")),
+    (
+        "battery-charging",
+        include_bytes!("../assets/icons/battery-charging.svg"),
+    ),
+    (
+        "battery-full",
+        include_bytes!("../assets/icons/battery-full.svg"),
+    ),
+    (
+        "battery-low",
+        include_bytes!("../assets/icons/battery-low.svg"),
+    ),
+    (
+        "battery-medium",
+        include_bytes!("../assets/icons/battery-medium.svg"),
+    ),
     ("book-open", include_bytes!("../assets/icons/book-open.svg")),
     (
         "book-open-text",
@@ -103,6 +124,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("cpu", include_bytes!("../assets/icons/cpu.svg")),
     ("database", include_bytes!("../assets/icons/database.svg")),
     ("download", include_bytes!("../assets/icons/download.svg")),
+    ("droplet", include_bytes!("../assets/icons/droplet.svg")),
     ("ellipsis", include_bytes!("../assets/icons/ellipsis.svg")),
     ("eraser", include_bytes!("../assets/icons/eraser.svg")),
     ("expand", include_bytes!("../assets/icons/expand.svg")),
@@ -133,6 +155,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "hard-drive",
         include_bytes!("../assets/icons/hard-drive.svg"),
     ),
+    ("hash", include_bytes!("../assets/icons/hash.svg")),
     (
         "highlighter",
         include_bytes!("../assets/icons/highlighter.svg"),
@@ -245,6 +268,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/sticky-note.svg"),
     ),
     ("sun", include_bytes!("../assets/icons/sun.svg")),
+    ("sun-moon", include_bytes!("../assets/icons/sun-moon.svg")),
     ("terminal", include_bytes!("../assets/icons/terminal.svg")),
     (
         "text-cursor",
@@ -258,6 +282,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("type", include_bytes!("../assets/icons/type.svg")),
     ("undo-2", include_bytes!("../assets/icons/undo-2.svg")),
+    ("unplug", include_bytes!("../assets/icons/unplug.svg")),
     ("upload", include_bytes!("../assets/icons/upload.svg")),
     (
         "wand-sparkles",

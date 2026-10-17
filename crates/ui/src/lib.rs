@@ -29,6 +29,7 @@
 //! | ring (frames 01, 02h) | [`ring`] |
 //! | toolbox (frames 01, 02h) | [`toolbox`] |
 //! | pad/face, pad/button, pad/dpad, pad-hint (frame 01b) | [`pad_glyph`] |
+//! | prompt, prompt/choice (frames 01b, 09a, 09j) | [`prompt`] |
 
 pub mod badge;
 pub mod button;
@@ -50,6 +51,7 @@ pub mod overlay;
 pub mod pad_glyph;
 pub mod paint;
 pub mod pane;
+pub mod prompt;
 pub mod rail;
 pub mod ring;
 pub mod row;

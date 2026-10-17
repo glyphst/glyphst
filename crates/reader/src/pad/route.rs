@@ -32,6 +32,8 @@ pub struct RouteState {
     pub document: bool,
     /// The document shows its page overview.
     pub overview: bool,
+    /// A toast with an action shows: X runs it.
+    pub toast_action: bool,
 }
 
 pub fn owner(state: &RouteState) -> Owner {
@@ -165,6 +167,8 @@ impl Router {
                         PadEvent::Pressed(PadButton::South) if grid => {
                             routed.keys.push((egui::Key::Enter, none));
                         }
+                        // X is the toast's.
+                        PadEvent::Pressed(PadButton::West) if state.toast_action => {}
                         // On the overview the d-pad moves a cell at a time.
                         PadEvent::Pressed(button) if grid && button.dir().is_some() => {}
                         event => events.push(event.clone()),
@@ -310,6 +314,7 @@ mod tests {
         modal: false,
         document: true,
         overview: false,
+        toast_action: false,
     };
 
     #[test]

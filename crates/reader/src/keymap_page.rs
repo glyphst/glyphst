@@ -1,7 +1,9 @@
 //! The Keyboard shortcuts tab, after the GPUI Reader's keymap editor (and
 //! Zed's and VS Code's): every command in a table with its keys, which
 //! category it is in and whether its keys are the preset's or the user's.
-//! Keys are recorded in place; a pause ends a sequence.
+//! Keys are recorded in place; a pause ends a sequence. Its gamepad side
+//! (frame 07 · shortcuts · gamepad) lists the pad's buttons the same way,
+//! recorded from the next press.
 
 use egui::{Key, RichText, Sense, vec2};
 
@@ -11,6 +13,8 @@ use crate::{
     commands::{Category, Command},
     icons,
     keys::{self, Keymap, KeymapPreset, Keys, Overrides, Shortcut},
+    pad::{PadButton, PadEvent},
+    pad_keys::{self, PadChord, PadKeymap},
     prefs::Prefs,
     theme::{self, Tokens},
 };
@@ -44,6 +48,16 @@ impl Recording {
     }
 }
 
+/// Pad buttons being recorded for `command`: what is held and since when
+/// (egui's input time); a release ends it.
+#[derive(Clone, Debug, PartialEq)]
+struct PadRecording {
+    command: Command,
+    held: Vec<(PadButton, f64)>,
+    /// Select started a chord, so its own release records nothing.
+    chorded: bool,
+}
+
 /// Seconds without a key press that end a recorded sequence.
 const RECORD_PAUSE: f64 = 1.0;
 
@@ -73,18 +87,21 @@ pub struct KeymapPage {
     recording: Option<Recording>,
     conflict: Option<Conflict>,
     sort: Sort,
+    /// The gamepad's buttons instead of the keys.
+    pub gamepad: bool,
+    pad_recording: Option<PadRecording>,
 }
 
 impl KeymapPage {
     /// Whether key presses are going to a recording (or a conflict waits
     /// for an answer), so shortcuts must not run.
     pub fn is_recording(&self) -> bool {
-        self.recording.is_some() || self.conflict.is_some()
+        self.recording.is_some() || self.conflict.is_some() || self.pad_recording.is_some()
     }
 
     /// The commands the table lists: those whose name or keys match the
     /// filter, in the chosen order.
-    fn rows(&self, keymap: &Keymap) -> Vec<Command> {
+    fn rows(&self, keymap: &Keymap, pad: &PadKeymap) -> Vec<Command> {
         let filter = self.filter.trim().to_lowercase();
         let mut rows: Vec<Command> = Command::ALL
             .into_iter()
@@ -92,10 +109,16 @@ impl KeymapPage {
                 filter.is_empty()
                     || command.label().to_lowercase().contains(&filter)
                     || command.category().label().to_lowercase().contains(&filter)
-                    || keymap
-                        .keys(*command)
-                        .iter()
-                        .any(|key| key.label().to_lowercase().contains(&filter))
+                    || if self.gamepad {
+                        pad.chords(*command)
+                            .iter()
+                            .any(|chord| chord.notation().contains(&filter))
+                    } else {
+                        keymap
+                            .keys(*command)
+                            .iter()
+                            .any(|key| key.label().to_lowercase().contains(&filter))
+                    }
             })
             .collect();
         match self.sort {
@@ -107,14 +130,28 @@ impl KeymapPage {
             }),
             Sort::Command => rows.sort_by_key(|command| command.label().to_lowercase()),
         }
+        // The pad has few buttons: the commands with some come first.
+        if self.gamepad {
+            rows.sort_by_key(|command| pad.chords(*command).is_empty());
+        }
         rows
     }
 
     /// Draws the page; returns whether the shortcuts (or the preset)
     /// changed.
-    pub fn show(&mut self, ui: &mut egui::Ui, prefs: &mut Prefs, keymap: &Keymap) -> bool {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        prefs: &mut Prefs,
+        keymap: &Keymap,
+        pad: &PadKeymap,
+    ) -> bool {
         let tokens = Tokens::get(ui.ctx());
         let mut changed = self.take_recording(ui.ctx(), prefs, keymap);
+        if let Some((command, chord)) = take_pad_recorded(ui.ctx(), &mut self.pad_recording) {
+            pad_keys::assign(&mut prefs.pad_shortcuts, pad, command, chord);
+            changed = true;
+        }
         let area = ui.available_rect_before_wrap();
         let width = (area.width() - 48.0).clamp(320.0, MAX_WIDTH);
         let page = egui::Rect::from_min_size(
@@ -137,31 +174,39 @@ impl KeymapPage {
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
             glyphst_ui::settings::form_style(ui);
-            glyphst_ui::settings::heading(
-                ui,
-                "Keyboard shortcuts",
-                "Click + to record keys (a pause ends a sequence), a key to remove it, or double-click a row.",
-            );
-            changed |= self.toolbar(ui, prefs, keymap, &tokens);
+            if self.gamepad {
+                glyphst_ui::settings::heading(
+                    ui,
+                    "Gamepad bindings",
+                    "Click + and press buttons on the controller: hold one, or select and \
+                     another, to bind a hold or a chord. The left stick scrolls, the right \
+                     one opens the ring, the triggers zoom and B is Escape.",
+                );
+            } else {
+                glyphst_ui::settings::heading(
+                    ui,
+                    "Keyboard shortcuts",
+                    "Click + to record keys (a pause ends a sequence), a key to remove it, or double-click a row.",
+                );
+            }
+            changed |= self.toolbar(ui, prefs, keymap, pad, &tokens);
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(match prefs.keymap {
-                    KeymapPreset::Standard => "Ctrl shortcuts, arrows and Page Up/Down.",
-                    KeymapPreset::Vim => {
-                        "hjkl, gg and G (42G goes to page 42), Ctrl+D/U, / n N, \
-                         Ctrl+O/I, : for the palette, Ctrl+W v/s/w/q for panes. \
-                         A number typed first repeats a move."
-                    }
-                })
-                .font(theme::mono(10.0))
-                .color(tokens.faint),
-            );
+            let note = match (self.gamepad, prefs.keymap) {
+                (true, _) => "Buttons by position: south is A on an Xbox pad, ✕ on a PlayStation one.",
+                (false, KeymapPreset::Standard) => "Ctrl shortcuts, arrows and Page Up/Down.",
+                (false, KeymapPreset::Vim) => {
+                    "hjkl, gg and G (42G goes to page 42), Ctrl+D/U, / n N, \
+                     Ctrl+O/I, : for the palette, Ctrl+W v/s/w/q for panes. \
+                     A number typed first repeats a move."
+                }
+            };
+            ui.label(RichText::new(note).font(theme::mono(10.0)).color(tokens.faint));
             ui.add_space(8.0);
             if let Some(conflict) = self.conflict.clone() {
                 changed |= self.conflict_banner(ui, prefs, keymap, &conflict, &tokens);
                 ui.add_space(8.0);
             }
-            changed |= self.table(ui, prefs, keymap, &tokens);
+            changed |= self.table(ui, prefs, keymap, pad, &tokens);
         });
         changed
     }
@@ -195,6 +240,7 @@ impl KeymapPage {
         ui: &mut egui::Ui,
         prefs: &mut Prefs,
         keymap: &Keymap,
+        pad: &PadKeymap,
         tokens: &Tokens,
     ) -> bool {
         let mut changed = false;
@@ -207,26 +253,41 @@ impl KeymapPage {
                 .show(ui);
             });
             ui.add_space(8.0);
-            ui.label(RichText::new("Keymap").color(tokens.muted));
-            let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
-            changed |= glyphst_ui::segmented::labels(ui, &mut prefs.keymap, &options);
+            let devices = [(false, "keyboard"), (true, "gamepad")];
+            if glyphst_ui::segmented::labels(ui, &mut self.gamepad, &devices) {
+                self.recording = None;
+                self.pad_recording = None;
+                self.conflict = None;
+            }
+            if !self.gamepad {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Keymap").color(tokens.muted));
+                let options = KeymapPreset::ALL.map(|preset| (preset, preset.label()));
+                changed |= glyphst_ui::segmented::labels(ui, &mut prefs.keymap, &options);
+            }
+            let gamepad = self.gamepad;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let overrides = if gamepad {
+                    &mut prefs.pad_shortcuts
+                } else {
+                    &mut prefs.shortcuts
+                };
                 if ui
-                    .add_enabled_ui(!prefs.shortcuts.is_empty(), |ui| {
+                    .add_enabled_ui(!overrides.is_empty(), |ui| {
                         ui.add(glyphst_ui::button::Button::bracket_muted("reset all"))
                     })
                     .inner
-                    .tip("back to the preset's keys for every command")
+                    .tip("back to the default for every command")
                     .clicked()
                 {
-                    prefs.shortcuts = Overrides::new();
+                    *overrides = Overrides::new();
                     changed = true;
                 }
                 let custom = Command::ALL
                     .iter()
-                    .filter(|command| prefs.shortcuts.contains_key(command.id()))
+                    .filter(|command| overrides.contains_key(command.id()))
                     .count();
-                let shown = self.rows(keymap).len();
+                let shown = self.rows(keymap, pad).len();
                 ui.label(
                     RichText::new(format!(
                         "{shown} of {} commands · {custom} changed",
@@ -313,10 +374,11 @@ impl KeymapPage {
         ui: &mut egui::Ui,
         prefs: &mut Prefs,
         keymap: &Keymap,
+        pad: &PadKeymap,
         tokens: &Tokens,
     ) -> bool {
         let mut changed = false;
-        let rows = self.rows(keymap);
+        let rows = self.rows(keymap, pad);
         // The rows scroll inside the card, which ends above the window's
         // bottom edge.
         let rows_height =
@@ -346,7 +408,11 @@ impl KeymapPage {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for command in rows {
-                            changed |= self.row(ui, prefs, keymap, command, tokens);
+                            changed |= if self.gamepad {
+                                self.pad_row(ui, prefs, pad, command, tokens)
+                            } else {
+                                self.row(ui, prefs, keymap, command, tokens)
+                            };
                         }
                     });
             });
@@ -391,7 +457,11 @@ impl KeymapPage {
             }
         };
         cell(columns.command, "Command", Some(Sort::Command));
-        cell(columns.keys, "Keys", None);
+        cell(
+            columns.keys,
+            if self.gamepad { "Buttons" } else { "Keys" },
+            None,
+        );
         cell(columns.category, "Category", Some(Sort::Category));
         cell(columns.source, "Source", None);
         ui.painter()
@@ -530,6 +600,260 @@ impl KeymapPage {
         }
         changed
     }
+}
+
+impl KeymapPage {
+    /// A command's row on the gamepad side: its buttons as glyphs.
+    fn pad_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        prefs: &mut Prefs,
+        pad: &PadKeymap,
+        command: Command,
+        tokens: &Tokens,
+    ) -> bool {
+        let mut changed = false;
+        let recording_here = self
+            .pad_recording
+            .as_ref()
+            .is_some_and(|recording| recording.command == command);
+        let (rect, response) = glyphst_ui::row::list_row(ui, ROW_HEIGHT, recording_here);
+        let columns = Columns::new(rect.x_range());
+        let y = rect.center().y;
+        label_cells(ui, &columns, rect, command, recording_here, tokens);
+        let custom = prefs.pad_shortcuts.contains_key(command.id());
+        source_cell(ui, &columns, y, custom, tokens);
+        let keys_rect =
+            egui::Rect::from_x_y_ranges(columns.keys, rect.y_range()).shrink2(vec2(8.0, 0.0));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(keys_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.set_clip_rect(keys_rect.intersect(ui.clip_rect()));
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if recording_here {
+                    ui.label(
+                        RichText::new("press buttons… (b cancels)")
+                            .font(theme::mono(11.0))
+                            .color(tokens.accent_text),
+                    );
+                    return;
+                }
+                for &chord in pad.chords(command) {
+                    if ui
+                        .push_id(("chord", command.id(), chord.notation()), |ui| {
+                            chord_chip(ui, chord, tokens)
+                        })
+                        .inner
+                        .tip("remove")
+                        .clicked()
+                    {
+                        pad_keys::unbind(&mut prefs.pad_shortcuts, pad, command, chord);
+                        changed = true;
+                    }
+                }
+                if ui
+                    .push_id(("add-pad", command.id()), |ui| {
+                        icons::button(ui, "plus", 22.0, false, "add a button")
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.pad_recording = Some(PadRecording::new(command));
+                }
+            },
+        );
+        let actions = egui::Rect::from_x_y_ranges(columns.actions, rect.y_range());
+        if custom
+            && ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(actions)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        ui.push_id(("reset-pad", command.id()), |ui| {
+                            icons::button(
+                                ui,
+                                "rotate-ccw",
+                                22.0,
+                                false,
+                                "back to the default buttons",
+                            )
+                        })
+                        .inner
+                    },
+                )
+                .inner
+                .clicked()
+        {
+            prefs.pad_shortcuts.remove(command.id());
+            changed = true;
+        }
+        if response.double_clicked() && !recording_here {
+            self.pad_recording = Some(PadRecording::new(command));
+        }
+        changed
+    }
+}
+
+impl PadRecording {
+    fn new(command: Command) -> Self {
+        Self {
+            command,
+            held: Vec::new(),
+            chorded: false,
+        }
+    }
+}
+
+/// The command's icon and name, and its category.
+fn label_cells(
+    ui: &egui::Ui,
+    columns: &Columns,
+    rect: egui::Rect,
+    command: Command,
+    on: bool,
+    tokens: &Tokens,
+) {
+    let y = rect.center().y;
+    icons::paint(
+        ui,
+        egui::Rect::from_center_size(egui::pos2(columns.command.min + 18.0, y), vec2(16.0, 16.0)),
+        command.icon(),
+        13.0,
+        tokens.faint,
+    );
+    glyphst_ui::text::row(
+        ui,
+        egui::pos2(columns.command.min + 34.0, y),
+        command.label().to_lowercase(),
+        theme::mono(12.0),
+        if on {
+            tokens.accent_text
+        } else {
+            tokens.text_2
+        },
+        columns.command.span() - 40.0,
+    );
+    glyphst_ui::text::row(
+        ui,
+        egui::pos2(columns.category.min + 10.0, y),
+        command.category().label().to_lowercase(),
+        theme::mono(11.0),
+        tokens.faint,
+        columns.category.span() - 14.0,
+    );
+}
+
+fn source_cell(ui: &egui::Ui, columns: &Columns, y: f32, custom: bool, tokens: &Tokens) {
+    glyphst_ui::text::row(
+        ui,
+        egui::pos2(columns.source.min + 10.0, y),
+        if custom { "changed" } else { "default" },
+        theme::mono(11.0),
+        if custom {
+            tokens.accent_text
+        } else {
+            tokens.faint
+        },
+        columns.source.span() - 14.0,
+    );
+}
+
+/// The buttons recorded: a release ends a recording, as a hold when the
+/// button was held [`pad_keys::HOLD`], as a chord when select was held.
+/// B (or Escape) cancels it.
+fn take_pad_recorded(
+    ctx: &egui::Context,
+    recording: &mut Option<PadRecording>,
+) -> Option<(Command, PadChord)> {
+    let active = recording.as_mut()?;
+    let now = ctx.input(|input| input.time);
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        *recording = None;
+        return None;
+    }
+    for event in crate::pad::frame_events(ctx) {
+        match event {
+            PadEvent::Pressed(PadButton::East) => {
+                *recording = None;
+                return None;
+            }
+            PadEvent::Pressed(button) => {
+                if button != PadButton::Select
+                    && active
+                        .held
+                        .iter()
+                        .any(|(held, _)| *held == PadButton::Select)
+                {
+                    active.chorded = true;
+                }
+                active.held.push((button, now));
+            }
+            PadEvent::Released(button) => {
+                let Some(index) = active.held.iter().position(|(held, _)| *held == button) else {
+                    continue;
+                };
+                let (_, since) = active.held.remove(index);
+                let modifier = button != PadButton::Select
+                    && active
+                        .held
+                        .iter()
+                        .any(|(held, _)| *held == PadButton::Select);
+                if button == PadButton::Select && active.chorded {
+                    continue;
+                }
+                let held = now - since >= pad_keys::HOLD.as_secs_f64();
+                let notation = format!(
+                    "{}{}{}",
+                    if held && !modifier { "hold " } else { "" },
+                    if modifier { "select+" } else { "" },
+                    button.name()
+                );
+                if let Some(chord) = PadChord::parse(&notation) {
+                    let command = active.command;
+                    *recording = None;
+                    return Some((command, chord));
+                }
+            }
+            PadEvent::Disconnected(_) => {
+                *recording = None;
+                return None;
+            }
+            PadEvent::Connected { .. } => {}
+        }
+    }
+    None
+}
+
+/// A button chip that removes its binding when clicked (an × while
+/// hovered).
+fn chord_chip(ui: &mut egui::Ui, chord: PadChord, tokens: &Tokens) -> egui::Response {
+    use glyphst_ui::pad_glyph::Hint;
+    let glyphs = pad_keys::glyphs(chord);
+    let hint = Hint::new(&glyphs, if chord.hold { "hold" } else { "" }).color(tokens.muted);
+    let size = hint.size(ui) + vec2(10.0, 6.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect(
+            rect,
+            tokens.ctl_radius(),
+            tokens.err_soft,
+            egui::Stroke::new(1.0, tokens.err),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            theme::mono(10.0),
+            tokens.err,
+        );
+    } else {
+        hint.paint(ui, rect.left() + 5.0, rect.center().y);
+    }
+    response
 }
 
 /// The table's columns across `x`.
@@ -673,7 +997,7 @@ mod tests {
         };
         let mut changed = false;
         let mut output = ctx.run_ui(input, |ui| {
-            changed = page.show(ui, prefs, keymap);
+            changed = page.show(ui, prefs, keymap, &PadKeymap::default());
         });
         output.textures_delta.clear();
         changed
@@ -681,6 +1005,58 @@ mod tests {
 
     fn keys(text: &str) -> Keys {
         Keys::parse(text).expect("parses")
+    }
+
+    #[test]
+    fn pad_buttons_record_as_chords_and_holds() {
+        let ctx = context();
+        let mut page = KeymapPage {
+            gamepad: true,
+            ..KeymapPage::default()
+        };
+        let mut prefs = Prefs::default();
+        let keymap = Keymap::default();
+        let pad_frame =
+            |page: &mut KeymapPage, prefs: &mut Prefs, events: Vec<PadEvent>, time: f64| {
+                crate::pad::set_frame_events(&ctx, &events);
+                frame(&ctx, page, prefs, &keymap, None, time)
+            };
+        page.pad_recording = Some(PadRecording::new(Command::ZoomIn));
+        assert!(page.is_recording(), "the pad does nothing else meanwhile");
+        let press = PadEvent::Pressed;
+        let release = PadEvent::Released;
+        pad_frame(&mut page, &mut prefs, vec![press(PadButton::Select)], 1.0);
+        pad_frame(
+            &mut page,
+            &mut prefs,
+            vec![press(PadButton::RightBumper)],
+            1.1,
+        );
+        assert!(pad_frame(
+            &mut page,
+            &mut prefs,
+            vec![release(PadButton::RightBumper), release(PadButton::Select)],
+            1.2
+        ));
+        assert_eq!(prefs.pad_shortcuts["view.zoom_in"], ["select+rb"]);
+        assert!(page.pad_recording.is_none());
+        page.pad_recording = Some(PadRecording::new(Command::ZoomOut));
+        pad_frame(
+            &mut page,
+            &mut prefs,
+            vec![press(PadButton::LeftStick)],
+            2.0,
+        );
+        assert!(pad_frame(
+            &mut page,
+            &mut prefs,
+            vec![release(PadButton::LeftStick)],
+            2.5
+        ));
+        assert_eq!(prefs.pad_shortcuts["view.zoom_out"], ["hold ls"]);
+        page.pad_recording = Some(PadRecording::new(Command::ZoomOut));
+        pad_frame(&mut page, &mut prefs, vec![press(PadButton::East)], 3.0);
+        assert!(page.pad_recording.is_none(), "B cancels");
     }
 
     /// Records `key` for `command` and lets the pause pass; returns whether
@@ -814,10 +1190,13 @@ mod tests {
         let prefs = Prefs::default();
         let keymap = Keymap::new(prefs.keymap, &prefs.shortcuts);
         let mut page = KeymapPage::default();
-        assert_eq!(page.rows(&keymap).len(), Command::ALL.len());
+        assert_eq!(
+            page.rows(&keymap, &PadKeymap::default()).len(),
+            Command::ALL.len()
+        );
 
         // By category: the categories in order, the registry's order in each.
-        let rows = page.rows(&keymap);
+        let rows = page.rows(&keymap, &PadKeymap::default());
         let positions: Vec<usize> = rows
             .iter()
             .map(|command| {
@@ -832,25 +1211,31 @@ mod tests {
 
         page.sort = Sort::Command;
         let labels: Vec<String> = page
-            .rows(&keymap)
+            .rows(&keymap, &PadKeymap::default())
             .iter()
             .map(|command| command.label().to_lowercase())
             .collect();
         assert!(labels.is_sorted());
 
         page.filter = "ctrl+f".into();
-        assert!(page.rows(&keymap).contains(&Command::Find));
+        assert!(
+            page.rows(&keymap, &PadKeymap::default())
+                .contains(&Command::Find)
+        );
         page.filter = "keyboard".into();
-        assert_eq!(page.rows(&keymap), [Command::KeyboardShortcuts]);
+        assert_eq!(
+            page.rows(&keymap, &PadKeymap::default()),
+            [Command::KeyboardShortcuts]
+        );
         page.filter = "translation".into();
         assert!(
-            page.rows(&keymap)
+            page.rows(&keymap, &PadKeymap::default())
                 .iter()
                 .all(|command| command.category() == Category::Translation
                     || command.label().to_lowercase().contains("translat"))
         );
         page.filter = "no such command".into();
-        assert!(page.rows(&keymap).is_empty());
+        assert!(page.rows(&keymap, &PadKeymap::default()).is_empty());
     }
 
     /// The page draws in both themes, with a recording and a conflict.

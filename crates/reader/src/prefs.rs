@@ -163,6 +163,11 @@ pub struct Prefs {
     pub present_ring: RingSlots,
     /// The reading ring's slots (the right stick opens it).
     pub reading_ring: RingSlots,
+    /// Gamepad mode (frames 09c–j): the fullscreen shell for reading with
+    /// a pad from afar.
+    pub gamepad_mode: bool,
+    /// A pad connecting asks whether to switch to gamepad mode.
+    pub ask_gamepad_mode: bool,
     pub last_session: LastSession,
 }
 
@@ -212,6 +217,8 @@ impl Default for Prefs {
             talk_minutes: 0,
             present_ring: present::default_ring(),
             reading_ring: present::default_reading_ring(),
+            gamepad_mode: false,
+            ask_gamepad_mode: true,
             last_session: LastSession::default(),
         }
     }

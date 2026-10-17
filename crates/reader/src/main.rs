@@ -56,6 +56,7 @@ mod panes;
 mod pickers;
 mod prefs;
 mod present;
+mod prompts;
 mod quick_ask;
 mod reading_clock;
 mod reading_days;

@@ -109,6 +109,7 @@ pub fn sanitize(overrides: &Overrides) -> Overrides {
 #[derive(Clone, Debug, Default)]
 pub struct PadKeymap {
     bindings: HashMap<PadChord, Command>,
+    chords: HashMap<Command, Vec<PadChord>>,
 }
 
 impl PadKeymap {
@@ -143,6 +144,7 @@ impl PadKeymap {
                         continue;
                     }
                     keymap.bindings.insert(chord, command);
+                    keymap.chords.entry(command).or_default().push(chord);
                 }
             }
         }
@@ -153,6 +155,10 @@ impl PadKeymap {
         self.bindings.get(&chord).copied()
     }
 
+    pub fn chords(&self, command: Command) -> &[PadChord] {
+        self.chords.get(&command).map_or(&[], Vec::as_slice)
+    }
+
     /// Whether the button waits for its release before it fires.
     fn waits(&self, button: PadButton) -> bool {
         button == MODIFIER
@@ -160,6 +166,74 @@ impl PadKeymap {
                 hold: true,
                 ..PadChord::tap(button)
             })
+    }
+}
+
+/// The glyphs that show `chord`: select first for a select chord. A hold
+/// is said in words beside them.
+pub fn glyphs(chord: PadChord) -> Vec<glyphst_ui::pad_glyph::Glyph> {
+    use glyphst_ui::pad_glyph::{Arm, Glyph};
+    let glyph = |button: PadButton| match button {
+        PadButton::Up => Glyph::Dpad(Some(Arm::Up)),
+        PadButton::Down => Glyph::Dpad(Some(Arm::Down)),
+        PadButton::Left => Glyph::Dpad(Some(Arm::Left)),
+        PadButton::Right => Glyph::Dpad(Some(Arm::Right)),
+        PadButton::Select => Glyph::Button("select"),
+        PadButton::Start => Glyph::Button("≡"),
+        PadButton::Guide => Glyph::Button("guide"),
+        button => match button.face() {
+            Some(face) => Glyph::Face(face),
+            None => Glyph::Button(button.name()),
+        },
+    };
+    let mut glyphs = Vec::new();
+    if chord.modifier {
+        glyphs.push(glyph(MODIFIER));
+    }
+    glyphs.push(glyph(chord.button));
+    glyphs
+}
+
+/// Binds `chord` to `command`, taking it from the command that had it.
+pub fn assign(overrides: &mut Overrides, keymap: &PadKeymap, command: Command, chord: PadChord) {
+    match keymap.command(chord) {
+        Some(owner) if owner == command => return,
+        Some(owner) => {
+            let kept = keymap.chords(owner).iter().copied().filter(|c| *c != chord);
+            set(overrides, owner, kept.collect());
+        }
+        None => {}
+    }
+    let mut kept = keymap.chords(command).to_vec();
+    kept.push(chord);
+    set(overrides, command, kept);
+}
+
+/// Takes `chord` away from `command`.
+pub fn unbind(overrides: &mut Overrides, keymap: &PadKeymap, command: Command, chord: PadChord) {
+    let kept = keymap
+        .chords(command)
+        .iter()
+        .copied()
+        .filter(|c| *c != chord);
+    set(overrides, command, kept.collect());
+}
+
+/// Keeps `chords` for `command`, or forgets the choice when they are its
+/// defaults.
+fn set(overrides: &mut Overrides, command: Command, chords: Vec<PadChord>) {
+    let defaults: Vec<PadChord> = command
+        .default_pad()
+        .iter()
+        .filter_map(|chord| PadChord::parse(chord))
+        .collect();
+    if chords == defaults {
+        overrides.remove(command.id());
+    } else {
+        overrides.insert(
+            command.id().to_string(),
+            chords.iter().map(|chord| chord.notation()).collect(),
+        );
     }
 }
 
@@ -424,6 +498,32 @@ mod tests {
             keymap.command(PadChord::tap(PadButton::West)),
             None,
             "bookmark is unbound"
+        );
+        assert_eq!(keymap.chords(Command::Bookmark), []);
+    }
+
+    #[test]
+    fn assigning_a_button_takes_it_from_its_command() {
+        let keymap = keymap();
+        let mut overrides = Overrides::new();
+        assign(
+            &mut overrides,
+            &keymap,
+            Command::ZoomIn,
+            PadChord::tap(PadButton::West),
+        );
+        assert_eq!(overrides["view.zoom_in"], ["west"]);
+        assert_eq!(overrides["text.bookmark"], [] as [String; 0]);
+        let keymap = PadKeymap::new(&overrides);
+        unbind(
+            &mut overrides,
+            &keymap,
+            Command::ZoomIn,
+            PadChord::tap(PadButton::West),
+        );
+        assert!(
+            !overrides.contains_key("view.zoom_in"),
+            "back to its defaults (none)"
         );
     }
 }

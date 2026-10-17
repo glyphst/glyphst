@@ -122,6 +122,18 @@ impl PadButton {
             .find(|button| button.name().eq_ignore_ascii_case(name))
     }
 
+    /// The face button it is, for prompts.
+    pub fn face(self) -> Option<glyphst_ui::pad_glyph::Face> {
+        use glyphst_ui::pad_glyph::Face;
+        Some(match self {
+            Self::South => Face::South,
+            Self::East => Face::East,
+            Self::West => Face::West,
+            Self::North => Face::North,
+            _ => return None,
+        })
+    }
+
     /// The d-pad direction the button is.
     pub fn dir(self) -> Option<Dir> {
         Some(match self {
@@ -230,14 +242,29 @@ pub struct PadFrame {
 }
 
 impl PadFrame {
-    /// Whether a button or a stick was used.
+    /// Whether a button or a stick was used, or a pad connected (it is
+    /// about to be).
     pub fn used(&self) -> bool {
         self.events
             .iter()
-            .any(|event| matches!(event, PadEvent::Pressed(_)))
+            .any(|event| matches!(event, PadEvent::Pressed(_) | PadEvent::Connected { .. }))
             || axis_speed(self.axes.left.length()) != 0.0
             || axis_speed(self.axes.right.length()) != 0.0
     }
+}
+
+fn events_id() -> egui::Id {
+    egui::Id::new("glyphst-pad-events")
+}
+
+/// Keeps the frame's pad events where pages that record buttons read them.
+pub fn set_frame_events(ctx: &egui::Context, events: &[PadEvent]) {
+    ctx.data_mut(|data| data.insert_temp(events_id(), events.to_vec()));
+}
+
+pub fn frame_events(ctx: &egui::Context) -> Vec<PadEvent> {
+    ctx.data(|data| data.get_temp::<Vec<PadEvent>>(events_id()))
+        .unwrap_or_default()
 }
 
 /// The document's share of a frame of pad input.

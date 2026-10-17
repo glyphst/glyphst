@@ -87,7 +87,8 @@ struct Toast {
 /// Transient messages at the bottom centre, after pdfcraft's `toast`: the
 /// latest shows for a few seconds, longer while hovered; a click on its
 /// `[ action ]` is reported by [`Toasts::show`], a click elsewhere
-/// dismisses it.
+/// dismisses it. After a pad the action shows X's glyph (frame 09b), and
+/// X runs it.
 #[derive(Default)]
 pub struct Toasts {
     messages: Vec<Toast>,
@@ -111,6 +112,15 @@ impl Toasts {
         });
         self.shown_at = None;
         self.leaving = false;
+    }
+
+    /// Whether the message showing has an action (X runs it then).
+    pub fn has_action(&self) -> bool {
+        !self.leaving
+            && self
+                .messages
+                .last()
+                .is_some_and(|toast| toast.action.is_some())
     }
 
     pub fn latest(&self) -> Option<&str> {
@@ -145,7 +155,10 @@ impl Toasts {
             crate::motion::smooth(ctx, egui::Id::new("toast-lift"), lift, crate::motion::PANEL);
         let t = Tokens::get(ctx);
         let screen = ctx.content_rect();
-        let mut action_clicked = false;
+        let pad = crate::pad_glyph::input(ctx) == crate::pad_glyph::InputDevice::Pad;
+        let mut action_clicked = toast.action.is_some()
+            && !self.leaving
+            && crate::pad_glyph::pressed_faces(ctx).contains(&crate::pad_glyph::Face::West);
         let area = egui::Area::new(egui::Id::new("toast"))
             .order(egui::Order::Tooltip)
             .sense(Sense::click())
@@ -178,8 +191,19 @@ impl Toasts {
                                 .wrap(),
                             );
                             if let Some(action) = &toast.action {
-                                action_clicked |=
-                                    ui.add(crate::button::Button::bracket(action)).clicked();
+                                action_clicked |= if pad {
+                                    let glyph = [crate::pad_glyph::Glyph::Face(
+                                        crate::pad_glyph::Face::West,
+                                    )];
+                                    ui.add(
+                                        crate::pad_glyph::Hint::new(&glyph, action)
+                                            .color(t.accent_text),
+                                    )
+                                    .interact(Sense::click())
+                                    .clicked()
+                                } else {
+                                    ui.add(crate::button::Button::bracket(action)).clicked()
+                                };
                             }
                         });
                     });

@@ -39,6 +39,21 @@ pub fn input(ctx: &egui::Context) -> InputDevice {
         .unwrap_or_default()
 }
 
+fn faces_id() -> egui::Id {
+    egui::Id::new("glyphst-pad-faces")
+}
+
+/// The pad's face buttons pressed this frame, for prompts and toasts; the
+/// app sets them before the frame.
+pub fn push_faces(ctx: &egui::Context, faces: &[Face]) {
+    ctx.data_mut(|data| data.insert_temp(faces_id(), faces.to_vec()));
+}
+
+pub fn pressed_faces(ctx: &egui::Context) -> Vec<Face> {
+    ctx.data(|data| data.get_temp::<Vec<Face>>(faces_id()))
+        .unwrap_or_default()
+}
+
 /// A face button by position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Face {
@@ -59,7 +74,7 @@ pub enum Arm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Face(Face),
-    /// A pill with a name: `lb`, `rt`, `≡` (start), `⧉` (select).
+    /// A pill with a name: `lb`, `rt`, `≡` (start), `select`.
     Button(&'static str),
     /// The d-pad, with the arm pressed (none: any).
     Dpad(Option<Arm>),
@@ -262,7 +277,7 @@ pub fn sample(ui: &mut Ui) {
         for face in [Face::South, Face::East, Face::West, Face::North] {
             ui.add(Hint::new(&[Glyph::Face(face)], ""));
         }
-        for name in ["lb", "rb", "lt", "rt", "≡", "⧉"] {
+        for name in ["lb", "rb", "lt", "rt", "≡", "select"] {
             ui.add(Hint::new(&[Glyph::Button(name)], ""));
         }
         ui.add(Hint::new(&[Glyph::Dpad(Some(Arm::Up))], ""));

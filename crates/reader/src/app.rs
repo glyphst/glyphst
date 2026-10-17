@@ -244,6 +244,9 @@ pub struct ReaderApp {
     pad_commands: Vec<Command>,
     pad_ring_steps: Vec<crate::pad::route::RingStep>,
     pad_ring: Option<ring::PadRing>,
+    /// Pads connecting and going, for the prompts.
+    pad_events: Vec<crate::pad::PadEvent>,
+    prompts: crate::prompts::Prompts,
     /// Where the pointer was when the pad was last used: moving it away
     /// makes the pointer the last input again.
     pad_pointer: Option<egui::Pos2>,
@@ -477,6 +480,8 @@ impl ReaderApp {
             pad_commands: Vec::new(),
             pad_ring_steps: Vec::new(),
             pad_ring: None,
+            pad_events: Vec::new(),
+            prompts: Default::default(),
             pad_pointer: None,
             last_input: Default::default(),
             frames: FrameTimes::default(),
@@ -556,6 +561,12 @@ impl ReaderApp {
         }
         if launch.shortcuts {
             app.open_keymap_tab();
+            // `--settings shortcuts:gamepad` shows the pad's side.
+            if launch.settings_group.as_deref() == Some("gamepad")
+                && let Some(Page::Keymap(page)) = app.pages.last_mut()
+            {
+                page.gamepad = true;
+            }
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
@@ -786,7 +797,7 @@ impl ReaderApp {
         let docs = || crate::home::documents(&self.library, &self.prefs.page_counts);
         match &mut self.pages[index] {
             Page::Keymap(page) => {
-                if page.show(ui, &mut self.prefs, &self.keymap) {
+                if page.show(ui, &mut self.prefs, &self.keymap, &self.pad_keymap) {
                     self.rebuild_keymap();
                 }
             }
@@ -2206,6 +2217,11 @@ impl ReaderApp {
             .edit(|settings| settings.window.set_transparent(!on));
     }
 
+    /// Turns gamepad mode on or off.
+    pub(crate) fn set_gamepad_mode(&mut self, on: bool, _ctx: &egui::Context) {
+        self.prefs.gamepad_mode = on;
+    }
+
     /// Notes a key or a click as the last input, for the hints that follow
     /// it. A pointer moved only slightly since the pad was used doesn't count.
     fn note_input_device(&mut self, events: &[egui::Event]) {
@@ -2247,8 +2263,11 @@ impl ReaderApp {
             }
         }
         // Key presses go to a shortcut being recorded, and the settings
-        // window stands in front of the document.
-        if self.settings_window.open || self.pages.iter().any(Page::is_recording) {
+        // window and prompts stand in front of the document.
+        if self.settings_window.open
+            || self.prompts.is_open()
+            || self.pages.iter().any(Page::is_recording)
+        {
             return actions;
         }
         let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
@@ -3850,12 +3869,36 @@ impl eframe::App for ReaderApp {
         let frame = self.pads.frame();
         let state = RouteState {
             recording: self.pages.iter().any(Page::is_recording),
-            modal: self.settings_window.open || self.palette.open,
+            modal: self.settings_window.open || self.palette.open || self.prompts.is_open(),
             document: self.active.is_some(),
             overview: self
                 .active
                 .is_some_and(|active| self.tabs[active].overview.is_some()),
+            toast_action: self.notices.has_action(),
         };
+        self.pad_events.extend(
+            frame
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        crate::pad::PadEvent::Connected { .. }
+                            | crate::pad::PadEvent::Disconnected(_)
+                    )
+                })
+                .cloned(),
+        );
+        let faces: Vec<glyphst_ui::pad_glyph::Face> = frame
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                crate::pad::PadEvent::Pressed(button) => button.face(),
+                _ => None,
+            })
+            .collect();
+        glyphst_ui::pad_glyph::push_faces(ctx, &faces);
+        crate::pad::set_frame_events(ctx, &frame.events);
         let routed = self
             .pad_router
             .route(&frame, &state, &self.pad_keymap, Instant::now());
@@ -4011,6 +4054,16 @@ impl eframe::App for ReaderApp {
         self.watch_effects(&ctx, now);
         self.update_wallpaper(&ctx);
         let pad = std::mem::take(&mut self.pad_input);
+        let pad_events = std::mem::take(&mut self.pad_events);
+        if !pad_events.is_empty() {
+            let connected = self.pads.connected();
+            self.prompts.note(
+                &pad_events,
+                &connected,
+                self.prefs.gamepad_mode,
+                self.prefs.ask_gamepad_mode,
+            );
+        }
         for step in std::mem::take(&mut self.pad_ring_steps) {
             self.pad_ring_step(step, &ctx, now);
         }
@@ -4136,6 +4189,15 @@ impl eframe::App for ReaderApp {
             self.present_overlay(&ctx, active, now);
         }
         self.pad_ring_overlay(&ctx);
+        if let Some(answer) = self.prompts.show(&ctx, self.prefs.gamepad_mode) {
+            use crate::prompts::Answer;
+            match answer {
+                Answer::GamepadMode => self.set_gamepad_mode(true, &ctx),
+                Answer::LeaveGamepadMode => self.set_gamepad_mode(false, &ctx),
+                Answer::NeverAsk => self.prefs.ask_gamepad_mode = false,
+                Answer::NotNow | Answer::Stay => {}
+            }
+        }
         // Above the status bar while it shows.
         let lift = if presenting || self.zen {
             28.0
