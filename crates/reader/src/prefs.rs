@@ -11,7 +11,7 @@ use crate::{
     keys::{self, KeymapPreset, Overrides},
     present::{self, RingSlots},
     sidebar::SidebarTab,
-    theme::{Accent, Density, ThemePreference},
+    theme::{Accent, Density, ThemeKind, ThemePreference},
 };
 use glyphst_ui::{
     fonts::FontChoice,
@@ -109,8 +109,14 @@ pub struct Prefs {
     pub animated_background: Option<String>,
     /// Frames per second an animated background may repaint at.
     pub background_fps: u32,
-    /// Effect id of the tint over pages, or `None` for none.
+    /// The page tint before it was the theme's: moved to both tints when
+    /// read.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<String>,
+    /// Effect ids of the tint over pages in the light and the dark theme,
+    /// or `None` for none.
+    pub tint_light: Option<String>,
+    pub tint_dark: Option<String>,
     /// The image backgrounds with `image: true` draw.
     pub wallpaper: Option<String>,
     /// Parameter values the user set, by effect id (manifest order).
@@ -173,6 +179,8 @@ impl Default for Prefs {
             animated_background: None,
             background_fps: 30,
             overlay: None,
+            tint_light: None,
+            tint_dark: None,
             wallpaper: None,
             effect_params: BTreeMap::new(),
             books: BTreeMap::new(),
@@ -263,8 +271,27 @@ impl Prefs {
             .effect_params
             .retain(|_, values| values.iter().all(|value| value.is_finite()));
         prefs.merge_wallpaper_effects();
+        if let Some(overlay) = prefs.overlay.take() {
+            prefs.tint_light = Some(overlay.clone());
+            prefs.tint_dark = Some(overlay);
+        }
         book_effects::trim(&mut prefs.books);
         prefs
+    }
+
+    /// The page tint of the `kind` theme.
+    pub fn tint(&self, kind: ThemeKind) -> Option<&str> {
+        match kind {
+            ThemeKind::Light => self.tint_light.as_deref(),
+            ThemeKind::Dark => self.tint_dark.as_deref(),
+        }
+    }
+
+    pub fn tint_mut(&mut self, kind: ThemeKind) -> &mut Option<String> {
+        match kind {
+            ThemeKind::Light => &mut self.tint_light,
+            ThemeKind::Dark => &mut self.tint_dark,
+        }
     }
 
     /// The soft and parallax wallpapers became settings of the one
@@ -345,7 +372,8 @@ mod tests {
             target_language: Some("ja".into()),
             shortcuts: [("text.find".to_string(), vec!["Ctrl+G".to_string()])].into(),
             keymap: KeymapPreset::Vim,
-            overlay: Some("sepia".into()),
+            tint_light: Some("sepia".into()),
+            tint_dark: Some("night".into()),
             wallpaper: Some("/pictures/lake.jpg".into()),
             effect_params: [("aurora".to_string(), [1.5, 0.2, 0.0, 0.0])].into(),
             books: [(
@@ -461,6 +489,24 @@ mod tests {
         // The plain wallpaper's dim keeps its place.
         let plain = load(r#"{"background":"image","effect_params":{"image":[0.4,0,0,0]}}"#);
         assert_eq!(plain.effect_params[glyphst_effects::IMAGE][0], 0.4);
+    }
+
+    #[test]
+    fn the_page_tint_of_before_becomes_both_themes_tint() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(STORAGE_KEY, r#"{"overlay":"sepia"}"#.into());
+        let prefs = Prefs::load(Some(&storage));
+        assert_eq!(prefs.tint(ThemeKind::Light), Some("sepia"));
+        assert_eq!(prefs.tint(ThemeKind::Dark), Some("sepia"));
+        assert_eq!(prefs.overlay, None);
+        prefs.save(&mut storage);
+        assert!(
+            !storage
+                .get_string(STORAGE_KEY)
+                .unwrap()
+                .contains("\"overlay\"")
+        );
+        assert_eq!(Prefs::load(Some(&storage)), prefs);
     }
 
     #[test]

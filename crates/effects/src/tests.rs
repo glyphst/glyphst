@@ -200,6 +200,31 @@ fn manifests_describe_effects_and_reject_bad_ones() {
     assert_eq!(def.params[1].kind, ParamKind::Toggle);
     assert_eq!(def.default_params(), [0.5, 1.0, 0.0, 0.0]);
 
+    // Colours are sRGB packed in a float, exact and kept in range.
+    let tint = parse_manifest(
+        "t.wgsl",
+        "// @effect id: t\n// @effect name: T\n// @effect kind: overlay\n\
+         // @effect themed: true\n// @effect param: paper colour #F1E3C6 Paper",
+    )
+    .unwrap();
+    assert!(tint.themed);
+    assert_eq!(tint.params[0].kind, ParamKind::Colour);
+    assert_eq!(unpack_colour(tint.default_params()[0]), [0xF1, 0xE3, 0xC6]);
+    assert_eq!(unpack_colour(pack_colour([1, 2, 255])), [1, 2, 255]);
+    assert_eq!(
+        tint.sanitize_params([1e9, 0.0, 0.0, 0.0])[0],
+        pack_colour([255; 3])
+    );
+    assert!(
+        parse_manifest(
+            "t",
+            "// @effect id: t\n// @effect name: T\n// @effect kind: overlay\n\
+             // @effect param: paper colour white Paper"
+        )
+        .is_err(),
+        "a colour needs #rrggbb"
+    );
+
     assert!(
         parse_manifest("x", "// @effect name: N\n// @effect kind: overlay").is_err(),
         "no id"
@@ -341,7 +366,7 @@ fn the_template_and_every_builtin_compile() {
     let (device, _queue) = require_device!();
     let mut registry = EffectRegistry::new(&device, FORMAT);
     assert!(registry.errors().is_empty(), "{:?}", registry.errors());
-    for id in [IMAGE, SEPIA, NIGHT, PAPER] {
+    for id in [IMAGE, SEPIA, NIGHT, PAPER, TINT, THEME_TINT] {
         assert!(registry.find(id).is_some(), "{id} missing");
     }
     assert!(registry.find(IMAGE).unwrap().image);

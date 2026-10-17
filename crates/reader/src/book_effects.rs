@@ -5,7 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, SOLID};
+use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, ParamKind, SOLID};
+use glyphst_ui::theme::Tokens;
 use serde::{Deserialize, Serialize};
 
 use crate::gpu::EffectUse;
@@ -43,7 +44,8 @@ impl BookEffects {
     }
 }
 
-/// The defaults: what Settings › Effects chose.
+/// The defaults: what Settings chose (the overlay is the page tint of the
+/// theme drawn).
 #[derive(Clone, Copy, Debug)]
 pub struct Defaults<'a> {
     pub background: &'a str,
@@ -51,6 +53,19 @@ pub struct Defaults<'a> {
     pub overlay: Option<&'a str>,
     /// Values the user set per effect id.
     pub params: &'a BTreeMap<String, [f32; MAX_PARAMS]>,
+    /// What themed overlays draw with.
+    pub theme: ThemeColours,
+}
+
+/// The theme's ink and paper for themed overlays: its text and its panes'
+/// colour (sRGB, without the window's opacity).
+pub type ThemeColours = [[u8; 3]; 2];
+
+pub fn theme_colours(tokens: &Tokens) -> ThemeColours {
+    [tokens.text, tokens.surface].map(|color| {
+        let [r, g, b, _] = color.to_srgba_unmultiplied();
+        [r, g, b]
+    })
 }
 
 /// A book's effects as drawn.
@@ -70,6 +85,28 @@ pub fn effect_use(def: &EffectDef, params: &BTreeMap<String, [f32; MAX_PARAMS]>)
             |values| def.sanitize_params(*values),
         ),
     }
+}
+
+/// [`effect_use`], with a themed overlay's first two colour parameters
+/// set to the theme's ink and paper.
+pub fn themed_use(
+    def: &EffectDef,
+    params: &BTreeMap<String, [f32; MAX_PARAMS]>,
+    theme: ThemeColours,
+) -> EffectUse {
+    let mut effect = effect_use(def, params);
+    if def.themed {
+        let colours = def
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| param.kind == ParamKind::Colour)
+            .map(|(index, _)| index);
+        for (index, colour) in colours.zip(theme) {
+            effect.params[index] = glyphst_effects::pack_colour(colour);
+        }
+    }
+    effect
 }
 
 /// The effects for a book with `book`'s choices (if any).
@@ -112,7 +149,7 @@ pub fn resolve<'a>(
             defaults.overlay,
             EffectKind::Overlay,
         )
-        .map(|def| effect_use(def, defaults.params)),
+        .map(|def| themed_use(def, defaults.params, defaults.theme)),
     }
 }
 
@@ -156,6 +193,7 @@ mod tests {
             duration_ms: 300,
             image: false,
             hidden: false,
+            themed: false,
             params: vec![ParamDef {
                 id: "amount".into(),
                 label: "Amount".into(),
@@ -184,6 +222,7 @@ mod tests {
             transition: Some("slide-over"),
             overlay: None,
             params: &params,
+            theme: [[0; 3], [255; 3]],
         };
 
         let plain = resolve(None, defaults, find);
@@ -213,6 +252,30 @@ mod tests {
             ..defaults
         };
         assert_eq!(resolve(None, odd, find).background.id, SOLID);
+    }
+
+    /// A themed tint draws with the theme's ink and paper, whatever was
+    /// saved for it; its other parameters stay the user's.
+    #[test]
+    fn themed_tints_take_the_themes_colours() {
+        let mut tint = def("theme-tint", EffectKind::Overlay);
+        tint.themed = true;
+        let colour = |id: &str| ParamDef {
+            id: id.into(),
+            label: id.into(),
+            kind: ParamKind::Colour,
+            default: 0.0,
+        };
+        tint.params = vec![colour("ink"), colour("paper"), tint.params[0].clone()];
+        let mut params = BTreeMap::new();
+        params.insert("theme-tint".to_string(), [5.0, 6.0, 0.25, 0.0]);
+        let effect = themed_use(&tint, &params, [[1, 2, 3], [250, 251, 252]]);
+        assert_eq!(glyphst_effects::unpack_colour(effect.params[0]), [1, 2, 3]);
+        assert_eq!(
+            glyphst_effects::unpack_colour(effect.params[1]),
+            [250, 251, 252]
+        );
+        assert_eq!(effect.params[2], 0.25);
     }
 
     #[test]

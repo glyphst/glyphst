@@ -176,6 +176,8 @@ if [[ ${tier} == screens ]]; then
         "07a-background @ --settings appearance:background --background image --wallpaper ^ --colours background"
         "07a-colours @ --settings appearance:colours --background image --wallpaper ^ --colours background"
         "02a-wallpaper-theme @ --background image --wallpaper ^ --colours background"
+        "07a-tint @ --settings appearance:tint --overlay tint"
+        "02a-theme-tint @ --overlay theme-tint --colours custom"
         "07-reading @ --settings reading"
         "07-presenting @ --settings presenting"
         "07-effects @ --settings effects"

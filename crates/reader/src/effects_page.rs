@@ -1,8 +1,8 @@
-//! The effects manager: galleries of live preview cards for transitions
-//! and page tints, with parameter sliders and the effects folder
-//! (Settings › Effects); the background behind the pages (Settings ›
-//! Appearance › background); and the same cards for one book's own
-//! choices (the Effects drawer).
+//! The effects manager: galleries of live preview cards for transitions,
+//! with parameter sliders and the effects folder (Settings › Effects); the
+//! background behind the pages and each theme's page tint (Settings ›
+//! Appearance); and the same cards for one book's own choices (the
+//! Effects drawer).
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -13,11 +13,11 @@ use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, ParamKind};
 use glyphst_ui::{Tip, button::Button, motif, slider::Slider, toggle::Switch};
 
 use crate::{
-    book_effects::{BookEffects, Choice, effect_use},
+    book_effects::{BookEffects, Choice, ThemeColours, theme_colours, themed_use},
     gpu::{EffectUse, PreviewCallback},
     icons,
     prefs::Prefs,
-    theme::{self, Tokens},
+    theme::{self, ThemeKind, Tokens},
 };
 
 /// What the page asks the app to do.
@@ -189,6 +189,10 @@ fn params_editor(
     let before = values;
     let mut reset = false;
     for (index, param) in def.params.iter().enumerate() {
+        // A themed tint's colours are the theme's.
+        if def.themed && param.kind == ParamKind::Colour {
+            continue;
+        }
         ui.horizontal(|ui| {
             ui.set_min_height(24.0);
             ui.label(
@@ -212,6 +216,19 @@ fn params_editor(
                         if ui.add(Switch(&mut on)).changed() {
                             values[index] = if on { 1.0 } else { 0.0 };
                         }
+                    }
+                    ParamKind::Colour => {
+                        let mut rgb = glyphst_effects::unpack_colour(values[index]);
+                        if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb)
+                            .changed()
+                        {
+                            values[index] = glyphst_effects::pack_colour(rgb);
+                        }
+                        ui.label(
+                            RichText::new(format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]))
+                                .font(theme::mono(11.0))
+                                .color(tokens.muted),
+                        );
                     }
                 },
             );
@@ -237,13 +254,14 @@ fn cards_for(
     params: &BTreeMap<String, [f32; MAX_PARAMS]>,
     has_wallpaper: bool,
     first: Vec<Card>,
+    theme: ThemeColours,
 ) -> Vec<Card> {
     first
         .into_iter()
         .chain(choosable(effects, kind).map(|def| Card {
             choice: Choice::Effect(def.id.clone()),
             label: def.name.clone(),
-            preview: Some(effect_use(def, params)),
+            preview: Some(themed_use(def, params, theme)),
             user: def.user,
             needs_wallpaper: def.image && !has_wallpaper,
         }))
@@ -296,6 +314,7 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 &prefs.effect_params,
                 has_wallpaper,
                 vec![off_card()],
+                theme_colours(&tokens),
             );
             let selected = as_choice(prefs.transition.as_deref());
             let card = fill_card(ui.available_width());
@@ -313,36 +332,6 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 None => {}
             }
             if let Some(def) = prefs.transition.as_deref().and_then(find) {
-                params_editor(ui, def, &mut prefs.effect_params);
-            }
-        });
-    });
-
-    glyphst_ui::settings::group(ui, "Page tint", |group| {
-        group.full(|ui| {
-            let cards = cards_for(
-                effects,
-                EffectKind::Overlay,
-                &prefs.effect_params,
-                has_wallpaper,
-                vec![off_card()],
-            );
-            let selected = as_choice(prefs.overlay.as_deref());
-            let card = fill_card(ui.available_width());
-            match gallery(
-                ui,
-                "settings-overlay",
-                EffectKind::Overlay,
-                &cards,
-                &selected,
-                card,
-                time,
-            ) {
-                Some(Choice::Effect(id)) => prefs.overlay = Some(id),
-                Some(_) => prefs.overlay = None,
-                None => {}
-            }
-            if let Some(def) = prefs.overlay.as_deref().and_then(find) {
                 params_editor(ui, def, &mut prefs.effect_params);
             }
         });
@@ -519,6 +508,7 @@ pub fn background_group(ui: &mut egui::Ui, page: BackgroundGroup<'_>) {
                         &prefs.effect_params,
                         has_wallpaper,
                         Vec::new(),
+                        theme_colours(&tokens),
                     )
                     .into_iter()
                     .filter(|card| {
@@ -566,6 +556,73 @@ pub fn background_group(ui: &mut egui::Ui, page: BackgroundGroup<'_>) {
             }
         }
     });
+}
+
+/// What Settings › Appearance › page tint needs.
+pub struct TintGroup<'a> {
+    pub prefs: &'a mut Prefs,
+    pub effects: &'a [EffectDef],
+    pub time: f32,
+}
+
+/// Settings › Appearance › page tint: the light and the dark theme's own
+/// tint, chosen from a gallery, with its parameters (a custom tint's
+/// colour and strength; a themed tint takes the theme's colours).
+pub fn tint_group(ui: &mut egui::Ui, page: TintGroup<'_>) {
+    let tokens = Tokens::get(ui.ctx());
+    let TintGroup {
+        prefs,
+        effects,
+        time,
+    } = page;
+    let find = |id: &str| effects.iter().find(|def| def.id == id);
+    // Which theme's tint is shown: the one drawn, until another is picked.
+    let editing = ui.id().with("tint-theme");
+    let mut kind = ui
+        .data(|data| data.get_temp::<ThemeKind>(editing))
+        .unwrap_or(tokens.kind);
+    glyphst_ui::settings::group(ui, "page tint", |group| {
+        group.row(
+            "for",
+            Some("the light and the dark theme each tint pages their own way"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut kind,
+                    &[(ThemeKind::Light, "light"), (ThemeKind::Dark, "dark")],
+                );
+            },
+        );
+        group.full(|ui| {
+            let cards = cards_for(
+                effects,
+                EffectKind::Overlay,
+                &prefs.effect_params,
+                prefs.wallpaper.is_some(),
+                vec![off_card()],
+                theme_colours(&tokens),
+            );
+            let selected = as_choice(prefs.tint(kind));
+            let card = fill_card(ui.available_width());
+            match gallery(
+                ui,
+                "settings-tint",
+                EffectKind::Overlay,
+                &cards,
+                &selected,
+                card,
+                time,
+            ) {
+                Some(Choice::Effect(id)) => *prefs.tint_mut(kind) = Some(id),
+                Some(_) => *prefs.tint_mut(kind) = None,
+                None => {}
+            }
+            if let Some(def) = prefs.tint(kind).and_then(find) {
+                params_editor(ui, def, &mut prefs.effect_params);
+            }
+        });
+    });
+    ui.data_mut(|data| data.insert_temp(editing, kind));
 }
 
 /// The wallpaper's file, then its dim, blur and parallax (the wallpaper
@@ -687,7 +744,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
             "default · {}",
             default.map_or("none", |def| def.name.as_str())
         ),
-        preview: default.map(|def| effect_use(def, params)),
+        preview: default.map(|def| themed_use(def, params, theme_colours(&tokens))),
         user: false,
         needs_wallpaper: default.is_some_and(|def| def.image) && !has_wallpaper,
     };
@@ -714,6 +771,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
                 params,
                 has_wallpaper,
                 vec![default_card(default_background, params)],
+                theme_colours(&tokens),
             );
             let size = tile(ui);
             if let Some(picked) = gallery(
@@ -734,7 +792,14 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
             ui.add_space(4.0);
             let mut first = vec![default_card(default_overlay, params)];
             first.push(off_card());
-            let cards = cards_for(effects, EffectKind::Overlay, params, has_wallpaper, first);
+            let cards = cards_for(
+                effects,
+                EffectKind::Overlay,
+                params,
+                has_wallpaper,
+                first,
+                theme_colours(&tokens),
+            );
             if let Some(picked) = gallery(
                 ui,
                 "book-overlay",

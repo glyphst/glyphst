@@ -197,6 +197,8 @@ pub struct ReaderApp {
     pub(crate) prefs: Prefs,
     /// The theme and window opacity applied to egui.
     theme_applied: Option<theme::Appearance>,
+    /// The applied theme's ink and paper, for themed page tints.
+    pub(crate) theme_colours: crate::book_effects::ThemeColours,
     fonts_applied: Option<glyphst_ui::fonts::FontChoice>,
     /// Watches the desktop's light or dark choice for the System theme.
     desktop_theme: DesktopTheme,
@@ -369,7 +371,9 @@ impl ReaderApp {
             prefs.transition = (transition != "none").then_some(transition);
         }
         if let Some(overlay) = launch.overlay {
-            prefs.overlay = (overlay != "none").then_some(overlay);
+            let tint = (overlay != "none").then_some(overlay);
+            prefs.tint_light = tint.clone();
+            prefs.tint_dark = tint;
         }
         if let Some(wallpaper) = launch.wallpaper {
             prefs.wallpaper = Some(wallpaper);
@@ -409,6 +413,7 @@ impl ReaderApp {
         let mut app = Self {
             prefs,
             theme_applied: None,
+            theme_colours: crate::book_effects::theme_colours(&Tokens::for_kind(ThemeKind::Light)),
             fonts_applied,
             desktop_theme: {
                 let ctx = cc.egui_ctx.clone();
@@ -2032,6 +2037,7 @@ impl ReaderApp {
         let applied = self.appearance(kind);
         if self.theme_applied.as_ref() != Some(&applied) {
             theme::apply(ctx, &applied);
+            self.theme_colours = crate::book_effects::theme_colours(&Tokens::get(ctx));
             self.theme_applied = Some(applied);
         }
         if self.fonts_applied.as_ref() != Some(&self.prefs.fonts) {

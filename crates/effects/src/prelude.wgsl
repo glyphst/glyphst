@@ -92,6 +92,16 @@ fn fx_unpremultiply(color: vec4<f32>) -> vec3<f32> {
     return select(vec3<f32>(0.0), color.rgb / color.a, color.a > 0.0);
 }
 
+// A `colour` parameter: sRGB packed as 0xRRGGBB in a float.
+fn fx_colour(packed: f32) -> vec3<f32> {
+    let value = u32(round(clamp(packed, 0.0, 16777215.0)));
+    return vec3<f32>(
+        f32((value >> 16u) & 255u),
+        f32((value >> 8u) & 255u),
+        f32(value & 255u),
+    ) / 255.0;
+}
+
 fn fx_luminance(rgb: vec3<f32>) -> f32 {
     return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
 }

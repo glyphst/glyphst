@@ -16,7 +16,12 @@
 //! // @effect duration: 300           (transitions, milliseconds)
 //! // @effect image: true              (backgrounds drawing the wallpaper)
 //! // @effect hidden: true             (not offered to choose)
+//! // @effect themed: true             (overlays: the app passes the theme's
+//! //                                   text and pane colours as the first
+//! //                                   two colour parameters)
 //! // @effect param: speed float 0 3 0.4 Speed
+//! // @effect param: colour colour #F1E3C6 Colour  (sRGB, packed as 0xRRGGBB;
+//! //                                   `fx_colour` unpacks it)
 //! ```
 //!
 //! User effects form their own layer over the built-ins: one may replace a
@@ -45,12 +50,31 @@ pub const NIGHT: &str = "night";
 pub const PAPER: &str = "paper";
 pub const DOTS: &str = "dots";
 pub const GENERATE: &str = "generate";
+pub const TINT: &str = "tint";
+pub const THEME_TINT: &str = "theme-tint";
+/// The largest packed `colour` parameter, 0xFFFFFF (exact in an f32).
+const MAX_COLOUR: f32 = 16_777_215.0;
+
+/// An sRGB colour as a `colour` parameter's value.
+pub fn pack_colour([r, g, b]: [u8; 3]) -> f32 {
+    (u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)) as f32
+}
+
+/// A `colour` parameter's value as sRGB.
+pub fn unpack_colour(value: f32) -> [u8; 3] {
+    let value = if value.is_finite() {
+        value.round().clamp(0.0, MAX_COLOUR) as u32
+    } else {
+        0
+    };
+    [(value >> 16) as u8, (value >> 8) as u8, value as u8]
+}
 
 /// Effects may declare at most this many parameters (one `vec4`).
 pub const MAX_PARAMS: usize = 4;
 
 const PRELUDE: &str = include_str!("prelude.wgsl");
-const BUILTIN: [(&str, &str); 13] = [
+const BUILTIN: [(&str, &str); 15] = [
     ("present.wgsl", include_str!("builtin/present.wgsl")),
     ("crossfade.wgsl", include_str!("builtin/crossfade.wgsl")),
     ("slide_over.wgsl", include_str!("builtin/slide_over.wgsl")),
@@ -66,6 +90,8 @@ const BUILTIN: [(&str, &str); 13] = [
         include_str!("builtin/paper_ground.wgsl"),
     ),
     ("night_sky.wgsl", include_str!("builtin/night_sky.wgsl")),
+    ("tint.wgsl", include_str!("builtin/tint.wgsl")),
+    ("theme_tint.wgsl", include_str!("builtin/theme_tint.wgsl")),
     ("generate.wgsl", include_str!("builtin/generate.wgsl")),
 ];
 
@@ -85,8 +111,13 @@ pub enum EffectKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamKind {
-    Float { min: f32, max: f32 },
+    Float {
+        min: f32,
+        max: f32,
+    },
     Toggle,
+    /// sRGB packed as 0xRRGGBB ([`pack_colour`]).
+    Colour,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +143,9 @@ pub struct EffectDef {
     pub image: bool,
     /// Used by the app itself, not offered as a choice.
     pub hidden: bool,
+    /// An overlay whose first two colour parameters the app fills with the
+    /// theme's text and pane colours.
+    pub themed: bool,
     pub params: Vec<ParamDef>,
     /// Where the effect came from: a built-in file name or a user path.
     pub source: String,
@@ -147,6 +181,7 @@ impl EffectDef {
                         0.0
                     }
                 }
+                ParamKind::Colour => value.round().clamp(0.0, MAX_COLOUR),
             };
         }
         clean
@@ -173,6 +208,7 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
     let mut animated = false;
     let mut image = false;
     let mut hidden = false;
+    let mut themed = false;
     let mut duration_ms = 300;
     let mut params = Vec::new();
     for line in text.lines() {
@@ -197,6 +233,7 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
             "animated" => animated = value == "true",
             "image" => image = value == "true",
             "hidden" => hidden = value == "true",
+            "themed" => themed = value == "true",
             "duration" => {
                 duration_ms = value
                     .parse()
@@ -217,13 +254,15 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
         duration_ms,
         image,
         hidden,
+        themed,
         params,
         source: source_name.to_string(),
         user: false,
     })
 }
 
-/// `<id> float <min> <max> <default> <label…>` or `<id> toggle <default> <label…>`.
+/// `<id> float <min> <max> <default> <label…>`, `<id> toggle <default>
+/// <label…>` or `<id> colour <#rrggbb> <label…>`.
 fn parse_param(value: &str) -> Result<ParamDef, String> {
     let mut words = value.split_whitespace();
     let id = words.next().ok_or("parameter without an id")?.to_string();
@@ -242,6 +281,15 @@ fn parse_param(value: &str) -> Result<ParamDef, String> {
             (ParamKind::Float { min, max }, default)
         }
         Some("toggle") => (ParamKind::Toggle, number(words.next())?),
+        Some("colour") => {
+            let hex = words
+                .next()
+                .and_then(|word| word.strip_prefix('#'))
+                .filter(|hex| hex.len() == 6)
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .ok_or_else(|| format!("colour {id:?} needs a #rrggbb default"))?;
+            (ParamKind::Colour, hex as f32)
+        }
         other => return Err(format!("unknown parameter type {other:?} for {id:?}")),
     };
     let label = words.collect::<Vec<_>>().join(" ");

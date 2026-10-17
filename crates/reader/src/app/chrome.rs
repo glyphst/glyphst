@@ -623,6 +623,13 @@ impl ReaderApp {
         background
     }
 
+    /// The theme drawn (light until the first frame applies one).
+    pub(crate) fn theme_kind(&self) -> ThemeKind {
+        self.theme_applied
+            .as_ref()
+            .map_or(ThemeKind::Light, |applied| applied.kind)
+    }
+
     /// The document path effects are chosen by.
     pub(crate) fn book_key(&self, index: usize) -> String {
         self.tabs[index].path.display().to_string()
@@ -635,8 +642,9 @@ impl ReaderApp {
         let defaults = Defaults {
             background: &self.prefs.background,
             transition: self.prefs.transition.as_deref(),
-            overlay: self.prefs.overlay.as_deref(),
+            overlay: self.prefs.tint(self.theme_kind()),
             params: &self.prefs.effect_params,
+            theme: self.theme_colours,
         };
         self.with_gpu(|gpu| resolve(book, defaults, |id| gpu.effects().find(id)))
             .unwrap_or_else(|| resolve(book, defaults, |_| None))
@@ -757,7 +765,7 @@ impl ReaderApp {
                     book: &mut book,
                     default_background: find(Some(&self.prefs.background)),
                     default_transition: find(self.prefs.transition.as_deref()),
-                    default_overlay: find(self.prefs.overlay.as_deref()),
+                    default_overlay: find(self.prefs.tint(self.theme_kind())),
                     effects: &effects,
                     params: &mut self.prefs.effect_params,
                     has_wallpaper: self.prefs.wallpaper.is_some(),

@@ -106,14 +106,15 @@ impl Section {
             Self::Appearance => {
                 "theme dark light system accent colour color scheme palette generate material \
                  font chrome prose ui scale size density transparency opacity blur glyph \
-                 ornaments background wallpaper image dim parallax animation"
+                 ornaments background wallpaper image dim parallax animation tint sepia night \
+                 paper grain"
             }
             Self::Reading => "session reopen sidebar drawer vim keys motion",
             Self::Presenting => {
                 "present presentation slides full screen fullscreen timer clock talk length \
                  countdown ring tools right click draw pen eraser laser page number"
             }
-            Self::Effects => "transition tint folder shader",
+            Self::Effects => "transition folder shader",
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
             Self::Ai => "ai model provider key agent claude codex mcp assistant",
@@ -127,7 +128,8 @@ impl Section {
             Self::Reading => "What opens at start, and what shows while you read.",
             Self::Presenting => "Full screen, the pointer, ink and the timer while you present.",
             Self::Effects => {
-                "Page transitions and tints for every book. The background is in Appearance."
+                "Page transitions for every book, and your own effects. The background and \
+                 the page tint are in Appearance."
             }
             Self::Translation => "The service that translates selections and documents.",
             Self::Ocr => "Recognizing the text of scanned pages.",
@@ -625,8 +627,17 @@ fn appearance(
     );
     jump(ui, "colours");
     colours(ui, prefs, app.background_seed);
+    jump(ui, "tint");
+    crate::effects_page::tint_group(
+        ui,
+        crate::effects_page::TintGroup {
+            prefs,
+            effects: app.effects,
+            time: app.time,
+        },
+    );
     ui.add_space(8.0);
-    ui.add(Button::bracket("page transitions and tints →"))
+    ui.add(Button::bracket("page transitions and your effects →"))
         .clicked()
 }
 
@@ -1101,6 +1112,7 @@ mod tests {
             duration_ms: 300,
             image: false,
             hidden: false,
+            themed: false,
             params: vec![glyphst_effects::ParamDef {
                 id: "amount".into(),
                 label: "Amount".into(),
@@ -1119,7 +1131,7 @@ mod tests {
         ];
         let mut prefs = Prefs {
             background: "wave".into(),
-            overlay: Some("night".into()),
+            tint_light: Some("night".into()),
             ..Prefs::default()
         };
         // The page itself, tall enough that every gallery is in view
@@ -1147,8 +1159,8 @@ mod tests {
             );
         });
         output.textures_delta.clear();
-        // Cards draw live previews: one per transition and tint, none for
-        // "None"; backgrounds are in Appearance.
+        // Cards draw live previews: one per transition, none for "None";
+        // backgrounds and tints are in Appearance.
         let previews = |output: &egui::FullOutput| {
             output
                 .shapes
@@ -1156,7 +1168,7 @@ mod tests {
                 .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
                 .count()
         };
-        assert_eq!(previews(&output), 2);
+        assert_eq!(previews(&output), 1);
         // Appearance › background: an effect background shows the gallery
         // of effects, without the solid colour and the wallpaper.
         let mut output = ctx.run_ui(input.clone(), |ui| {
@@ -1167,6 +1179,19 @@ mod tests {
                     effects: &effects,
                     time: 1.0,
                     actions: &mut actions,
+                },
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(previews(&output), 1);
+        // Appearance › page tint: the tints, with "None".
+        let mut output = ctx.run_ui(input.clone(), |ui| {
+            crate::effects_page::tint_group(
+                ui,
+                crate::effects_page::TintGroup {
+                    prefs: &mut prefs,
+                    effects: &effects,
+                    time: 1.0,
                 },
             );
         });

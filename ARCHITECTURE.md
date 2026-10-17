@@ -106,8 +106,10 @@ book's) and the page tint, an overlay that each view draws from its pages
 into a tinted image before the content effect, so tints survive
 transitions and splits. Defaults are set in Settings (the background in
 Appearance as a theme colour, a colour, the wallpaper with its dim, blur
-and parallax, or an effect; transitions and tints in Effects), with
-parameters per effect; a book's own choices (the Effects drawer) live in
+and parallax, or an effect; a page tint per light and dark theme, also in
+Appearance; transitions in Effects), with parameters per effect (a
+`colour` parameter is sRGB packed in a float; `themed` tints get the
+theme's text and pane colours from the app); a book's own choices (the Effects drawer) live in
 the Reader's preferences by document path, not in the library, whose
 formats are compatibility contracts. Preview cards are paint callbacks
 drawing each effect over two sample pages (or the wallpaper).
