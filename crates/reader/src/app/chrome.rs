@@ -32,6 +32,8 @@ pub(super) struct StageChrome {
 enum PaneHeaderAction {
     Focus(u64),
     Close(u64),
+    /// The zoom was clicked: back to 100% (fit width).
+    FitWidth(u64),
 }
 
 impl ReaderApp {
@@ -198,8 +200,11 @@ impl ReaderApp {
         if presenting || self.zen {
             return (animating, drawn);
         }
-        if !split && let Some(breadcrumb) = layout.breadcrumb {
-            self.breadcrumb(ui, breadcrumb, active);
+        if !split
+            && let Some(breadcrumb) = layout.breadcrumb
+            && self.breadcrumb(ui, breadcrumb, active)
+        {
+            self.tabs[active].apply(ViewAction::FitWidth, false);
         }
         if split {
             self.pane_dividers(ui, &dividers);
@@ -213,6 +218,12 @@ impl ReaderApp {
                 }
             }
             Some(PaneHeaderAction::Focus(id)) => self.focus_tab(id),
+            Some(PaneHeaderAction::FitWidth(id)) => {
+                self.focus_tab(id);
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    tab.apply(ViewAction::FitWidth, false);
+                }
+            }
             None => {}
         }
         self.tab_drop(&ctx);
@@ -318,8 +329,9 @@ impl ReaderApp {
 
     /// The breadcrumb over the pages: the file and the outline path to the
     /// current page, and at the right the render time and zoom (or the
-    /// find counts while finding).
-    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) {
+    /// find counts while finding). Returns whether the zoom was clicked,
+    /// which resets it.
+    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) -> bool {
         let tokens = Tokens::get(ui.ctx());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
@@ -342,17 +354,22 @@ impl ReaderApp {
             let pages = tab.find.matched_pages();
             format!("{} matches · {pages} pages", tab.find.matches.len())
         } else {
-            format!(
-                "gpu · {:.1} ms · {:.0}%",
-                self.frames.percentile_ms(0.5),
-                tab.view.scale / tab.fit_scale() * 100.0
-            )
+            format!("gpu · {:.1} ms · ", self.frames.percentile_ms(0.5))
         };
         let font = theme::mono(11.0);
         let y = rect.center().y;
+        // The page zoom ends the meta, on its own to be clicked.
+        let zoomed = tab.overview.is_none() && !(tab.find.open && !tab.find.query.is_empty());
+        let mut reset = false;
+        let mut meta_right = rect.right() - 12.0;
+        if zoomed {
+            let zoom = zoom_label(ui, pos2(meta_right, y), Align2::RIGHT_CENTER, tab, &tokens);
+            reset = zoom.clicked();
+            meta_right = zoom.rect.left();
+        }
         let meta_rect = ui_text::line(
             ui,
-            pos2(rect.right() - 12.0, y),
+            pos2(meta_right, y),
             Align2::RIGHT_CENTER,
             meta,
             font.clone(),
@@ -413,6 +430,7 @@ impl ReaderApp {
             );
             x = part_rect.right() + 8.0;
         }
+        reset
     }
 
     /// A split pane's header: `▌ file — p.4 / 15 — 100%` and a close
@@ -455,13 +473,8 @@ impl ReaderApp {
             if focused { tokens.text } else { tokens.muted },
             rect.width() * 0.5,
         );
-        let meta = format!(
-            "— p.{} / {} — {:.0}%",
-            tab.current_page() + 1,
-            tab.layout.len(),
-            tab.view.scale / tab.fit_scale() * 100.0
-        );
-        ui_text::line(
+        let meta = format!("— p.{} / {} — ", tab.current_page() + 1, tab.layout.len());
+        let meta = ui_text::line(
             ui,
             pos2(title.right() + 8.0, y),
             Align2::LEFT_CENTER,
@@ -470,6 +483,11 @@ impl ReaderApp {
             tokens.faint,
             (rect.right() - 40.0 - title.right()).max(0.0),
         );
+        if meta.right() + 32.0 < rect.right() - 40.0
+            && zoom_label(ui, pos2(meta.right(), y), Align2::LEFT_CENTER, tab, &tokens).clicked()
+        {
+            return Some(PaneHeaderAction::FitWidth(id));
+        }
         let close = Rect::from_center_size(pos2(rect.right() - 16.0, y), vec2(20.0, 20.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(close));
         if icons::button(&mut child, "x", 20.0, false, "Close the pane").clicked() {
@@ -939,4 +957,31 @@ fn resize_handle(
     .value(width, min..=1200.0)
     .show(ui)
     .delta
+}
+
+/// A tab's zoom as a percentage of fit width, anchored at `pos`; clicking
+/// it goes back to 100%.
+fn zoom_label(
+    ui: &mut egui::Ui,
+    pos: egui::Pos2,
+    align: Align2,
+    tab: &DocumentTab,
+    tokens: &Tokens,
+) -> egui::Response {
+    let label = format!("{:.0}%", tab.view.scale / tab.fit_scale() * 100.0);
+    let font = theme::mono(11.0);
+    let size = ui_text::width(ui, &label, &font);
+    let rect = align.anchor_size(pos, vec2(size, 20.0));
+    let response = ui
+        .interact(rect, Id::new(("zoom-label", tab.id)), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .tip("back to 100% (fit width)");
+    let color = if response.hovered() {
+        tokens.text
+    } else {
+        tokens.faint
+    };
+    ui.painter()
+        .text(rect.center(), Align2::CENTER_CENTER, label, font, color);
+    response
 }

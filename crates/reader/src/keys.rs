@@ -974,6 +974,11 @@ mod tests {
             "layouts type + with Shift"
         );
         assert_eq!(
+            press(&keymap, Key::Equals, none, false),
+            [Command::FitWidth],
+            "= fits the width, as in sioyek"
+        );
+        assert_eq!(
             press(&keymap, Key::P, Modifiers::ALT, false),
             [],
             "Alt+P is not P"

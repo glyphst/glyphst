@@ -121,6 +121,20 @@ impl KeymapPage {
             egui::pos2(area.center().x - width / 2.0, area.top() + 24.0),
             vec2(width, (area.height() - 24.0).max(0.0)),
         );
+        // An opaque card under the page, so a transparent window doesn't
+        // show the desktop through the text; it ends 16pt under the table.
+        let card = egui::Rect::from_min_max(
+            page.min - vec2(16.0, 16.0),
+            egui::pos2(page.right() + 16.0, area.bottom() - BOTTOM_GAP + 16.0),
+        );
+        ui.painter()
+            .rect_filled(card, tokens.pop_radius(), tokens.surface.to_opaque());
+        ui.painter().rect_stroke(
+            card,
+            tokens.pop_radius(),
+            tokens.hairline(),
+            egui::StrokeKind::Inside,
+        );
         ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
             glyphst_ui::settings::form_style(ui);
             glyphst_ui::settings::heading(

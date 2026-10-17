@@ -162,6 +162,7 @@ if [[ ${tier} == screens ]]; then
         "07-translation @ --settings translation"
         "07-ai @ --settings ai"
         "07-shortcuts --settings shortcuts"
+        "07-shortcuts-glass --settings shortcuts --opacity 0.5"
     )
     for theme in dark light; do
         for state in "${states[@]}"; do

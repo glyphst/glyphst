@@ -104,6 +104,9 @@ pub struct Launch {
     pub overlay: Option<String>,
     /// The wallpaper image.
     pub wallpaper: Option<String>,
+    /// A transparent window at this opacity, in memory (`--opacity`, for
+    /// screenshots of glass).
+    pub opacity: Option<f32>,
     pub theme: Option<ThemePreference>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
@@ -370,20 +373,26 @@ impl ReaderApp {
         }
         // Scripted runs and fakes keep settings and keys in memory, so fake
         // providers never reach the user's config or keychain.
-        let user_settings = if launch.translate_fake || launch.ai_fake || !persist {
-            let mut settings = glyphst_settings::Settings::default();
-            if launch.translate_fake {
-                let port = crate::fake_providers::start_translation_server()?;
-                crate::fake_providers::use_fake_translation(&mut settings, port);
-            }
-            if launch.ai_fake {
-                let port = crate::fake_providers::start_ai_server()?;
-                crate::fake_providers::use_fake_ai(&mut settings, port);
-            }
-            UserSettings::in_memory(&cc.egui_ctx, settings, Default::default())
-        } else {
-            UserSettings::load(&cc.egui_ctx)
-        };
+        let user_settings =
+            if launch.translate_fake || launch.ai_fake || launch.opacity.is_some() || !persist {
+                let mut settings = glyphst_settings::Settings::default();
+                if let Some(opacity) = launch.opacity {
+                    settings.window.set_transparent(true);
+                    settings.window.opacity = opacity;
+                    settings.window.sanitize();
+                }
+                if launch.translate_fake {
+                    let port = crate::fake_providers::start_translation_server()?;
+                    crate::fake_providers::use_fake_translation(&mut settings, port);
+                }
+                if launch.ai_fake {
+                    let port = crate::fake_providers::start_ai_server()?;
+                    crate::fake_providers::use_fake_ai(&mut settings, port);
+                }
+                UserSettings::in_memory(&cc.egui_ctx, settings, Default::default())
+            } else {
+                UserSettings::load(&cc.egui_ctx)
+            };
         let translator = Translator::new(persist, false);
         let chatgpt = {
             let ctx = cc.egui_ctx.clone();

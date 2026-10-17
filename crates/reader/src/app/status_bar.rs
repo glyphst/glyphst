@@ -163,6 +163,10 @@ impl ReaderApp {
             ("zoom-in", keymap.tip("zoom in", Command::ZoomIn)),
             ("fit", keymap.tip("fit width", Command::FitWidth)),
             (
+                "zoom-reset",
+                keymap.tip("back to 100% (fit width)", Command::FitWidth),
+            ),
+            (
                 "spread",
                 keymap.tip("two-page spread", Command::ToggleSpread),
             ),
@@ -433,7 +437,7 @@ impl ReaderApp {
                 .priority(2)
                 .tooltip(tip("fit")),
         );
-        let (zoom_out, zoom_in) = (tip("zoom-out"), tip("zoom-in"));
+        let (zoom_out, zoom_in, zoom_reset) = (tip("zoom-out"), tip("zoom-in"), tip("zoom-reset"));
         segments.push(
             Segment::custom("zoom", Side::Right, 108.0, move |ui, rect| {
                 let y = rect.center().y;
@@ -468,12 +472,28 @@ impl ReaderApp {
                 if step(rect.right() - 12.0, "+", &zoom_in) {
                     report.borrow_mut().actions.push(ViewAction::ZoomIn);
                 }
+                // The percentage between the steps resets the zoom.
+                let reset = Rect::from_x_y_ranges(
+                    (rect.left() + 42.0)..=(rect.right() - 20.0),
+                    (y - 10.0)..=(y + 10.0),
+                );
+                let response = ui
+                    .interact(reset, ui.id().with("zoom-reset"), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .tip(&zoom_reset);
+                if response.clicked() {
+                    report.borrow_mut().actions.push(ViewAction::FitWidth);
+                }
                 ui.painter().text(
-                    pos2((rect.left() + 34.0 + rect.right() - 12.0) / 2.0, y),
+                    reset.center(),
                     Align2::CENTER_CENTER,
                     format!("{zoom:.0}%"),
                     theme::mono(11.0),
-                    tokens.muted,
+                    if response.hovered() {
+                        tokens.text
+                    } else {
+                        tokens.muted
+                    },
                 );
             })
             .priority(6),

@@ -3,7 +3,7 @@
 //!
 //! glyphst-reader [documents…] [--background ID] [--transition ID|none] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
-//!     [--wallpaper PATH] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
+//!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
 //!     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
@@ -11,7 +11,7 @@
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
 //! dragging on text selects it (Alt+drag a column), double and triple
 //! clicks select a word and a line, right-click for highlights and notes.
-//! Keys: Ctrl+O open, Ctrl+W close, Ctrl+Tab switch tabs; + / - / 0 zoom
+//! Keys: Ctrl+O open, Ctrl+W close, Ctrl+Tab switch tabs; + / - / = (or 0) zoom
 //! and fit, Page Up / Page Down / Space turn pages, Home / End, P presents,
 //! Ctrl+F find (F3 next), Ctrl+C copy, Ctrl+A select the page, Ctrl+D
 //! bookmark, Ctrl+T translate the selection, Ctrl+L assistant, Alt+Left /
@@ -78,7 +78,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -96,6 +96,7 @@ fn parse_args() -> Result<Launch> {
         split: None,
         overlay: None,
         wallpaper: None,
+        opacity: None,
         arrangement: None,
         find: None,
         page: None,
@@ -139,6 +140,9 @@ fn parse_args() -> Result<Launch> {
             "--background" => launch.background = Some(value()?),
             "--overlay" => launch.overlay = Some(value()?),
             "--wallpaper" => launch.wallpaper = Some(value()?),
+            "--opacity" => {
+                launch.opacity = Some(value()?.parse().context("--opacity takes a number")?);
+            }
             "--rotate" => {
                 let rotation = match value()?.as_str() {
                     "0" => 0,
