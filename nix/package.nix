@@ -39,6 +39,8 @@
   runtimeLibraries = [
     # rfd's file dialogs dlopen libdbus to reach the xdg portal.
     dbus
+    # winit loads it at run time.
+    libxkbcommon
     vulkan-loader
     wayland
     libva
