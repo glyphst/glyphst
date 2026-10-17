@@ -177,8 +177,18 @@ that repeat, A Enter, B Escape, bumpers Tab), so every list and button works
 as from the keyboard; on a document the left stick scrolls, the triggers
 zoom and the buttons run commands through `pad_keys.rs` (taps, holds and
 `select+` chords, each command's defaults in `commands.rs`, the user's in the
-prefs), with B fixed as Escape. Scripted runs never read real pads:
-`--pad-demo` plays a scripted pad once the pages are drawn.
+prefs), with B fixed as Escape. The right stick opens a ring of
+commands (`app/ring.rs`, presenting's tools while presenting) and letting
+it go picks; a toast's action takes X. Prompts (`prompts.rs`, glyphst-ui's
+`prompt`) show pad glyphs or key caps after whichever was used last; a pad
+connecting asks whether to switch to gamepad mode. Gamepad mode
+(`couch/`, `app/couch.rs`) replaces the docked shell, fullscreen: a home
+of the recent books, the page alone with a hint bar that fades, and
+contents, go-to-page and menu sheets that take the keys the pad presses.
+It has its own pad defaults and text size (a zoom over the design's
+sizes). Scripted runs never read real pads: `--pad-demo` plays a
+scripted pad once the pages are drawn, `--gamepad-mode` and
+`--fixed-clock` set gamepad mode up for screenshots.
 
 Every user action is a command in a registry (after pdfcraft's): an id,
 a label, default keys and when it can run. Keys, the command palette
