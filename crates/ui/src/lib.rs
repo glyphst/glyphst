@@ -44,6 +44,7 @@ pub mod layout;
 pub mod menu;
 pub mod meter;
 pub mod motif;
+pub mod motion;
 pub mod overlay;
 pub mod paint;
 pub mod pane;

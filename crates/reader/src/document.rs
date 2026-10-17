@@ -25,6 +25,7 @@ use glyphst_pdf::{
     vector_cache::PageCache,
 };
 use glyphst_pdf_gpu::{Camera, PreparedPage, rotate, rotate_rect};
+use glyphst_ui::motion;
 use mupdf::{Colorspace, DisplayList, Matrix};
 
 use crate::generation::PageSketch;
@@ -222,9 +223,6 @@ impl Layout {
     }
 }
 
-/// Exponential approach rate of the animated zoom, per second.
-const ZOOM_RESPONSE: f64 = 18.0;
-
 /// Scroll position and animated zoom of a view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -263,9 +261,14 @@ impl View {
             self.set_scale(self.target_scale);
             return false;
         }
-        let step = 1.0 - (-ZOOM_RESPONSE * seconds.min(1.0 / 30.0)).exp();
-        let scale = (self.scale.ln() + (self.target_scale.ln() - self.scale.ln()) * step).exp();
-        self.set_scale(scale);
+        // Smoothed in log scale, so each doubling takes as long.
+        let scale = motion::approach(
+            self.scale.ln(),
+            self.target_scale.ln(),
+            motion::SCROLL,
+            seconds,
+        );
+        self.set_scale(scale.exp());
         true
     }
 

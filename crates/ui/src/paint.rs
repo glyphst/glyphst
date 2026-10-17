@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use egui::{Color32, Rect, Stroke, vec2};
 
-use crate::theme;
+use crate::{motion, theme};
 
 /// The image coordinates shown at a rect's corners, clockwise from its top
 /// left, when the image is turned `quarter_turns` clockwise: each corner
@@ -46,20 +46,6 @@ pub fn paint_turned_image(
     }
     mesh.indices.extend([0, 1, 2, 0, 2, 3]);
     painter.add(mesh);
-}
-
-/// Durations of the assistant's small motions, after Zeron's `motion.rs`.
-pub mod motion {
-    /// A disclosure opening or closing.
-    pub const COLLAPSE: f32 = 0.18;
-    /// A chevron turning.
-    pub const CHEVRON: f32 = 0.2;
-    /// Controls fading in on hover.
-    pub const HOVER_FADE: f32 = 0.15;
-    /// A menu appearing.
-    pub const MENU_IN: f32 = 0.14;
-    /// One sweep of a shimmer over a running label.
-    pub const SHIMMER_PERIOD: f64 = 2.2;
 }
 
 /// `galley` at `pos` in `base`, with a brighter band (`peak`) sweeping

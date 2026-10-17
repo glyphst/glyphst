@@ -3743,6 +3743,13 @@ impl eframe::App for ReaderApp {
         self.frames.tick();
         self.fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         self.apply_theme(&ctx);
+        // Screenshots are taken of settled frames.
+        let reduce_motion = self.harness.is_some()
+            || self
+                .user_settings
+                .get()
+                .is_some_and(|settings| settings.behavior.reduce_motion);
+        glyphst_ui::motion::set_reduced(&ctx, reduce_motion);
         let blur = self.user_settings.get().is_some_and(|settings| {
             settings.window.blur() && settings.window.opacity_in(self.fullscreen) < 1.0
         });

@@ -17,7 +17,7 @@ use crate::{
     ai_tools::summarize_steps,
     theme::{self, Tokens},
 };
-use glyphst_ui::paint::motion;
+use glyphst_ui::motion;
 
 /// The reserved lane under a message for its actions.
 const LANE: f32 = 22.0;

@@ -285,7 +285,7 @@ impl Menu {
         let opened = ui.ctx().animate_bool_with_time(
             egui::Id::new("assistant-menu-open"),
             true,
-            glyphst_ui::paint::motion::MENU_IN,
+            glyphst_ui::motion::MENU_IN,
         );
         let area = egui::Area::new(egui::Id::new("assistant-menu"))
             .order(egui::Order::Foreground)
