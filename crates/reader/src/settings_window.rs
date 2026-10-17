@@ -847,6 +847,19 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
             },
         );
     });
+    ui.add_space(10.0);
+    motif::rule_title(ui, "gamepad ring", None);
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Push the right stick toward a command and let go to run it; B cancels. \
+             While presenting the stick opens presenting's ring instead.",
+        )
+        .font(theme::regular(12.0))
+        .color(Tokens::get(ui.ctx()).muted),
+    );
+    ui.add_space(8.0);
+    ring_slots(ui, &mut prefs.reading_ring, crate::app::fits_reading_ring);
 }
 
 /// The Presenting page (frame 07): full screen, the clock, and the tool
@@ -910,7 +923,9 @@ fn presenting(ui: &mut egui::Ui, prefs: &mut Prefs) {
         .color(Tokens::get(ui.ctx()).muted),
     );
     ui.add_space(8.0);
-    ring_slots(ui, &mut prefs.present_ring);
+    ring_slots(ui, &mut prefs.present_ring, |command| {
+        command.category() == crate::commands::Category::Present
+    });
 }
 
 /// Talk lengths offered, in minutes.
@@ -918,12 +933,16 @@ const TALK_LENGTHS: [u32; 9] = [0, 5, 10, 15, 20, 30, 45, 60, 90];
 
 /// The ring's eight directions in two columns: up to down-right on the
 /// left, down to up-left on the right.
-fn ring_slots(ui: &mut egui::Ui, slots: &mut crate::present::RingSlots) {
+fn ring_slots(
+    ui: &mut egui::Ui,
+    slots: &mut crate::present::RingSlots,
+    fits: impl Fn(crate::commands::Command) -> bool,
+) {
     const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
     let tokens = Tokens::get(ui.ctx());
     let tools: Vec<crate::commands::Command> = crate::commands::Command::ALL
         .into_iter()
-        .filter(|command| command.category() == crate::commands::Category::Present)
+        .filter(|&command| fits(command))
         .collect();
     let width = ((ui.available_width() - 32.0) / 2.0).max(160.0);
     for row in 0..4 {

@@ -65,7 +65,10 @@ pub(crate) mod agent;
 mod chrome;
 mod page_chrome;
 mod present;
+mod ring;
 mod status_bar;
+
+pub(crate) use ring::fits_reading_ring;
 mod tab_bar;
 
 /// How often the effects folder is looked at for changes.
@@ -239,6 +242,8 @@ pub struct ReaderApp {
     /// and the commands its buttons ran.
     pad_input: GamepadInput,
     pad_commands: Vec<Command>,
+    pad_ring_steps: Vec<crate::pad::route::RingStep>,
+    pad_ring: Option<ring::PadRing>,
     /// Where the pointer was when the pad was last used: moving it away
     /// makes the pointer the last input again.
     pad_pointer: Option<egui::Pos2>,
@@ -470,6 +475,8 @@ impl ReaderApp {
             pad_keymap: Default::default(),
             pad_input: GamepadInput::default(),
             pad_commands: Vec::new(),
+            pad_ring_steps: Vec::new(),
+            pad_ring: None,
             pad_pointer: None,
             last_input: Default::default(),
             frames: FrameTimes::default(),
@@ -2429,6 +2436,10 @@ impl ReaderApp {
                 self.open_library();
                 None
             }
+            Command::Home => {
+                self.activate(None);
+                None
+            }
             Command::ToggleTransparency => {
                 self.toggle_transparency();
                 None
@@ -3851,6 +3862,7 @@ impl eframe::App for ReaderApp {
         raw_input.events.extend(route::key_events(&routed.keys));
         self.pad_input = routed.document;
         self.pad_commands.extend(routed.commands);
+        self.pad_ring_steps.extend(routed.ring);
         if let Some(wait) = routed.wake {
             ctx.request_repaint_after(wait);
         }
@@ -3999,6 +4011,9 @@ impl eframe::App for ReaderApp {
         self.watch_effects(&ctx, now);
         self.update_wallpaper(&ctx);
         let pad = std::mem::take(&mut self.pad_input);
+        for step in std::mem::take(&mut self.pad_ring_steps) {
+            self.pad_ring_step(step, &ctx, now);
+        }
         for command in std::mem::take(&mut self.pad_commands) {
             if let Err(reason) = self.run(command, &ctx)
                 && command.needs() != Needs::Document
@@ -4120,6 +4135,7 @@ impl eframe::App for ReaderApp {
         if presenting && let Some(active) = self.active {
             self.present_overlay(&ctx, active, now);
         }
+        self.pad_ring_overlay(&ctx);
         // Above the status bar while it shows.
         let lift = if presenting || self.zen {
             28.0

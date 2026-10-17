@@ -333,6 +333,22 @@ pub fn default_ring() -> RingSlots {
     RING_DEFAULTS.map(|command| Some(command.id().to_string()))
 }
 
+/// The reading ring's defaults (frame 09b), from up clockwise.
+pub const READING_RING_DEFAULTS: [Option<Command>; glyphst_ui::ring::SLOTS] = [
+    Some(Command::Outline),
+    Some(Command::Bookmark),
+    Some(Command::FitWidth),
+    Some(Command::FitPage),
+    Some(Command::PageOverview),
+    None,
+    Some(Command::Back),
+    Some(Command::Home),
+];
+
+pub fn default_reading_ring() -> RingSlots {
+    READING_RING_DEFAULTS.map(|command| command.map(|command| command.id().to_string()))
+}
+
 /// The presentation's state, new each time presenting starts (ink stays
 /// with the tab).
 #[derive(Debug)]

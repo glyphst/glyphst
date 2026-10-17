@@ -161,6 +161,8 @@ pub struct Prefs {
     pub talk_minutes: u32,
     /// The tool ring's commands by id, from up clockwise.
     pub present_ring: RingSlots,
+    /// The reading ring's slots (the right stick opens it).
+    pub reading_ring: RingSlots,
     pub last_session: LastSession,
 }
 
@@ -209,6 +211,7 @@ impl Default for Prefs {
             present_page_number: false,
             talk_minutes: 0,
             present_ring: present::default_ring(),
+            reading_ring: present::default_reading_ring(),
             last_session: LastSession::default(),
         }
     }

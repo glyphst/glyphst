@@ -238,6 +238,7 @@ if [[ ${tier} == screens ]]; then
         "07-ai @ --settings ai"
         "07-shortcuts --settings shortcuts"
         "07-shortcuts-glass --settings shortcuts --opacity 0.5"
+        "09b-pad-ring @ --pad-demo stick:R:0.65,-0.65"
     )
     if ((${#names[@]} > 0)); then
         chosen=()

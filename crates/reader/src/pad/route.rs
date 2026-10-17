@@ -7,6 +7,8 @@
 
 use std::time::{Duration, Instant};
 
+use egui::Vec2;
+
 use super::{Dir, GamepadInput, PadButton, PadEvent, PadFrame, Repeat, repeat::stick_dir};
 use crate::{
     commands::Command,
@@ -42,6 +44,24 @@ pub fn owner(state: &RouteState) -> Owner {
     }
 }
 
+/// How far the right stick goes before the ring opens, how far it aims a
+/// slot, and how far back it comes to let go (and pick).
+const RING_OPEN: f32 = 0.6;
+const RING_AIM: f32 = 0.5;
+const RING_LET_GO: f32 = 0.25;
+
+/// What the right stick does to the ring.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RingStep {
+    /// Opens it, aimed so.
+    Open(Vec2),
+    Aim(Vec2),
+    /// Letting go (or A) picks the slot last aimed at.
+    Pick(usize),
+    /// B, or letting go before aiming at one.
+    Cancel,
+}
+
 /// A frame of pad input, routed.
 #[derive(Debug, Default, PartialEq)]
 pub struct Routed {
@@ -52,6 +72,7 @@ pub struct Routed {
     pub commands: Vec<Command>,
     /// When a held direction repeats, or a held button becomes a hold.
     pub wake: Option<Duration>,
+    pub ring: Option<RingStep>,
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +82,11 @@ pub struct Router {
     repeat: Repeat,
     stick: Option<Dir>,
     presses: PadPresses,
+    /// The ring is open, with the slot last aimed at.
+    ring: Option<Option<usize>>,
+    /// The ring closed with the stick still out: it opens again only once
+    /// the stick has come back.
+    ring_spent: bool,
 }
 
 impl Router {
@@ -86,6 +112,15 @@ impl Router {
             }
         }
         let owner = owner(state);
+        if let Some(step) = self.ring_step(frame, owner, &pressed) {
+            // The ring takes the pad while it is open.
+            self.presses
+                .update(&PadKeymap::default(), &frame.events, now);
+            return Routed {
+                ring: Some(step),
+                ..Routed::default()
+            };
+        }
         // The stick moves through lists and the page overview; on a
         // document it scrolls.
         let grid = owner == Owner::Document && state.overview;
@@ -161,6 +196,45 @@ impl Router {
             }
         }
         routed
+    }
+}
+
+impl Router {
+    /// The right stick opens the ring and aims it; letting go picks.
+    fn ring_step(
+        &mut self,
+        frame: &PadFrame,
+        owner: Owner,
+        pressed: &[PadButton],
+    ) -> Option<RingStep> {
+        let stick = frame.axes.right;
+        let reach = stick.length();
+        self.ring_spent &= reach >= RING_LET_GO;
+        let Some(aimed) = self.ring else {
+            if owner == Owner::Document && reach > RING_OPEN && !self.ring_spent {
+                self.ring = Some(Some(glyphst_ui::ring::slot_toward(stick)));
+                return Some(RingStep::Open(stick));
+            }
+            return None;
+        };
+        let close = |router: &mut Self, step| {
+            router.ring = None;
+            router.ring_spent = reach >= RING_LET_GO;
+            Some(step)
+        };
+        if owner != Owner::Document || pressed.contains(&PadButton::East) {
+            return close(self, RingStep::Cancel);
+        }
+        let aimed = if reach >= RING_AIM {
+            Some(glyphst_ui::ring::slot_toward(stick))
+        } else {
+            aimed
+        };
+        self.ring = Some(aimed);
+        if pressed.contains(&PadButton::South) || reach < RING_LET_GO {
+            return close(self, aimed.map_or(RingStep::Cancel, RingStep::Pick));
+        }
+        Some(RingStep::Aim(stick))
     }
 }
 
@@ -402,6 +476,75 @@ mod tests {
             routed.commands,
             [Command::NextPage],
             "select is no longer held, so this is no chord"
+        );
+    }
+
+    fn right_stick(at: Vec2) -> PadFrame {
+        PadFrame {
+            events: Vec::new(),
+            axes: Axes {
+                right: at,
+                ..Axes::default()
+            },
+        }
+    }
+
+    #[test]
+    fn the_right_stick_opens_the_ring_and_letting_go_picks() {
+        let mut router = Router::default();
+        let keymap = keymap();
+        let now = Instant::now();
+        let mut route = |frame: &PadFrame| router.route(frame, &DOCUMENT, &keymap, now);
+        assert_eq!(route(&right_stick(egui::vec2(0.3, 0.0))).ring, None);
+        assert_eq!(
+            route(&right_stick(egui::vec2(0.0, -0.9))).ring,
+            Some(RingStep::Open(egui::vec2(0.0, -0.9)))
+        );
+        let aimed = route(&right_stick(egui::vec2(0.9, 0.0)));
+        assert_eq!(aimed.ring, Some(RingStep::Aim(egui::vec2(0.9, 0.0))));
+        // On the way back the slot stays the one last aimed at.
+        route(&right_stick(egui::vec2(0.3, 0.0)));
+        assert_eq!(
+            route(&right_stick(Vec2::ZERO)).ring,
+            Some(RingStep::Pick(2))
+        );
+        assert_eq!(route(&right_stick(Vec2::ZERO)).ring, None, "closed");
+    }
+
+    #[test]
+    fn the_ring_takes_the_pad_and_b_cancels_it() {
+        let mut router = Router::default();
+        let keymap = keymap();
+        let now = Instant::now();
+        router.route(&right_stick(egui::vec2(0.9, 0.0)), &DOCUMENT, &keymap, now);
+        let mut pressed = right_stick(egui::vec2(0.9, 0.0));
+        pressed.events = tap(PadButton::RightBumper);
+        let routed = router.route(&pressed, &DOCUMENT, &keymap, now);
+        assert_eq!(routed.commands, [], "no page turns under the ring");
+        pressed.events = tap(PadButton::East);
+        let routed = router.route(&pressed, &DOCUMENT, &keymap, now);
+        assert_eq!(routed.ring, Some(RingStep::Cancel));
+        assert_eq!(
+            routed.keys,
+            [],
+            "B closes the ring, not the document's things"
+        );
+        let modal = RouteState {
+            modal: true,
+            ..DOCUMENT
+        };
+        let still_out = router.route(&right_stick(egui::vec2(0.9, 0.0)), &DOCUMENT, &keymap, now);
+        assert_eq!(
+            still_out.ring, None,
+            "it opens again only once the stick is back"
+        );
+        router.route(&right_stick(Vec2::ZERO), &DOCUMENT, &keymap, now);
+        router.route(&right_stick(egui::vec2(0.9, 0.0)), &DOCUMENT, &keymap, now);
+        let routed = router.route(&right_stick(egui::vec2(0.9, 0.0)), &modal, &keymap, now);
+        assert_eq!(
+            routed.ring,
+            Some(RingStep::Cancel),
+            "a window in front closes it"
         );
     }
 

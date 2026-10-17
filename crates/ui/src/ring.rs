@@ -70,6 +70,23 @@ pub fn pick(center: Pos2, pointer: Pos2) -> Pick {
     Pick::Slot(slot)
 }
 
+/// The slot a stick pushed toward `direction` points at.
+pub fn slot_toward(direction: Vec2) -> usize {
+    let turn = direction.x.atan2(-direction.y).rem_euclid(TAU) / TAU;
+    (turn * SLOTS as f32 + 0.5) as usize % SLOTS
+}
+
+/// Where the pointer is for a stick at `stick` (-1..=1): out from the
+/// centre, short of the rim.
+pub fn stick_pointer(center: Pos2, stick: Vec2) -> Pos2 {
+    let stick = if stick.length() > 1.0 {
+        stick.normalized()
+    } else {
+        stick
+    };
+    center + stick * (DIAMETER / 2.0 - 12.0)
+}
+
 /// Where a ring opened at `pointer` goes so it fits inside `screen`.
 pub fn center_within(pointer: Pos2, screen: egui::Rect) -> Pos2 {
     let radius = DIAMETER / 2.0 + 1.0;
@@ -243,6 +260,24 @@ mod tests {
     use egui::pos2;
 
     use super::*;
+
+    #[test]
+    fn sticks_point_at_slots_clockwise_from_up() {
+        assert_eq!(slot_toward(vec2(0.0, -1.0)), 0);
+        assert_eq!(slot_toward(vec2(0.7, -0.7)), 1);
+        assert_eq!(slot_toward(vec2(1.0, 0.0)), 2);
+        assert_eq!(slot_toward(vec2(0.0, 1.0)), 4);
+        assert_eq!(slot_toward(vec2(-1.0, 0.1)), 6);
+        let center = pos2(100.0, 100.0);
+        assert_eq!(
+            pick(center, stick_pointer(center, vec2(1.0, 0.0))),
+            Pick::Slot(2)
+        );
+        assert_eq!(
+            pick(center, stick_pointer(center, Vec2::ZERO)),
+            Pick::Cancel
+        );
+    }
 
     #[test]
     fn the_direction_picks_the_slot_clockwise_from_up() {

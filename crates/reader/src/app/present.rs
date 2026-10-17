@@ -63,7 +63,7 @@ impl ReaderApp {
     }
 
     /// The ring's commands from the preferences, from up clockwise.
-    fn ring_commands(&self) -> [Option<Command>; ring::SLOTS] {
+    pub(super) fn ring_commands(&self) -> [Option<Command>; ring::SLOTS] {
         self.prefs.present_ring.clone().map(|id| {
             id.as_deref()
                 .and_then(Command::from_id)

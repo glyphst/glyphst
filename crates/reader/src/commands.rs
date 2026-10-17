@@ -28,6 +28,8 @@ pub enum Command {
     ReadingActivity,
     /// The library tab (frame 04d).
     Library,
+    /// The home tab.
+    Home,
     ToggleSidebar,
     ToggleStats,
     ThemeSystem,
@@ -180,7 +182,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 77] = [
+    pub const ALL: [Self; 78] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -192,6 +194,7 @@ impl Command {
         Self::NewTab,
         Self::ReadingActivity,
         Self::Library,
+        Self::Home,
         Self::ToggleSidebar,
         Self::ToggleStats,
         Self::ThemeSystem,
@@ -274,6 +277,7 @@ impl Command {
             Self::NewTab => "app.new_tab",
             Self::ReadingActivity => "app.reading_activity",
             Self::Library => "app.library",
+            Self::Home => "app.home",
             Self::ToggleTransparency => "app.toggle_transparency",
             Self::UiScaleUp => "app.ui_scale_up",
             Self::UiScaleDown => "app.ui_scale_down",
@@ -360,6 +364,7 @@ impl Command {
             Self::NewTab => "New tab",
             Self::ReadingActivity => "Reading activity",
             Self::Library => "Library",
+            Self::Home => "Home",
             Self::ToggleTransparency => "Toggle transparency",
             Self::UiScaleUp => "Larger interface",
             Self::UiScaleDown => "Smaller interface",
@@ -443,6 +448,7 @@ impl Command {
             Self::NewTab => "plus",
             Self::ReadingActivity => "activity",
             Self::Library => "library",
+            Self::Home => "house",
             Self::ToggleTransparency => "eye",
             Self::UiScaleUp => "a-arrow-up",
             Self::UiScaleDown => "a-arrow-down",
@@ -521,6 +527,7 @@ impl Command {
             | Self::NewTab
             | Self::ReadingActivity
             | Self::Library
+            | Self::Home
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
@@ -665,6 +672,7 @@ impl Command {
             | Self::KeyboardShortcuts
             | Self::ReadingActivity
             | Self::Library
+            | Self::Home
             | Self::ToggleTransparency
             | Self::KeysStandard
             | Self::KeysVim
@@ -769,6 +777,7 @@ impl Command {
             | Self::NewTab
             | Self::ReadingActivity
             | Self::Library
+            | Self::Home
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
