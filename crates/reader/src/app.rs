@@ -2973,6 +2973,11 @@ impl ReaderApp {
             gamepad: pad,
             seconds,
             now: Some(now),
+            smooth: !glyphst_ui::motion::is_reduced(&ctx)
+                && self
+                    .user_settings
+                    .get()
+                    .is_none_or(|settings| settings.behavior.smooth_scrolling),
         };
         let turning = self.transition.is_some();
         self.tabs[active].pixels_per_point = f64::from(ppp);

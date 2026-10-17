@@ -233,6 +233,8 @@ pub struct View {
     pub target_scale: f64,
     /// View pixel kept fixed while the zoom animates.
     pub anchor: [f64; 2],
+    /// Where a glide (a smoothed scroll) takes `origin`.
+    pub glide: Option<[f64; 2]>,
 }
 
 impl View {
@@ -242,7 +244,40 @@ impl View {
             scale,
             target_scale: scale,
             anchor: [0.0; 2],
+            glide: None,
         }
+    }
+
+    /// Where the view is going: the glide's end, or where it is.
+    pub fn destination(&self) -> [f64; 2] {
+        self.glide.unwrap_or(self.origin)
+    }
+
+    /// Ends a glide at once, at its end.
+    pub fn settle(&mut self) {
+        if let Some(end) = self.glide.take() {
+            self.origin = end;
+        }
+    }
+
+    /// Turns the move from `shown` to `origin` into a glide. A move longer
+    /// than `reach` page points jumps to `reach / 2` short of its end and
+    /// glides from there, so the pages between are never loaded.
+    pub fn glide_from(&mut self, shown: [f64; 2], reach: f64) {
+        let end = self.origin;
+        let [dx, dy] = [end[0] - shown[0], end[1] - shown[1]];
+        let distance = dx.hypot(dy);
+        if distance == 0.0 {
+            return;
+        }
+        let start = if distance > reach {
+            let left = reach / 2.0 / distance;
+            [end[0] - dx * left, end[1] - dy * left]
+        } else {
+            shown
+        };
+        self.origin = start;
+        self.glide = Some(end);
     }
 
     pub fn zoom_by(&mut self, factor: f64, anchor: [f64; 2], min: f64, max: f64) {
@@ -250,53 +285,80 @@ impl View {
         self.target_scale = (self.target_scale * factor).clamp(min, max);
     }
 
+    /// Scrolls at once (a drag, the wheel), carrying a glide along.
     pub fn scroll_by_pixels(&mut self, dx: f64, dy: f64) {
-        self.origin[0] += dx / self.scale;
-        self.origin[1] += dy / self.scale;
+        self.shift([dx / self.scale, dy / self.scale]);
     }
 
-    /// Advances the zoom animation; returns whether it is still running.
-    pub fn animate(&mut self, seconds: f64) -> bool {
-        if (self.target_scale / self.scale - 1.0).abs() < 1e-4 {
-            self.set_scale(self.target_scale);
-            return false;
+    fn shift(&mut self, [dx, dy]: [f64; 2]) {
+        self.origin[0] += dx;
+        self.origin[1] += dy;
+        if let Some(end) = &mut self.glide {
+            end[0] += dx;
+            end[1] += dy;
         }
-        // Smoothed in log scale, so each doubling takes as long.
-        let scale = motion::approach(
-            self.scale.ln(),
-            self.target_scale.ln(),
-            motion::SCROLL,
-            seconds,
-        );
-        self.set_scale(scale.exp());
+    }
+
+    /// Advances the zoom and glide animations; returns whether one is
+    /// still running.
+    pub fn animate(&mut self, seconds: f64) -> bool {
+        let zooming = (self.target_scale / self.scale - 1.0).abs() >= 1e-4;
+        if zooming {
+            // Smoothed in log scale, so each doubling takes as long.
+            let scale = motion::approach(
+                self.scale.ln(),
+                self.target_scale.ln(),
+                motion::SCROLL,
+                seconds,
+            );
+            self.set_scale(scale.exp());
+        } else {
+            self.set_scale(self.target_scale);
+        }
+        let Some(end) = self.glide else {
+            return zooming;
+        };
+        let origin = self.origin;
+        self.origin =
+            [0, 1].map(|axis| motion::approach(origin[axis], end[axis], motion::SCROLL, seconds));
+        // Within a quarter of a device pixel it has arrived.
+        let left = (end[0] - self.origin[0]).hypot(end[1] - self.origin[1]);
+        if left * self.scale < 0.25 {
+            self.settle();
+            return zooming;
+        }
         true
     }
 
     /// Sets the scale immediately, keeping the anchor fixed on screen.
     pub fn set_scale(&mut self, scale: f64) {
         let [ax, ay] = self.anchor;
-        let page = [
-            self.origin[0] + ax / self.scale,
-            self.origin[1] + ay / self.scale,
-        ];
+        self.shift([ax / self.scale - ax / scale, ay / self.scale - ay / scale]);
         self.scale = scale;
-        self.origin = [page[0] - ax / scale, page[1] - ay / scale];
     }
 
-    /// Keeps the view within the document, centering it when narrower.
+    /// Keeps the view, and a glide's end, within the document, centering
+    /// them when narrower.
     pub fn clamp(&mut self, layout: &Layout, viewport: [f64; 2]) {
+        self.origin = self.clamped(self.origin, layout, viewport);
+        self.glide = self.glide.map(|end| self.clamped(end, layout, viewport));
+    }
+
+    fn clamped(&self, [x, y]: [f64; 2], layout: &Layout, viewport: [f64; 2]) -> [f64; 2] {
         let [width, height] = [viewport[0] / self.scale, viewport[1] / self.scale];
         let margin = PAGE_GAP;
-        self.origin[0] = if width >= layout.width + 2.0 * margin {
-            (layout.width - width) / 2.0
-        } else {
-            self.origin[0].clamp(-margin, layout.width + margin - width)
-        };
-        self.origin[1] = if height >= layout.height + 2.0 * margin {
-            (layout.height - height) / 2.0
-        } else {
-            self.origin[1].clamp(-margin, layout.height + margin - height)
-        };
+        [
+            if width >= layout.width + 2.0 * margin {
+                (layout.width - width) / 2.0
+            } else {
+                x.clamp(-margin, layout.width + margin - width)
+            },
+            if height >= layout.height + 2.0 * margin {
+                (layout.height - height) / 2.0
+            } else {
+                y.clamp(-margin, layout.height + margin - height)
+            },
+        ]
     }
 }
 
@@ -1289,6 +1351,39 @@ mod tests {
         }
         assert_eq!(view.scale, 4.0);
         assert!(!view.animate(1.0 / 60.0));
+    }
+
+    #[test]
+    fn a_glide_eases_to_its_end_and_moves_with_direct_scrolling() {
+        let mut view = View::new(2.0);
+        view.origin = [0.0, 100.0];
+        view.glide_from([0.0, 0.0], 1000.0);
+        assert_eq!(view.origin, [0.0, 0.0], "starts where it was shown");
+        assert!(view.animate(1.0 / 60.0));
+        let first = view.origin[1];
+        assert!(first > 0.0 && first < 50.0, "{first}");
+        // A drag during the glide moves both now and the end.
+        view.scroll_by_pixels(0.0, 20.0);
+        assert_eq!(view.origin[1], first + 10.0);
+        assert_eq!(view.glide, Some([0.0, 110.0]));
+        let mut frames = 1;
+        while view.animate(1.0 / 60.0) {
+            frames += 1;
+        }
+        assert_eq!(view.origin, [0.0, 110.0]);
+        assert_eq!(view.glide, None);
+        assert!(frames < 30, "{frames} frames");
+    }
+
+    #[test]
+    fn a_long_glide_jumps_most_of_the_way() {
+        let mut view = View::new(1.0);
+        view.origin = [0.0, 10_000.0];
+        view.glide_from([0.0, 0.0], 800.0);
+        assert_eq!(view.origin, [0.0, 9_600.0]);
+        view.origin = [0.0, 9_000.0];
+        view.settle();
+        assert_eq!(view.origin, [0.0, 10_000.0]);
     }
 
     #[test]

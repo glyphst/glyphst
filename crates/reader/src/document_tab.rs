@@ -109,6 +109,26 @@ pub enum ViewAction {
     },
 }
 
+impl ViewAction {
+    /// Whether it moves the view, so smooth scrolling glides it there.
+    fn glides(self) -> bool {
+        matches!(
+            self,
+            Self::PreviousPage
+                | Self::NextPage
+                | Self::Step(_)
+                | Self::Sideways(_)
+                | Self::HalfPage(_)
+                | Self::GoToPage(_)
+                | Self::GoTo { .. }
+                | Self::GoToEntry(_)
+                | Self::Back
+                | Self::Forward
+                | Self::Reveal { .. }
+        )
+    }
+}
+
 /// Input gathered for one frame of the view.
 #[derive(Default)]
 pub struct ViewInput<'a> {
@@ -123,6 +143,9 @@ pub struct ViewInput<'a> {
     pub seconds: f64,
     /// The frame's time; without it raster layers are not refreshed.
     pub now: Option<Instant>,
+    /// Whether the actions' moves glide (smooth scrolling) instead of
+    /// jumping.
+    pub smooth: bool,
 }
 
 /// A loaded page waiting for the GPU.
@@ -1201,7 +1224,11 @@ impl DocumentTab {
     }
 
     fn picked_view(&self) -> PickedView {
-        (self.view.origin, self.view.target_scale, self.present)
+        (
+            self.view.destination(),
+            self.view.target_scale,
+            self.present,
+        )
     }
 
     pub fn go_to_page(&mut self, page: usize) {
@@ -1449,7 +1476,19 @@ impl DocumentTab {
         }
         let mut turn = None;
         for action in input.actions {
+            // Actions start from where a glide is going.
+            let (shown, glide) = (self.view.origin, self.view.glide);
+            self.view.settle();
+            let settled = self.view.origin;
             turn = turn.or(self.apply(action, turning));
+            if input.smooth && action.glides() && self.present.is_none() {
+                let reach = 2.0 * self.viewport[1] / self.view.scale;
+                self.view.glide_from(shown, reach);
+            } else if self.view.origin == settled {
+                // It didn't move the view: the glide goes on.
+                self.view.origin = shown;
+                self.view.glide = glide;
+            }
         }
         if self.present.is_none() {
             let (min, max) = self.zoom_limits();
@@ -1869,6 +1908,50 @@ mod tests {
         );
         assert_eq!(frame.draws.len(), 1);
         assert_eq!(frame.wanted[0], 0);
+    }
+
+    #[test]
+    fn smooth_scrolling_glides_key_steps_and_adds_up_quick_presses() {
+        let mut tab = tab(20);
+        settle(&mut tab);
+        let start = tab.view.origin[1];
+        let step = STEP_PIXELS / tab.view.scale;
+        let frame = |tab: &mut DocumentTab, actions| {
+            tab.frame(
+                [1248, 900],
+                ViewInput {
+                    zoom: 1.0,
+                    actions,
+                    seconds: 1.0 / 60.0,
+                    smooth: true,
+                    ..Default::default()
+                },
+                false,
+            )
+        };
+        let first = frame(&mut tab, vec![ViewAction::Step(1)]);
+        assert!(first.animating);
+        let moved = tab.view.origin[1] - start;
+        assert!(moved > 0.0 && moved < step, "{moved} of {step}");
+        // A second press goes on from where the first was going.
+        frame(&mut tab, vec![ViewAction::Step(1)]);
+        for _ in 0..60 {
+            frame(&mut tab, Vec::new());
+        }
+        assert!((tab.view.origin[1] - (start + 2.0 * step)).abs() < 1e-6);
+        assert!(!frame(&mut tab, Vec::new()).animating);
+        // Without smooth scrolling a step lands at once.
+        tab.frame(
+            [1248, 900],
+            ViewInput {
+                zoom: 1.0,
+                actions: vec![ViewAction::Step(-2)],
+                seconds: 1.0 / 60.0,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!((tab.view.origin[1] - start).abs() < 1e-6);
     }
 
     #[test]
