@@ -30,6 +30,10 @@ pub enum Command {
     Library,
     /// The home tab.
     Home,
+    /// Gamepad mode (frames 09c–j), on or off.
+    GamepadMode,
+    /// Gamepad mode's menu (frame 09i).
+    GamepadMenu,
     ToggleSidebar,
     ToggleStats,
     ThemeSystem,
@@ -60,6 +64,8 @@ pub enum Command {
     FitWidth,
     /// The whole page in the view.
     FitPage,
+    /// A page chosen on a sheet of pages (frame 09h).
+    GoToPage,
     RotateClockwise,
     RotateCounterclockwise,
     ToggleSpread,
@@ -182,7 +188,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 78] = [
+    pub const ALL: [Self; 81] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -195,6 +201,8 @@ impl Command {
         Self::ReadingActivity,
         Self::Library,
         Self::Home,
+        Self::GamepadMode,
+        Self::GamepadMenu,
         Self::ToggleSidebar,
         Self::ToggleStats,
         Self::ThemeSystem,
@@ -222,6 +230,7 @@ impl Command {
         Self::ZoomOut,
         Self::FitWidth,
         Self::FitPage,
+        Self::GoToPage,
         Self::RotateClockwise,
         Self::RotateCounterclockwise,
         Self::ToggleSpread,
@@ -278,6 +287,8 @@ impl Command {
             Self::ReadingActivity => "app.reading_activity",
             Self::Library => "app.library",
             Self::Home => "app.home",
+            Self::GamepadMode => "app.gamepad_mode",
+            Self::GamepadMenu => "app.gamepad_menu",
             Self::ToggleTransparency => "app.toggle_transparency",
             Self::UiScaleUp => "app.ui_scale_up",
             Self::UiScaleDown => "app.ui_scale_down",
@@ -305,6 +316,7 @@ impl Command {
             Self::ZoomOut => "view.zoom_out",
             Self::FitWidth => "view.fit_width",
             Self::FitPage => "view.fit_page",
+            Self::GoToPage => "view.go_to_page",
             Self::RotateClockwise => "view.rotate_clockwise",
             Self::RotateCounterclockwise => "view.rotate_counterclockwise",
             Self::ToggleSpread => "view.two_page_spread",
@@ -365,6 +377,8 @@ impl Command {
             Self::ReadingActivity => "Reading activity",
             Self::Library => "Library",
             Self::Home => "Home",
+            Self::GamepadMode => "Gamepad mode",
+            Self::GamepadMenu => "Gamepad mode's menu",
             Self::ToggleTransparency => "Toggle transparency",
             Self::UiScaleUp => "Larger interface",
             Self::UiScaleDown => "Smaller interface",
@@ -392,6 +406,7 @@ impl Command {
             Self::ZoomOut => "Zoom out",
             Self::FitWidth => "Fit width",
             Self::FitPage => "Fit page",
+            Self::GoToPage => "Go to page…",
             Self::RotateClockwise => "Rotate clockwise",
             Self::RotateCounterclockwise => "Rotate counterclockwise",
             Self::ToggleSpread => "Two-page spread",
@@ -449,6 +464,7 @@ impl Command {
             Self::ReadingActivity => "activity",
             Self::Library => "library",
             Self::Home => "house",
+            Self::GamepadMode | Self::GamepadMenu => "gamepad-2",
             Self::ToggleTransparency => "eye",
             Self::UiScaleUp => "a-arrow-up",
             Self::UiScaleDown => "a-arrow-down",
@@ -475,6 +491,7 @@ impl Command {
             Self::ZoomOut => "zoom-out",
             Self::FitWidth => "scan",
             Self::FitPage => "maximize-2",
+            Self::GoToPage => "hash",
             Self::RotateClockwise => "rotate-cw",
             Self::RotateCounterclockwise => "rotate-ccw",
             Self::ToggleSpread => "book-open",
@@ -528,6 +545,8 @@ impl Command {
             | Self::ReadingActivity
             | Self::Library
             | Self::Home
+            | Self::GamepadMode
+            | Self::GamepadMenu
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem
@@ -555,6 +574,7 @@ impl Command {
             | Self::ZoomOut
             | Self::FitWidth
             | Self::FitPage
+            | Self::GoToPage
             | Self::RotateClockwise
             | Self::RotateCounterclockwise
             | Self::ToggleSpread
@@ -686,6 +706,9 @@ impl Command {
             | Self::PageColumns
             | Self::Outline
             | Self::FitPage
+            | Self::GoToPage
+            | Self::GamepadMode
+            | Self::GamepadMenu
             | Self::McpConfig => &[],
         }
     }
@@ -727,9 +750,14 @@ impl Command {
     }
 
     /// The pad buttons that run it unless the user changed them, in
-    /// `pad_keys` notation. The sticks, the triggers and B are fixed.
-    pub fn default_pad(self) -> &'static [&'static str] {
+    /// `pad_keys` notation; `couch` for gamepad mode, where start opens its
+    /// menu rather than presenting. The sticks, the triggers and B are
+    /// fixed.
+    pub fn default_pad(self, couch: bool) -> &'static [&'static str] {
         match self {
+            Self::Present if couch => &[],
+            Self::GamepadMenu if couch => &["start"],
+            Self::GamepadMode => &["select+start"],
             Self::NextPage => &["rb", "right"],
             Self::PreviousPage => &["lb", "left"],
             Self::ScrollDown => &["down"],
@@ -778,6 +806,8 @@ impl Command {
             | Self::ReadingActivity
             | Self::Library
             | Self::Home
+            | Self::GamepadMode
+            | Self::GamepadMenu
             | Self::ToggleSidebar
             | Self::ToggleStats
             | Self::ThemeSystem

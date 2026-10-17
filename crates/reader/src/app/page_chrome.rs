@@ -58,7 +58,7 @@ impl ReaderApp {
     ) {
         let tokens = Tokens::get(ui.ctx());
         let tab = &self.tabs[active];
-        if tab.present.is_some() || self.zen {
+        if tab.present.is_some() || self.bare() {
             return;
         }
         // The current page, once it is found wholly on the GPU.

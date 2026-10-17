@@ -168,6 +168,8 @@ pub struct Prefs {
     pub gamepad_mode: bool,
     /// A pad connecting asks whether to switch to gamepad mode.
     pub ask_gamepad_mode: bool,
+    /// Gamepad mode's text size, as zoom over the design's.
+    pub couch_text: f32,
     pub last_session: LastSession,
 }
 
@@ -219,6 +221,7 @@ impl Default for Prefs {
             reading_ring: present::default_reading_ring(),
             gamepad_mode: false,
             ask_gamepad_mode: true,
+            couch_text: 1.0,
             last_session: LastSession::default(),
         }
     }
@@ -287,6 +290,7 @@ impl Prefs {
         }
         prefs.shortcuts = keys::sanitize(&prefs.shortcuts);
         prefs.pad_shortcuts = crate::pad_keys::sanitize(&prefs.pad_shortcuts);
+        prefs.couch_text = crate::couch::step_text_size(prefs.couch_text, 0);
         prefs
             .effect_params
             .retain(|_, values| values.iter().all(|value| value.is_finite()));

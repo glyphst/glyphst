@@ -24,7 +24,8 @@ pub type CoverTexture = (egui::TextureId, f32);
 
 enum Cover {
     Pending,
-    Ready(egui::TextureHandle, f32),
+    /// The texture, its aspect and its colour (gamepad mode's glow).
+    Ready(egui::TextureHandle, f32, Option<egui::Color32>),
     Failed,
 }
 
@@ -68,7 +69,12 @@ impl Covers {
                 Some(image) => {
                     let aspect = image.size[0] as f32 / image.size[1].max(1) as f32;
                     let name = format!("cover:{}", path.display());
-                    Cover::Ready(ctx.load_texture(name, image, Default::default()), aspect)
+                    let tint = tint(&image);
+                    Cover::Ready(
+                        ctx.load_texture(name, image, Default::default()),
+                        aspect,
+                        tint,
+                    )
                 }
                 None => Cover::Failed,
             };
@@ -87,7 +93,7 @@ impl Covers {
     /// The cover of `path`, asking for it the first time.
     pub fn get(&mut self, path: &Path) -> Option<CoverTexture> {
         match self.covers.get(path) {
-            Some(Cover::Ready(texture, aspect)) => Some((texture.id(), *aspect)),
+            Some(Cover::Ready(texture, aspect, _)) => Some((texture.id(), *aspect)),
             Some(Cover::Pending | Cover::Failed) => None,
             None => {
                 if self.requests.send(path.to_path_buf()).is_ok() {
@@ -97,6 +103,41 @@ impl Covers {
             }
         }
     }
+}
+
+impl Covers {
+    /// The colour of `path`'s cover, once it is read: its pixels averaged
+    /// by how colourful each is, so white pages and black text don't wash
+    /// it out. `None` for a cover without colour.
+    pub fn tint(&self, path: &Path) -> Option<egui::Color32> {
+        match self.covers.get(path) {
+            Some(Cover::Ready(_, _, tint)) => *tint,
+            _ => None,
+        }
+    }
+}
+
+fn tint(image: &egui::ColorImage) -> Option<egui::Color32> {
+    let (mut sum, mut weight) = ([0.0f64; 3], 0.0f64);
+    for pixel in image.pixels.iter().step_by(7) {
+        let [r, g, b, _] = pixel.to_array();
+        let chroma = f64::from(r.max(g).max(b) - r.min(g).min(b)) / 255.0;
+        let w = chroma * chroma;
+        sum[0] += f64::from(r) * w;
+        sum[1] += f64::from(g) * w;
+        sum[2] += f64::from(b) * w;
+        weight += w;
+    }
+    let count = (image.pixels.len() / 7).max(1) as f64;
+    if weight / count < 0.01 {
+        return None;
+    }
+    let channel = |c: f64| (c / weight).round().clamp(0.0, 255.0) as u8;
+    Some(egui::Color32::from_rgb(
+        channel(sum[0]),
+        channel(sum[1]),
+        channel(sum[2]),
+    ))
 }
 
 /// The cached cover's file: the document's path, size and modification

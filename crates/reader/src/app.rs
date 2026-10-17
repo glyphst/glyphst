@@ -63,6 +63,7 @@ use crate::{
 
 pub(crate) mod agent;
 mod chrome;
+mod couch;
 mod page_chrome;
 mod present;
 mod ring;
@@ -164,6 +165,9 @@ pub struct Launch {
     /// the real pads, as this family (`--pad-family`).
     pub pad_demo: Option<String>,
     pub pad_family: crate::pad::Family,
+    /// Scripted runs: start in gamepad mode, with the clock at 21:30.
+    pub gamepad_mode: bool,
+    pub fixed_clock: bool,
 }
 
 /// One pane's frame of the document view.
@@ -247,6 +251,8 @@ pub struct ReaderApp {
     /// Pads connecting and going, for the prompts.
     pad_events: Vec<crate::pad::PadEvent>,
     prompts: crate::prompts::Prompts,
+    pub(crate) couch: crate::couch::Couch,
+    fixed_clock: bool,
     /// Where the pointer was when the pad was last used: moving it away
     /// makes the pointer the last input again.
     pad_pointer: Option<egui::Pos2>,
@@ -418,6 +424,9 @@ impl ReaderApp {
         if let Some(wallpaper) = launch.wallpaper {
             prefs.wallpaper = Some(wallpaper);
         }
+        if launch.gamepad_mode {
+            prefs.gamepad_mode = true;
+        }
         if let Some(tab) = launch.sidebar {
             prefs.sidebar = tab;
             prefs.show_sidebar = true;
@@ -482,6 +491,8 @@ impl ReaderApp {
             pad_ring: None,
             pad_events: Vec::new(),
             prompts: Default::default(),
+            couch: Default::default(),
+            fixed_clock: launch.fixed_clock,
             pad_pointer: None,
             last_input: Default::default(),
             frames: FrameTimes::default(),
@@ -2147,7 +2158,18 @@ impl ReaderApp {
             palette: self.palette(),
             opacity: self.window_opacity(),
             density: self.prefs.density,
-            ui_scale: self.prefs.ui_scale,
+            // Gamepad mode draws at the design's sizes, zoomed by its own
+            // text size.
+            ui_scale: if self.prefs.gamepad_mode {
+                theme::BASE_SCALE
+            } else {
+                self.prefs.ui_scale
+            },
+            zoom: if self.prefs.gamepad_mode {
+                self.prefs.couch_text
+            } else {
+                1.0
+            },
             ornaments: self.prefs.glyph_ornaments,
             fonts: self.prefs.fonts.clone(),
         }
@@ -2215,11 +2237,6 @@ impl ReaderApp {
             .is_some_and(|settings| settings.window.transparent());
         self.user_settings
             .edit(|settings| settings.window.set_transparent(!on));
-    }
-
-    /// Turns gamepad mode on or off.
-    pub(crate) fn set_gamepad_mode(&mut self, on: bool, _ctx: &egui::Context) {
-        self.prefs.gamepad_mode = on;
     }
 
     /// Notes a key or a click as the last input, for the hints that follow
@@ -2320,6 +2337,9 @@ impl ReaderApp {
                     }
                 } else if self.zen {
                     self.zen = false;
+                } else if self.prefs.gamepad_mode {
+                    // B leaves the book for gamepad mode's home.
+                    self.activate(None);
                 }
             }
         }
@@ -2351,7 +2371,8 @@ impl ReaderApp {
     /// The keymap for the preferences' preset and shortcuts.
     pub(crate) fn rebuild_keymap(&mut self) {
         self.keymap = Keymap::new(self.prefs.keymap, &self.prefs.shortcuts);
-        self.pad_keymap = crate::pad_keys::PadKeymap::new(&self.prefs.pad_shortcuts);
+        self.pad_keymap =
+            crate::pad_keys::PadKeymap::new(&self.prefs.pad_shortcuts, self.prefs.gamepad_mode);
         self.pending_keys.clear();
     }
 
@@ -2476,10 +2497,29 @@ impl ReaderApp {
                 self.prefs.show_sidebar = !self.prefs.show_sidebar;
                 None
             }
+            Command::Outline if self.prefs.gamepad_mode => {
+                self.open_couch(crate::couch::Overlay::Contents { cursor: 0 });
+                None
+            }
             Command::Outline => {
                 let shown = self.prefs.show_sidebar && self.prefs.sidebar == SidebarTab::Outline;
                 self.prefs.show_sidebar = !shown;
                 self.prefs.sidebar = SidebarTab::Outline;
+                None
+            }
+            Command::GoToPage => {
+                self.open_couch(crate::couch::Overlay::GoTo { page: 0 });
+                None
+            }
+            Command::GamepadMenu => {
+                if !self.prefs.gamepad_mode {
+                    return Err("Only in gamepad mode");
+                }
+                self.open_couch(crate::couch::Overlay::Menu { cursor: 0 });
+                None
+            }
+            Command::GamepadMode => {
+                self.set_gamepad_mode(!self.prefs.gamepad_mode, ctx);
                 None
             }
             Command::ToggleStats => {
@@ -3869,7 +3909,10 @@ impl eframe::App for ReaderApp {
         let frame = self.pads.frame();
         let state = RouteState {
             recording: self.pages.iter().any(Page::is_recording),
-            modal: self.settings_window.open || self.palette.open || self.prompts.is_open(),
+            modal: self.settings_window.open
+                || self.palette.open
+                || self.prompts.is_open()
+                || self.couch.overlay.is_some(),
             document: self.active.is_some(),
             overview: self
                 .active
@@ -3912,6 +3955,16 @@ impl eframe::App for ReaderApp {
         if frame.used() {
             self.last_input = glyphst_ui::pad_glyph::InputDevice::Pad;
             self.pad_pointer = ctx.input(|i| i.pointer.latest_pos());
+            self.couch.hints_until = ctx.input(|i| i.time) + crate::couch::HINTS_SECONDS;
+        }
+        // With the last pad gone its glyphs would name nothing.
+        if frame
+            .events
+            .iter()
+            .any(|event| matches!(event, crate::pad::PadEvent::Disconnected(_)))
+            && self.pads.connected().is_empty()
+        {
+            self.last_input = glyphst_ui::pad_glyph::InputDevice::Pointer;
         }
         glyphst_ui::pad_glyph::set_input(ctx, self.last_input);
     }
@@ -4074,6 +4127,7 @@ impl eframe::App for ReaderApp {
                 self.notices.push(reason.to_string());
             }
         }
+        self.couch_input(&ctx);
         let mut actions = self.global_actions(&ctx);
         actions.append(&mut self.pending_actions);
         if let Some(active) = self.active {
@@ -4096,11 +4150,11 @@ impl eframe::App for ReaderApp {
         self.presenting_edges(&ctx, presenting, now);
         // Zen mode is for reading a document; the home page leaves it.
         self.zen &= self.active.is_some();
-        // The bars slide away for present and zen modes, and back.
+        // The bars slide away for present, zen and gamepad modes, and back.
         let bars = glyphst_ui::motion::smooth_bool(
             &ctx,
             egui::Id::new("bars-shown"),
-            !presenting && !self.zen,
+            !presenting && !self.bare(),
             glyphst_ui::motion::PANEL,
         );
         if bars > 0.0 {
@@ -4152,6 +4206,8 @@ impl eframe::App for ReaderApp {
             .show(ui, |ui| {
                 if self.active.is_some() {
                     (animating, pages_drawn) = self.stage(ui, actions, &pad, seconds, now);
+                } else if self.prefs.gamepad_mode {
+                    self.couch_home(ui);
                 } else if let Some(gallery) = self.gallery.as_mut() {
                     gallery.show(ui);
                 } else if let Some(index) = self.page_focused {
@@ -4188,6 +4244,7 @@ impl eframe::App for ReaderApp {
         if presenting && let Some(active) = self.active {
             self.present_overlay(&ctx, active, now);
         }
+        self.couch_overlay(&ctx);
         self.pad_ring_overlay(&ctx);
         if let Some(answer) = self.prompts.show(&ctx, self.prefs.gamepad_mode) {
             use crate::prompts::Answer;
@@ -4199,7 +4256,7 @@ impl eframe::App for ReaderApp {
             }
         }
         // Above the status bar while it shows.
-        let lift = if presenting || self.zen {
+        let lift = if presenting || self.bare() {
             28.0
         } else {
             glyphst_ui::status::HEIGHT + 16.0

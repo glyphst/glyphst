@@ -72,7 +72,7 @@ impl ReaderApp {
             sidebar_shown,
             assistant: Some(self.prefs.assistant_width),
             assistant_shown,
-            present: presenting || self.zen,
+            present: presenting || self.bare(),
         });
         // The focused pane's tab is always shown.
         let focused_id = self.tabs[active].id;
@@ -87,11 +87,11 @@ impl ReaderApp {
         let (panes, dividers) = if presenting {
             (vec![(focused_id, layout.reading)], Vec::new())
         } else {
-            let split = self.panes.count() > 1 && !self.zen;
+            let split = self.panes.count() > 1 && !self.bare();
             self.panes
                 .rects(if split { column } else { layout.reading })
         };
-        let split = panes.len() > 1 && !self.zen;
+        let split = panes.len() > 1 && !self.bare();
         let ppp = ctx.pixels_per_point();
         let backdrop = if split { column } else { layout.reading };
         let pointer = ctx
@@ -209,7 +209,7 @@ impl ReaderApp {
         self.note_popover(&ctx);
         self.translation_card(&ctx);
         self.quick_ask_ui(&ctx, layout.reading);
-        if presenting || self.zen {
+        if presenting || self.bare() {
             return (animating, drawn);
         }
         if !split

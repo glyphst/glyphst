@@ -197,6 +197,7 @@ pub fn paint(ui: &Ui, rect: Rect, glyph: Glyph, scale: Scale, on: Option<egui::C
 }
 
 /// A glyph and what it does (pen component `pad-hint`): `(A) select`.
+#[derive(Clone, Copy)]
 pub struct Hint<'a> {
     pub glyphs: &'a [Glyph],
     pub label: &'a str,

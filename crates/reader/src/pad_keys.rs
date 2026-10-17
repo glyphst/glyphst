@@ -110,10 +110,13 @@ pub fn sanitize(overrides: &Overrides) -> Overrides {
 pub struct PadKeymap {
     bindings: HashMap<PadChord, Command>,
     chords: HashMap<Command, Vec<PadChord>>,
+    couch: bool,
 }
 
 impl PadKeymap {
-    pub fn new(overrides: &Overrides) -> Self {
+    /// The bindings for `overrides`, over the defaults of gamepad mode
+    /// (`couch`) or of the desktop.
+    pub fn new(overrides: &Overrides, couch: bool) -> Self {
         let chosen: HashMap<Command, Vec<PadChord>> = overrides
             .iter()
             .filter_map(|(id, chords)| {
@@ -124,7 +127,10 @@ impl PadKeymap {
                 ))
             })
             .collect();
-        let mut keymap = Self::default();
+        let mut keymap = Self {
+            couch,
+            ..Self::default()
+        };
         // The user's buttons claim their bindings first, then defaults take
         // what is left.
         for pass_chosen in [true, false] {
@@ -134,7 +140,7 @@ impl PadKeymap {
                     Some(_) => continue,
                     None if pass_chosen => continue,
                     None => command
-                        .default_pad()
+                        .default_pad(couch)
                         .iter()
                         .filter_map(|chord| PadChord::parse(chord))
                         .collect(),
@@ -200,13 +206,13 @@ pub fn assign(overrides: &mut Overrides, keymap: &PadKeymap, command: Command, c
         Some(owner) if owner == command => return,
         Some(owner) => {
             let kept = keymap.chords(owner).iter().copied().filter(|c| *c != chord);
-            set(overrides, owner, kept.collect());
+            set(overrides, keymap.couch, owner, kept.collect());
         }
         None => {}
     }
     let mut kept = keymap.chords(command).to_vec();
     kept.push(chord);
-    set(overrides, command, kept);
+    set(overrides, keymap.couch, command, kept);
 }
 
 /// Takes `chord` away from `command`.
@@ -216,14 +222,14 @@ pub fn unbind(overrides: &mut Overrides, keymap: &PadKeymap, command: Command, c
         .iter()
         .copied()
         .filter(|c| *c != chord);
-    set(overrides, command, kept.collect());
+    set(overrides, keymap.couch, command, kept.collect());
 }
 
 /// Keeps `chords` for `command`, or forgets the choice when they are its
 /// defaults.
-fn set(overrides: &mut Overrides, command: Command, chords: Vec<PadChord>) {
+fn set(overrides: &mut Overrides, couch: bool, command: Command, chords: Vec<PadChord>) {
     let defaults: Vec<PadChord> = command
-        .default_pad()
+        .default_pad(couch)
         .iter()
         .filter_map(|chord| PadChord::parse(chord))
         .collect();
@@ -347,7 +353,7 @@ mod tests {
     use super::*;
 
     fn keymap() -> PadKeymap {
-        PadKeymap::new(&Overrides::new())
+        PadKeymap::new(&Overrides::new(), false)
     }
 
     fn press(button: PadButton) -> PadEvent {
@@ -383,7 +389,7 @@ mod tests {
     fn defaults_parse_and_never_share_a_chord() {
         let mut seen = HashMap::new();
         for command in Command::ALL {
-            for text in command.default_pad() {
+            for text in command.default_pad(false) {
                 let chord = PadChord::parse(text)
                     .unwrap_or_else(|| panic!("{}: {text} doesn't parse", command.id()));
                 if let Some(other) = seen.insert(chord, command) {
@@ -396,6 +402,30 @@ mod tests {
             keymap.command(PadChord::tap(PadButton::RightBumper)),
             Some(Command::NextPage)
         );
+    }
+
+    #[test]
+    fn gamepad_mode_s_start_opens_its_menu() {
+        let couch = PadKeymap::new(&Overrides::new(), true);
+        assert_eq!(
+            couch.command(PadChord::tap(PadButton::Start)),
+            Some(Command::GamepadMenu)
+        );
+        assert_eq!(
+            keymap().command(PadChord::tap(PadButton::Start)),
+            Some(Command::Present)
+        );
+        for keymap in [couch, keymap()] {
+            let chord = PadChord::parse("select+start").unwrap();
+            assert_eq!(keymap.command(chord), Some(Command::GamepadMode));
+        }
+        let mut seen = HashMap::new();
+        for command in Command::ALL {
+            for text in command.default_pad(true) {
+                let chord = PadChord::parse(text).unwrap();
+                assert!(seen.insert(chord, command).is_none(), "{text} twice");
+            }
+        }
     }
 
     #[test]
@@ -440,7 +470,7 @@ mod tests {
             Command::Bookmark.id().to_string(),
             vec!["hold north".to_string()],
         );
-        let keymap = PadKeymap::new(&overrides);
+        let keymap = PadKeymap::new(&overrides, false);
         let start = Instant::now();
         let mut presses = PadPresses::default();
         let pressed = presses.update(&keymap, &[press(PadButton::North)], start);
@@ -484,7 +514,7 @@ mod tests {
             vec!["rb".to_string(), "nonsense".to_string()],
         );
         overrides.insert(Command::Bookmark.id().to_string(), Vec::new());
-        let keymap = PadKeymap::new(&overrides);
+        let keymap = PadKeymap::new(&overrides, false);
         assert_eq!(
             keymap.command(PadChord::tap(PadButton::RightBumper)),
             Some(Command::ZoomIn)
@@ -514,7 +544,7 @@ mod tests {
         );
         assert_eq!(overrides["view.zoom_in"], ["west"]);
         assert_eq!(overrides["text.bookmark"], [] as [String; 0]);
-        let keymap = PadKeymap::new(&overrides);
+        let keymap = PadKeymap::new(&overrides, false);
         unbind(
             &mut overrides,
             &keymap,

@@ -306,7 +306,7 @@ mod tests {
     }
 
     fn keymap() -> PadKeymap {
-        PadKeymap::new(&Overrides::new())
+        PadKeymap::new(&Overrides::new(), false)
     }
 
     const DOCUMENT: RouteState = RouteState {

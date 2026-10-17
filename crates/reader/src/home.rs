@@ -133,6 +133,15 @@ pub struct Doc {
 }
 
 impl Doc {
+    /// The page last read, from 1.
+    pub fn page(&self) -> usize {
+        self.page
+    }
+
+    pub fn pages(&self) -> Option<usize> {
+        self.pages
+    }
+
     pub fn progress(&self) -> Option<f32> {
         let pages = self.pages.filter(|&pages| pages > 0)?;
         Some((self.page as f32 / pages as f32).clamp(0.0, 1.0))

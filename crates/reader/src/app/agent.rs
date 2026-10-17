@@ -366,7 +366,7 @@ impl ReaderApp {
         lines.push(format!("Panes: {}", self.panes.count()));
         lines.push(format!("Theme: {:?}", self.prefs.theme));
         lines.push(format!("Keymap: {:?}", self.prefs.keymap));
-        if self.zen {
+        if self.bare() {
             lines.push("Zen mode is on.".into());
         }
         if let Some(settings) = self.user_settings.get() {

@@ -31,6 +31,7 @@ mod annotations;
 mod app;
 mod book_effects;
 mod commands;
+mod couch;
 mod covers;
 mod desktop_theme;
 mod doc_text;
@@ -82,7 +83,7 @@ use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] [--colours preset|background|custom] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] \
+                     [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
@@ -122,6 +123,8 @@ fn parse_args() -> Result<Launch> {
         select_region: None,
         pad_demo: None,
         pad_family: pad::Family::Generic,
+        gamepad_mode: false,
+        fixed_clock: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -233,6 +236,8 @@ fn parse_args() -> Result<Launch> {
                 launch.select_region = Some((page.max(1), [x0, y0, x1, y1]));
             }
             "--pad-demo" => launch.pad_demo = Some(value()?),
+            "--gamepad-mode" => launch.gamepad_mode = true,
+            "--fixed-clock" => launch.fixed_clock = true,
             "--pad-family" => {
                 let name = value()?;
                 launch.pad_family = pad::Family::parse(&name).with_context(|| {

@@ -159,6 +159,8 @@ pub struct Appearance {
     pub density: Density,
     /// The chrome's base size in points; 13 is the design's.
     pub ui_scale: f32,
+    /// A zoom over that, beyond its range: gamepad mode's text size.
+    pub zoom: f32,
     /// Rule titles, tree lines and dot fields; off draws plain labels.
     pub ornaments: bool,
     pub fonts: fonts::FontChoice,
@@ -172,6 +174,7 @@ impl Default for Appearance {
             opacity: 1.0,
             density: Density::Default,
             ui_scale: BASE_SCALE,
+            zoom: 1.0,
             ornaments: true,
             fonts: fonts::FontChoice::default(),
         }
@@ -617,7 +620,7 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
     let scale = appearance
         .ui_scale
         .clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
-    let zoom = scale / BASE_SCALE;
+    let zoom = scale / BASE_SCALE * appearance.zoom.clamp(0.5, 2.0);
     if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
         ctx.set_zoom_factor(zoom);
     }

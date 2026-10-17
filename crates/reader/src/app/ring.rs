@@ -40,6 +40,7 @@ fn ring_label(command: Command) -> &'static str {
         Command::FitWidth => "fit width",
         Command::FitPage => "fit page",
         Command::PageOverview => "overview",
+        Command::GoToPage => "go to page",
         Command::Back => "back",
         Command::Forward => "forward",
         Command::Home => "home",
@@ -145,7 +146,21 @@ impl ReaderApp {
         });
         let screen = ctx.content_rect();
         let center = screen.center();
-        egui::Area::new(egui::Id::new("pad-ring"))
+        // Gamepad mode's ring is 420 across (frame 09e).
+        let id = egui::Id::new("pad-ring");
+        let scale = if self.prefs.gamepad_mode {
+            420.0 / ring::DIAMETER
+        } else {
+            1.0
+        };
+        let about = center.to_vec2();
+        ctx.set_transform_layer(
+            egui::LayerId::new(egui::Order::Foreground, id),
+            egui::emath::TSTransform::from_translation(about)
+                * egui::emath::TSTransform::from_scaling(scale)
+                * egui::emath::TSTransform::from_translation(-about),
+        );
+        egui::Area::new(id)
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .interactable(false)

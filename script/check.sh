@@ -241,6 +241,14 @@ if [[ ${tier} == screens ]]; then
         "07-shortcuts-gamepad --settings shortcuts:gamepad"
         "09a-pad-connected @ --pad-demo connect:8BitDo_Pro_2"
         "09b-pad-ring @ --pad-demo stick:R:0.65,-0.65"
+        "09c-gamepad-home --gamepad-mode --fixed-clock --pad-demo connect"
+        "09d-gamepad-reader @ --gamepad-mode --pad-demo connect;tap:ls"
+        "09e-gamepad-ring @ --gamepad-mode --pad-demo stick:R:0.65,-0.65"
+        "09f-gamepad-contents @ --gamepad-mode --command view.outline"
+        "09g-gamepad-overview @ --gamepad-mode --command view.page_overview"
+        "09h-gamepad-go-to @ --gamepad-mode --command view.go_to_page --pad-demo tap:right*5"
+        "09i-gamepad-menu @ --gamepad-mode --command app.gamepad_menu"
+        "09j-gamepad-disconnected --gamepad-mode --fixed-clock --pad-demo connect;disconnect"
     )
     if ((${#names[@]} > 0)); then
         chosen=()
