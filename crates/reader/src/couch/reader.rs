@@ -2,7 +2,7 @@
 //! the hint bar that fades a few seconds after the last input, and the
 //! contents, go-to-page and menu sheets.
 
-use egui::{Align2, Color32, Rect, pos2, vec2};
+use egui::{Align2, Rect, pos2, vec2};
 use glyphst_ui::{
     icons, motion,
     pad_glyph::{Arm, Face, Glyph, Hint},
@@ -30,6 +30,58 @@ pub struct ReaderView<'a> {
     /// Gamepad mode: the chips and the reading hints show (the go-to sheet
     /// also works outside it).
     pub couch: bool,
+    /// The go-to sheet's pages about the one chosen, and their quarter
+    /// turns.
+    pub strip: Vec<StripPage>,
+    pub rotation: u8,
+}
+
+/// A page on the go-to sheet's strip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripPage {
+    pub page: usize,
+    /// Its render, once there is one.
+    pub texture: Option<egui::TextureId>,
+    /// Width over height, as turned.
+    pub aspect: f32,
+}
+
+/// How tall the strip's pages are, the chosen one and the rest.
+pub const STRIP_CHOSEN: f32 = 162.0;
+pub const STRIP_PAGE: f32 = 130.0;
+const STRIP_GAP: f32 = 18.0;
+
+/// Each strip page's rect: the chosen one centred on `center_x`, the rest
+/// out from it, all resting on `bottom`.
+pub fn strip_rects(strip: &[StripPage], chosen: usize, center_x: f32, bottom: f32) -> Vec<Rect> {
+    let size = |item: &StripPage| {
+        let height = if item.page == chosen {
+            STRIP_CHOSEN
+        } else {
+            STRIP_PAGE
+        };
+        vec2(height * item.aspect.clamp(0.3, 3.0), height)
+    };
+    let Some(at) = strip.iter().position(|item| item.page == chosen) else {
+        return Vec::new();
+    };
+    let mut rects = vec![Rect::NOTHING; strip.len()];
+    let place = |x: f32, size: egui::Vec2| Rect::from_min_size(pos2(x, bottom - size.y), size);
+    let chosen_size = size(&strip[at]);
+    rects[at] = place(center_x - chosen_size.x / 2.0, chosen_size);
+    let mut right = rects[at].right();
+    for index in at + 1..strip.len() {
+        let size = size(&strip[index]);
+        rects[index] = place(right + STRIP_GAP, size);
+        right = rects[index].right();
+    }
+    let mut left = rects[at].left();
+    for index in (0..at).rev() {
+        let size = size(&strip[index]);
+        rects[index] = place(left - STRIP_GAP - size.x, size);
+        left = rects[index].left();
+    }
+    rects
 }
 
 /// `1.15×`, `1×`.
@@ -318,56 +370,34 @@ fn go_to(ui: &egui::Ui, screen: Rect, view: &ReaderView<'_>, page: usize, t: &To
         theme::mono(15.0),
         t.faint,
     );
-    // The pages about the chosen one, it larger.
+    // The pages about the chosen one, it larger, as they render.
     let strip_bottom = sheet.top() + 290.0;
-    let center = sheet.center().x;
-    for offset in -4isize..=4 {
-        let Some(at) = page
-            .checked_add_signed(offset)
-            .filter(|&at| at < view.pages)
-        else {
-            continue;
-        };
-        let on = offset == 0;
-        let size = if on {
-            vec2(125.0, 162.0)
-        } else {
-            vec2(100.0, 130.0)
-        };
-        let x = center
-            + offset as f32 * 118.0
-            + if offset > 0 {
-                13.0
-            } else if offset < 0 {
-                -13.0
-            } else {
-                0.0
-            };
-        let rect = Rect::from_center_size(pos2(x, strip_bottom - size.y / 2.0), size);
-        let alpha = if on { 1.0 } else { 0.75 };
-        painter.rect_filled(rect, 0, t.page.gamma_multiply(alpha));
-        for line in 0..9 {
-            let y = rect.top() + 12.0 + line as f32 * (rect.height() - 24.0) / 9.0;
-            let width =
-                (rect.width() - 18.0) * [0.75, 1.0, 1.0, 0.92, 1.0, 0.55, 1.0, 0.95, 0.8][line];
-            painter.rect_filled(
-                Rect::from_min_size(pos2(rect.left() + 9.0, y), vec2(width, 3.0)),
-                0,
-                Color32::from_black_alpha(48),
-            );
+    let clip = painter.with_clip_rect(sheet);
+    let rects = strip_rects(&view.strip, page, sheet.center().x, strip_bottom);
+    for (item, rect) in view.strip.iter().zip(rects) {
+        let on = item.page == page;
+        let alpha = if on { 1.0 } else { 0.7 };
+        clip.rect_filled(rect, 0, t.page);
+        if let Some(texture) = item.texture {
+            glyphst_ui::paint::paint_turned_image(&clip, texture, rect, view.rotation);
+        }
+        if !on {
+            clip.rect_filled(rect, 0, Tokens::fade(t.surface, 1.0 - alpha));
         }
         if on {
-            painter.rect_stroke(
+            clip.rect_stroke(
                 rect,
                 0,
                 egui::Stroke::new(3.0, t.accent),
                 egui::StrokeKind::Outside,
             );
+        } else {
+            clip.rect_stroke(rect, 0, t.hairline(), egui::StrokeKind::Inside);
         }
-        painter.text(
+        clip.text(
             pos2(rect.center().x, rect.bottom() + 16.0),
             Align2::CENTER_CENTER,
-            (at + 1).to_string(),
+            (item.page + 1).to_string(),
             theme::mono(14.0),
             if on { t.accent_text } else { t.muted },
         );
@@ -473,5 +503,33 @@ pub fn menu(
             );
         }
         y += 60.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page(page: usize, aspect: f32) -> StripPage {
+        StripPage {
+            page,
+            texture: None,
+            aspect,
+        }
+    }
+
+    #[test]
+    fn the_strip_centres_the_chosen_page_and_keeps_each_page_s_shape() {
+        let strip = [page(3, 0.7), page(4, 1.4), page(5, 0.7)];
+        let rects = strip_rects(&strip, 4, 500.0, 300.0);
+        assert!((rects[1].center().x - 500.0).abs() < 1e-3);
+        assert_eq!(rects[1].height(), STRIP_CHOSEN);
+        assert!(
+            (rects[1].width() - STRIP_CHOSEN * 1.4).abs() < 1e-3,
+            "a spread stays wide"
+        );
+        assert_eq!(rects[0].height(), STRIP_PAGE);
+        assert!(rects[0].right() < rects[1].left() && rects[2].left() > rects[1].right());
+        assert!(rects.iter().all(|rect| rect.bottom() == 300.0));
     }
 }

@@ -1,7 +1,8 @@
 //! The ring the right stick opens (frames 09b, 09e): the reading ring's
 //! commands, or presenting's tools while presenting. Pushing the stick
 //! opens it at the screen's centre and aims; letting go picks the slot last
-//! aimed at, B cancels.
+//! aimed at. A stick can't reach the hub, so the bottom slot cancels (as B
+//! does), and the hub names the command aimed at.
 
 use std::time::Instant;
 
@@ -30,6 +31,16 @@ pub(crate) enum RingKind {
 pub(crate) struct PadRing {
     kind: RingKind,
     aim: Vec2,
+    /// The slot aimed at, which stays as the stick comes back.
+    slot: Option<usize>,
+}
+
+/// What a stick ring runs from `slot`: nothing from the cancel slot.
+pub(crate) fn picked<T: Copy>(commands: &[Option<T>; ring::SLOTS], slot: usize) -> Option<T> {
+    if slot == ring::CANCEL_SLOT {
+        return None;
+    }
+    commands.get(slot).copied().flatten()
 }
 
 /// A command's short name on the reading ring.
@@ -82,17 +93,18 @@ impl ReaderApp {
 
     pub(super) fn pad_ring_step(&mut self, step: RingStep, ctx: &egui::Context, now: Instant) {
         match step {
-            RingStep::Open(aim) => {
+            RingStep::Open(aim, slot) => {
                 let kind = if self.presenting.is_some() {
                     RingKind::Present
                 } else {
                     RingKind::Reading
                 };
-                self.pad_ring = Some(PadRing { kind, aim });
+                self.pad_ring = Some(PadRing { kind, aim, slot });
             }
-            RingStep::Aim(aim) => {
+            RingStep::Aim(aim, slot) => {
                 if let Some(ring) = &mut self.pad_ring {
                     ring.aim = aim;
+                    ring.slot = slot;
                 }
             }
             RingStep::Cancel => self.pad_ring = None,
@@ -102,12 +114,12 @@ impl ReaderApp {
                 };
                 match ring.kind {
                     RingKind::Reading => {
-                        if let Some(command) = self.reading_ring_commands()[slot] {
+                        if let Some(command) = picked(&self.reading_ring_commands(), slot) {
                             self.run_or_notify(command, ctx);
                         }
                     }
                     RingKind::Present => {
-                        if let Some(command) = self.ring_commands()[slot] {
+                        if let Some(command) = picked(&self.ring_commands(), slot) {
                             self.run_present(command, now);
                         }
                     }
@@ -132,7 +144,7 @@ impl ReaderApp {
             RingKind::Present => self.ring_commands(),
         };
         let present = self.presenting.as_ref();
-        let slots = commands.map(|command| {
+        let mut slots = commands.map(|command| {
             command.map(|command| match (pad_ring.kind, present) {
                 (RingKind::Present, Some(state)) => {
                     let (label, icon) = state.slot(command);
@@ -143,6 +155,18 @@ impl ReaderApp {
                     label: ring_label(command),
                 },
             })
+        });
+        slots[ring::CANCEL_SLOT] = Some(ring::Slot {
+            icon: "x",
+            label: "cancel",
+        });
+        let name = pad_ring.slot.map(|slot| match picked(&commands, slot) {
+            _ if slot == ring::CANCEL_SLOT => "Cancel".to_string(),
+            Some(command) => match (pad_ring.kind, present) {
+                (RingKind::Present, Some(state)) => capitalised(state.slot(command).0),
+                _ => self.ring_title(command),
+            },
+            None => String::new(),
         });
         let screen = ctx.content_rect();
         let center = screen.center();
@@ -167,15 +191,51 @@ impl ReaderApp {
             .show(ctx, |ui| {
                 ui.set_clip_rect(screen);
                 ui.multiply_opacity(shown);
-                ring::paint(
-                    ui,
-                    center,
-                    &slots,
-                    ring::stick_pointer(center, pad_ring.aim),
-                );
+                // A stick coming back still aims at its slot.
+                let pointer = match pad_ring.slot {
+                    Some(slot) if pad_ring.aim.length() < 0.5 => ring::slot_pointer(center, slot),
+                    _ => ring::stick_pointer(center, pad_ring.aim),
+                };
+                let hub = ring::Hub::Name(name.as_deref().filter(|name| !name.is_empty()));
+                ring::paint(ui, center, &slots, pointer, hub);
                 ring_hints(ui, center + vec2(0.0, ring::DIAMETER / 2.0 + 24.0));
             });
     }
+}
+
+impl ReaderApp {
+    /// A reading command's name in the hub, saying what it will do now.
+    fn ring_title(&self, command: Command) -> String {
+        let bookmarked = self.active.is_some_and(|active| {
+            let tab = &self.tabs[active];
+            let page = tab.position().page.max(1);
+            tab.annotations
+                .bookmarks
+                .iter()
+                .any(|bookmark| bookmark.position.page.max(1) == page)
+        });
+        match command {
+            Command::Bookmark if bookmarked => "Remove bookmark",
+            Command::Bookmark => "Bookmark page",
+            Command::Outline => "Contents",
+            Command::Home if self.prefs.gamepad_mode => "Library home",
+            Command::Back => "Go back",
+            Command::Forward => "Go forward",
+            Command::FitWidth => "Fit width",
+            Command::FitPage => "Fit page",
+            Command::GoToPage => "Go to page",
+            other => other.label(),
+        }
+        .to_string()
+    }
+}
+
+fn capitalised(label: &str) -> String {
+    let mut chars = label.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// `◎ aim · let go to pick   (B) cancel` on a chip under the ring.
@@ -206,6 +266,14 @@ fn ring_hints(ui: &egui::Ui, top: Pos2) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bottom_slot_cancels_a_stick_ring() {
+        let commands = [Some(Command::Outline); ring::SLOTS];
+        assert_eq!(picked(&commands, 0), Some(Command::Outline));
+        assert_eq!(picked(&commands, ring::CANCEL_SLOT), None);
+        assert_eq!(capitalised("end draw"), "End draw");
+    }
 
     #[test]
     fn the_reading_ring_holds_reading_commands() {

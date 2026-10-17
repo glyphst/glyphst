@@ -852,14 +852,19 @@ fn reading(ui: &mut egui::Ui, prefs: &mut Prefs) {
     ui.add_space(2.0);
     ui.label(
         RichText::new(
-            "Push the right stick toward a command and let go to run it; B cancels. \
-             While presenting the stick opens presenting's ring instead.",
+            "Push the right stick toward a command and let go to run it; the bottom slot \
+             and B cancel. While presenting the stick opens presenting's ring instead.",
         )
         .font(theme::regular(12.0))
         .color(Tokens::get(ui.ctx()).muted),
     );
     ui.add_space(8.0);
-    ring_slots(ui, &mut prefs.reading_ring, crate::app::fits_reading_ring);
+    ring_slots(
+        ui,
+        &mut prefs.reading_ring,
+        crate::app::fits_reading_ring,
+        true,
+    );
 }
 
 /// The Presenting page (frame 07): full screen, the clock, and the tool
@@ -917,15 +922,19 @@ fn presenting(ui: &mut egui::Ui, prefs: &mut Prefs) {
     ui.label(
         RichText::new(
             "Hold the right button and flick toward a tool. A plain right-click goes to the \
-             previous page; release on the hub to cancel.",
+             previous page; release on the hub to cancel. The pad's right stick opens it \
+             too, with cancel in place of the bottom tool.",
         )
         .font(theme::regular(12.0))
         .color(Tokens::get(ui.ctx()).muted),
     );
     ui.add_space(8.0);
-    ring_slots(ui, &mut prefs.present_ring, |command| {
-        command.category() == crate::commands::Category::Present
-    });
+    ring_slots(
+        ui,
+        &mut prefs.present_ring,
+        |command| command.category() == crate::commands::Category::Present,
+        false,
+    );
 }
 
 /// Talk lengths offered, in minutes.
@@ -933,10 +942,13 @@ const TALK_LENGTHS: [u32; 9] = [0, 5, 10, 15, 20, 30, 45, 60, 90];
 
 /// The ring's eight directions in two columns: up to down-right on the
 /// left, down to up-left on the right.
+/// `cancel_slot`: the ring only the stick opens, whose bottom slot is
+/// cancel.
 fn ring_slots(
     ui: &mut egui::Ui,
     slots: &mut crate::present::RingSlots,
     fits: impl Fn(crate::commands::Command) -> bool,
+    cancel_slot: bool,
 ) {
     const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
     let tokens = Tokens::get(ui.ctx());
@@ -959,6 +971,14 @@ fn ring_slots(
                                 .font(theme::mono(13.0))
                                 .color(tokens.accent_text),
                         );
+                        if cancel_slot && slot == glyphst_ui::ring::CANCEL_SLOT {
+                            ui.label(
+                                RichText::new("cancel (a stick can't reach the hub)")
+                                    .font(theme::mono(12.0))
+                                    .color(tokens.muted),
+                            );
+                            return;
+                        }
                         let chosen = slots[slot]
                             .as_deref()
                             .and_then(crate::commands::Command::from_id);

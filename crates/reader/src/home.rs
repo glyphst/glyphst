@@ -349,8 +349,9 @@ impl Home {
                         motif::rule_title(ui, &label, None);
                     }
                     group = Some(date);
+                    // Clicks only: the keys and the pad stay in home's column.
                     let (row, response) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+                        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::CLICK);
                     if response.hovered() {
                         ui.painter().rect_filled(row, 0, tokens.hover);
                     }
@@ -575,6 +576,7 @@ pub fn cover_row(
                 .width(cover_width)
                 .show(ui)
                 .tip(&doc.path.display().to_string());
+            focus_for_pad(&response);
             if response.clicked() {
                 action = Some(HomeAction::Open(doc.path.clone()));
             }
@@ -975,13 +977,11 @@ fn continue_card(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .add(
-                                            Button::primary("continue")
-                                                .trailing_icon("arrow-right"),
-                                        )
-                                        .clicked()
-                                    {
+                                    let button = ui.add(
+                                        Button::primary("continue").trailing_icon("arrow-right"),
+                                    );
+                                    focus_for_pad(&button);
+                                    if button.clicked() {
                                         action = Some(HomeAction::Open(doc.path.clone()));
                                     }
                                     ui.add(Key("enter"));
@@ -1002,6 +1002,19 @@ fn continue_card(
         action = Some(HomeAction::Open(doc.path.clone()));
     }
     action
+}
+
+/// The pad moves egui's focus with its arrows, which needs something
+/// focused first: home's first control takes it once the pad is used.
+fn focus_for_pad(response: &egui::Response) {
+    let ctx = &response.ctx;
+    if glyphst_ui::pad_glyph::input(ctx) == glyphst_ui::pad_glyph::InputDevice::Pad
+        && ctx.memory(|memory| memory.focused().is_none())
+    {
+        response.request_focus();
+        // The press that called for it mustn't also move it on.
+        ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
 }
 
 fn notice(ui: &mut egui::Ui, tokens: &Tokens, error: &str) {

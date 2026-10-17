@@ -115,6 +115,8 @@ pub enum Nav {
 }
 
 impl Nav {
+    /// `consume_key` ignores Shift, so Shift+Tab comes before Tab or Tab
+    /// would take it.
     pub const KEYS: [(egui::Key, egui::Modifiers, Nav); 8] = [
         (egui::Key::ArrowUp, egui::Modifiers::NONE, Nav::Up),
         (egui::Key::ArrowDown, egui::Modifiers::NONE, Nav::Down),
@@ -122,8 +124,8 @@ impl Nav {
         (egui::Key::ArrowRight, egui::Modifiers::NONE, Nav::Right),
         (egui::Key::Enter, egui::Modifiers::NONE, Nav::Enter),
         (egui::Key::Escape, egui::Modifiers::NONE, Nav::Back),
-        (egui::Key::Tab, egui::Modifiers::NONE, Nav::Next),
         (egui::Key::Tab, egui::Modifiers::SHIFT, Nav::Previous),
+        (egui::Key::Tab, egui::Modifiers::NONE, Nav::Next),
     ];
 
     /// The keys pressed this frame, taken so nothing else sees them.
@@ -323,6 +325,27 @@ mod tests {
             ..BOOK
         };
         assert!(!MenuItem::rows(home.reading).contains(&MenuItem::Library));
+    }
+
+    #[test]
+    fn shift_tab_is_previous_and_tab_next() {
+        let ctx = egui::Context::default();
+        let key = |modifiers| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let input = egui::RawInput {
+            events: vec![key(egui::Modifiers::SHIFT), key(egui::Modifiers::NONE)],
+            ..Default::default()
+        };
+        let mut taken = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| taken = Nav::take(ui.ctx()));
+        output.textures_delta.clear();
+        taken.sort_by_key(|nav| *nav as u8);
+        assert_eq!(taken, [Nav::Next, Nav::Previous]);
     }
 
     #[test]

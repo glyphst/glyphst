@@ -24,6 +24,26 @@ fn turned_uvs(quarter_turns: u8) -> [egui::Pos2; 4] {
 
 /// Paints `texture` (an upright page image) into `rect` turned
 /// `quarter_turns` clockwise, as the page is laid out.
+/// Whether `response` has the keys, whether or not the window does (egui's
+/// `has_focus` also asks the window): a pad works an unfocused window.
+pub fn has_focus(response: &egui::Response) -> bool {
+    response.ctx.memory(|memory| memory.has_focus(response.id))
+}
+
+/// The keyboard's (and the pad's) focus on `rect`: a 2pt `accent` ring
+/// just outside it.
+pub fn focus_ring(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
+    if has_focus(response) {
+        let t = crate::theme::Tokens::get(ui.ctx());
+        ui.painter().rect_stroke(
+            rect.expand(3.0),
+            t.ctl_radius(),
+            egui::Stroke::new(2.0, t.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
 pub fn paint_turned_image(
     painter: &egui::Painter,
     texture: egui::TextureId,

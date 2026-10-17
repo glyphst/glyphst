@@ -2338,7 +2338,9 @@ impl ReaderApp {
                 } else if self.zen {
                     self.zen = false;
                 } else if self.prefs.gamepad_mode {
-                    // B leaves the book for gamepad mode's home.
+                    // B leaves the book for gamepad mode's home, which
+                    // mustn't take the same press as asking to leave.
+                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                     self.activate(None);
                 }
             }
@@ -3945,7 +3947,31 @@ impl eframe::App for ReaderApp {
         let routed = self
             .pad_router
             .route(&frame, &state, &self.pad_keymap, Instant::now());
-        raw_input.events.extend(route::key_events(&routed.keys));
+        let mut keys = routed.keys;
+        // egui's arrows move its focus only once something has it: on a
+        // page tab with nothing focused, the first arrow focuses its first
+        // control instead (home focuses its own).
+        let arrow = |key: &egui::Key| {
+            matches!(
+                key,
+                egui::Key::ArrowUp
+                    | egui::Key::ArrowDown
+                    | egui::Key::ArrowLeft
+                    | egui::Key::ArrowRight
+            )
+        };
+        if route::owner(&state) == route::Owner::Keys
+            && !state.modal
+            && self.active.is_none()
+            && self.page_focused.is_some()
+            && !self.prefs.gamepad_mode
+            && keys.iter().any(|(key, _)| arrow(key))
+            && ctx.memory(|memory| memory.focused().is_none())
+        {
+            keys.retain(|(key, _)| !arrow(key));
+            keys.insert(0, (egui::Key::Tab, egui::Modifiers::NONE));
+        }
+        raw_input.events.extend(route::key_events(&keys));
         self.pad_input = routed.document;
         self.pad_commands.extend(routed.commands);
         self.pad_ring_steps.extend(routed.ring);

@@ -505,7 +505,7 @@ impl ReaderApp {
                     let pointer = present::virtual_pointer(center, state.ring_motion, at, latest);
                     let mut ring_ui = ui.new_child(egui::UiBuilder::new());
                     ring_ui.multiply_opacity(ring_shown);
-                    ring::paint(&ring_ui, center, &slots, pointer);
+                    ring::paint(&ring_ui, center, &slots, pointer, ring::Hub::Cancel);
                 }
                 if let Some(pos) = hover.filter(|_| !over_toolbox && state.ring.is_none()) {
                     paint_cursor(ui, state, pos, now);

@@ -210,14 +210,7 @@ impl<'a> Button<'a> {
         let fill = crate::motion::color(ui.ctx(), response.id, fill);
         ui.painter()
             .rect(rect, t.ctl_radius(), fill, stroke, StrokeKind::Inside);
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect.expand(1.0),
-                t.ctl_radius(),
-                egui::Stroke::new(1.0, t.accent),
-                StrokeKind::Outside,
-            );
-        }
+        crate::paint::focus_ring(ui, &response, rect);
         // Content centred when the button is wider than it needs.
         let mut x = rect.center().x - width / 2.0 + pad;
         let y = rect.center().y;

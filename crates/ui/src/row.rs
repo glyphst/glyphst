@@ -17,15 +17,24 @@ pub fn list_row(ui: &mut Ui, height: f32, selected: bool) -> (Rect, Response) {
     let t = Tokens::get(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    let focused = crate::paint::has_focus(&response);
     let fill = if selected {
         t.accent_soft
-    } else if response.contains_pointer() {
+    } else if response.contains_pointer() || focused {
         t.hover
     } else {
         egui::Color32::TRANSPARENT
     };
     ui.painter()
         .rect_filled(rect, 0, crate::motion::color(ui.ctx(), response.id, fill));
+    // The keyboard's (and the pad's) focus: an `accent` left edge.
+    if focused {
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+            0,
+            t.accent,
+        );
+    }
     (rect, response)
 }
 

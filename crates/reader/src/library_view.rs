@@ -173,6 +173,15 @@ impl LibraryView {
             for doc in &rows {
                 let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
                 if ui.is_rect_visible(rect) {
+                    // The keyboard's (and the pad's) focus, as list rows show it.
+                    if glyphst_ui::paint::has_focus(&response) {
+                        ui.painter().rect_filled(rect, 0, tokens.hover);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+                            0,
+                            tokens.accent,
+                        );
+                    }
                     paint_row(ui, &tokens, rect, &columns(rect.x_range()), doc, full, now);
                 }
                 if response

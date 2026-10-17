@@ -38,6 +38,8 @@ pub enum HomeAction {
     /// Opens the book on its contents (Y).
     Contents(PathBuf),
     Menu,
+    /// B or Escape: leave gamepad mode (once confirmed).
+    Leave,
 }
 
 const CARD: [f32; 2] = [520.0, 270.0];
@@ -72,6 +74,7 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
                     .get(couch.shelf)
                     .map(|doc| HomeAction::Open(doc.path.clone()));
             }
+            Nav::Back => action = Some(HomeAction::Leave),
             _ => {}
         }
     }
@@ -104,7 +107,13 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
             theme::regular(20.0),
             t.muted,
         );
-        draw::hint_bar(ui, screen, &menu_hint(), &[]);
+        let exit = [Glyph::Face(Face::East)];
+        draw::hint_bar(
+            ui,
+            screen,
+            &menu_hint(),
+            &[Hint::new(&exit, "exit").couch()],
+        );
         return action;
     };
     hero_text(ui, screen, doc, &t);
@@ -165,6 +174,7 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
 
     let read = [Glyph::Face(Face::South)];
     let contents = [Glyph::Face(Face::North)];
+    let exit = [Glyph::Face(Face::East)];
     draw::hint_bar(
         ui,
         screen,
@@ -172,6 +182,7 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
         &[
             Hint::new(&contents, "contents").couch(),
             Hint::new(&read, "read").couch(),
+            Hint::new(&exit, "exit").couch(),
         ],
     );
     if response.clicked() {

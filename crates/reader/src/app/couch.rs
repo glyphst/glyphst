@@ -8,7 +8,7 @@ use crate::{
     couch::{
         self, Book, MenuItem, Nav, Outcome, Overlay,
         home::{HomeAction, HomeView},
-        reader::ReaderView,
+        reader::{ReaderView, StripPage},
     },
     document_tab::ViewAction,
     pad::Power,
@@ -16,6 +16,8 @@ use crate::{
 
 /// How many recent books home's shelf holds.
 const SHELF: usize = 24;
+/// How many pages the go-to sheet shows each side of the chosen one.
+const STRIP_REACH: usize = 4;
 
 impl ReaderApp {
     /// Turns gamepad mode on or off: fullscreen on the way in, the window
@@ -167,8 +169,44 @@ impl ReaderApp {
                 self.couch.overlay = Some(Overlay::Contents { cursor: 0 });
             }
             Some(HomeAction::Menu) => self.couch.overlay = Some(Overlay::Menu { cursor: 0 }),
+            Some(HomeAction::Leave) => self.prompts.ask(crate::prompts::Question::Leave),
             None => {}
         }
+    }
+
+    /// The go-to sheet's pages about `chosen`, with their renders, asking
+    /// for those still missing as the page overview does.
+    fn go_to_strip(&mut self, ctx: &egui::Context, active: usize, chosen: usize) -> Vec<StripPage> {
+        let tab = &mut self.tabs[active];
+        let pages = tab.layout.len();
+        let range = chosen.saturating_sub(STRIP_REACH)..(chosen + STRIP_REACH + 1).min(pages);
+        let ppp = ctx.pixels_per_point();
+        let mut wanted = Vec::new();
+        let strip = range
+            .clone()
+            .map(|page| {
+                let [w, h] = tab.layout.page_size(page);
+                let aspect = (w / h.max(1.0)) as f32;
+                let height = if page == chosen {
+                    couch::reader::STRIP_CHOSEN
+                } else {
+                    couch::reader::STRIP_PAGE
+                };
+                let paper = egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(height * aspect, height),
+                );
+                let texture = crate::overview::page_texture(tab, page, paper, ppp, &mut wanted);
+                StripPage {
+                    page,
+                    texture,
+                    aspect,
+                }
+            })
+            .collect();
+        tab.want_thumbnails(range);
+        tab.want_grid_images(wanted);
+        strip
     }
 
     /// Gamepad mode's chips, hint bar and sheets over the book; the go-to
@@ -199,6 +237,8 @@ impl ReaderApp {
                     smooth: self.prefs.smooth_scrolling,
                     fit_page: self.couch.fit_page,
                     couch: true,
+                    strip: Vec::new(),
+                    rotation: 0,
                 };
                 let screen = ctx.content_rect();
                 egui::Area::new(egui::Id::new("couch-home-menu"))
@@ -214,6 +254,10 @@ impl ReaderApp {
             return;
         };
         let current = self.current_entry();
+        let strip = match self.couch.overlay {
+            Some(Overlay::GoTo { page }) => self.go_to_strip(ctx, active, page),
+            _ => Vec::new(),
+        };
         let tab = &self.tabs[active];
         let page = tab.current_page();
         let section = crate::shell::section_path(
@@ -239,6 +283,8 @@ impl ReaderApp {
             smooth: self.prefs.smooth_scrolling,
             fit_page: self.couch.fit_page,
             couch: gamepad,
+            strip,
+            rotation: tab.layout.arrangement.rotation,
         };
         couch::reader::show(ctx, &self.couch, &view);
     }

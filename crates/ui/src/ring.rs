@@ -37,6 +37,19 @@ pub const OPEN_DISTANCE: f32 = 12.0;
 /// How long the button is held still before the ring opens.
 pub const OPEN_HOLD: Duration = Duration::from_millis(300);
 
+/// The slot that cancels on a ring the stick opens: a stick can't reach
+/// the hub, since letting it go picks.
+pub const CANCEL_SLOT: usize = 4;
+
+/// What the hub shows.
+#[derive(Clone, Copy, Debug)]
+pub enum Hub<'a> {
+    /// `cancel`, lit while the pointer is on it (the mouse's ring).
+    Cancel,
+    /// The aimed slot's name, or the `g▌` mark while none is (the stick's).
+    Name(Option<&'a str>),
+}
+
 /// What releasing the button at a point picks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pick {
@@ -76,6 +89,12 @@ pub fn slot_toward(direction: Vec2) -> usize {
     (turn * SLOTS as f32 + 0.5) as usize % SLOTS
 }
 
+/// The pointer aiming at `slot`, for a stick that has come back toward
+/// the centre with the slot still aimed.
+pub fn slot_pointer(center: Pos2, slot: usize) -> Pos2 {
+    center + direction(slot) * SLOT_RADIUS
+}
+
 /// Where the pointer is for a stick at `stick` (-1..=1): out from the
 /// centre, short of the rim.
 pub fn stick_pointer(center: Pos2, stick: Vec2) -> Pos2 {
@@ -105,12 +124,23 @@ fn direction(slot: usize) -> Vec2 {
 
 /// Paints the ring at `center` with the pointer at `pointer`: what
 /// releasing there picks is lit, and the notch and dot show where it is.
-pub fn paint(ui: &egui::Ui, center: Pos2, slots: &[Option<Slot<'_>>; SLOTS], pointer: Pos2) {
+pub fn paint(
+    ui: &egui::Ui,
+    center: Pos2,
+    slots: &[Option<Slot<'_>>; SLOTS],
+    pointer: Pos2,
+    hub_shows: Hub<'_>,
+) {
     let t = Tokens::get(ui.ctx());
     let painter = ui.painter();
-    let hot = pick(center, pointer);
+    let named = matches!(hub_shows, Hub::Name(_));
+    let hot = match pick(center, pointer) {
+        // A stick ring has no cancel on its hub.
+        Pick::Cancel if named => Pick::Slot(usize::MAX),
+        hot => hot,
+    };
     let outer = DIAMETER / 2.0;
-    let inner = HUB / 2.0;
+    let inner = if named { 48.0 } else { HUB / 2.0 };
     painter.add(disc(center, outer, t.raised));
     if let Pick::Slot(slot) = hot
         && slots[slot].is_some()
@@ -144,15 +174,51 @@ pub fn paint(ui: &egui::Ui, center: Pos2, slots: &[Option<Slot<'_>>; SLOTS], poi
         t.hover
     };
     painter.circle_filled(center, inner, hub);
-    let x = egui::Rect::from_center_size(center - vec2(0.0, 9.0), Vec2::splat(13.0));
-    icons::paint(ui, x, "x", 13.0, t.faint);
-    painter.text(
-        center + vec2(0.0, 9.0),
-        Align2::CENTER_CENTER,
-        "cancel",
-        theme::mono(11.0),
-        if hot == Pick::Cancel { t.text } else { t.muted },
-    );
+    match hub_shows {
+        Hub::Cancel => {
+            let x = egui::Rect::from_center_size(center - vec2(0.0, 9.0), Vec2::splat(13.0));
+            icons::paint(ui, x, "x", 13.0, t.faint);
+            painter.text(
+                center + vec2(0.0, 9.0),
+                Align2::CENTER_CENTER,
+                "cancel",
+                theme::mono(11.0),
+                if hot == Pick::Cancel { t.text } else { t.muted },
+            );
+        }
+        Hub::Name(Some(name)) => {
+            let mut job = egui::text::LayoutJob::simple(
+                name.to_string(),
+                theme::regular(12.0),
+                t.accent_text,
+                inner * 2.0 - 14.0,
+            );
+            job.halign = egui::Align::Center;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = painter.layout_job(job);
+            let at = center - vec2(0.0, galley.size().y / 2.0);
+            painter.galley(at, galley, t.accent_text);
+        }
+        Hub::Name(None) => {
+            // The `g▌` mark.
+            let g = painter.text(
+                center - vec2(5.0, 0.0),
+                Align2::CENTER_CENTER,
+                "g",
+                theme::mono_bold(18.0),
+                t.text,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(g.right() + 1.0, center.y - 10.0),
+                    vec2(8.0, 20.0),
+                ),
+                0,
+                t.accent,
+            );
+        }
+    }
     // Where the pointer is: a notch on the hub toward it, and its dot.
     let offset = pointer - center;
     if offset.length() > 2.0 {
@@ -252,6 +318,7 @@ pub fn sample(ui: &mut egui::Ui) {
         rect.center(),
         &slots,
         rect.center() - vec2(0.0, DIAMETER / 2.0 - 12.0),
+        Hub::Cancel,
     );
 }
 

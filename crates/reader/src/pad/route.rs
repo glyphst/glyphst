@@ -55,9 +55,10 @@ const RING_LET_GO: f32 = 0.25;
 /// What the right stick does to the ring.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RingStep {
-    /// Opens it, aimed so.
-    Open(Vec2),
-    Aim(Vec2),
+    /// Opens it, aimed so, with the slot aimed at (it stays aimed while
+    /// the stick comes back to let go).
+    Open(Vec2, Option<usize>),
+    Aim(Vec2, Option<usize>),
     /// Letting go (or A) picks the slot last aimed at.
     Pick(usize),
     /// B, or letting go before aiming at one.
@@ -216,8 +217,9 @@ impl Router {
         self.ring_spent &= reach >= RING_LET_GO;
         let Some(aimed) = self.ring else {
             if owner == Owner::Document && reach > RING_OPEN && !self.ring_spent {
-                self.ring = Some(Some(glyphst_ui::ring::slot_toward(stick)));
-                return Some(RingStep::Open(stick));
+                let slot = glyphst_ui::ring::slot_toward(stick);
+                self.ring = Some(Some(slot));
+                return Some(RingStep::Open(stick, Some(slot)));
             }
             return None;
         };
@@ -238,7 +240,7 @@ impl Router {
         if pressed.contains(&PadButton::South) || reach < RING_LET_GO {
             return close(self, aimed.map_or(RingStep::Cancel, RingStep::Pick));
         }
-        Some(RingStep::Aim(stick))
+        Some(RingStep::Aim(stick, aimed))
     }
 }
 
@@ -503,10 +505,13 @@ mod tests {
         assert_eq!(route(&right_stick(egui::vec2(0.3, 0.0))).ring, None);
         assert_eq!(
             route(&right_stick(egui::vec2(0.0, -0.9))).ring,
-            Some(RingStep::Open(egui::vec2(0.0, -0.9)))
+            Some(RingStep::Open(egui::vec2(0.0, -0.9), Some(0)))
         );
         let aimed = route(&right_stick(egui::vec2(0.9, 0.0)));
-        assert_eq!(aimed.ring, Some(RingStep::Aim(egui::vec2(0.9, 0.0))));
+        assert_eq!(
+            aimed.ring,
+            Some(RingStep::Aim(egui::vec2(0.9, 0.0), Some(2)))
+        );
         // On the way back the slot stays the one last aimed at.
         route(&right_stick(egui::vec2(0.3, 0.0)));
         assert_eq!(

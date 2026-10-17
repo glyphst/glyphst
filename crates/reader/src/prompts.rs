@@ -17,6 +17,8 @@ pub enum Question {
     Connected { name: String },
     /// The last pad went away in gamepad mode: leave it?
     Disconnected,
+    /// B on gamepad mode's home: leave it?
+    Leave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +40,13 @@ pub struct Prompts {
 impl Prompts {
     pub fn is_open(&self) -> bool {
         !self.queue.is_empty()
+    }
+
+    /// Asks `question`, unless it is already waiting.
+    pub fn ask(&mut self, question: Question) {
+        if !self.queue.contains(&question) {
+            self.queue.push_back(question);
+        }
     }
 
     /// Asks what the pad's events call for. `connected` is the pads still
@@ -122,6 +131,24 @@ impl Prompts {
                 .show(ctx)
                 .map(|index| [Answer::Stay, Answer::LeaveGamepadMode][index])
             }
+            Question::Leave => {
+                let choices = [
+                    Choice::new("stay", Face::East),
+                    Choice::new("leave", Face::South),
+                ];
+                Prompt {
+                    id: egui::Id::new("prompt-leave-gamepad-mode"),
+                    icon: Some("log-out"),
+                    title: "Leave gamepad mode?",
+                    body: "Back to the desktop Reader, in a window again. Select + start \
+                           comes back here.",
+                    choices: &choices,
+                    apart: 0,
+                    scale: Scale::Couch,
+                }
+                .show(ctx)
+                .map(|index| [Answer::Stay, Answer::LeaveGamepadMode][index])
+            }
         };
         if let Some(answer) = answer {
             self.queue.pop_front();
@@ -171,6 +198,14 @@ mod tests {
         prompts.note(&[connected()], &[pad()], true, true);
         prompts.note(&[connected()], &[pad()], false, false);
         assert!(!prompts.is_open());
+    }
+
+    #[test]
+    fn leaving_is_asked_once() {
+        let mut prompts = Prompts::default();
+        prompts.ask(Question::Leave);
+        prompts.ask(Question::Leave);
+        assert_eq!(prompts.queue.len(), 1);
     }
 
     #[test]

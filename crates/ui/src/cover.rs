@@ -175,7 +175,12 @@ impl<'a> DocCover<'a> {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.title)
         });
-        self.paint(ui, rect, response.hovered());
+        self.paint(
+            ui,
+            rect,
+            response.hovered() || crate::paint::has_focus(&response),
+        );
+        crate::paint::focus_ring(ui, &response, rect);
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
@@ -302,7 +307,12 @@ impl<'a> PageCover<'a> {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.title)
         });
-        self.paint(ui, rect, response.hovered());
+        self.paint(
+            ui,
+            rect,
+            response.hovered() || crate::paint::has_focus(&response),
+        );
+        crate::paint::focus_ring(ui, &response, rect);
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 

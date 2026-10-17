@@ -339,7 +339,8 @@ pub const READING_RING_DEFAULTS: [Option<Command>; glyphst_ui::ring::SLOTS] = [
     Some(Command::Bookmark),
     Some(Command::FitWidth),
     Some(Command::FitPage),
-    Some(Command::PageOverview),
+    // The stick's cancel.
+    None,
     Some(Command::GoToPage),
     Some(Command::Back),
     Some(Command::Home),
