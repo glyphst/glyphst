@@ -30,7 +30,7 @@ pub struct QuickAsk {
     /// Focus the composer on the next frame (once: focusing every frame
     /// resets an input method's composition).
     focus: bool,
-    markdown: egui_commonmark::CommonMarkCache,
+    markdown: glyphst_markdown::MarkdownCache,
 }
 
 impl Default for QuickAsk {
@@ -40,7 +40,7 @@ impl Default for QuickAsk {
             editor: MentionEditor::new(egui::Id::unique("quick-ask-input")),
             assistant: Assistant::default(),
             focus: false,
-            markdown: egui_commonmark::CommonMarkCache::default(),
+            markdown: glyphst_markdown::MarkdownCache::default(),
         }
     }
 }
@@ -182,12 +182,10 @@ impl QuickAsk {
                 .auto_shrink([false, true])
                 .show(ui, |ui| match &answer {
                     Some(answer) if !answer.is_empty() => {
-                        ui.style_mut()
-                            .text_styles
-                            .insert(egui::TextStyle::Body, crate::theme::regular(14.0));
-                        egui_commonmark::CommonMarkViewer::new().show(
+                        glyphst_markdown::show(
                             ui,
                             &mut self.markdown,
+                            &glyphst_markdown::MarkdownStyle::new(tokens, 14.0),
                             answer,
                         );
                     }

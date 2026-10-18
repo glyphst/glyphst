@@ -92,13 +92,11 @@ Known gaps:
   no spotlight, zoom to a region or presenter view on a second screen.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
 - Translation sessions are not restored from the cache on reopening.
-- The assistant has no Mermaid diagrams (`mermaid-render` is kept for
-  them). A region is one page's; the overview selects no pages for it.
+- A region is one page's; the overview selects no pages for it.
   The change log of agents' edits lives while the app runs (saved chats
   keep their trace, not their undo list), and picture pasting needs
   `wl-paste` (Wayland) or `xclip` (X11).
-- Assistant panel: Markdown bold is a stronger colour only (egui's text has
-  no weights); chips of a reopened chat carry what was kept when sent (a
+- Assistant panel: chips of a reopened chat carry what was kept when sent (a
   selection's text, a page's label), not the live pages; streamed text
   appears without a fade, and the empty state's composer does not glide to
   the bottom on the first message; the fake provider streams no reasoning,
@@ -123,8 +121,8 @@ Known gaps:
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates from the gaps
-above: restoring translation sessions from the cache, Mermaid diagrams in
-the assistant, and a dense page's first load (MuPDF's interpretation
+above: restoring translation sessions from the cache, and a dense page's
+first load (MuPDF's interpretation
 dominates; only a faster content-stream reader would cut it).
 
 **Done when:** the chosen milestone works with tests, `check.sh quick`

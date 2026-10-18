@@ -1,7 +1,8 @@
 //! Canned states of the panel for unattended screenshots
 //! (`--assistant-demo STATE`): a chat about the open document with chips,
 //! a folded and a running answer, the menu, a chip's preview, an edit, an
-//! error and the history. Nothing reaches a model.
+//! error, the history and one answer using every kind of Markdown block.
+//! Nothing reaches a model.
 
 use std::{sync::mpsc, time::Instant};
 
@@ -15,13 +16,54 @@ use crate::{
 };
 
 /// The states `--assistant-demo` takes.
-pub const DEMO_STATES: [&str; 8] = [
-    "empty", "menu", "hover", "running", "done", "edit", "error", "history",
+pub const DEMO_STATES: [&str; 9] = [
+    "empty", "menu", "hover", "running", "done", "edit", "error", "history", "markdown",
 ];
 
 const ANSWER: &str = "The paper argues that **attention alone** is enough for sequence transduction: the Transformer drops recurrence and convolutions entirely.\n\n- **Encoder and decoder** are stacks of six identical layers, each with multi-head self-attention and a feed-forward network.\n- **Scaled dot-product attention** divides the scores by √dₖ so the softmax keeps useful gradients.\n- **Positional encodings** use sines and cosines, so the model can attend by relative position.\n\nOn WMT 2014 English–German it reaches `28.4` BLEU, more than 2 points above the best ensembles, at a fraction of the training cost.";
 
-const FOLLOW_UP: &str = "Self-attention connects every pair of positions in a constant number of operations, while a recurrent layer needs `O(n)` sequential steps. That makes long-range dependencies easier to learn and the layer far easier to parallelize.";
+/// A table that has to wrap in the 380pt panel, inline and display math,
+/// prices that must stay text, and bold CJK.
+const FOLLOW_UP: &str = r"Self-attention connects every pair of positions in a constant number of operations, while a recurrent layer needs $O(n)$ sequential steps:
+
+| Layer | Complexity per layer | Sequential operations | Maximum path length |
+|:--|:--|--:|--:|
+| Self-attention | $O(n^2 \cdot d)$ | $O(1)$ | $O(1)$ |
+| Recurrent | $O(n \cdot d^2)$ | $O(n)$ | $O(n)$ |
+| Convolutional | $O(k \cdot n \cdot d^2)$ | $O(1)$ | $O(\log_k n)$ |
+
+Each head computes
+
+$$\mathrm{Attention}(Q, K, V) = \mathrm{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V$$
+
+**简而言之**：自注意力让任意两个位置直接相连，长距离依赖更容易学习，训练也更容易并行。The base model trained in 12 hours on 8 P100s, about $300 of cloud time at $3 an hour.";
+
+/// Headings, lists, a quote, code, a diagram and a table, for the
+/// `markdown` state.
+const MARKDOWN: &str = r#"### Encoder layer
+
+1. **Multi-head attention** over the previous layer, then a residual add.
+2. A position-wise **feed-forward** network:
+   - two linear maps with a ReLU between them,
+   - inner size $d_{ff} = 2048$.
+
+> Dropout $P_{drop} = 0.1$ applies to every sub-layer's output.
+
+```python
+def ffn(x):
+    return relu(x @ w1 + b1) @ w2 + b2
+```
+
+```mermaid
+flowchart LR
+  x[Input] --> a[Multi-head attention] --> n1[Add & norm]
+  n1 --> f[Feed-forward] --> n2[Add & norm]
+```
+
+| Model | BLEU | Cost (FLOPs) |
+|:--|--:|--:|
+| Transformer (base) | 27.3 | $3.3 \cdot 10^{18}$ |
+| Transformer (big) | **28.4** | $2.3 \cdot 10^{19}$ |"#;
 
 fn tool(name: &str, arguments: &str, output: &str, state: ToolState) -> Segment {
     Segment::Tool(ToolRow {
@@ -56,6 +98,24 @@ impl Assistant {
             })
         };
         let now = current_timestamp();
+        if state == "markdown" {
+            let mut question = Draft::plain("Walk me through one encoder layer of ");
+            question.push_chip(page(2, 2));
+            self.messages
+                .push(ChatMessage::user_text(question.text.clone()));
+            self.views.push(MessageView {
+                draft: Some(question),
+                sent_at: Some(now - 60),
+                ..MessageView::default()
+            });
+            self.messages.push(ChatMessage::assistant(MARKDOWN.into()));
+            self.views.push(MessageView {
+                segments: vec![Segment::Text(MARKDOWN.into())],
+                duration_ms: Some(5_100),
+                ..MessageView::default()
+            });
+            return;
+        }
         if state == "history" {
             self.sessions = [
                 ("Summary of the Transformer paper", 600, 6, None),

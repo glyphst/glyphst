@@ -23,7 +23,6 @@ eframe = { workspace = true, features = [
     "x11",
 ] }
 egui.workspace = true
-egui_commonmark.workspace = true
 egui_extras.workspace = true
 gilrs.workspace = true
 glyphst-agent-host = { path = "../agent-host" }
@@ -31,6 +30,7 @@ glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-effects = { path = "../effects" }
 glyphst-library = { path = "../library" }
+glyphst-markdown = { path = "../markdown" }
 glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-gpu = { path = "../pdf-gpu" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }

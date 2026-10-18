@@ -272,6 +272,8 @@ if [[ ${tier} == screens ]]; then
         "05-empty @ --assistant-demo empty"
         "05-menu @ --assistant-demo menu"
         "05-running @ --assistant-demo running"
+        "05-done @ --assistant-demo done"
+        "05-markdown @ --assistant-demo markdown"
         "05-error @ --assistant-demo error"
         "05-history @ --assistant-demo history"
         "05-edit @ --assistant-demo edit"

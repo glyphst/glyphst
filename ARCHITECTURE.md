@@ -14,7 +14,8 @@
 | `pdf` | MuPDF integration: document opening, render sessions, display lists, vector capture |
 | `pdf-gpu` | GPU vector page rendering from captured pages (wgpu 30) |
 | `effects` | Shader effects (transitions, backgrounds, overlays) defined as data; wgpu only |
-| `mermaid-render` | Mermaid diagrams to SVG (not used yet; for the assistant) |
+| `markdown` | The assistant's Markdown: blocks parsed once per text, galley paragraphs with real bold, wrapping tables, LaTeX formulas (RaTeX) and mermaid diagrams |
+| `mermaid-render` | Mermaid diagrams to SVG (for `markdown`) |
 
 Private modules split implementation without introducing additional state
 owners. Each document tab owns its loader and indexer workers, their
@@ -294,9 +295,15 @@ change in the reader is copied when mentioned, and pages are read on the
 worker when the message is sent, into a `<context>` block; saved chats keep
 the chips (`AiSessionMessage.mentions`), the time of each message and how
 long each answer took. Pasted (`wl-paste`/`xclip`) and dropped pictures
-become image chips. `--assistant-demo STATE` shows the panel in a canned
-state (empty, menu, hover, running, done, edit, error, history) for
-screenshots. External agents reach the same tools through an
+become image chips. Answers, previews and quick ask draw Markdown with
+`glyphst_markdown::show`: a text is parsed once (by hash) into blocks, each
+paragraph is one wrapped galley (bold in the semibold family, links
+clickable), table columns share the width down to their widest word,
+dollars that read as prices or shell variables stay text (ported from
+Zeron), formulas are RaTeX textures over placeholder glyphs, and closed
+mermaid fences render on a worker thread with resvg. `--assistant-demo
+STATE` shows the panel in a canned state (empty, menu, hover, running,
+done, edit, error, history, markdown) for screenshots. External agents reach the same tools through an
 [MCP server](crates/agent-host/src/mcp.rs) (streamable HTTP on 127.0.0.1,
 plain JSON responses), started when first needed. Each agent session has its
 own bearer token, which selects its tools and the origin and conversation its
@@ -400,8 +407,9 @@ When redb reports a file from an older file format
 
 [Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin crates.io
 versions and Git revisions (merman for Mermaid).
-Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml). egui, eframe,
-egui_extras and egui_commonmark move together, and `pdf-gpu` uses egui's
+Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml). egui, eframe
+and egui_extras move together (and resvg in `markdown` stays egui_extras'
+version), and `pdf-gpu` uses egui's
 wgpu. The craft-ui parts the Reader uses are a copy in
 `crates/ui/src/craft/` (from craft-libs at a recorded revision, MIT), so
 they follow egui upgrades here instead of waiting on craft-libs. Exact renderer/compiler/math pins and major

@@ -5,6 +5,7 @@ members = [
     "crates/core",
     "crates/effects",
     "crates/library",
+    "crates/markdown",
     "crates/mermaid-render",
     "crates/pdf",
     "crates/pdf-gpu",
@@ -34,8 +35,8 @@ bytemuck = { version = "1", features = ["derive"] }
 dirs = "7"
 eframe = { version = "0.37", default-features = false }
 egui = "0.37"
-# Markdown in the egui Reader's assistant; MIT OR Apache-2.0.
-egui_commonmark = { version = "0.26", default-features = false, features = ["pulldown_cmark"] }
+# Markdown in the egui Reader's assistant (glyphst-markdown); MIT.
+pulldown-cmark = { version = "0.13", default-features = false }
 # SVG icons in the egui Reader (resvg); MIT OR Apache-2.0.
 egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 futures = "0.3"
@@ -59,6 +60,12 @@ pollster = "0.4"
 # The Secret Service keyring (async-io), reading the items GPUI wrote.
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 rand = "0.10"
+# LaTeX formulas in assistant Markdown, KaTeX-compatible, with the KaTeX
+# fonts embedded; MIT.
+ratex-layout = "0.1.15"
+ratex-parser = "0.1.15"
+ratex-render = { version = "0.1.15", features = ["embed-fonts"] }
+ratex-types = "0.1.15"
 rfd = "0.17"
 rust-embed = { version = "8", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }

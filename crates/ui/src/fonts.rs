@@ -28,14 +28,19 @@ pub const MONO_SEMIBOLD: &str = "mono-semibold";
 /// The named family of JetBrains Mono Bold.
 pub const MONO_BOLD: &str = "mono-bold";
 
+/// Inter Regular and SemiBold, also for drawing text outside egui (the
+/// assistant's diagrams).
+pub const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+pub const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
+
 /// The bundled chrome family.
 pub const BUNDLED_MONO: &str = "JetBrains Mono";
 /// The bundled prose family.
 pub const BUNDLED_SANS: &str = "Inter";
 
 /// The CJK faces in a glyphst-fonts checkout.
-const CJK_REGULAR_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf";
-const CJK_BOLD_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf";
+pub const CJK_REGULAR_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf";
+pub const CJK_BOLD_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf";
 
 /// Installed CJK sans families tried in order without a checkout; past
 /// them, any face covering 中 (U+4E2D), Simplified Chinese ones first.
@@ -108,15 +113,12 @@ pub fn embedded() -> FontDefinitions {
             .font_data
             .insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
     };
-    add("Inter", include_bytes!("../assets/fonts/Inter-Regular.ttf"));
+    add("Inter", INTER_REGULAR);
     add(
         "Inter-Medium",
         include_bytes!("../assets/fonts/Inter-Medium.ttf"),
     );
-    add(
-        "Inter-SemiBold",
-        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
-    );
+    add("Inter-SemiBold", INTER_SEMIBOLD);
     add(
         "JetBrainsMono",
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),

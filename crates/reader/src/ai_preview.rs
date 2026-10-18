@@ -68,7 +68,7 @@ pub struct Previews {
     hovered: Option<(ChipKind, Rect)>,
     /// Where the hover card was last frame.
     card: Option<Rect>,
-    markdown: egui_commonmark::CommonMarkCache,
+    markdown: glyphst_markdown::MarkdownCache,
 }
 
 /// The key a preview is kept under, and whether it needs loading.
@@ -318,12 +318,10 @@ impl Previews {
                                 egui::Frame::new()
                                     .inner_margin(egui::Margin::symmetric(12, 10))
                                     .show(ui, |ui| {
-                                        ui.style_mut()
-                                            .text_styles
-                                            .insert(egui::TextStyle::Body, theme::regular(12.5));
-                                        egui_commonmark::CommonMarkViewer::new().show(
+                                        glyphst_markdown::show(
                                             ui,
                                             &mut self.markdown,
+                                            &glyphst_markdown::MarkdownStyle::new(&tokens, 12.5),
                                             &text,
                                         );
                                     });

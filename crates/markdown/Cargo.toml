@@ -1,0 +1,22 @@
+[package]
+name = "glyphst-markdown"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+egui.workspace = true
+glyphst-core = { path = "../core" }
+glyphst-mermaid-render = { path = "../mermaid-render" }
+glyphst-ui = { path = "../ui" }
+image = { workspace = true, default-features = false, features = ["png"] }
+pulldown-cmark.workspace = true
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-render.workspace = true
+ratex-types.workspace = true
+# Diagrams rasterised with fonts we choose (the version egui_extras uses).
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
+tracing.workspace = true

@@ -644,29 +644,12 @@ impl Assistant {
         action
     }
 
-    /// The answer's Markdown. egui draws bold in a stronger colour only,
-    /// so the body is a little softer than the text colour.
+    /// The answer's Markdown: the design's prose (Inter 14, line height
+    /// 1.55), bold in the semibold face and the full text colour.
     fn markdown_ui(&mut self, ui: &mut egui::Ui, text: &str) {
         let tokens = Tokens::get(ui.ctx());
-        ui.scope(|ui| {
-            let style = ui.style_mut();
-            style
-                .text_styles
-                .insert(egui::TextStyle::Body, theme::regular(14.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Monospace, theme::mono(12.0));
-            style.spacing.item_spacing.y = 8.0;
-            style.visuals.code_bg_color = tokens.raised;
-            let strong = if tokens.dark() {
-                Color32::WHITE
-            } else {
-                Color32::BLACK
-            };
-            style.visuals.override_text_color = Some(theme::mix(tokens.text, tokens.raised, 0.14));
-            style.visuals.widgets.active.fg_stroke.color = strong;
-            egui_commonmark::CommonMarkViewer::new().show(ui, &mut self.markdown, text);
-        });
+        let style = glyphst_markdown::MarkdownStyle::new(&tokens, 14.0);
+        glyphst_markdown::show(ui, &mut self.markdown, &style, text);
     }
 
     /// The live row at the end of a running answer.
@@ -923,7 +906,7 @@ fn details(
     ui: &mut egui::Ui,
     item: &Segment,
     tokens: &Tokens,
-    markdown: &mut egui_commonmark::CommonMarkCache,
+    markdown: &mut glyphst_markdown::MarkdownCache,
 ) {
     egui::Frame::new()
         .fill(tokens.raised)
@@ -943,17 +926,12 @@ fn details(
                 .max_height(220.0)
                 .show(ui, |ui| match item {
                     Segment::Thought(text) | Segment::Text(text) => {
-                        ui.scope(|ui| {
-                            ui.style_mut()
-                                .text_styles
-                                .insert(egui::TextStyle::Body, theme::regular(12.5));
-                            ui.visuals_mut().override_text_color = Some(tokens.muted);
-                            egui_commonmark::CommonMarkViewer::new().show(
-                                ui,
-                                markdown,
-                                text.trim(),
-                            );
-                        });
+                        let style = glyphst_markdown::MarkdownStyle {
+                            text: tokens.muted,
+                            strong_text: tokens.text_2,
+                            ..glyphst_markdown::MarkdownStyle::new(tokens, 12.5)
+                        };
+                        glyphst_markdown::show(ui, markdown, &style, text.trim());
                     }
                     Segment::Tool(row) => {
                         let input = serde_json::from_str::<serde_json::Value>(&row.arguments)
