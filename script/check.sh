@@ -216,6 +216,7 @@ if [[ ${tier} == screens ]]; then
         "02a-reader @ --sidebar outline --assistant-demo done"
         "02b-generating @ --screenshot-generating"
         "02d-find @ --find the"
+        "02d-find-empty @ --command text.find"
         "02e-overview @ --command view.page_overview"
         "02e-overview-find @ --sidebar search --find the --command view.page_overview"
         "02e-overview-wallpaper @ --background image --wallpaper ^ --colours background --command view.page_overview"

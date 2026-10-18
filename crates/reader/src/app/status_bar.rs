@@ -265,20 +265,22 @@ impl ReaderApp {
                     pos2(rect.left() + 38.0, rect.top() + 3.0),
                     vec2(width, rect.height() - 6.0),
                 );
-                let response = ui.put(
-                    field,
-                    egui::TextEdit::singleline(page_input)
-                        .font(font.clone())
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::ZERO)
-                        .desired_width(width)
-                        .align(egui::Align2::LEFT_CENTER)
-                        .hint_text(
-                            egui::RichText::new((current + 1).to_string())
-                                .font(font.clone())
-                                .color(tokens.text),
-                        ),
-                );
+                let response = glyphst_ui::text::fitted(ui, |ui| {
+                    ui.put(
+                        field,
+                        egui::TextEdit::singleline(page_input)
+                            .font(font.clone())
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_width(width)
+                            .align(egui::Align2::LEFT_CENTER)
+                            .hint_text(
+                                egui::RichText::new((current + 1).to_string())
+                                    .font(font.clone())
+                                    .color(tokens.text),
+                            ),
+                    )
+                });
                 if response.has_focus() {
                     ui.painter().hline(
                         field.x_range(),

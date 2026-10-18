@@ -372,16 +372,18 @@ pub fn find_bar(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.add(icons::image("search", 14.0, tokens.faint));
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut find.query)
-                                .id(egui::Id::unique("find-input"))
-                                .font(theme::mono(12.0))
-                                .hint_text(
-                                    egui::RichText::new("find in document").color(tokens.faint),
-                                )
-                                .desired_width(150.0)
-                                .frame(egui::Frame::NONE),
-                        );
+                        let response = glyphst_ui::text::fitted(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut find.query)
+                                    .id(egui::Id::unique("find-input"))
+                                    .font(theme::mono(12.0))
+                                    .hint_text(
+                                        egui::RichText::new("find in document").color(tokens.faint),
+                                    )
+                                    .desired_width(150.0)
+                                    .frame(egui::Frame::NONE),
+                            )
+                        });
                         if find.focus {
                             response.request_focus();
                             find.focus = false;

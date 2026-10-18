@@ -433,16 +433,22 @@ impl ProviderPages {
                         name.clear();
                         host.clear();
                     }
-                    ui.add(
-                        egui::TextEdit::singleline(host)
-                            .hint_text("https://host/v1")
-                            .desired_width(200.0),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(name)
-                            .hint_text("Name")
-                            .desired_width(120.0),
-                    );
+                    glyphst_ui::text::fitted(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(host)
+                                .margin(glyphst_ui::text::FIELD_MARGIN)
+                                .hint_text("https://host/v1")
+                                .desired_width(200.0),
+                        )
+                    });
+                    glyphst_ui::text::fitted(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(name)
+                                .margin(glyphst_ui::text::FIELD_MARGIN)
+                                .hint_text("Name")
+                                .desired_width(120.0),
+                        )
+                    });
                 },
             );
         });
@@ -567,11 +573,14 @@ impl ProviderPages {
         }
         ui.horizontal(|ui| {
             let new = self.new_model.entry(provider).or_default();
-            ui.add(
-                egui::TextEdit::singleline(new)
-                    .hint_text("model id")
-                    .desired_width(200.0),
-            );
+            glyphst_ui::text::fitted(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(new)
+                        .margin(glyphst_ui::text::FIELD_MARGIN)
+                        .hint_text("model id")
+                        .desired_width(200.0),
+                )
+            });
             if ui
                 .add_enabled(!new.trim().is_empty(), egui::Button::new("Add"))
                 .clicked()
@@ -704,12 +713,15 @@ impl ProviderPages {
             {
                 self.revealed.insert(id);
             }
-            ui.add(
-                egui::TextEdit::singleline(value)
-                    .password(!shown)
-                    .hint_text("not set")
-                    .desired_width(FIELD_WIDTH - 32.0),
-            );
+            glyphst_ui::text::fitted(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .margin(glyphst_ui::text::FIELD_MARGIN)
+                        .password(!shown)
+                        .hint_text("not set")
+                        .desired_width(FIELD_WIDTH - 32.0),
+                )
+            });
         });
     }
 }
@@ -733,11 +745,14 @@ const FIELD_WIDTH: f32 = 280.0;
 
 fn text_field(group: &mut Group<'_>, label: &str, value: &mut String, hint: &str) {
     group.row(label, None, |ui| {
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .desired_width(FIELD_WIDTH),
-        );
+        glyphst_ui::text::fitted(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .margin(glyphst_ui::text::FIELD_MARGIN)
+                    .hint_text(hint)
+                    .desired_width(FIELD_WIDTH),
+            )
+        });
     });
 }
 

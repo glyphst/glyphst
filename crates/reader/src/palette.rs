@@ -582,18 +582,22 @@ impl Palette {
                             };
                             let count_width =
                                 glyphst_ui::text::width(ui, &count, &theme::mono(10.0)) + 28.0;
-                            let field = ui.add(
-                                egui::TextEdit::singleline(&mut self.query)
-                                    .id(field_id())
-                                    .hint_text(egui::RichText::new(hint).color(tokens.faint))
-                                    // Tab completes a path instead of
-                                    // moving the focus.
-                                    .lock_focus(true)
-                                    .font(theme::mono(14.0))
-                                    .frame(egui::Frame::NONE)
-                                    .margin(egui::Margin::symmetric(4, 8))
-                                    .desired_width((ui.available_width() - count_width).max(40.0)),
-                            );
+                            let field = glyphst_ui::text::fitted(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.query)
+                                        .id(field_id())
+                                        .hint_text(egui::RichText::new(hint).color(tokens.faint))
+                                        // Tab completes a path instead of
+                                        // moving the focus.
+                                        .lock_focus(true)
+                                        .font(theme::mono(14.0))
+                                        .frame(egui::Frame::NONE)
+                                        .margin(egui::Margin::symmetric(4, 8))
+                                        .desired_width(
+                                            (ui.available_width() - count_width).max(40.0),
+                                        ),
+                                )
+                            });
                             ui.label(
                                 egui::RichText::new(count)
                                     .font(theme::mono(10.0))

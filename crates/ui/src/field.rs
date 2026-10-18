@@ -169,7 +169,7 @@ impl<'a> TextField<'a> {
         if let Some(id) = self.id {
             edit = edit.id(id);
         }
-        let response = ui.put(edit_rect, edit);
+        let response = crate::text::fitted(ui, |ui| ui.put(edit_rect, edit));
         let focused = response.has_focus();
         let stroke = if focused {
             egui::Stroke::new(1.0, t.accent)

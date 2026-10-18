@@ -1666,11 +1666,14 @@ fn bookmarks(
                 if let Some((id, text)) = &mut state.bookmark
                     && *id == bookmark.id
                 {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(text)
-                            .font(theme::mono(12.0))
-                            .desired_width(f32::INFINITY),
-                    );
+                    let response = glyphst_ui::text::fitted(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(text)
+                                .font(theme::mono(12.0))
+                                .margin(glyphst_ui::text::FIELD_MARGIN)
+                                .desired_width(f32::INFINITY),
+                        )
+                    });
                     if std::mem::take(&mut state.focus_rename) {
                         response.request_focus();
                     }
@@ -1889,12 +1892,15 @@ fn note_details(
             if let Some((id, body)) = &mut state.note
                 && *id == item.id
             {
-                ui.add(
-                    egui::TextEdit::multiline(body)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("note"),
-                );
+                glyphst_ui::text::fitted(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(body)
+                            .margin(glyphst_ui::text::FIELD_MARGIN)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("note"),
+                    )
+                });
                 let (save, cancel) = ui
                     .horizontal(|ui| {
                         (

@@ -4057,12 +4057,15 @@ impl ReaderApp {
                             }
                         });
                         if is_note {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut editor.body)
-                                    .hint_text("Note")
-                                    .desired_rows(3)
-                                    .desired_width(260.0),
-                            );
+                            glyphst_ui::text::fitted(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut editor.body)
+                                        .margin(glyphst_ui::text::FIELD_MARGIN)
+                                        .hint_text("Note")
+                                        .desired_rows(3)
+                                        .desired_width(260.0),
+                                )
+                            });
                         }
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {

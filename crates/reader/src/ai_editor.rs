@@ -448,16 +448,18 @@ impl MentionEditor {
             .max_height(style.max_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                egui::TextEdit::multiline(text)
-                    .id(self.id)
-                    .hint_text(egui::RichText::new(style.hint).color(tokens.faint))
-                    .font(style.font.clone())
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .desired_rows(style.rows)
-                    .desired_width(f32::INFINITY)
-                    .layouter(&mut layouter)
-                    .show(ui)
+                glyphst_ui::text::fitted(ui, |ui| {
+                    egui::TextEdit::multiline(text)
+                        .id(self.id)
+                        .hint_text(egui::RichText::new(style.hint).color(tokens.faint))
+                        .font(style.font.clone())
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .desired_rows(style.rows)
+                        .desired_width(f32::INFINITY)
+                        .layouter(&mut layouter)
+                        .show(ui)
+                })
             })
             .inner;
         if let Some(caret) = self.draft.reconcile(&old) {
