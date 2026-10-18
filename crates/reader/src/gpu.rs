@@ -64,9 +64,34 @@ pub struct TransitionUse {
     pub effect: EffectUse,
     pub progress: f32,
     pub direction: f32,
-    /// On a transition's first frame, the tab whose last drawn image becomes
-    /// the outgoing view; later frames keep that snapshot.
-    pub capture_from: Option<u64>,
+    /// Where the switch came from, in view pixels.
+    pub origin: Option<[f32; 2]>,
+    pub seed: f32,
+    /// Played back: the view drawn is the outgoing image and the snapshot
+    /// the incoming one.
+    pub reversed: bool,
+    /// On a transition's first frame, what becomes the outgoing view;
+    /// later frames keep that snapshot.
+    pub capture: Option<Capture>,
+}
+
+/// A transition's outgoing image, made into the view's snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Capture {
+    /// The last image of a tab's view, or of a tab just closed.
+    View(u64),
+    /// What a transition running in `tab`'s view shows, drawn once more.
+    Composite {
+        tab: u64,
+        effect: EffectUse,
+        progress: f32,
+        direction: f32,
+        origin: Option<[f32; 2]>,
+        seed: f32,
+        reversed: bool,
+    },
+    /// Nothing: the view comes in over the background.
+    Clear,
 }
 
 /// Physical pixel size egui uses for a callback in `rect`.
@@ -168,10 +193,21 @@ impl ViewState {
             _ => self.target.texture(),
         }
     }
+
+    /// [`Self::image`] to sample.
+    fn image_view(&self) -> &wgpu::TextureView {
+        match (&self.tinted, self.shows_tinted) {
+            (Some(tinted), true) => &tinted.view,
+            _ => self.target.view(),
+        }
+    }
 }
 
 /// Frames a view is kept after it was last drawn, for a transition from it.
 const VIEW_KEEP_FRAMES: u64 = 240;
+/// Frames a closed tab's last image is kept, for the transition its close
+/// starts.
+const ORPHAN_KEEP_FRAMES: u64 = 8;
 
 struct Snapshot {
     texture: wgpu::Texture,
@@ -196,6 +232,8 @@ pub struct ReaderGpu {
     frame: u64,
     /// Each shown tab's view, by tab id.
     views: HashMap<u64, ViewState>,
+    /// The last images of tabs just closed, with the frame they closed on.
+    orphans: HashMap<u64, (wgpu::Texture, u64)>,
     paper: wgpu::RenderPipeline,
     paper_bind_group: wgpu::BindGroup,
     paper_color: wgpu::Buffer,
@@ -317,6 +355,7 @@ impl ReaderGpu {
             belt: wgpu::util::StagingBelt::new(device.clone(), UPLOAD_BYTES_PER_FRAME),
             frame: 0,
             views: HashMap::new(),
+            orphans: HashMap::new(),
             paper,
             paper_bind_group,
             paper_color,
@@ -652,7 +691,9 @@ impl ReaderGpu {
         self.parts.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
         self.uploads.retain(|upload| upload.key().tab != tab);
-        self.views.remove(&tab);
+        if let Some(view) = self.views.remove(&tab) {
+            self.orphans.insert(tab, (view.image().clone(), self.frame));
+        }
     }
 
     fn resident_bytes(&self) -> u64 {
@@ -726,6 +767,30 @@ fn snapshot(device: &wgpu::Device, format: wgpu::TextureFormat, size: [u32; 2]) 
     }
 }
 
+/// A render pass that clears `view` to transparent.
+fn clear_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    label: &str,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
 /// The per-frame paint callback of a document view.
 pub struct ViewCallback {
     pub rect: egui::Rect,
@@ -791,17 +856,76 @@ impl CallbackTrait for ViewCallback {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // A transition's first frame keeps the outgoing view (another tab's
-        // last image, or this view's before a turn) before the new one
-        // replaces it; without one of this size the outgoing view is empty.
-        let capture = self.transition.as_ref().and_then(|t| t.capture_from);
-        let outgoing = capture
-            .and_then(|from| gpu.views.get(&from))
-            .filter(|view| view.target.size() == target)
-            .map(|view| view.image().clone());
+        // last image, this view's before a turn, or what a transition
+        // running when this one started showed) before the new one replaces
+        // it; without one of this size the outgoing view is empty.
+        enum Outgoing {
+            Copy(wgpu::Texture),
+            Draw(PreparedEffect),
+            Clear,
+        }
+        let capture = self.transition.as_ref().and_then(|t| t.capture.clone());
+        let resolution = [size[0] as f32, size[1] as f32];
+        let outgoing = capture.as_ref().map(|capture| match capture {
+            // A closed tab's last image first: a callback queued before
+            // the close may have made its view again, empty.
+            Capture::View(from) => gpu
+                .orphans
+                .get(from)
+                .filter(|(image, _)| [image.width(), image.height()] == target)
+                .map(|(image, _)| image.clone())
+                .or_else(|| {
+                    gpu.views
+                        .get(from)
+                        .filter(|view| view.target.size() == target)
+                        .map(|view| view.image().clone())
+                })
+                .map_or(Outgoing::Clear, Outgoing::Copy),
+            Capture::Composite {
+                tab,
+                effect,
+                progress,
+                direction,
+                origin,
+                seed,
+                reversed,
+            } => gpu
+                .views
+                .get(tab)
+                .filter(|view| view.target.size() == target)
+                .and_then(|view| {
+                    let snapshot = view.snapshot.as_ref().filter(|s| s.size == target)?;
+                    let (from, to) = if *reversed {
+                        (view.image_view(), &snapshot.view)
+                    } else {
+                        (&snapshot.view, view.image_view())
+                    };
+                    gpu.effects.prepare(
+                        device,
+                        &effect.id,
+                        &EffectInputs {
+                            from,
+                            to,
+                            resolution,
+                            pointer: None,
+                            time: self.time,
+                            progress: *progress,
+                            direction: *direction,
+                            params: effect.params,
+                            opacity: 1.0,
+                            extent,
+                            origin: *origin,
+                            seed: *seed,
+                        },
+                    )
+                })
+                .map_or(Outgoing::Clear, Outgoing::Draw),
+            Capture::Clear => Outgoing::Clear,
+        });
         let format = gpu.format;
         let view = gpu.view(device, self.tab, target);
         view.last_drawn = frame;
-        if capture.is_some() {
+        if let Some(outgoing) = outgoing {
             if view
                 .snapshot
                 .as_ref()
@@ -810,8 +934,9 @@ impl CallbackTrait for ViewCallback {
                 view.snapshot = Some(snapshot(device, format, target));
             }
             let snapshot = view.snapshot.as_ref().expect("made above");
+            let snapshot_view = snapshot.view.clone();
             match outgoing {
-                Some(texture) => encoder.copy_texture_to_texture(
+                Outgoing::Copy(texture) => encoder.copy_texture_to_texture(
                     texture.as_image_copy(),
                     snapshot.texture.as_image_copy(),
                     wgpu::Extent3d {
@@ -820,23 +945,14 @@ impl CallbackTrait for ViewCallback {
                         depth_or_array_layers: 1,
                     },
                 ),
-                None => {
-                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("clear_snapshot"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &snapshot.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                            depth_slice: None,
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                Outgoing::Draw(prepared) => {
+                    let mut pass = clear_pass(&mut encoder, &snapshot_view, "composite_snapshot");
+                    // The pane's part only, as the view draws it.
+                    pass.set_viewport(0.0, 0.0, resolution[0], resolution[1], 0.0, 1.0);
+                    gpu.effects.draw(&prepared, &mut pass);
+                }
+                Outgoing::Clear => {
+                    clear_pass(&mut encoder, &snapshot_view, "clear_snapshot");
                 }
             }
         }
@@ -914,7 +1030,6 @@ impl CallbackTrait for ViewCallback {
             }
         }
 
-        let resolution = [size[0] as f32, size[1] as f32];
         // The tint, drawn from the pages into the view's tinted image.
         let tint = self.overlay.as_ref().and_then(|overlay| {
             let inputs = EffectInputs {
@@ -970,22 +1085,21 @@ impl CallbackTrait for ViewCallback {
         let prepare = |id: &str,
                        fallback: &str,
                        from: &wgpu::TextureView,
-                       params: [f32; 4],
-                       progress: f32,
-                       direction: f32| {
+                       to: &wgpu::TextureView,
+                       transition: Option<&TransitionUse>| {
             let effect_inputs = EffectInputs {
                 from,
-                to: image,
+                to,
                 resolution,
                 pointer: self.pointer,
                 time: self.time,
-                progress,
-                direction,
-                params,
+                progress: transition.map_or(0.0, |t| t.progress),
+                direction: transition.map_or(1.0, |t| t.direction),
+                params: transition.map_or([0.0; 4], |t| t.effect.params),
                 opacity: 1.0,
                 extent,
-                origin: None,
-                seed: 0.0,
+                origin: transition.and_then(|t| t.origin),
+                seed: transition.map_or(0.0, |t| t.seed),
             };
             effects
                 .prepare(device, id, &effect_inputs)
@@ -993,15 +1107,15 @@ impl CallbackTrait for ViewCallback {
         };
         let content = match (&self.transition, &view.snapshot) {
             // The snapshot is window-sized, like the view's target.
-            (Some(transition), Some(snapshot)) if snapshot.size == target => prepare(
-                &transition.effect.id,
-                PRESENT,
-                &snapshot.view,
-                transition.effect.params,
-                transition.progress,
-                transition.direction,
-            ),
-            _ => prepare(PRESENT, PRESENT, image, [0.0; 4], 0.0, 1.0),
+            (Some(transition), Some(snapshot)) if snapshot.size == target => {
+                let (from, to) = if transition.reversed {
+                    (image, &snapshot.view)
+                } else {
+                    (&snapshot.view, image)
+                };
+                prepare(&transition.effect.id, PRESENT, from, to, Some(transition))
+            }
+            _ => prepare(PRESENT, PRESENT, image, image, None),
         };
         view.prepared = content.into_iter().collect();
         // Every pane adds to the frame's statistics.
@@ -1117,13 +1231,39 @@ impl CallbackTrait for PreviewCallback {
         let Some(gpu) = resources.get_mut::<ReaderGpu>() else {
             return Vec::new();
         };
-        let def = gpu.effects.find(&self.effect.id);
+        // Random shows each transition in turn, a cycle each.
+        const RANDOM_CYCLE: f32 = 1.6;
+        let (effect, time) = if self.effect.id == glyphst_effects::RANDOM {
+            let pool: Vec<&glyphst_effects::EffectDef> = gpu
+                .effects
+                .defs()
+                .filter(|def| def.kind == EffectKind::Transition && !def.hidden)
+                .collect();
+            let turn = (self.time / RANDOM_CYCLE).max(0.0) as usize;
+            match pool.get(turn % pool.len().max(1)) {
+                Some(def) => (
+                    EffectUse {
+                        id: def.id.clone(),
+                        params: def.default_params(),
+                    },
+                    self.time % RANDOM_CYCLE,
+                ),
+                None => (self.effect.clone(), self.time),
+            }
+        } else {
+            (self.effect.clone(), self.time)
+        };
+        let def = gpu.effects.find(&effect.id);
         let image = def.is_some_and(|def| def.image);
         // Transitions run, then hold the incoming page a moment.
         let duration = def
             .map_or(0.3, |def| def.duration_ms as f32 / 1000.0)
             .max(0.05);
-        let progress = (self.time % (duration + 0.9) / duration).min(1.0);
+        let progress = if self.effect.id == glyphst_effects::RANDOM {
+            (time / duration).min(1.0)
+        } else {
+            (time % (duration + 0.9) / duration).min(1.0)
+        };
         let (from, to) = match (self.kind, &gpu.wallpaper) {
             (EffectKind::Transition, _) => (&gpu.samples[0], &gpu.samples[1]),
             (EffectKind::Overlay, _) => (&gpu.samples[0], &gpu.samples[0]),
@@ -1139,13 +1279,13 @@ impl CallbackTrait for PreviewCallback {
             time: self.time,
             progress,
             direction: 1.0,
-            params: self.effect.params,
+            params: effect.params,
             opacity: 1.0,
             extent: [1.0; 2],
             origin: None,
             seed: 0.0,
         };
-        match gpu.effects.prepare(device, &self.effect.id, &inputs) {
+        match gpu.effects.prepare(device, &effect.id, &inputs) {
             Some(prepared) => gpu.previews.insert(self.key.clone(), prepared),
             None => gpu.previews.remove(&self.key),
         };
@@ -1194,6 +1334,8 @@ impl CallbackTrait for BackdropCallback {
         // pages' and views' last use, and for the statistics.
         gpu.frame += 1;
         let frame = gpu.frame;
+        gpu.orphans
+            .retain(|_, (_, closed)| frame <= *closed + ORPHAN_KEEP_FRAMES);
         gpu.views
             .retain(|_, view| frame - view.last_drawn <= VIEW_KEEP_FRAMES);
         gpu.stats = FrameStats::default();

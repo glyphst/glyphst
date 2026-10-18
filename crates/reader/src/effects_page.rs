@@ -272,6 +272,20 @@ fn as_choice(id: Option<&str>) -> Choice {
     id.map_or(Choice::Off, |id| Choice::Effect(id.to_string()))
 }
 
+/// A different transition every switch; its preview shows them in turn.
+fn random_card() -> Card {
+    Card {
+        choice: Choice::Effect(glyphst_effects::RANDOM.into()),
+        label: "Random".into(),
+        preview: Some(EffectUse {
+            id: glyphst_effects::RANDOM.into(),
+            params: [0.0; MAX_PARAMS],
+        }),
+        user: false,
+        needs_wallpaper: false,
+    }
+}
+
 fn off_card() -> Card {
     Card {
         choice: Choice::Off,
@@ -306,7 +320,38 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
     let find = |id: &str| effects.iter().find(|def| def.id == id);
     let has_wallpaper = prefs.wallpaper.is_some();
 
-    glyphst_ui::settings::group(ui, "Page transition", |group| {
+    glyphst_ui::settings::group(ui, "Book switch", |group| {
+        group.full(|ui| {
+            let cards = cards_for(
+                effects,
+                EffectKind::Transition,
+                &prefs.effect_params,
+                has_wallpaper,
+                vec![off_card(), random_card()],
+                theme_colours(&tokens),
+            );
+            let selected = as_choice(prefs.switch_transition.as_deref());
+            let card = fill_card(ui.available_width());
+            match gallery(
+                ui,
+                "settings-switch",
+                EffectKind::Transition,
+                &cards,
+                &selected,
+                card,
+                time,
+            ) {
+                Some(Choice::Effect(id)) => prefs.switch_transition = Some(id),
+                Some(_) => prefs.switch_transition = None,
+                None => {}
+            }
+            if let Some(def) = prefs.switch_transition.as_deref().and_then(find) {
+                params_editor(ui, def, &mut prefs.effect_params);
+            }
+        });
+    });
+
+    glyphst_ui::settings::group(ui, "Page turn", |group| {
         group.full(|ui| {
             let cards = cards_for(
                 effects,
@@ -721,6 +766,8 @@ pub struct BookPage<'a> {
     pub book: &'a mut BookEffects,
     pub default_background: Option<&'a EffectDef>,
     pub default_transition: Option<&'a EffectDef>,
+    /// The default book switch's name ("random", an effect's, or none).
+    pub default_switch: Option<String>,
     pub default_overlay: Option<&'a EffectDef>,
     pub effects: &'a [EffectDef],
     pub params: &'a mut BTreeMap<String, [f32; MAX_PARAMS]>,
@@ -746,6 +793,7 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
         book,
         default_background,
         default_transition,
+        default_switch,
         default_overlay,
         effects,
         params,
@@ -856,7 +904,47 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
                 });
             }
             ui.add_space(8.0);
-            motif::rule_title(ui, "page transition", None);
+            // As many as fit on a line, wrapping: the choices outgrow a
+            // segmented control.
+            let chips = |ui: &mut egui::Ui, options: &[(Choice, String)], current: &mut Choice| {
+                let mut changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for (choice, label) in options {
+                        let chosen = choice == current;
+                        if ui
+                            .add(Button::plain(label).selected(chosen).small())
+                            .clicked()
+                            && !chosen
+                        {
+                            *current = choice.clone();
+                            changed = true;
+                        }
+                    }
+                });
+                changed
+            };
+            let transitions = || {
+                choosable(effects, EffectKind::Transition)
+                    .map(|def| (Choice::Effect(def.id.clone()), def.name.to_lowercase()))
+            };
+            motif::rule_title(ui, "book switch", None);
+            ui.add_space(6.0);
+            let mut options: Vec<(Choice, String)> = vec![
+                (
+                    Choice::Default,
+                    format!("default · {}", default_switch.as_deref().unwrap_or("none")),
+                ),
+                (Choice::Off, "none".to_owned()),
+                (
+                    Choice::Effect(glyphst_effects::RANDOM.into()),
+                    "random".to_owned(),
+                ),
+            ];
+            options.extend(transitions());
+            changes.book |= chips(ui, &options, &mut book.switch);
+            ui.add_space(8.0);
+            motif::rule_title(ui, "page turn", None);
             ui.add_space(6.0);
             let mut options: Vec<(Choice, String)> = vec![
                 (
@@ -868,26 +956,8 @@ pub fn book_page(ui: &mut egui::Ui, page: BookPage<'_>) -> BookChanges {
                 ),
                 (Choice::Off, "none".to_owned()),
             ];
-            options.extend(
-                choosable(effects, EffectKind::Transition)
-                    .map(|def| (Choice::Effect(def.id.clone()), def.name.to_lowercase())),
-            );
-            // As many as fit on a line, wrapping: the choices outgrow a
-            // segmented control.
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                for (choice, label) in &options {
-                    let chosen = *choice == book.transition;
-                    if ui
-                        .add(Button::plain(label).selected(chosen).small())
-                        .clicked()
-                        && !chosen
-                    {
-                        book.transition = choice.clone();
-                        changes.book = true;
-                    }
-                }
-            });
+            options.extend(transitions());
+            changes.book |= chips(ui, &options, &mut book.transition);
             ui.add_space(10.0);
             for (label, on) in [
                 ("smooth scrolling", smooth_scrolling),

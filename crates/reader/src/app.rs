@@ -29,8 +29,8 @@ use crate::{
     find::{self, FindBarAction},
     generation::{Generations, PageState},
     gpu::{
-        EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse, UPLOAD_BYTES_PER_FRAME,
-        ViewCallback, pixel_size,
+        Capture as GpuCapture, EffectUse, PAGE_BUDGET_BYTES, PageKey, ReaderGpu, TransitionUse,
+        UPLOAD_BYTES_PER_FRAME, ViewCallback, pixel_size,
     },
     harness::Harness,
     home::{Home, HomeAction},
@@ -55,7 +55,7 @@ use crate::{
     sidebar::{self, OtherBookmark, SidebarAction, SidebarInfo, SidebarState, SidebarTab},
     text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
-    transition::ViewTransition,
+    transition::{Capture, Rng, ViewTransition},
     translation::{CardState, Translator},
     user_settings::UserSettings,
     window_blur::WindowBlur,
@@ -106,7 +106,9 @@ pub struct Launch {
     pub files: Vec<PathBuf>,
     pub harness: Option<Harness>,
     pub background: Option<String>,
+    /// Book switches' and page turns' transition.
     pub transition: Option<String>,
+    pub reduce_motion: bool,
     /// The default page tint (an overlay effect id, or `none`).
     pub overlay: Option<String>,
     /// The wallpaper image.
@@ -173,6 +175,31 @@ pub struct Launch {
 }
 
 /// One pane's frame of the document view.
+/// How a tab becomes active.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Switch {
+    /// Where it comes from, in points; else the origin set for the next
+    /// switch, or this frame's click.
+    pub origin: Option<egui::Pos2>,
+    /// +1 or -1; else by the tabs' order.
+    pub direction: Option<f32>,
+    /// The book switcher showing a book before it is picked.
+    pub peek: bool,
+    /// How many times faster than its own length the transition runs.
+    pub speed: f32,
+}
+
+impl Default for Switch {
+    fn default() -> Self {
+        Self {
+            origin: None,
+            direction: None,
+            peek: false,
+            speed: 1.0,
+        }
+    }
+}
+
 struct PaneView<'a> {
     /// Where the pages are laid out.
     rect: egui::Rect,
@@ -238,6 +265,15 @@ pub struct ReaderApp {
     pickers: Pickers,
     pub(crate) render_state: egui_wgpu::RenderState,
     pub(crate) transition: Option<ViewTransition>,
+    /// Picks random transitions, their varied parameters and seeds.
+    transition_rng: Rng,
+    /// The last transition Random picked, so the next one differs.
+    last_random: Option<String>,
+    /// Where the next switch comes from, in points (a card picked); else
+    /// this frame's click.
+    pub(crate) next_origin: Option<egui::Pos2>,
+    /// Where the pointer clicked this frame.
+    click: Option<egui::Pos2>,
     /// The animations over pages that are slow to load.
     pub(crate) generations: Generations,
     started: Instant,
@@ -419,7 +455,12 @@ impl ReaderApp {
             prefs.colours = colours;
         }
         if let Some(transition) = launch.transition {
+            // Book switches and page turns both.
             prefs.transition = (transition != "none").then_some(transition);
+            prefs.switch_transition = prefs.transition.clone();
+        }
+        if launch.reduce_motion {
+            prefs.reduce_motion = true;
         }
         if let Some(overlay) = launch.overlay {
             let tint = (overlay != "none").then_some(overlay);
@@ -488,6 +529,15 @@ impl ReaderApp {
             pickers: Pickers::default(),
             render_state,
             transition: None,
+            // Screenshots repeat their random picks.
+            transition_rng: if launch.harness.is_some() {
+                Rng::new(1)
+            } else {
+                Rng::from_time()
+            },
+            last_random: None,
+            next_origin: None,
+            click: None,
             generations: Generations::default(),
             started: Instant::now(),
             pads,
@@ -717,9 +767,14 @@ impl ReaderApp {
     }
 
     /// Makes another tab active: it shows in the focused pane (or its own
-    /// pane gets the focus), with the transition effect from the document
-    /// it replaces.
+    /// pane gets the focus), with the book-switch transition from the
+    /// document it replaces (or from nothing, coming from Home).
     pub(crate) fn activate(&mut self, next: Option<usize>) {
+        self.activate_with(next, Switch::default());
+    }
+
+    /// [`Self::activate`] with where the switch comes from.
+    pub(crate) fn activate_with(&mut self, next: Option<usize>, switch: Switch) {
         self.page_focused = None;
         if next == self.active {
             return;
@@ -729,21 +784,93 @@ impl ReaderApp {
         let Some(next) = next else {
             return;
         };
-        self.couch.book_opened = true;
+        if !switch.peek {
+            self.couch.book_opened = true;
+        }
         let tab = self.tabs[next].id;
         let replaced = self.panes.show(tab);
-        let (Some(_), Some(from), Some(effect)) =
-            (previous, replaced, self.effects_for(Some(next)).transition)
-        else {
+        let capture = match (previous, replaced) {
+            (None, _) => Capture::Clear,
+            (Some(_), Some(from)) => Capture::View(from),
+            // Already on the stage in another pane: only the focus moves.
+            (Some(_), None) => return,
+        };
+        let direction = switch.direction.unwrap_or_else(|| {
+            let from = previous.filter(|_| replaced.is_some());
+            if from.is_none_or(|from| next >= from) {
+                1.0
+            } else {
+                -1.0
+            }
+        });
+        let origin = switch.origin.or(self.next_origin.take()).or(self.click);
+        self.begin_switch(next, capture, direction, origin, switch.speed);
+    }
+
+    /// Starts the book-switch transition into tab `index` from `capture`.
+    /// Going back to the book a running switch left plays it backwards;
+    /// another switch while one runs starts from what is on screen, with
+    /// the same effect.
+    fn begin_switch(
+        &mut self,
+        index: usize,
+        capture: Capture,
+        direction: f32,
+        origin: Option<egui::Pos2>,
+        speed: f32,
+    ) {
+        let tab = self.tabs[index].id;
+        let now = Instant::now();
+        if let Some(running) = self.transition.as_mut().filter(|t| !t.finished(now)) {
+            let from = match capture {
+                Capture::View(from) => Some(from),
+                _ => None,
+            };
+            if running.from_tab == Some(tab) && from == Some(running.tab) {
+                running.reverse(now);
+                return;
+            }
+            if from == Some(running.tab) {
+                let composite = running.composite(now);
+                let planned = running.planned();
+                self.transition = Some(
+                    ViewTransition::new(planned, composite, tab, direction, origin, now)
+                        .faster(speed),
+                );
+                return;
+            }
+        }
+        self.transition = None;
+        let Some(choice) = self.effects_for(Some(index)).switch else {
             return;
         };
-        let from_index = self.tabs.iter().position(|tab| tab.id == from);
-        let direction = if from_index.is_none_or(|from| next >= from) {
-            1.0
-        } else {
-            -1.0
+        let reduce_motion = self.prefs.reduce_motion;
+        let saved = &self.prefs.effect_params;
+        let (rng, last) = (&mut self.transition_rng, self.last_random.as_deref());
+        let planned = {
+            let renderer = self.render_state.renderer.read();
+            renderer
+                .callback_resources
+                .get::<ReaderGpu>()
+                .and_then(|gpu| {
+                    crate::transition::plan(
+                        &choice,
+                        gpu.effects().defs(),
+                        saved,
+                        reduce_motion,
+                        rng,
+                        last,
+                    )
+                })
         };
-        self.begin_transition(effect, from, tab, direction);
+        let Some(planned) = planned else {
+            return;
+        };
+        if choice.id == glyphst_effects::RANDOM {
+            self.last_random = Some(planned.effect.id.clone());
+        }
+        self.transition =
+            Some(ViewTransition::new(planned, capture, tab, direction, origin, now).faster(speed));
     }
 
     /// Opens the Keyboard shortcuts tab, or goes to it.
@@ -1934,25 +2061,44 @@ impl ReaderApp {
         }
     }
 
-    fn begin_transition(&mut self, effect: EffectUse, from_tab: u64, tab: u64, direction: f32) {
-        let duration = self
-            .with_gpu(|gpu| gpu.effects().find(&effect.id).map(|def| def.duration_ms))
-            .flatten();
-        if let Some(duration) = duration {
-            self.transition = Some(ViewTransition::new(
-                effect.id,
-                effect.params,
-                from_tab,
+    /// A page turn's transition in tab `tab`'s view.
+    fn begin_transition(&mut self, effect: EffectUse, tab: u64, direction: f32) {
+        let reduce_motion = self.prefs.reduce_motion;
+        let saved = &self.prefs.effect_params;
+        let rng = &mut self.transition_rng;
+        let planned = {
+            let renderer = self.render_state.renderer.read();
+            renderer
+                .callback_resources
+                .get::<ReaderGpu>()
+                .and_then(|gpu| {
+                    crate::transition::plan(
+                        &effect,
+                        gpu.effects().defs(),
+                        saved,
+                        reduce_motion,
+                        rng,
+                        None,
+                    )
+                })
+        };
+        self.transition = planned.map(|planned| {
+            ViewTransition::new(
+                planned,
+                Capture::View(tab),
                 tab,
                 direction,
-                duration,
+                None,
                 Instant::now(),
-            ));
-        }
+            )
+        });
     }
 
-    fn close(&mut self, index: usize) {
+    pub(crate) fn close(&mut self, index: usize) {
         self.save_position(index, true);
+        // Closing the book shown alone reveals the next one out of its last
+        // image.
+        let shown_alone = self.active == Some(index) && self.panes.count() == 1;
         let mut tab = self.tabs.remove(index);
         self.free_textures(&tab.take_freed_textures(true));
         self.saved_positions.remove(&tab.id);
@@ -1976,6 +2122,11 @@ impl ReaderApp {
         };
         if let Some(active) = self.active {
             self.panes.show(self.tabs[active].id);
+            if shown_alone {
+                let direction = if active < index { -1.0 } else { 1.0 };
+                let origin = self.click;
+                self.begin_switch(active, Capture::View(tab.id), direction, origin, 1.0);
+            }
         }
     }
 
@@ -3163,13 +3314,16 @@ impl ReaderApp {
             now: Some(now),
             smooth: !glyphst_ui::motion::is_reduced(&ctx) && self.prefs.smooth_scrolling,
         };
-        let turning = self.transition.is_some();
+        let turning = self
+            .transition
+            .as_ref()
+            .is_some_and(|transition| transition.tab == tab_id);
         self.tabs[active].pixels_per_point = f64::from(ppp);
         let mut frame = self.tabs[active].frame(size, input, turning);
         if let Some(direction) = frame.turn
             && let Some(effect) = self.effects_for(Some(active)).transition
         {
-            self.begin_transition(effect, tab_id, tab_id, direction);
+            self.begin_transition(effect, tab_id, direction);
         }
 
         // Loading: ask for wanted pages; the stage drops pages over the
@@ -3220,18 +3374,44 @@ impl ReaderApp {
         }
 
         let tokens = Tokens::get(&ctx);
+        // Origins and the composite capture's are in points; the view
+        // works in its own pixels.
+        let to_pixels = |point: egui::Pos2| {
+            let at = (point - rect.min) * ppp;
+            [at.x, at.y]
+        };
         let transition = self
             .transition
             .as_mut()
             .filter(|transition| transition.tab == tab_id)
             .map(|transition| TransitionUse {
-                effect: EffectUse {
-                    id: transition.effect.clone(),
-                    params: transition.params,
-                },
+                effect: transition.effect.clone(),
                 progress: transition.progress(now),
                 direction: transition.direction,
-                capture_from: transition.take_capture(),
+                origin: transition.origin.map(to_pixels),
+                seed: transition.seed,
+                reversed: transition.reversed(),
+                capture: transition.take_capture().map(|capture| match capture {
+                    Capture::View(tab) => GpuCapture::View(tab),
+                    Capture::Clear => GpuCapture::Clear,
+                    Capture::Composite {
+                        tab,
+                        effect,
+                        progress,
+                        direction,
+                        origin,
+                        seed,
+                        reversed,
+                    } => GpuCapture::Composite {
+                        tab,
+                        effect,
+                        progress,
+                        direction,
+                        origin: origin.map(to_pixels),
+                        seed,
+                        reversed,
+                    },
+                }),
             });
         let page_color = tokens.page.to_normalized_gamma_f32();
         // The pages draw into a window-sized image, so a pane changing
@@ -4201,6 +4381,12 @@ impl eframe::App for ReaderApp {
             }
         }
         self.couch_input(&ctx);
+        self.click = ctx.input(|i| {
+            i.pointer
+                .any_click()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
         let mut actions = self.global_actions(&ctx);
         actions.append(&mut self.pending_actions);
         if let Some(active) = self.active {

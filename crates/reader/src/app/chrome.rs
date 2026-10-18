@@ -668,6 +668,7 @@ impl ReaderApp {
         let defaults = Defaults {
             background: &self.prefs.background,
             transition: self.prefs.transition.as_deref(),
+            switch: self.prefs.switch_transition.as_deref(),
             overlay: self.prefs.tint(self.theme_kind()),
             params: &self.prefs.effect_params,
             theme: self.theme_colours,
@@ -787,6 +788,10 @@ impl ReaderApp {
                     book: &mut book,
                     default_background: find(Some(&self.prefs.background)),
                     default_transition: find(self.prefs.transition.as_deref()),
+                    default_switch: match self.prefs.switch_transition.as_deref() {
+                        Some(glyphst_effects::RANDOM) => Some("random".to_owned()),
+                        other => find(other).map(|def| def.name.to_lowercase()),
+                    },
                     default_overlay: find(self.prefs.tint(self.theme_kind())),
                     effects: &effects,
                     params: &mut self.prefs.effect_params,

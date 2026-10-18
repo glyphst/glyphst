@@ -46,6 +46,10 @@ pub enum ShotKind {
     PageTurn,
     /// Halfway through switching from the first tab to the second.
     TabSwitch,
+    /// Halfway through closing the second tab, revealing the first.
+    TabClose,
+    /// Halfway through going from Home to the first tab.
+    HomeOpen,
     /// The loading animation replayed over the drawn pages, while its
     /// parts are traced.
     Generating,
@@ -78,6 +82,9 @@ pub struct Screenshot {
     slide_frames: u32,
     /// The captured image, handed over by egui's screenshot callback.
     image: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
+    /// Tabs shown and settled so far (`TabClose` shows both before
+    /// closing one).
+    visited: usize,
 }
 
 impl Screenshot {
@@ -90,6 +97,7 @@ impl Screenshot {
             requested: false,
             slide_frames: 0,
             image: Arc::default(),
+            visited: 0,
         }
     }
 
@@ -500,18 +508,41 @@ impl ReaderApp {
                 }
                 halfway(self)
             }
-            ShotKind::TabSwitch => {
-                // Settle on the first tab, so its image is the outgoing
-                // view, then switch to the second.
+            ShotKind::TabSwitch | ShotKind::TabClose | ShotKind::HomeOpen => {
+                // Settle on the tab whose image is the outgoing view (the
+                // first), then switch, held halfway. A close settles on
+                // both, so the tab revealed has its pages, and closes the
+                // second.
+                let settle = if shot.kind == ShotKind::TabClose {
+                    shot.visited.min(1)
+                } else {
+                    0
+                };
                 if !shot.started && self.tabs.len() >= 2 {
-                    if self.active != Some(0) {
-                        self.activate(Some(0));
+                    if self.active != Some(settle) {
+                        self.activate(Some(settle));
                         self.transition = None;
                         shot.ready_frames = 0;
                         return false;
                     }
-                    self.activate(Some(1));
+                    if shot.kind == ShotKind::TabClose && shot.visited == 0 {
+                        shot.visited = 1;
+                        return false;
+                    }
+                    match shot.kind {
+                        ShotKind::TabClose => self.close(1),
+                        ShotKind::HomeOpen => {
+                            self.activate(None);
+                            self.activate(Some(0));
+                        }
+                        _ => self.activate(Some(1)),
+                    }
+                    if let Some(transition) = &mut self.transition {
+                        transition.freeze(0.5);
+                    }
                     shot.started = true;
+                    // The outgoing image is made on the next frame.
+                    return false;
                 }
                 shot.started && halfway(self)
             }

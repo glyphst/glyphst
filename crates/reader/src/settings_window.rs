@@ -128,7 +128,7 @@ impl Section {
             Self::Reading => "What opens at start, and what shows while you read.",
             Self::Presenting => "Full screen, the pointer, ink and the timer while you present.",
             Self::Effects => {
-                "Page transitions for every book, and your own effects. The background and \
+                "Book switches, page turns and your own effects. The background and \
                  the page tint are in Appearance."
             }
             Self::Translation => "The service that translates selections and documents.",
@@ -1189,7 +1189,8 @@ mod tests {
         });
         output.textures_delta.clear();
         // Cards draw live previews: one per transition, none for "None";
-        // backgrounds and tints are in Appearance.
+        // the book switch's gallery adds Random, the page turn's doesn't.
+        // Backgrounds and tints are in Appearance.
         let previews = |output: &egui::FullOutput| {
             output
                 .shapes
@@ -1197,7 +1198,7 @@ mod tests {
                 .filter(|shape| matches!(shape.shape, egui::Shape::Callback(_)))
                 .count()
         };
-        assert_eq!(previews(&output), 1);
+        assert_eq!(previews(&output), 3);
         // Appearance › background: an effect background shows the gallery
         // of effects, without the solid colour and the wallpaper.
         let mut output = ctx.run_ui(input.clone(), |ui| {

@@ -1,7 +1,7 @@
 //! Glyphst Reader: GPU vector pages, tabs and split panes, a library home
 //! and shader effects for transitions and backgrounds.
 //!
-//! glyphst-reader [documents…] [--background ID] [--transition ID|none] [--zoom Z]
+//! glyphst-reader [documents…] [--background ID] [--transition ID|random|none] [--reduce-motion] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
@@ -85,7 +85,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -93,6 +93,7 @@ fn parse_args() -> Result<Launch> {
         harness: None,
         background: None,
         transition: None,
+        reduce_motion: false,
         theme: None,
         zoom: None,
         window: None,
@@ -144,6 +145,9 @@ fn parse_args() -> Result<Launch> {
             "--screenshot" => launch.harness = shot(ShotKind::View, value()?),
             "--screenshot-turn" => launch.harness = shot(ShotKind::PageTurn, value()?),
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
+            "--screenshot-close" => launch.harness = shot(ShotKind::TabClose, value()?),
+            "--screenshot-open" => launch.harness = shot(ShotKind::HomeOpen, value()?),
+            "--reduce-motion" => launch.reduce_motion = true,
             "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
             "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),
             "--screenshot-present-tools" => launch.harness = shot(ShotKind::PresentTools, value()?),

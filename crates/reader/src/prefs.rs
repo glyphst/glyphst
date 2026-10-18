@@ -104,8 +104,12 @@ pub struct Prefs {
     pub smooth_scrolling: bool,
     /// Motion becomes short fades: slides and glides jump, pages fade in.
     pub reduce_motion: bool,
-    /// Effect id of the transition between views, or `None` for a cut.
+    /// Effect id of the page turn's transition (presenting), or `None` for
+    /// a cut.
     pub transition: Option<String>,
+    /// Effect id of the transition between books, [`glyphst_effects::RANDOM`]
+    /// for a different one each switch, or `None` for a cut.
+    pub switch_transition: Option<String>,
     /// Effect id of the background behind pages.
     pub background: String,
     /// The animated background last chosen, restored when Appearance's
@@ -192,6 +196,7 @@ impl Default for Prefs {
             smooth_scrolling: true,
             reduce_motion: false,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
+            switch_transition: Some(glyphst_effects::RANDOM.into()),
             background: glyphst_effects::SOLID.into(),
             animated_background: None,
             background_fps: 30,

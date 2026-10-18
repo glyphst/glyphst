@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, ParamKind, SOLID};
+use glyphst_effects::{EffectDef, EffectKind, MAX_PARAMS, ParamKind, RANDOM, SOLID};
 use glyphst_ui::theme::Tokens;
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,10 @@ pub enum Choice {
 #[serde(default)]
 pub struct BookEffects {
     pub background: Choice,
+    /// The page turn's transition (presenting).
     pub transition: Choice,
+    /// The transition when switching to this book; may be [`RANDOM`].
+    pub switch: Choice,
     pub overlay: Choice,
     /// When it was last chosen or shown, as a counter, for trimming.
     pub used: u64,
@@ -38,9 +41,14 @@ pub struct BookEffects {
 
 impl BookEffects {
     pub fn is_default(&self) -> bool {
-        [&self.background, &self.transition, &self.overlay]
-            .iter()
-            .all(|choice| **choice == Choice::Default)
+        [
+            &self.background,
+            &self.transition,
+            &self.switch,
+            &self.overlay,
+        ]
+        .iter()
+        .all(|choice| **choice == Choice::Default)
     }
 }
 
@@ -50,6 +58,8 @@ impl BookEffects {
 pub struct Defaults<'a> {
     pub background: &'a str,
     pub transition: Option<&'a str>,
+    /// The book switch's transition; may be [`RANDOM`].
+    pub switch: Option<&'a str>,
     pub overlay: Option<&'a str>,
     /// Values the user set per effect id.
     pub params: &'a BTreeMap<String, [f32; MAX_PARAMS]>,
@@ -73,6 +83,8 @@ pub fn theme_colours(tokens: &Tokens) -> ThemeColours {
 pub struct Resolved {
     pub background: EffectUse,
     pub transition: Option<EffectUse>,
+    /// The book switch's: an effect, or [`RANDOM`] to pick one per switch.
+    pub switch: Option<EffectUse>,
     pub overlay: Option<EffectUse>,
 }
 
@@ -144,6 +156,28 @@ pub fn resolve<'a>(
             EffectKind::Transition,
         )
         .map(|def| effect_use(def, defaults.params)),
+        switch: {
+            let random = |id: &str| id == RANDOM;
+            let chosen = match book.map(|book| &book.switch) {
+                Some(Choice::Effect(id))
+                    if random(id) || usable(id, EffectKind::Transition).is_some() =>
+                {
+                    Some(Some(id.as_str()))
+                }
+                Some(Choice::Off) => Some(None),
+                _ => None,
+            };
+            match chosen.unwrap_or(defaults.switch) {
+                Some(id) if random(id) => Some(EffectUse {
+                    id: RANDOM.into(),
+                    params: [0.0; MAX_PARAMS],
+                }),
+                Some(id) => {
+                    usable(id, EffectKind::Transition).map(|def| effect_use(def, defaults.params))
+                }
+                None => None,
+            }
+        },
         overlay: pick(
             book.map(|book| &book.overlay),
             defaults.overlay,
@@ -221,6 +255,7 @@ mod tests {
         let defaults = Defaults {
             background: "aurora",
             transition: Some("slide-over"),
+            switch: Some(RANDOM),
             overlay: None,
             params: &params,
             theme: [[0; 3], [255; 3]],
@@ -230,10 +265,12 @@ mod tests {
         assert_eq!(plain.background.id, "aurora");
         assert_eq!(plain.transition.unwrap().id, "slide-over");
         assert_eq!(plain.overlay, None);
+        assert_eq!(plain.switch.unwrap().id, RANDOM, "random is kept");
 
         let book = BookEffects {
             background: Choice::Effect("gone".into()),
             transition: Choice::Off,
+            switch: Choice::Effect("crossfade".into()),
             overlay: Choice::Effect("night".into()),
             used: 1,
         };
@@ -243,6 +280,21 @@ mod tests {
             "a vanished effect falls back"
         );
         assert_eq!(chosen.transition, None);
+        assert_eq!(chosen.switch.unwrap().id, "crossfade");
+        let off = BookEffects {
+            switch: Choice::Off,
+            ..BookEffects::default()
+        };
+        assert_eq!(resolve(Some(&off), defaults, find).switch, None);
+        let gone = BookEffects {
+            switch: Choice::Effect("gone".into()),
+            ..BookEffects::default()
+        };
+        assert_eq!(
+            resolve(Some(&gone), defaults, find).switch.unwrap().id,
+            RANDOM,
+            "a vanished switch falls back to the default"
+        );
         let overlay = chosen.overlay.unwrap();
         assert_eq!(overlay.id, "night");
         assert_eq!(overlay.params[0], 1.0, "params kept within range");
