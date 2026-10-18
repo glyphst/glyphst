@@ -91,9 +91,9 @@ impl<'a> Item<'a> {
         let enabled = ui.is_enabled();
         response.widget_info(|| match self.checked {
             Some(checked) => {
-                egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, self.label)
+                egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, checked, self.label)
             }
-            None => egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, self.label),
+            None => egui::WidgetInfo::labeled(egui::Role::Button, enabled, self.label),
         });
         let hovered = (response.hovered() || response.has_focus()) && enabled;
         let fill = if hovered {

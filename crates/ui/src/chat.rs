@@ -156,9 +156,7 @@ impl TimelineStep<'_> {
 pub fn suggestion(ui: &mut Ui, prompt: &str, command: &str) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), prompt)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), prompt));
     let hovered = response.hovered();
     ui.painter().rect(
         rect,

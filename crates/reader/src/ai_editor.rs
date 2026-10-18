@@ -804,7 +804,7 @@ mod tests {
     fn the_caret_steps_over_chips_and_backspace_removes_them() {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::embedded());
-        let mut editor = MentionEditor::new(Id::new("test-editor"));
+        let mut editor = MentionEditor::new(Id::unique("test-editor"));
         let frame = |editor: &mut MentionEditor, events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(

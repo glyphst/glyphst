@@ -28,7 +28,7 @@ pub enum InputDevice {
 }
 
 fn input_id() -> egui::Id {
-    egui::Id::new("glyphst-pad-input")
+    egui::Id::unique("glyphst-pad-input")
 }
 
 pub fn set_input(ctx: &egui::Context, device: InputDevice) {
@@ -78,7 +78,7 @@ impl Labels {
 }
 
 fn labels_id() -> egui::Id {
-    egui::Id::new("glyphst-pad-labels")
+    egui::Id::unique("glyphst-pad-labels")
 }
 
 pub fn set_labels(ctx: &egui::Context, labels: Labels) {
@@ -91,7 +91,7 @@ pub fn labels(ctx: &egui::Context) -> Labels {
 }
 
 fn faces_id() -> egui::Id {
-    egui::Id::new("glyphst-pad-faces")
+    egui::Id::unique("glyphst-pad-faces")
 }
 
 /// The pad's face buttons pressed this frame, for prompts and toasts; the

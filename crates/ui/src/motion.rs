@@ -41,22 +41,34 @@ pub fn approach(value: f64, target: f64, rate: f64, seconds: f64) -> f64 {
 }
 
 fn reduced_id() -> egui::Id {
-    egui::Id::new("glyphst-reduce-motion")
+    egui::Id::unique("glyphst-reduce-motion")
 }
 
 /// Sets whether motion is reduced ("replace all motion with short
-/// fades"): smoothed values then jump to their targets and egui's scroll
-/// animations are off; its fades stay. Call it once a frame, before the
-/// UI.
+/// fades"): smoothed values then jump to their targets, and egui's scroll
+/// animations and coasting are off; its fades stay. Call it once a frame,
+/// before the UI.
+///
+/// Scroll areas never rubber-band: glides and jumps to the end set offsets
+/// past the edge (`f32::MAX`), which egui must clamp, not spring back from.
 pub fn set_reduced(ctx: &egui::Context, reduced: bool) {
     ctx.data_mut(|data| data.insert_temp(reduced_id(), reduced));
+    let mut kinetic = egui::style::KineticScrollStyle {
+        rubber_band: false,
+        ..Default::default()
+    };
     let scroll = if reduced {
+        kinetic.decay_time = 0.0;
         egui::style::ScrollAnimation::none()
     } else {
         egui::Style::default().scroll_animation
     };
-    if ctx.global_style().scroll_animation != scroll {
-        ctx.all_styles_mut(|style| style.scroll_animation = scroll);
+    let style = ctx.global_style();
+    if style.scroll_animation != scroll || style.spacing.scroll.kinetic != kinetic {
+        ctx.all_styles_mut(|style| {
+            style.scroll_animation = scroll;
+            style.spacing.scroll.kinetic = kinetic;
+        });
     }
 }
 
@@ -67,7 +79,7 @@ pub fn is_reduced(ctx: &egui::Context) -> bool {
 }
 
 fn moving_id() -> egui::Id {
-    egui::Id::new("glyphst-motion-moving")
+    egui::Id::unique("glyphst-motion-moving")
 }
 
 /// Asks for the next frame, and notes that something moved in this one.
@@ -238,7 +250,7 @@ mod tests {
             .map(|&on| {
                 let mut value = 0.0;
                 let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                    value = smooth_bool(ui.ctx(), egui::Id::new("t"), on, PANEL);
+                    value = smooth_bool(ui.ctx(), egui::Id::unique("t"), on, PANEL);
                 });
                 output.textures_delta.clear();
                 value
@@ -261,7 +273,7 @@ mod tests {
     #[test]
     fn a_scroll_glide_eases_to_its_target_and_ends_when_scrolled_by_hand() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("list");
+        let id = egui::Id::unique("list");
         let frame = |offset: f32, target| {
             let mut next = None;
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -287,7 +299,7 @@ mod tests {
     #[test]
     fn a_color_fades_to_its_target() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("fill");
+        let id = egui::Id::unique("fill");
         let frame = |target| {
             let mut shown = egui::Color32::TRANSPARENT;
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -319,10 +331,13 @@ mod tests {
             ctx.global_style().scroll_animation,
             egui::style::ScrollAnimation::none()
         );
+        assert_eq!(ctx.global_style().spacing.scroll.kinetic.decay_time, 0.0);
         set_reduced(&ctx, false);
         assert_ne!(
             ctx.global_style().scroll_animation,
             egui::style::ScrollAnimation::none()
         );
+        let kinetic = ctx.global_style().spacing.scroll.kinetic;
+        assert!(kinetic.decay_time > 0.0 && !kinetic.rubber_band);
     }
 }

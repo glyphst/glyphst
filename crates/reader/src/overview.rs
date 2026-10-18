@@ -251,7 +251,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
     if let Some(offset) = state.offset
         && let Some(offset) = glyphst_ui::motion::scroll_glide(
             ui.ctx(),
-            egui::Id::new(("overview", &tab.path)),
+            egui::Id::unique(("overview", &tab.path)),
             offset,
             target,
         )
@@ -280,7 +280,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
             );
             let response = ui.interact(
                 cell_rect,
-                ui.id().with(("overview-page", page)),
+                ui.scope_id().with(("overview-page", page)),
                 egui::Sense::click(),
             );
             let [w, h] = tab.layout.page_size(page);
@@ -295,7 +295,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
             // which reads over dark and light wallpapers alike.
             let lift = glyphst_ui::motion::smooth_bool(
                 ui.ctx(),
-                egui::Id::new(("overview-lift", &tab.path, page)),
+                egui::Id::unique(("overview-lift", &tab.path, page)),
                 focused,
                 glyphst_ui::motion::PANEL,
             );
@@ -453,7 +453,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
             }
         }
     });
-    state.offset = Some(output.state.offset.y);
+    state.offset = Some(output.state.clamped_offset().y);
     state.columns = columns;
     state.rows_shown = ((rect.height() / row_height).floor() as usize).max(1);
     let pages = shown.start * columns..(shown.end * columns).min(count);

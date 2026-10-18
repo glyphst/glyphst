@@ -203,7 +203,7 @@ impl ReaderApp {
             let step = |ui: &mut egui::Ui, x: f32, icon: &str, enabled: bool, tip: &str| {
                 let cell = Rect::from_center_size(pos2(x, rect.center().y), vec2(18.0, 20.0));
                 let response = ui
-                    .interact(cell, ui.id().with(icon), Sense::click())
+                    .interact(cell, ui.scope_id().with(icon), Sense::click())
                     .tip(tip);
                 let color = if !enabled {
                     tokens.rule_strong
@@ -272,7 +272,7 @@ impl ReaderApp {
                         .frame(egui::Frame::NONE)
                         .margin(egui::Margin::ZERO)
                         .desired_width(width)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .hint_text(
                             egui::RichText::new((current + 1).to_string())
                                 .font(font.clone())
@@ -315,13 +315,14 @@ impl ReaderApp {
         segments.push(
             Segment::custom("progress", Side::Left, meter_width, move |ui, rect| {
                 let track = rect.shrink2(vec2(10.0, 0.0));
-                let response = ui.interact(track, ui.id().with("scrub"), Sense::click_and_drag());
+                let response =
+                    ui.interact(track, ui.scope_id().with("scrub"), Sense::click_and_drag());
                 let label = format!("{:.0}%", fraction * 100.0);
                 let meter = track.with_max_x(track.right() - 2.0);
                 // The bar fills smoothly as the page changes.
                 let shown = glyphst_ui::motion::smooth(
                     ui.ctx(),
-                    ui.id().with("progress-fill"),
+                    ui.scope_id().with("progress-fill"),
                     fraction,
                     glyphst_ui::motion::PANEL,
                 );
@@ -410,7 +411,7 @@ impl ReaderApp {
                     let step = |x: f32, icon: &str, tip: &str| {
                         let cell = Rect::from_center_size(pos2(x, y), vec2(18.0, 20.0));
                         let response = ui
-                            .interact(cell, ui.id().with(icon), Sense::click())
+                            .interact(cell, ui.scope_id().with(icon), Sense::click())
                             .tip(tip);
                         icons::paint(
                             ui,
@@ -461,7 +462,7 @@ impl ReaderApp {
                 let step = |x: f32, glyph: &str, tip: &str| {
                     let cell = Rect::from_center_size(pos2(x, y), vec2(14.0, 20.0));
                     let response = ui
-                        .interact(cell, ui.id().with(glyph), Sense::click())
+                        .interact(cell, ui.scope_id().with(glyph), Sense::click())
                         .tip(tip);
                     ui.painter().text(
                         cell.center(),
@@ -488,7 +489,7 @@ impl ReaderApp {
                     (y - 10.0)..=(y + 10.0),
                 );
                 let response = ui
-                    .interact(reset, ui.id().with("zoom-reset"), Sense::click())
+                    .interact(reset, ui.scope_id().with("zoom-reset"), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .tip(&zoom_reset);
                 if response.clicked() {

@@ -144,7 +144,7 @@ impl<'a> Button<'a> {
             ui.allocate_exact_size(vec2(width.max(self.min_width), height), Sense::click());
         let enabled = ui.is_enabled();
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, self.selected, self.label)
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, self.selected, self.label)
         });
         let hovered = response.hovered() && enabled;
         let pressed = response.is_pointer_button_down_on() && enabled;

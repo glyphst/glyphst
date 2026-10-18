@@ -329,7 +329,7 @@ impl Default for Assistant {
             created: 0,
             messages: Vec::new(),
             views: Vec::new(),
-            editor: MentionEditor::new(egui::Id::new("assistant-input")),
+            editor: MentionEditor::new(egui::Id::unique("assistant-input")),
             menu: Menu::default(),
             previews: Previews::default(),
             queue: Vec::new(),
@@ -1847,7 +1847,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::embedded());
         let mut assistant = Assistant::default();
-        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("assistant-input")));
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique("assistant-input")));
         panel_frame(&ctx, &mut assistant, Vec::new());
         panel_frame(
             &ctx,
@@ -1905,7 +1905,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::embedded());
         let mut assistant = Assistant::default();
-        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("assistant-input")));
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique("assistant-input")));
         panel_frame(&ctx, &mut assistant, Vec::new());
         let text = |text: &str| egui::Event::Text(text.into());
         for typed in ["@", "p", "a", "g", "e"] {

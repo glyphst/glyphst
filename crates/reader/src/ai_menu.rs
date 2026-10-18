@@ -283,11 +283,11 @@ impl Menu {
         let moved = pointer != self.pointer;
         self.pointer = pointer;
         let opened = ui.ctx().animate_bool_with_time(
-            egui::Id::new("assistant-menu-open"),
+            egui::Id::unique("assistant-menu-open"),
             true,
             glyphst_ui::motion::MENU_IN,
         );
-        let area = egui::Area::new(egui::Id::new("assistant-menu"))
+        let area = egui::Area::new(egui::Id::unique("assistant-menu"))
             .order(egui::Order::Foreground)
             .pivot(Align2::LEFT_BOTTOM)
             .fixed_pos(anchor.left_top() + vec2(0.0, -6.0 + 6.0 * (1.0 - opened)))
@@ -312,7 +312,7 @@ impl Menu {
                         .show(ui, |ui| {
                             let slide = glyphst_ui::row::Slide::under(
                                 ui,
-                                egui::Id::new(("assistant-menu-highlight", query)),
+                                egui::Id::unique(("assistant-menu-highlight", query)),
                             );
                             let mut selected_rect = None;
                             let mut group = "";
@@ -479,7 +479,7 @@ fn aside(
     } else {
         (Align2::LEFT_BOTTOM, menu.left_top() + vec2(0.0, -6.0))
     };
-    egui::Area::new(egui::Id::new("assistant-menu-aside"))
+    egui::Area::new(egui::Id::unique("assistant-menu-aside"))
         .order(egui::Order::Foreground)
         .pivot(pivot)
         .fixed_pos(at)

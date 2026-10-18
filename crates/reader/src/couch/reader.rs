@@ -100,7 +100,7 @@ pub fn show(ctx: &egui::Context, couch: &Couch, view: &ReaderView<'_>) {
     let now = ctx.input(|input| input.time);
     let hints = motion::smooth_bool(
         ctx,
-        egui::Id::new("couch-hints"),
+        egui::Id::unique("couch-hints"),
         couch.hints_pinned
             || now < couch.hints_until
             || couch.overlay.is_some()
@@ -111,7 +111,7 @@ pub fn show(ctx: &egui::Context, couch: &Couch, view: &ReaderView<'_>) {
     if now < couch.hints_until {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(couch.hints_until - now));
     }
-    egui::Area::new(egui::Id::new("couch-reader"))
+    egui::Area::new(egui::Id::unique("couch-reader"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .interactable(false)

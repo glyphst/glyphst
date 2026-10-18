@@ -277,7 +277,7 @@ pub fn background(frame: PadFrame) -> PadFrame {
 }
 
 fn events_id() -> egui::Id {
-    egui::Id::new("glyphst-pad-events")
+    egui::Id::unique("glyphst-pad-events")
 }
 
 /// Keeps the frame's pad events where pages that record buttons read them.

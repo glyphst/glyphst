@@ -5,6 +5,7 @@
 
 use std::{
     path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -75,6 +76,8 @@ pub struct Screenshot {
     requested: bool,
     /// Frames since the sidebar started sliding (`SidebarSlide`).
     slide_frames: u32,
+    /// The captured image, handed over by egui's screenshot callback.
+    image: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
 }
 
 impl Screenshot {
@@ -86,7 +89,19 @@ impl Screenshot {
             started: false,
             requested: false,
             slide_frames: 0,
+            image: Arc::default(),
         }
+    }
+
+    /// Asks for the next frame's pixels; they arrive in `image`.
+    fn request(&self, ctx: &egui::Context) {
+        let (image, repaint) = (self.image.clone(), ctx.clone());
+        ctx.request_screenshot(move |captured| {
+            if let Ok(mut image) = image.lock() {
+                *image = Some(captured);
+            }
+            repaint.request_repaint();
+        });
     }
 }
 
@@ -433,12 +448,7 @@ impl ReaderApp {
         pages_drawn: bool,
         now: Instant,
     ) -> bool {
-        let captured = ctx.input(|i| {
-            i.raw.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let captured = shot.image.lock().ok().and_then(|mut image| image.take());
         if let Some(image) = captured {
             let rgba: Vec<u8> = image
                 .pixels
@@ -459,7 +469,7 @@ impl ReaderApp {
         if shot.kind == ShotKind::SidebarSlide && shot.started {
             shot.slide_frames += 1;
             if shot.slide_frames == SLIDE_SHOT_FRAMES {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                shot.request(ctx);
             }
             return false;
         }
@@ -539,7 +549,7 @@ impl ReaderApp {
         };
         if shot.requested {
             self.generations.pause_replay();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            shot.request(ctx);
         }
         false
     }

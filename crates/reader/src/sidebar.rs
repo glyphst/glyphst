@@ -800,7 +800,7 @@ fn quote_card(
             }
         });
     let rect = inner.response.rect;
-    let response = ui.interact(rect, ui.id().with("card"), egui::Sense::click());
+    let response = ui.interact(rect, ui.scope_id().with("card"), egui::Sense::click());
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 0, Tokens::fade(tokens.hover, 0.5));
@@ -1175,7 +1175,7 @@ fn outline(
     let mut scrolled = target.is_some();
     if let Some(offset) = motion::scroll_glide(
         ui.ctx(),
-        egui::Id::new(("outline", tab.id)),
+        egui::Id::unique(("outline", tab.id)),
         view.list.offset,
         target,
     ) {
@@ -1254,7 +1254,7 @@ fn outline(
             {
                 let toggle = child.interact(
                     disclosure_rect(&child, rect, prefix),
-                    child.id().with("disclosure"),
+                    child.scope_id().with("disclosure"),
                     egui::Sense::click(),
                 );
                 if toggle.clicked() {
@@ -1288,7 +1288,7 @@ fn outline(
         }
     });
 
-    let offset = output.state.offset.y;
+    let offset = output.state.clamped_offset().y;
     // Scrolling by hand stops following once the current row is out of
     // the list.
     if !scrolled
@@ -1527,7 +1527,7 @@ fn pages(
     }
     if let Some(offset) = motion::scroll_glide(
         ui.ctx(),
-        egui::Id::new(("pages", tab.id)),
+        egui::Id::unique(("pages", tab.id)),
         view.pages.offset,
         target,
     ) {
@@ -1559,8 +1559,11 @@ fn pages(
                     cell.center(),
                     egui::vec2(w as f32 * scale, h as f32 * scale),
                 );
-                let response =
-                    ui.interact(paper, ui.id().with(("thumb", page)), egui::Sense::click());
+                let response = ui.interact(
+                    paper,
+                    ui.scope_id().with(("thumb", page)),
+                    egui::Sense::click(),
+                );
                 let painter = ui.painter();
                 painter.rect_filled(paper, 0, tokens.page);
                 let texture = if sharp {
@@ -1619,7 +1622,7 @@ fn pages(
             }
         }
     });
-    tab.outline_view.pages.offset = output.state.offset.y;
+    tab.outline_view.pages.offset = output.state.clamped_offset().y;
     tab.outline_view.pages.viewport = output.inner_rect.height();
     let ahead = shown.start.saturating_sub(4)..(shown.end + 4).min(count);
     tab.want_thumbnails(ahead);

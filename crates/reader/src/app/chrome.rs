@@ -56,13 +56,13 @@ impl ReaderApp {
         let presenting = self.tabs[active].present.is_some();
         let sidebar_shown = motion::smooth_bool(
             &ctx,
-            Id::new("stage-sidebar-shown"),
+            Id::unique("stage-sidebar-shown"),
             self.prefs.show_sidebar,
             motion::PANEL,
         );
         let assistant_shown = motion::smooth_bool(
             &ctx,
-            Id::new("stage-assistant-shown"),
+            Id::unique("stage-assistant-shown"),
             self.assistant.open,
             motion::PANEL,
         );
@@ -311,7 +311,7 @@ impl ReaderApp {
             painter.vline(x, rect.y_range(), tokens.hairline());
         };
         if overlay {
-            egui::Area::new(Id::new(id))
+            egui::Area::new(Id::unique(id))
                 .order(Order::Middle)
                 .fixed_pos(shown.min)
                 .show(ui.ctx(), |ui| {
@@ -467,7 +467,7 @@ impl ReaderApp {
         let tokens = Tokens::get(ui.ctx());
         let tab = &self.tabs[index];
         let id = tab.id;
-        let response = ui.interact(rect, Id::new(("pane-header", id)), egui::Sense::click());
+        let response = ui.interact(rect, Id::unique(("pane-header", id)), egui::Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
         painter.hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
@@ -547,7 +547,7 @@ impl ReaderApp {
                 Rect::from_center_size(divider.rect.center(), vec2(divider.rect.width(), 4.0))
             };
             let delta = glyphst_ui::craft::layout::ResizeHandle::new(
-                Id::new(("pane-divider", divider.path_bits, divider.depth)),
+                Id::unique(("pane-divider", divider.path_bits, divider.depth)),
                 divider.axis,
                 handle,
                 "Resize panes",
@@ -603,7 +603,7 @@ impl ReaderApp {
             let tokens = Tokens::get(ctx);
             let painter = ctx.layer_painter(egui::LayerId::new(
                 Order::Foreground,
-                Id::new("tab-drop-preview"),
+                Id::unique("tab-drop-preview"),
             ));
             // A dotted accent outline on an accent wash, and where it goes.
             painter.rect_filled(preview, 0, Tokens::fade(tokens.accent_soft, 0.6));
@@ -975,7 +975,7 @@ fn resize_handle(
         focused: tokens.accent,
     };
     glyphst_ui::craft::layout::ResizeHandle::new(
-        Id::new((id, "resize")),
+        Id::unique((id, "resize")),
         glyphst_ui::craft::layout::SplitAxis::Horizontal,
         handle,
         "Resize",
@@ -1000,7 +1000,11 @@ fn zoom_label(
     let size = ui_text::width(ui, &label, &font);
     let rect = align.anchor_size(pos, vec2(size, 20.0));
     let response = ui
-        .interact(rect, Id::new(("zoom-label", tab.id)), egui::Sense::click())
+        .interact(
+            rect,
+            Id::unique(("zoom-label", tab.id)),
+            egui::Sense::click(),
+        )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .tip("back to 100% (fit width with margins)");
     let color = if response.hovered() {

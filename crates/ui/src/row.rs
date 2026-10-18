@@ -131,7 +131,7 @@ impl Slide {
 }
 
 fn list_open_id() -> egui::Id {
-    egui::Id::new("glyphst-list-open")
+    egui::Id::unique("glyphst-list-open")
 }
 
 /// Says a list with keyboard moves is open this frame, so the app's
@@ -217,12 +217,7 @@ impl<'a> ListRow<'a> {
             Sense::click(),
         );
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
-                ui.is_enabled(),
-                self.active,
-                self.title,
-            )
+            egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), self.active, self.title)
         });
         self.paint(ui, rect, &response);
         response
@@ -309,12 +304,7 @@ impl TreeRow<'_> {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), t.row(26.0)), Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
-                ui.is_enabled(),
-                self.active,
-                self.title,
-            )
+            egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), self.active, self.title)
         });
         let hovered = response.contains_pointer();
         let fill = if self.active {

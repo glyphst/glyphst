@@ -264,7 +264,7 @@ impl Previews {
             screen.left() + 8.0,
             (screen.right() - width - 8.0).max(screen.left() + 8.0),
         );
-        let area = egui::Area::new(egui::Id::new("assistant-chip-preview"))
+        let area = egui::Area::new(egui::Id::unique("assistant-chip-preview"))
             .order(egui::Order::Tooltip)
             .pivot(pivot)
             .fixed_pos(egui::pos2(x, y))

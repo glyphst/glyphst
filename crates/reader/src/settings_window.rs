@@ -214,7 +214,7 @@ impl SettingsWindow {
             (screen.width() - 48.0).clamp(360.0, 960.0),
             (screen.height() - 80.0).clamp(280.0, 680.0),
         );
-        let response = egui::Modal::new(egui::Id::new("settings"))
+        let response = egui::Modal::new(egui::Id::unique("settings"))
             .backdrop_color(tokens.scrim)
             .frame(glyphst_ui::pane::popover(ctx).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
@@ -292,13 +292,13 @@ impl SettingsWindow {
         TextField::search(&mut self.query, "search settings")
             .shortcut("/")
             .width(220.0)
-            .id(egui::Id::new("settings-search"))
+            .id(egui::Id::unique("settings-search"))
             .show(&mut field_ui);
         if ui.input(|i| i.key_pressed(egui::Key::Slash))
             && ui.ctx().memory(|memory| memory.focused().is_none())
         {
             ui.ctx()
-                .memory_mut(|memory| memory.request_focus(egui::Id::new("settings-search")));
+                .memory_mut(|memory| memory.request_focus(egui::Id::unique("settings-search")));
         }
     }
 

@@ -132,7 +132,7 @@ impl ReaderApp {
     pub(super) fn pad_ring_overlay(&mut self, ctx: &egui::Context) {
         let shown = motion::smooth_bool(
             ctx,
-            egui::Id::new("pad-ring-shown"),
+            egui::Id::unique("pad-ring-shown"),
             self.pad_ring.is_some(),
             motion::HOVER,
         );
@@ -171,7 +171,7 @@ impl ReaderApp {
         let screen = ctx.content_rect();
         let center = screen.center();
         // Gamepad mode's ring is 420 across (frame 09e).
-        let id = egui::Id::new("pad-ring");
+        let id = egui::Id::unique("pad-ring");
         let scale = if self.prefs.gamepad_mode {
             420.0 / ring::DIAMETER
         } else {

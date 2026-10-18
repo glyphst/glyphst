@@ -178,10 +178,9 @@ impl Assistant {
     ) -> Option<PanelAction> {
         let tokens = Tokens::get(ui.ctx());
         let mut action = None;
-        let id = egui::Id::new("assistant-thread");
         let jump = std::mem::take(&mut self.jump_to_bottom);
         let mut area = egui::ScrollArea::vertical()
-            .id_salt(id)
+            .id_salt("assistant-thread")
             .auto_shrink(false)
             .stick_to_bottom(true)
             .max_height(height);
@@ -242,7 +241,7 @@ impl Assistant {
         });
         // Fades where the thread goes on past its edges.
         let rect = output.inner_rect;
-        let offset = output.state.offset.y;
+        let offset = output.state.clamped_offset().y;
         let rest = (output.content_size.y - rect.height() - offset).max(0.0);
         if offset > 1.0 {
             fade(ui.painter(), rect, tokens.surface.to_opaque(), true);
@@ -308,7 +307,7 @@ impl Assistant {
             .draft
             .clone()
             .unwrap_or_else(|| Draft::plain(self.messages[index].display_text()));
-        let expanded_id = egui::Id::new(("assistant-expanded", self.chat_id, index));
+        let expanded_id = egui::Id::unique(("assistant-expanded", self.chat_id, index));
         let expanded = ui.data(|data| data.get_temp::<bool>(expanded_id).unwrap_or(false));
         let line = TEXT_LINE;
         // The design's user message: `you` over the text, on `raised` with
@@ -356,7 +355,7 @@ impl Assistant {
         let (lane, _) = ui.allocate_exact_size(vec2(width, LANE), Sense::hover());
         let hovered = ui.rect_contains_pointer(bubble.union(lane));
         let shown = ui.ctx().animate_bool_with_time(
-            egui::Id::new(("assistant-lane", self.chat_id, index)),
+            egui::Id::unique(("assistant-lane", self.chat_id, index)),
             hovered || self.confirm_restore == Some(index),
             motion::HOVER_FADE,
         );
@@ -373,7 +372,7 @@ impl Assistant {
                 child.ctx().copy_text(draft.prompt().0);
             }
             if idle && crate::icons::button(&mut child, "pencil", 22.0, false, "edit").clicked() {
-                let mut editor = MentionEditor::new(egui::Id::new(("assistant-edit", index)));
+                let mut editor = MentionEditor::new(egui::Id::unique(("assistant-edit", index)));
                 editor.set(child.ctx(), draft.clone());
                 child
                     .ctx()
@@ -561,7 +560,7 @@ impl Assistant {
                     self.views[index].unfolded = !open;
                 }
                 let openness = ui.ctx().animate_bool_with_time(
-                    egui::Id::new(("assistant-work", self.chat_id, index)),
+                    egui::Id::unique(("assistant-work", self.chat_id, index)),
                     open,
                     motion::COLLAPSE,
                 );
@@ -603,7 +602,7 @@ impl Assistant {
         let block = Rect::from_min_max(egui::pos2(lane.left(), top), lane.max);
         let hovered = ui.rect_contains_pointer(block);
         let shown = ui.ctx().animate_bool_with_time(
-            egui::Id::new(("assistant-answer-lane", self.chat_id, index)),
+            egui::Id::unique(("assistant-answer-lane", self.chat_id, index)),
             hovered,
             motion::HOVER_FADE,
         );
@@ -1027,7 +1026,11 @@ fn scroll_pill(ui: &mut egui::Ui, thread: Rect, tokens: &Tokens) -> egui::Respon
         egui::pos2(thread.center().x, thread.bottom() - 10.0 - size.y / 2.0),
         size,
     );
-    let response = ui.interact(rect, egui::Id::new("assistant-scroll-pill"), Sense::click());
+    let response = ui.interact(
+        rect,
+        egui::Id::unique("assistant-scroll-pill"),
+        Sense::click(),
+    );
     ui.painter().rect(
         rect,
         tokens.pop_radius(),

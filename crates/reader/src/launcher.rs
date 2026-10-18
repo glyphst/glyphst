@@ -163,7 +163,7 @@ impl Launcher {
                             .font(theme::semibold(22.0))
                             .color(tokens.text),
                     );
-                    let field_id = ui.id().with("launcher-field");
+                    let field_id = ui.scope_id().with("launcher-field");
                     let field = TextField::new(&mut self.query, "a path, a title or an author…")
                         .icon("folder-search")
                         .width(column)

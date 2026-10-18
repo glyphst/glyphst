@@ -99,7 +99,7 @@ impl<'a> IconButton<'a> {
         );
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                egui::WidgetType::Button,
+                egui::Role::Button,
                 valid && ui.is_enabled(),
                 self.selected,
                 self.label,

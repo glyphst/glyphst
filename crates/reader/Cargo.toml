@@ -12,6 +12,8 @@ chrono.workspace = true
 dirs.workspace = true
 eframe = { workspace = true, features = [
     "accesskit",
+    # The system clipboard (egui 0.37 made it opt-in).
+    "clipboard",
     "default_fonts",
     # Opens web links (and the ChatGPT sign-in page) in the browser.
     "links",

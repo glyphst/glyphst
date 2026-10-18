@@ -481,7 +481,7 @@ impl Palette {
         // rises into place.
         let shown = glyphst_ui::motion::smooth_bool(
             ctx,
-            egui::Id::new("command-palette-shown"),
+            egui::Id::unique("command-palette-shown"),
             self.open,
             glyphst_ui::motion::PANEL,
         );
@@ -546,7 +546,7 @@ impl Palette {
         let screen = ctx.content_rect();
         let mut chosen = None;
         let previous_query = self.query.clone();
-        let response = egui::Area::new(egui::Id::new("command-palette"))
+        let response = egui::Area::new(egui::Id::unique("command-palette"))
             .order(egui::Order::Foreground)
             .pivot(Align2::CENTER_TOP)
             .fixed_pos(egui::pos2(
@@ -629,7 +629,7 @@ impl Palette {
                             .show(ui, |ui| {
                                 let slide = glyphst_ui::row::Slide::under(
                                     ui,
-                                    egui::Id::new(("palette-highlight", &typed)),
+                                    egui::Id::unique(("palette-highlight", &typed)),
                                 );
                                 let mut highlighted_rect = None;
                                 for (index, hit) in hits.iter().enumerate() {
@@ -871,7 +871,7 @@ fn group_of(item: &Item) -> &'static str {
 
 /// The query field's id, to move its caret after replacing the query.
 fn field_id() -> egui::Id {
-    egui::Id::new("command-palette-field")
+    egui::Id::unique("command-palette-field")
 }
 
 #[cfg(test)]

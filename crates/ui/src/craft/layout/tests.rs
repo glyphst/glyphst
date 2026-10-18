@@ -268,7 +268,7 @@ impl HandleTest {
                 result = Some(
                     ui.add_enabled_ui(self.enabled, |ui| {
                         ResizeHandle::new(
-                            Id::new("divider"),
+                            Id::unique("divider"),
                             self.axis,
                             self.rect,
                             &self.label,

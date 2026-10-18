@@ -173,7 +173,7 @@ impl<'a> DocCover<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, response) = ui.allocate_exact_size(self.size, Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.title)
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.title)
         });
         self.paint(
             ui,
@@ -305,7 +305,7 @@ impl<'a> PageCover<'a> {
         let (rect, response) =
             ui.allocate_exact_size(vec2(self.width, self.height()), Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.title)
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.title)
         });
         self.paint(
             ui,

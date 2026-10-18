@@ -361,7 +361,7 @@ pub fn find_bar(
 ) -> Option<FindBarAction> {
     let tokens = Tokens::get(ctx);
     let mut action = None;
-    egui::Area::new(egui::Id::new("find-bar"))
+    egui::Area::new(egui::Id::unique("find-bar"))
         .order(egui::Order::Middle)
         .pivot(egui::Align2::RIGHT_TOP)
         .fixed_pos(area.right_top() + egui::vec2(-24.0, 8.0))
@@ -374,7 +374,7 @@ pub fn find_bar(
                         ui.add(icons::image("search", 14.0, tokens.faint));
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut find.query)
-                                .id(egui::Id::new("find-input"))
+                                .id(egui::Id::unique("find-input"))
                                 .font(theme::mono(12.0))
                                 .hint_text(
                                     egui::RichText::new("find in document").color(tokens.faint),

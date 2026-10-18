@@ -150,7 +150,7 @@ pub fn popover(ctx: &egui::Context, at: egui::Pos2, has_text: bool) -> Option<Ac
         ("sparkles", "ask", true, Action::Ask),
         ("languages", "translate", has_text, Action::Translate),
     ];
-    egui::Area::new(egui::Id::new("region-popover"))
+    egui::Area::new(egui::Id::unique("region-popover"))
         .order(egui::Order::Foreground)
         .fixed_pos(at + egui::vec2(0.0, -8.0))
         .pivot(egui::Align2::RIGHT_BOTTOM)

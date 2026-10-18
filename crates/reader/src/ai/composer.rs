@@ -484,7 +484,7 @@ impl Assistant {
         if !self.selector_open {
             return None;
         }
-        let area = egui::Area::new(egui::Id::new("assistant-selector"))
+        let area = egui::Area::new(egui::Id::unique("assistant-selector"))
             .order(egui::Order::Foreground)
             .pivot(Align2::RIGHT_BOTTOM)
             .fixed_pos(rect.right_top() + vec2(0.0, -6.0))

@@ -26,7 +26,7 @@ impl PageThumb<'_> {
             ui.allocate_exact_size(vec2(self.width, self.height()), Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                egui::WidgetType::Button,
+                egui::Role::Button,
                 ui.is_enabled(),
                 self.current,
                 self.label,

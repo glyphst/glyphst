@@ -1524,7 +1524,7 @@ impl ReaderApp {
         };
         let tokens = Tokens::get(ctx);
         let (mut close, mut pin) = (false, false);
-        let area = egui::Area::new(egui::Id::new("translation-card"))
+        let area = egui::Area::new(egui::Id::unique("translation-card"))
             .order(egui::Order::Foreground)
             .fixed_pos(card.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
@@ -3364,7 +3364,7 @@ impl ReaderApp {
             let painter = ctx
                 .layer_painter(egui::LayerId::new(
                     egui::Order::Middle,
-                    egui::Id::new("translation-hover"),
+                    egui::Id::unique("translation-hover"),
                 ))
                 .with_clip_rect(rect.intersect(map.paper));
             let tokens = Tokens::get(ctx);
@@ -3765,7 +3765,7 @@ impl ReaderApp {
         let mut save = false;
         let mut delete = false;
         let is_note = matches!(editor.id, AnnotationId::Note(_));
-        let area = egui::Area::new(egui::Id::new("note-editor"))
+        let area = egui::Area::new(egui::Id::unique("note-editor"))
             .order(egui::Order::Foreground)
             .fixed_pos(editor.at + egui::vec2(8.0, 8.0))
             .show(ctx, |ui| {
@@ -4226,7 +4226,7 @@ impl eframe::App for ReaderApp {
         // The bars slide away for present, zen and gamepad modes, and back.
         let bars = glyphst_ui::motion::smooth_bool(
             &ctx,
-            egui::Id::new("bars-shown"),
+            egui::Id::unique("bars-shown"),
             !presenting && !self.bare(),
             glyphst_ui::motion::PANEL,
         );

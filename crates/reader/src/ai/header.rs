@@ -77,7 +77,7 @@ impl Assistant {
     /// The `…` menu under its button.
     fn more_menu(&mut self, ui: &egui::Ui, button: Rect) -> Option<PanelAction> {
         let mut action = None;
-        let area = egui::Area::new(egui::Id::new("assistant-more"))
+        let area = egui::Area::new(egui::Id::unique("assistant-more"))
             .order(egui::Order::Foreground)
             .pivot(Align2::RIGHT_TOP)
             .fixed_pos(button.right_bottom() + vec2(0.0, 4.0))

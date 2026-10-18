@@ -53,10 +53,14 @@ pub fn show<T: PartialEq + Copy>(
     for ((option, icon, label), width) in options.iter().zip(widths) {
         let cell = Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(width, 21.0));
         x += width + 2.0;
-        let response = ui.interact(cell, ui.id().with(("segment", *label)), Sense::click());
+        let response = ui.interact(
+            cell,
+            ui.scope_id().with(("segment", *label)),
+            Sense::click(),
+        );
         let selected = *value == *option;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, *label)
+            egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, selected, *label)
         });
         let fill = if selected {
             t.hover

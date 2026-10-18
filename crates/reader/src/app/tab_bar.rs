@@ -131,7 +131,7 @@ impl ReaderApp {
         let cell = |ui: &mut egui::Ui, which: BarTab, tab: &DocTab, width: f32, x: &mut f32| {
             let rect = Rect::from_min_size(pos2(*x, bar.top()), vec2(width, bar.height()));
             *x = rect.right();
-            let id = ui.id().with(match which {
+            let id = ui.scope_id().with(match which {
                 BarTab::Page(index) => ("bar-page", index as u64),
                 BarTab::Document(index) => ("bar-tab", ids[index]),
             });

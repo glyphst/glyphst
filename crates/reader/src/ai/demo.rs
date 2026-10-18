@@ -189,7 +189,7 @@ impl Assistant {
             }
             "edit" => {
                 let index = answer - 1;
-                let mut editor = MentionEditor::new(egui::Id::new(("assistant-edit", index)));
+                let mut editor = MentionEditor::new(egui::Id::unique(("assistant-edit", index)));
                 editor.set(ctx, self.views[index].draft.clone().unwrap_or_default());
                 ctx.memory_mut(|memory| memory.request_focus(editor.id));
                 self.editing = Some(Editing { index, editor });

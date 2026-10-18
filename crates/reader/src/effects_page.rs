@@ -594,7 +594,7 @@ pub fn tint_group(ui: &mut egui::Ui, page: TintGroup<'_>) {
     } = page;
     let find = |id: &str| effects.iter().find(|def| def.id == id);
     // Which theme's tint is shown: the one drawn, until another is picked.
-    let editing = ui.id().with("tint-theme");
+    let editing = ui.scope_id().with("tint-theme");
     let mut kind = ui
         .data(|data| data.get_temp::<ThemeKind>(editing))
         .unwrap_or(tokens.kind);

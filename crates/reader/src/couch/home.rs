@@ -141,7 +141,7 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
     );
     let offset = motion::smooth(
         &ctx,
-        egui::Id::new("couch-shelf"),
+        egui::Id::unique("couch-shelf"),
         couch.shelf as f32 * (COVER[0] + GAP),
         motion::PANEL,
     );

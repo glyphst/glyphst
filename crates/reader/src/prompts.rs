@@ -98,7 +98,7 @@ impl Prompts {
                     Choice::new("gamepad mode", Face::South),
                 ];
                 Prompt {
-                    id: egui::Id::new("prompt-pad-connected"),
+                    id: egui::Id::unique("prompt-pad-connected"),
                     icon: Some("gamepad-2"),
                     title: "Controller connected",
                     body: &body,
@@ -115,7 +115,7 @@ impl Prompts {
                     Choice::new("leave gamepad mode", Face::South),
                 ];
                 Prompt {
-                    id: egui::Id::new("prompt-pad-disconnected"),
+                    id: egui::Id::unique("prompt-pad-disconnected"),
                     icon: Some("unplug"),
                     title: "Controller disconnected",
                     body: "Gamepad mode needs a controller. Reconnect it to keep reading here, \
@@ -137,7 +137,7 @@ impl Prompts {
                     Choice::new("leave", Face::South),
                 ];
                 Prompt {
-                    id: egui::Id::new("prompt-leave-gamepad-mode"),
+                    id: egui::Id::unique("prompt-leave-gamepad-mode"),
                     icon: Some("log-out"),
                     title: "Leave gamepad mode?",
                     body: "Back to the desktop Reader, in a window again. Select + start \

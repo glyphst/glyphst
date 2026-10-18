@@ -37,7 +37,7 @@ impl Default for QuickAsk {
     fn default() -> Self {
         Self {
             open: false,
-            editor: MentionEditor::new(egui::Id::new("quick-ask-input")),
+            editor: MentionEditor::new(egui::Id::unique("quick-ask-input")),
             assistant: Assistant::default(),
             focus: false,
             markdown: egui_commonmark::CommonMarkCache::default(),
@@ -91,7 +91,7 @@ impl QuickAsk {
             .raised
             .to_opaque()
             .gamma_multiply(1.0 - settings.transparency.clamp(0.0, 0.9));
-        egui::Area::new(egui::Id::new("quick-ask"))
+        egui::Area::new(egui::Id::unique("quick-ask"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .pivot(pivot)

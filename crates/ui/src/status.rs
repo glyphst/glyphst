@@ -197,7 +197,7 @@ pub fn bar(ui: &mut Ui, segments: Vec<Segment<'_>>) -> Vec<(&'static str, Respon
             };
             ui.painter().vline(x, cell.y_range(), t.hairline());
         }
-        let id = ui.id().with(("status", segment.id));
+        let id = ui.scope_id().with(("status", segment.id));
         let sense = if segment.clickable {
             Sense::click()
         } else {

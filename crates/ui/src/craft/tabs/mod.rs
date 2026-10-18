@@ -194,7 +194,7 @@ impl<'a> Tab<'a> {
         );
         response.widget_info(|| {
             egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
+                egui::Role::Button,
                 valid && ui.is_enabled(),
                 self.selected,
                 self.label,

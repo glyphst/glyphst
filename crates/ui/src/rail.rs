@@ -20,7 +20,7 @@ pub fn button(
     let t = Tokens::get(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, 36.0), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, tooltip)
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, tooltip)
     });
     let hovered = response.hovered();
     let fill = if active || hovered {

@@ -457,7 +457,7 @@ pub fn drop_zone(
         tokens.text_2,
     );
     // Centred by the width it took last frame: the key differs by keymap.
-    let width_id = egui::Id::new(id);
+    let width_id = egui::Id::unique(id);
     let width = ui
         .ctx()
         .data(|data| data.get_temp::<f32>(width_id))
@@ -1067,7 +1067,7 @@ fn drop_hint(ui: &egui::Ui, tokens: &Tokens, rect: Rect) {
     let area = rect.shrink(12.0);
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("drop-hint"),
+        egui::Id::unique("drop-hint"),
     ));
     painter.rect_filled(area, 0, Tokens::fade(tokens.accent_soft, 0.85));
     for (from, to) in [

@@ -36,7 +36,7 @@ impl Widget for Checkbox<'_> {
         let enabled = ui.is_enabled();
         let on = *self.on;
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, self.label)
+            egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, self.label)
         });
         let (mark_color, label_color) = match (enabled, on, response.hovered()) {
             (false, ..) => (t.faint, t.faint),
@@ -77,9 +77,7 @@ impl Widget for Switch<'_> {
         }
         let on = *self.0;
         let enabled = ui.is_enabled();
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, "")
-        });
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, ""));
         let how_on = ui.ctx().animate_bool_responsive(response.id, on);
         let off_fill = if response.hovered() && enabled {
             t.rule_strong

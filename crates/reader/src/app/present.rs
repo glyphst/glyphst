@@ -461,7 +461,7 @@ impl ReaderApp {
             })
         });
 
-        egui::Area::new(egui::Id::new("present-overlay"))
+        egui::Area::new(egui::Id::unique("present-overlay"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .interactable(false)
@@ -477,7 +477,7 @@ impl ReaderApp {
                 } else {
                     let read = motion::smooth(
                         ctx,
-                        egui::Id::new("present-progress"),
+                        egui::Id::unique("present-progress"),
                         crate::shell::read_fraction(current, pages),
                         motion::PANEL,
                     );
@@ -496,7 +496,7 @@ impl ReaderApp {
                 // The ring fades in where it opens.
                 let ring_shown = motion::smooth_bool(
                     ctx,
-                    egui::Id::new("present-ring-shown"),
+                    egui::Id::unique("present-ring-shown"),
                     state.ring.is_some(),
                     motion::HOVER,
                 );
@@ -517,14 +517,14 @@ impl ReaderApp {
         let awake = !idle || over_toolbox;
         let shown = motion::smooth_bool(
             ctx,
-            egui::Id::new("present-toolbox-shown"),
+            egui::Id::unique("present-toolbox-shown"),
             awake,
             motion::FADE,
         );
         let opacity = shown
             * motion::smooth(
                 ctx,
-                egui::Id::new("present-toolbox-hover"),
+                egui::Id::unique("present-toolbox-hover"),
                 if over_toolbox { 1.0 } else { 0.6 },
                 motion::HOVER,
             );
@@ -532,7 +532,7 @@ impl ReaderApp {
         state.toolbox.clear();
         if state.mode != Mode::Hidden && state.blank.is_none() && !dialog && shown > 0.0 {
             let mode = state.mode;
-            let area = egui::Area::new(egui::Id::new("present-toolbox"))
+            let area = egui::Area::new(egui::Id::unique("present-toolbox"))
                 .order(egui::Order::Foreground)
                 .fade_in(false)
                 .interactable(awake)
@@ -596,7 +596,7 @@ impl ReaderApp {
             if mode == Mode::Pen
                 && let Some(pen) = area.inner
             {
-                let colors = egui::Area::new(egui::Id::new("present-colors"))
+                let colors = egui::Area::new(egui::Id::unique("present-colors"))
                     .order(egui::Order::Foreground)
                     .fade_in(false)
                     .interactable(awake)

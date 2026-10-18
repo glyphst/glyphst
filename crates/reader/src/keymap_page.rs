@@ -426,11 +426,15 @@ impl KeymapPage {
         let mut cell = |x: egui::Rangef, label: &str, sort: Option<Sort>| {
             let cell = egui::Rect::from_x_y_ranges(x, rect.y_range());
             let response = sort.map(|sort| {
-                ui.interact(cell, ui.id().with(("keymap-sort", label)), Sense::click())
-                    .tip(&format!("order by {}", label.to_lowercase()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                    .then_some(sort)
+                ui.interact(
+                    cell,
+                    ui.scope_id().with(("keymap-sort", label)),
+                    Sense::click(),
+                )
+                .tip(&format!("order by {}", label.to_lowercase()))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+                .then_some(sort)
             });
             let active = sort.is_some() && sort == Some(self.sort);
             let color = if active { tokens.text_2 } else { tokens.faint };

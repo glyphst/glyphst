@@ -241,7 +241,7 @@ impl ReaderApp {
         let response = ui
             .interact(
                 Rect::from_min_max(column.min, pos2(column.right(), y_of(ticks - 1) + step)),
-                ui.id().with(("minimap", self.tabs[active].id)),
+                ui.scope_id().with(("minimap", self.tabs[active].id)),
                 Sense::click_and_drag(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);

@@ -256,7 +256,7 @@ impl ReaderApp {
                     rotation: 0,
                 };
                 let screen = ctx.content_rect();
-                egui::Area::new(egui::Id::new("couch-home-menu"))
+                egui::Area::new(egui::Id::unique("couch-home-menu"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(screen.min)
                     .interactable(false)

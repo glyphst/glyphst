@@ -7,7 +7,8 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-egui.workspace = true
+# egui's own faces, emoji included, as the symbol fallback (fonts.rs).
+egui = { workspace = true, features = ["monochrome_emoji_fonts"] }
 egui_extras.workspace = true
 material-colors.workspace = true
 serde.workspace = true

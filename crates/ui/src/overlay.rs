@@ -143,7 +143,7 @@ impl Toasts {
         // as it comes and goes.
         let shown = crate::motion::smooth_bool(
             ctx,
-            egui::Id::new("toast-shown"),
+            egui::Id::unique("toast-shown"),
             !self.leaving,
             crate::motion::PANEL,
         );
@@ -151,15 +151,19 @@ impl Toasts {
             self.clear();
             return None;
         }
-        let lift =
-            crate::motion::smooth(ctx, egui::Id::new("toast-lift"), lift, crate::motion::PANEL);
+        let lift = crate::motion::smooth(
+            ctx,
+            egui::Id::unique("toast-lift"),
+            lift,
+            crate::motion::PANEL,
+        );
         let t = Tokens::get(ctx);
         let screen = ctx.content_rect();
         let pad = crate::pad_glyph::input(ctx) == crate::pad_glyph::InputDevice::Pad;
         let mut action_clicked = toast.action.is_some()
             && !self.leaving
             && crate::pad_glyph::pressed_faces(ctx).contains(&crate::pad_glyph::Face::West);
-        let area = egui::Area::new(egui::Id::new("toast"))
+        let area = egui::Area::new(egui::Id::unique("toast"))
             .order(egui::Order::Tooltip)
             .sense(Sense::click())
             .interactable(!self.leaving)
@@ -233,7 +237,7 @@ impl Toasts {
 /// follow: `gg top · gt tab`) follow it in faint mono.
 pub fn pending_keys(ctx: &egui::Context, keys: &str, hints: &str, at: egui::Pos2) {
     let t = Tokens::get(ctx);
-    egui::Area::new(egui::Id::new("pending-keys"))
+    egui::Area::new(egui::Id::unique("pending-keys"))
         .order(egui::Order::Tooltip)
         .interactable(false)
         .pivot(Align2::LEFT_BOTTOM)
@@ -285,7 +289,7 @@ pub fn pending_keys(ctx: &egui::Context, keys: &str, hints: &str, at: egui::Pos2
 pub fn scrim(ctx: &egui::Context, id: &str) -> Response {
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new(id))
+    egui::Area::new(egui::Id::unique(id))
         .order(egui::Order::Middle)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
@@ -304,7 +308,7 @@ pub fn fading_scrim(ctx: &egui::Context, id: &str, shown: f32) -> Option<Respons
     }
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
-    let response = egui::Area::new(egui::Id::new(id))
+    let response = egui::Area::new(egui::Id::unique(id))
         .order(egui::Order::Middle)
         .fade_in(false)
         .interactable(shown >= 1.0)

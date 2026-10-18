@@ -244,7 +244,7 @@ impl LibraryView {
             title(ui, width);
             ui.add_space(8.0);
         }
-        let filter_id = egui::Id::new((self.id, "filter"));
+        let filter_id = egui::Id::unique((self.id, "filter"));
         let (row, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
         let mut row_ui = ui.new_child(
             egui::UiBuilder::new()

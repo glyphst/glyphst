@@ -23,7 +23,7 @@ impl Widget for SearchButton<'_> {
         let t = Tokens::get(ui.ctx());
         let (rect, response) = ui.allocate_exact_size(vec2(self.width, 28.0), Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.placeholder)
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.placeholder)
         });
         let fill = if response.hovered() {
             t.hover
@@ -164,7 +164,7 @@ impl<'a> TextField<'a> {
             .hint_text(egui::RichText::new(self.hint).color(t.faint))
             .font(theme::mono(12.0))
             .frame(egui::Frame::NONE)
-            .vertical_align(egui::Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .desired_width(edit_rect.width());
         if let Some(id) = self.id {
             edit = edit.id(id);

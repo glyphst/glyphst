@@ -421,7 +421,7 @@ impl Tokens {
     }
 
     pub fn get(ctx: &egui::Context) -> Self {
-        ctx.data(|data| data.get_temp::<Tokens>(egui::Id::new(TOKENS_ID)))
+        ctx.data(|data| data.get_temp::<Tokens>(egui::Id::unique(TOKENS_ID)))
             .unwrap_or_else(|| Self::for_kind(ThemeKind::Light))
     }
 
@@ -552,7 +552,7 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
         Tokens::from_palette(appearance.kind, appearance.palette).with_opacity(appearance.opacity);
     t.density = appearance.density;
     t.ornaments = appearance.ornaments;
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new(TOKENS_ID), t));
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique(TOKENS_ID), t));
     let mut v = if t.dark() {
         Visuals::dark()
     } else {
