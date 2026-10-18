@@ -928,6 +928,8 @@ impl CallbackTrait for ViewCallback {
                 params: overlay.params,
                 opacity: 1.0,
                 extent,
+                origin: None,
+                seed: 0.0,
             };
             effects.prepare(device, &overlay.id, &inputs)
         });
@@ -982,13 +984,16 @@ impl CallbackTrait for ViewCallback {
                 params,
                 opacity: 1.0,
                 extent,
+                origin: None,
+                seed: 0.0,
             };
             effects
                 .prepare(device, id, &effect_inputs)
                 .or_else(|| effects.prepare(device, fallback, &effect_inputs))
         };
         let content = match (&self.transition, &view.snapshot) {
-            (Some(transition), Some(snapshot)) if snapshot.size == size => prepare(
+            // The snapshot is window-sized, like the view's target.
+            (Some(transition), Some(snapshot)) if snapshot.size == target => prepare(
                 &transition.effect.id,
                 PRESENT,
                 &snapshot.view,
@@ -1137,6 +1142,8 @@ impl CallbackTrait for PreviewCallback {
             params: self.effect.params,
             opacity: 1.0,
             extent: [1.0; 2],
+            origin: None,
+            seed: 0.0,
         };
         match gpu.effects.prepare(device, &self.effect.id, &inputs) {
             Some(prepared) => gpu.previews.insert(self.key.clone(), prepared),
@@ -1211,6 +1218,8 @@ impl CallbackTrait for BackdropCallback {
             params: self.background.params,
             opacity: self.opacity,
             extent: [1.0; 2],
+            origin: None,
+            seed: 0.0,
         };
         gpu.backdrop = gpu
             .effects

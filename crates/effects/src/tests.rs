@@ -67,6 +67,33 @@ fn texture_from(
     texture
 }
 
+/// How a test draws an effect; [`Draw::default`] is the plain case.
+#[derive(Clone, Copy)]
+struct Draw {
+    progress: f32,
+    opacity: f32,
+    extent: [f32; 2],
+    direction: f32,
+    origin: Option<[f32; 2]>,
+    /// The effect's defaults when `None`.
+    params: Option<[f32; MAX_PARAMS]>,
+    seed: f32,
+}
+
+impl Default for Draw {
+    fn default() -> Self {
+        Self {
+            progress: 0.0,
+            opacity: 1.0,
+            extent: [1.0; 2],
+            direction: 1.0,
+            origin: None,
+            params: None,
+            seed: 0.0,
+        }
+    }
+}
+
 /// Draws `id` over a transparent target and returns its pixels.
 fn render(
     device: &wgpu::Device,
@@ -77,9 +104,11 @@ fn render(
     to: &wgpu::Texture,
     progress: f32,
 ) -> Vec<u8> {
-    render_at(
-        device, queue, registry, id, from, to, progress, 1.0, [1.0; 2],
-    )
+    let draw = Draw {
+        progress,
+        ..Draw::default()
+    };
+    render_with(device, queue, registry, id, from, to, draw)
 }
 
 /// [`render`] drawn `opacity` opaque, reading `extent` of the inputs.
@@ -94,6 +123,24 @@ fn render_at(
     progress: f32,
     opacity: f32,
     extent: [f32; 2],
+) -> Vec<u8> {
+    let draw = Draw {
+        progress,
+        opacity,
+        extent,
+        ..Draw::default()
+    };
+    render_with(device, queue, registry, id, from, to, draw)
+}
+
+fn render_with(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    registry: &EffectRegistry,
+    id: &str,
+    from: &wgpu::Texture,
+    to: &wgpu::Texture,
+    draw: Draw,
 ) -> Vec<u8> {
     let target = solid_texture(device, queue, [0, 0, 0, 0]);
     let target_view = target.create_view(&Default::default());
@@ -112,11 +159,13 @@ fn render_at(
                 resolution: [SIZE as f32; 2],
                 pointer: None,
                 time: 0.0,
-                progress,
-                direction: 1.0,
-                params: def.default_params(),
-                opacity,
-                extent,
+                progress: draw.progress,
+                direction: draw.direction,
+                params: draw.params.unwrap_or_else(|| def.default_params()),
+                opacity: draw.opacity,
+                extent: draw.extent,
+                origin: draw.origin,
+                seed: draw.seed,
             },
         )
         .unwrap();
@@ -252,6 +301,26 @@ fn manifests_describe_effects_and_reject_bad_ones() {
         .is_err(),
         "default outside its range"
     );
+
+    // `random:` marks parameters a switch may vary; it must name real ones.
+    let wipe = parse_manifest(
+        "w",
+        "// @effect id: w\n// @effect name: W\n// @effect kind: transition\n\
+         // @effect random: angle\n// @effect param: angle float 0 360 0 Angle\n\
+         // @effect param: soft float 0 1 0.3 Softness",
+    )
+    .unwrap();
+    assert!(wipe.params[0].random);
+    assert!(!wipe.params[1].random);
+    assert!(
+        parse_manifest(
+            "w",
+            "// @effect id: w\n// @effect name: W\n// @effect kind: transition\n\
+             // @effect random: tilt\n// @effect param: angle float 0 360 0 Angle"
+        )
+        .is_err(),
+        "random names an unknown parameter"
+    );
 }
 
 #[test]
@@ -264,31 +333,93 @@ fn builtin_effects_compile() {
     }
 }
 
+/// A texture whose every pixel differs, so an effect that moves or
+/// distorts its input at either end shows.
+fn gradient_texture(device: &wgpu::Device, queue: &wgpu::Queue, flip: bool) -> wgpu::Texture {
+    let pixels: Vec<u8> = (0..SIZE * SIZE)
+        .flat_map(|index| {
+            let (x, y) = ((index % SIZE) as u8, (index / SIZE) as u8);
+            let (x, y) = if flip { (7 - y, 7 - x) } else { (x, y) };
+            [20 + x * 28, 20 + y * 28, if flip { 200 } else { 40 }, 255]
+        })
+        .collect();
+    texture_from(device, queue, &pixels, [SIZE, SIZE])
+}
+
+/// Each parameter at its minimum, or at its maximum.
+fn extreme_params(def: &EffectDef, high: bool) -> [f32; MAX_PARAMS] {
+    let mut values = def.default_params();
+    for (value, param) in values.iter_mut().zip(&def.params) {
+        *value = match param.kind {
+            ParamKind::Float { min, max } => {
+                if high {
+                    max
+                } else {
+                    min
+                }
+            }
+            ParamKind::Toggle => f32::from(u8::from(high)),
+            ParamKind::Colour => param.default,
+        };
+    }
+    values
+}
+
 #[test]
 fn transitions_start_at_the_outgoing_view_and_end_at_the_incoming_one() {
     let (device, queue) = require_device!();
     let registry = EffectRegistry::new(&device, FORMAT);
-    let from = solid_texture(&device, &queue, [200, 30, 30, 255]);
-    let to = solid_texture(&device, &queue, [30, 30, 200, 255]);
-    let transitions: Vec<String> = registry
+    let from = gradient_texture(&device, &queue, false);
+    let to = gradient_texture(&device, &queue, true);
+    let pixels = |texture: &wgpu::Texture| {
+        render(&device, &queue, &registry, PRESENT, texture, texture, 0.0)
+    };
+    let (from_pixels, to_pixels) = (pixels(&from), pixels(&to));
+    let transitions: Vec<EffectDef> = registry
         .defs()
         .filter(|def| def.kind == EffectKind::Transition)
-        .map(|def| def.id.clone())
+        .cloned()
         .collect();
     assert!(transitions.len() >= 2);
-    for id in transitions {
-        let start = render(&device, &queue, &registry, &id, &from, &to, 0.0);
-        let end = render(&device, &queue, &registry, &id, &from, &to, 1.0);
-        assert!(
-            start.chunks_exact(4).all(|p| p == [200, 30, 30, 255]),
-            "{id} at 0: {:?}",
-            &start[..4]
-        );
-        assert!(
-            end.chunks_exact(4).all(|p| p == [30, 30, 200, 255]),
-            "{id} at 1: {:?}",
-            &end[..4]
-        );
+    let size = SIZE as f32;
+    let origins = [
+        None,
+        Some([0.0, 0.0]),
+        Some([size, size]),
+        Some([-3.0 * size, 0.5 * size]),
+        Some([0.5 * size, 4.0 * size]),
+    ];
+    for def in &transitions {
+        let param_sets = [
+            None,
+            Some(extreme_params(def, false)),
+            Some(extreme_params(def, true)),
+        ];
+        for direction in [1.0, -1.0] {
+            for origin in origins {
+                for params in param_sets {
+                    for seed in [0.0, 7.3] {
+                        let draw = Draw {
+                            direction,
+                            origin,
+                            params,
+                            seed,
+                            ..Draw::default()
+                        };
+                        let at = |progress| {
+                            let draw = Draw { progress, ..draw };
+                            render_with(&device, &queue, &registry, &def.id, &from, &to, draw)
+                        };
+                        let case = format!(
+                            "{} (direction {direction}, origin {origin:?}, params {params:?}, seed {seed})",
+                            def.id
+                        );
+                        assert_eq!(at(0.0), from_pixels, "{case} at 0");
+                        assert_eq!(at(1.0), to_pixels, "{case} at 1");
+                    }
+                }
+            }
+        }
     }
 }
 

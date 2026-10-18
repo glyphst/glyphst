@@ -1146,6 +1146,7 @@ mod tests {
                 label: "Amount".into(),
                 kind: glyphst_effects::ParamKind::Float { min: 0.0, max: 1.0 },
                 default: 0.5,
+                random: false,
             }],
             source: format!("{id}.wgsl"),
             user,

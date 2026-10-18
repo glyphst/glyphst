@@ -19,12 +19,17 @@
 //               around the pages; keep its alpha).
 //
 // Uniforms (prelude): fx.resolution and fx.pointer (pixels; -1 outside),
-// fx.time (seconds), fx.progress, fx.direction (+1 forward, -1 back) and
-// fx.params (the params above, in order). Return premultiplied RGBA; the
-// prelude multiplies it by a transparent window's opacity. Read the page
-// images with fx_sample_from(uv) and fx_sample_to(uv): they show only part
-// of their textures (fx.extent), so a direct textureSample must scale uv
-// by fx.extent.
+// fx.time (seconds), fx.progress, fx.direction (+1 forward, -1 back),
+// fx.params (the params above, in order), and for transitions fx.origin
+// (pixels: where the switch came from, such as the tab clicked; fx_origin()
+// gives it as uv) and fx.seed (differs every run, for fx_hash21 and
+// fx_value_noise). `// @effect random: <params>` lets a book switch pick
+// those parameters at random when the user kept their defaults.
+//
+// Return premultiplied RGBA; the prelude multiplies it by a transparent
+// window's opacity. Read the page images with fx_sample_from(uv) and
+// fx_sample_to(uv): they show only part of their textures (fx.extent), so a
+// direct textureSample must scale uv by fx.extent.
 
 fn effect(uv: vec2<f32>, pixel: vec2<f32>) -> vec4<f32> {
     let t = fx.time * fx.params.x;

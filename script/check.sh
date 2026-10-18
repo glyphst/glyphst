@@ -221,6 +221,7 @@ if [[ ${tier} == screens ]]; then
         "02g-present @ --command view.present"
         "02h-present-tools @ --command view.present --screenshot-present-tools"
         "02i-present-palette @ --command view.present --command app.command_palette"
+        "02k-switch-slide-over @ # --transition slide-over --screenshot-switch"
         "03-outline @ --sidebar outline"
         "03-pages @ --sidebar pages"
         "03-pages-one @ --sidebar pages --command view.page_columns"

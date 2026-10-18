@@ -22,6 +22,8 @@
 //! // @effect param: speed float 0 3 0.4 Speed
 //! // @effect param: colour colour #F1E3C6 Colour  (sRGB, packed as 0xRRGGBB;
 //! //                                   `fx_colour` unpacks it)
+//! // @effect random: angle count     (parameters a book switch may vary
+//! //                                   when the user kept their defaults)
 //! ```
 //!
 //! User effects form their own layer over the built-ins: one may replace a
@@ -52,6 +54,9 @@ pub const DOTS: &str = "dots";
 pub const GENERATE: &str = "generate";
 pub const TINT: &str = "tint";
 pub const THEME_TINT: &str = "theme-tint";
+/// Not an effect: the transition choice that picks a different transition
+/// for every switch.
+pub const RANDOM: &str = "random";
 /// The largest packed `colour` parameter, 0xFFFFFF (exact in an f32).
 const MAX_COLOUR: f32 = 16_777_215.0;
 
@@ -126,6 +131,9 @@ pub struct ParamDef {
     pub label: String,
     pub kind: ParamKind,
     pub default: f32,
+    /// Named by the manifest's `random:` line: a switch may pick any value
+    /// in its range instead of the default.
+    pub random: bool,
 }
 
 /// An effect's manifest.
@@ -211,6 +219,7 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
     let mut themed = false;
     let mut duration_ms = 300;
     let mut params = Vec::new();
+    let mut random = Vec::new();
     for line in text.lines() {
         let Some(entry) = line.trim().strip_prefix("// @effect ") else {
             continue;
@@ -240,11 +249,19 @@ pub fn parse_manifest(source_name: &str, text: &str) -> Result<EffectDef, String
                     .map_err(|_| format!("duration must be milliseconds: {value:?}"))?
             }
             "param" => params.push(parse_param(value)?),
+            "random" => random.extend(value.split_whitespace().map(str::to_string)),
             other => return Err(format!("unknown manifest key {other:?}")),
         }
     }
     if params.len() > MAX_PARAMS {
         return Err(format!("at most {MAX_PARAMS} parameters"));
+    }
+    for id in random {
+        let param = params
+            .iter_mut()
+            .find(|param| param.id == id)
+            .ok_or_else(|| format!("random names an unknown parameter {id:?}"))?;
+        param.random = true;
     }
     Ok(EffectDef {
         id: id.ok_or("missing id")?,
@@ -298,6 +315,7 @@ fn parse_param(value: &str) -> Result<ParamDef, String> {
         id,
         kind,
         default,
+        random: false,
     })
 }
 
@@ -312,8 +330,10 @@ struct Uniforms {
     opacity: f32,
     params: [f32; 4],
     extent: [f32; 2],
+    origin: [f32; 2],
+    seed: f32,
     /// Pads the struct to WGSL's 16-byte size.
-    _pad: [f32; 2],
+    _pad: [f32; 3],
 }
 
 /// Per-draw values of an effect.
@@ -335,6 +355,11 @@ pub struct EffectInputs<'a> {
     /// fraction of their size: a view draws into a window-sized image and
     /// shows the pane's part of it.
     pub extent: [f32; 2],
+    /// Transitions: where the switch came from in pixels (the tab or card
+    /// picked, which may lie outside), or `None` for the centre.
+    pub origin: Option<[f32; 2]>,
+    /// Varies a transition's pattern from one run to the next.
+    pub seed: f32,
 }
 
 struct CompiledEffect {
@@ -600,7 +625,12 @@ impl EffectRegistry {
             opacity: inputs.opacity.clamp(0.0, 1.0),
             params: inputs.params,
             extent: inputs.extent.map(|extent| extent.clamp(0.0, 1.0)),
-            _pad: [0.0; 2],
+            origin: inputs
+                .origin
+                .filter(|origin| origin.iter().all(|value| value.is_finite()))
+                .unwrap_or([inputs.resolution[0] / 2.0, inputs.resolution[1] / 2.0]),
+            seed: inputs.seed,
+            _pad: [0.0; 3],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("effect_uniforms"),

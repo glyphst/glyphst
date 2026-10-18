@@ -22,6 +22,12 @@ struct EffectUniforms {
     // fraction of their size (a view draws into a window-sized image).
     // fx_sample_from and fx_sample_to apply it.
     extent: vec2<f32>,
+    // Transitions: where the switch came from, in pixels (the tab or card
+    // picked; may lie outside the view). The centre when there is none.
+    origin: vec2<f32>,
+    // Transitions: a number that differs from one run to the next, for
+    // patterns that should not repeat.
+    seed: f32,
 }
 
 @group(0) @binding(0) var<uniform> fx: EffectUniforms;
@@ -63,6 +69,63 @@ fn fx_sample_to(uv: vec2<f32>) -> vec4<f32> {
 fn fx_smoothstep01(t: f32) -> f32 {
     let x = clamp(t, 0.0, 1.0);
     return x * x * (3.0 - 2.0 * x);
+}
+
+fn fx_ease_in_out_cubic(t: f32) -> f32 {
+    let x = clamp(t, 0.0, 1.0);
+    if x < 0.5 {
+        return 4.0 * x * x * x;
+    }
+    let y = 2.0 - 2.0 * x;
+    return 1.0 - y * y * y / 2.0;
+}
+
+fn fx_ease_out_cubic(t: f32) -> f32 {
+    let y = 1.0 - clamp(t, 0.0, 1.0);
+    return 1.0 - y * y * y;
+}
+
+// The view's width over its height.
+fn fx_aspect() -> f32 {
+    return fx.resolution.x / max(fx.resolution.y, 1.0);
+}
+
+// `uv` stretched to the view's aspect: x runs 0..fx_aspect(), y 0..1, so
+// distances are round.
+fn fx_square(uv: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(uv.x * fx_aspect(), uv.y);
+}
+
+// The origin as `uv`.
+fn fx_origin() -> vec2<f32> {
+    return fx.origin / max(fx.resolution, vec2<f32>(1.0));
+}
+
+// From `point` (in fx_square space) to the farthest corner of the view: how
+// far a shape growing from `point` must reach to cover it.
+fn fx_reach(point: vec2<f32>) -> f32 {
+    let size = vec2<f32>(fx_aspect(), 1.0);
+    let far = max(abs(point), abs(size - point));
+    return length(far);
+}
+
+// A pseudo-random number in 0..1 for `p`, varied by fx.seed.
+fn fx_hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21) + fract(fx.seed * 0.1031));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+// Smooth value noise in 0..1.
+fn fx_value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = fx_hash21(i);
+    let b = fx_hash21(i + vec2<f32>(1.0, 0.0));
+    let c = fx_hash21(i + vec2<f32>(0.0, 1.0));
+    let d = fx_hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 // Backgrounds with `image: true`: the wallpaper (premultiplied, mipmapped)

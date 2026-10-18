@@ -199,6 +199,7 @@ mod tests {
                 label: "Amount".into(),
                 kind: ParamKind::Float { min: 0.0, max: 1.0 },
                 default: 0.5,
+                random: false,
             }],
             source: format!("{id}.wgsl"),
             user: false,
@@ -265,6 +266,7 @@ mod tests {
             label: id.into(),
             kind: ParamKind::Colour,
             default: 0.0,
+            random: false,
         };
         tint.params = vec![colour("ink"), colour("paper"), tint.params[0].clone()];
         let mut params = BTreeMap::new();
