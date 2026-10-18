@@ -1160,9 +1160,16 @@ fn outline(
             ancestors(entries, entry).len()
         };
         let viewport = view.list.viewport_or(ui);
-        if let Some(offset) =
-            reveal_offset(row, sticky, OUTLINE_ROW, viewport, view.list.offset, strict)
-        {
+        let content = rows.len() as f32 * OUTLINE_ROW;
+        if let Some(offset) = reveal_offset(
+            row,
+            sticky,
+            OUTLINE_ROW,
+            content,
+            viewport,
+            view.list.offset,
+            strict,
+        ) {
             // Opening the list puts it there; following the reading
             // glides.
             if strict {
@@ -1221,9 +1228,11 @@ fn outline(
             let index = rows[position];
             let entry = &entries[index];
             let prefix = prefix(position);
+            // Ids of the row's own, not of its slot in the rows shown, so
+            // a row keeps its hover and fades when the list moves.
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
-                    .id_salt((index, sticky))
+                    .scope_id(ui.scope_id().with(("outline-row", index, sticky)))
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
@@ -1307,8 +1316,11 @@ fn outline(
     if let Some(index) = chosen {
         actions.push(SidebarAction::View(ViewAction::GoToEntry(index)));
         view.current = Some(index);
+        // The row clicked is in view: follow from there without moving the
+        // list (it glides only if the row is half under the sticky rows).
         if !view.unfollowed {
-            view.locate();
+            view.paused = false;
+            view.reveal = Some(false);
         }
     }
 }
@@ -1451,11 +1463,14 @@ fn row_is_visible(row: Option<usize>, offset: f32, viewport: f32, height: f32) -
 }
 
 /// The scroll offset that centres row `row` below `sticky` sticky rows,
-/// or `None` when it shows there already and `strict` is not asked.
+/// or `None` when it shows there already and `strict` is not asked. It
+/// stays within `content`, the list's height: an offset past the end
+/// would show the list scrolled too far for a frame.
 fn reveal_offset(
     row: usize,
     sticky: usize,
     height: f32,
+    content: f32,
     viewport: f32,
     offset: f32,
     strict: bool,
@@ -1466,7 +1481,8 @@ fn reveal_offset(
         return None;
     }
     let free = (viewport - covered).max(height);
-    Some((top - covered - (free - height) / 2.0).max(0.0))
+    let end = (content - viewport).max(0.0);
+    Some((top - covered - (free - height) / 2.0).clamp(0.0, end))
 }
 
 fn pages(
@@ -1510,10 +1526,13 @@ fn pages(
     if fresh || view.page != Some(current) {
         view.page = Some(current);
         let viewport = view.pages.viewport_or(ui);
+        // `show_rows` puts the item spacing between rows.
+        let stride = row_height + ui.spacing().item_spacing.y;
         if let Some(offset) = reveal_offset(
             current / columns,
             0,
-            row_height,
+            stride,
+            rows as f32 * stride - ui.spacing().item_spacing.y,
             viewport,
             view.pages.offset,
             fresh,
@@ -1999,6 +2018,61 @@ mod tests {
     }
 
     #[test]
+    fn choosing_a_section_leaves_the_outline_where_it_is() {
+        let mut tab = crate::document_tab::test_tab(60);
+        tab.outline = (0..60)
+            .map(|page| crate::document::OutlineEntry {
+                title: format!("section {page}"),
+                page: Some(page),
+                y: None,
+                depth: 0,
+                parent: None,
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        let draw = |tab: &mut DocumentTab, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut output = ctx.run_ui(input, |ui| super::outline(ui, tab, "", &mut actions));
+            output.textures_delta.clear();
+            actions
+        };
+        for _ in 0..3 {
+            draw(&mut tab, Vec::new());
+        }
+        let offset = tab.outline_view.list.offset;
+        // Section 12 shows near the bottom of the list, far from its centre.
+        let pos = egui::pos2(100.0, 12.5 * OUTLINE_ROW - offset);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&mut tab, vec![egui::Event::PointerMoved(pos)]);
+        draw(&mut tab, vec![button(true)]);
+        let actions = draw(&mut tab, vec![button(false)]);
+        assert!(matches!(
+            actions.as_slice(),
+            [SidebarAction::View(ViewAction::GoToEntry(12))]
+        ));
+        tab.apply(ViewAction::GoToEntry(12), false);
+        for _ in 0..3 {
+            draw(&mut tab, Vec::new());
+        }
+        assert_eq!(tab.current_outline_entry(), Some(12));
+        assert!(tab.outline_view.following());
+        assert_eq!(tab.outline_view.list.offset, offset);
+    }
+
+    #[test]
     fn only_the_branch_of_a_row_toggles_it() {
         let prefix = motif::tree_prefix(&[false, true, false], false);
         assert_eq!(own_branch(&prefix), ("│     │  ", "├─ "));
@@ -2161,16 +2235,22 @@ mod tests {
 
     #[test]
     fn reveals_centre_below_the_sticky_rows() {
-        // Rows of 10 in a 100-point list scrolled to 0.
-        assert_eq!(reveal_offset(3, 0, 10.0, 100.0, 0.0, false), None);
-        assert_eq!(reveal_offset(3, 0, 10.0, 100.0, 0.0, true), Some(0.0));
+        // 100 rows of 10 in a 100-point list scrolled to 0.
+        let reveal = |row, sticky, offset, strict| {
+            reveal_offset(row, sticky, 10.0, 1000.0, 100.0, offset, strict)
+        };
+        assert_eq!(reveal(3, 0, 0.0, false), None);
+        assert_eq!(reveal(3, 0, 0.0, true), Some(0.0));
         // Row 50 is centred: its top 45 points down.
-        assert_eq!(reveal_offset(50, 0, 10.0, 100.0, 0.0, false), Some(455.0));
+        assert_eq!(reveal(50, 0, 0.0, false), Some(455.0));
         // Under two sticky rows, row 50 centres in the 80 points left.
-        assert_eq!(reveal_offset(50, 2, 10.0, 100.0, 0.0, false), Some(445.0));
+        assert_eq!(reveal(50, 2, 0.0, false), Some(445.0));
         // A row hidden under the sticky rows is revealed.
-        assert_eq!(reveal_offset(41, 2, 10.0, 100.0, 400.0, false), Some(355.0));
-        assert_eq!(reveal_offset(42, 2, 10.0, 100.0, 400.0, false), None);
+        assert_eq!(reveal(41, 2, 400.0, false), Some(355.0));
+        assert_eq!(reveal(42, 2, 400.0, false), None);
+        // The last rows can't be centred: the list stops at its end.
+        assert_eq!(reveal(99, 0, 0.0, true), Some(900.0));
+        assert_eq!(reveal(97, 0, 0.0, false), Some(900.0));
     }
 
     #[test]
