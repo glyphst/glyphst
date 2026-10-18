@@ -15,7 +15,9 @@
 #                           name or prefix (02d, 03-search, 07a), all by
 #                           default; GLYPHST_SCREENS_DOC and
 #                           GLYPHST_SCREENS_DOC2 are the PDFs shown (default:
-#                           the first two of ../pdf-samples)
+#                           the first two of ../pdf-samples); each shot reads
+#                           its own copy of the library as it was when the
+#                           run started, so shots agree and never touch it
 #
 # Options:
 #   --keep-going      run every step and report all failures
@@ -318,13 +320,30 @@ if [[ ${tier} == screens ]]; then
     parallel=${parallel:-$([[ -n ${GLYPHST_HEADLESS:-} ]] && echo 4 || echo 1)}
     step reader-build cargo build --locked -p glyphst-reader
 
+    # The library (positions, history, bookmarks) as the run starts. Each
+    # shot gets a copy: Readers sharing one would race for its lock, and
+    # only the winner would open documents where they were left.
+    seed="${run_dir}/data-seed"
+    mkdir -p "${seed}/glyphst-reader"
+    data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+    if [[ -d ${data_home}/glyphst-reader ]]; then
+        cp -a "${data_home}/glyphst-reader/." "${seed}/glyphst-reader/"
+    fi
+    # User fonts stay where fontconfig finds them.
+    if [[ -d ${data_home}/fonts ]]; then
+        ln -s "${data_home}/fonts" "${seed}/fonts"
+    fi
+
     # Runs one shot (name, image, then the Reader's command) in the
     # background, leaving its exit status and seconds in name.status.
     shoot() {
-        local name=$1 image=$2 begin status=0
+        local name=$1 image=$2 begin status=0 data="${run_dir}/data/$1"
         shift 2
         begin=$(date +%s)
-        "$@" > "${run_dir}/${name}.log" 2>&1 || status=$?
+        mkdir -p "${data}"
+        cp -a "${seed}/." "${data}/"
+        XDG_DATA_HOME="${data}" "$@" > "${run_dir}/${name}.log" 2>&1 || status=$?
+        rm -rf "${data}"
         # The Reader exits cleanly even when it could not save the image.
         if ((status == 0)) && [[ ! -s ${image} ]]; then
             printf 'no image at %s\n' "${image}" >> "${run_dir}/${name}.log"
@@ -375,6 +394,7 @@ if [[ ${tier} == screens ]]; then
     done
     wait
     report
+    rm -rf "${seed}" "${run_dir}/data"
     finish
 fi
 step fmt cargo fmt --all -- --check
