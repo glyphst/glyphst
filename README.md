@@ -26,15 +26,23 @@ tools and the windowing and Vulkan libraries are needed. On Linux, the Nix
 development shell provides them.
 
 ```sh
+git clone https://github.com/glyphst/glyphst-fonts ../fonts
 nix develop
 cargo run -p glyphst-reader --release -- /path/to/document.pdf
 ```
+
+The CJK interface faces (Noto Sans CJK SC) and the PDF translation fonts live
+in [glyphst-fonts](https://github.com/glyphst/glyphst-fonts), read at run time
+from `$GLYPHST_FONTS_DIR` or a `fonts/` checkout beside this one. Without it,
+CJK text falls back to an installed font and translation reports the missing
+directory. `cargo build --release` is the quick local build; shipped builds use
+`--profile dist` (thin LTO, one codegen unit).
 
 Without Nix, install the platform packages listed in
 [CI](.github/workflows/ci.yml) before running Cargo.
 
 Normal builds use the published Git revisions in `Cargo.toml` and `Cargo.lock`;
-no dependency submodule or sibling checkout is required. Nix uses the same Rust
+no dependency submodule or sibling checkout is required to build. Nix uses the same Rust
 toolchain file and Cargo lockfile. The read-only clones in the workspace's
 `../references/` are optional research material, not build inputs.
 

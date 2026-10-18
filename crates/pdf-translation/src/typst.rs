@@ -42,6 +42,8 @@ pub enum TypstExecutionMode {
 #[derive(Debug, Clone)]
 pub struct TypstCompilerConfig {
     pub assets_dir: PathBuf,
+    /// The glyphst-fonts checkout whose `fonts/` holds the CJK and Lilex faces.
+    pub fonts_dir: PathBuf,
     pub execution: TypstExecutionMode,
 }
 
@@ -49,6 +51,7 @@ impl Default for TypstCompilerConfig {
     fn default() -> Self {
         Self {
             assets_dir: resolve_translation_assets_dir(),
+            fonts_dir: glyphst_core::paths::fonts_dir().unwrap_or_default(),
             execution: TypstExecutionMode::InProcess,
         }
     }
@@ -142,9 +145,12 @@ impl TypstCompiler {
         })?;
 
         let result = match self.config.execution {
-            TypstExecutionMode::InProcess => {
-                compile_source_in_process(job_directory, &self.config.assets_dir, file_stem)
-            }
+            TypstExecutionMode::InProcess => compile_source_in_process(
+                job_directory,
+                &self.config.assets_dir,
+                &self.config.fonts_dir,
+                file_stem,
+            ),
             TypstExecutionMode::CurrentExecutableWorker => self.compile_source_in_worker(
                 job_directory,
                 file_stem,
@@ -166,7 +172,7 @@ impl TypstCompiler {
         cancellation: &CancellationToken,
     ) -> Result<TypstOutput, TypstError> {
         validate_file_stem(file_stem)?;
-        validate_compiler_assets(&self.config.assets_dir)?;
+        validate_compiler_assets(&self.config.assets_dir, &self.config.fonts_dir)?;
         let executable = std::env::current_exe().map_err(|error| {
             TypstError::process(format!(
                 "failed to locate the Glyphst Reader executable for the Typst worker: {error}"
@@ -176,6 +182,7 @@ impl TypstCompiler {
             .arg(TYPST_WORKER_FLAG)
             .arg(job_directory)
             .arg(&self.config.assets_dir)
+            .arg(&self.config.fonts_dir)
             .arg(file_stem)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -390,6 +397,9 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
         let assets_dir = arguments
             .next()
             .ok_or_else(|| TypstError::process("Typst worker is missing its assets directory"))?;
+        let fonts_dir = arguments
+            .next()
+            .ok_or_else(|| TypstError::process("Typst worker is missing its fonts directory"))?;
         let file_stem = arguments
             .next()
             .ok_or_else(|| TypstError::process("Typst worker is missing its source file stem"))?;
@@ -401,7 +411,12 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
         let file_stem = file_stem
             .to_str()
             .ok_or_else(|| TypstError::process("Typst worker file stem is not valid UTF-8"))?;
-        compile_source_in_process(Path::new(&job_directory), Path::new(&assets_dir), file_stem)
+        compile_source_in_process(
+            Path::new(&job_directory),
+            Path::new(&assets_dir),
+            Path::new(&fonts_dir),
+            file_stem,
+        )
     })();
 
     let exit_code = if result.is_ok() { 0 } else { 1 };
@@ -422,14 +437,15 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
 fn compile_source_in_process(
     job_directory: &Path,
     assets_dir: &Path,
+    fonts_dir: &Path,
     file_stem: &str,
 ) -> Result<TypstOutput, TypstError> {
     validate_file_stem(file_stem)?;
-    validate_compiler_assets(assets_dir)?;
+    validate_compiler_assets(assets_dir, fonts_dir)?;
     let source_path = job_directory.join(format!("{file_stem}.typ"));
     validate_file_asset(&source_path, "generated Typst source")?;
 
-    let world = GlyphstTypstWorld::new(job_directory, assets_dir, file_stem)?;
+    let world = GlyphstTypstWorld::new(job_directory, assets_dir, fonts_dir, file_stem)?;
     let compilation = typst::compile::<PagedDocument>(&world);
     if !compilation.warnings.is_empty() {
         tracing::warn!(
@@ -460,8 +476,13 @@ struct GlyphstTypstWorld {
 }
 
 impl GlyphstTypstWorld {
-    fn new(job_directory: &Path, assets_dir: &Path, file_stem: &str) -> Result<Self, TypstError> {
-        let font_path = assets_dir.join("fonts");
+    fn new(
+        job_directory: &Path,
+        assets_dir: &Path,
+        fonts_dir: &Path,
+        file_stem: &str,
+    ) -> Result<Self, TypstError> {
+        let font_path = fonts_dir.join("fonts");
         let font_entries = fonts::scan(&font_path).collect::<Vec<_>>();
         if font_entries.is_empty() {
             return Err(TypstError::missing_asset(format!(
@@ -1597,8 +1618,11 @@ fn validate_file_stem(file_stem: &str) -> Result<(), TypstError> {
     }
 }
 
-fn validate_compiler_assets(assets_dir: &Path) -> Result<(), TypstError> {
-    validate_asset(&assets_dir.join("fonts"), "translation font directory")?;
+fn validate_compiler_assets(assets_dir: &Path, fonts_dir: &Path) -> Result<(), TypstError> {
+    validate_asset(
+        &fonts_dir.join("fonts"),
+        "glyphst-fonts checkout (set GLYPHST_FONTS_DIR)",
+    )?;
     validate_asset(
         &assets_dir.join("typst/packages/preview/cmarker/0.1.8"),
         "cmarker Typst package",

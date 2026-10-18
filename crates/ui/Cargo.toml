@@ -10,6 +10,8 @@ workspace = true
 # egui's own faces, emoji included, as the symbol fallback (fonts.rs).
 egui = { workspace = true, features = ["monochrome_emoji_fonts"] }
 egui_extras.workspace = true
+# The glyphst-fonts checkout (fonts.rs).
+glyphst-core = { path = "../core" }
 material-colors.workspace = true
 serde.workspace = true
 

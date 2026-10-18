@@ -43,6 +43,13 @@
           craneLib = (crane.mkLib pkgs).overrideToolchain mkRustToolchain;
           glyphstReader = pkgs.callPackage ./nix/package.nix {
             inherit craneLib;
+            # The CJK and translation fonts, kept out of this repository.
+            glyphstFonts = pkgs.fetchFromGitHub {
+              owner = "glyphst";
+              repo = "glyphst-fonts";
+              rev = "fb297ed94f5762e2ef274719da885137483803ca";
+              hash = "sha256-NdSntFQhxSChRHnhRwXiCVN4dvMTZCoZmTQZHcueIUo=";
+            };
           };
         in
         {

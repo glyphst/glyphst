@@ -17,7 +17,9 @@
 #                           GLYPHST_SCREENS_DOC2 are the PDFs shown (default:
 #                           the first two of ../pdf-samples); each shot reads
 #                           its own copy of the library as it was when the
-#                           run started, so shots agree and never touch it
+#                           run started, so shots agree and never touch it;
+#                           the CJK faces come from GLYPHST_FONTS_DIR
+#                           (default: ../fonts, the glyphst-fonts checkout)
 #
 # Options:
 #   --keep-going      run every step and report all failures
@@ -168,6 +170,13 @@ fi
 if [[ ${tier} == screens ]]; then
     document=${GLYPHST_SCREENS_DOC:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 1p)}
     second=${GLYPHST_SCREENS_DOC2:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 2p)}
+    # The glyphst-fonts checkout gives every shot the same CJK faces
+    # instead of whatever fontconfig has installed.
+    export GLYPHST_FONTS_DIR=${GLYPHST_FONTS_DIR:-${repo}/../fonts}
+    if [[ ! -f ${GLYPHST_FONTS_DIR}/fonts/manifest.txt ]]; then
+        printf 'error: no glyphst-fonts checkout at %s (set GLYPHST_FONTS_DIR)\n' "${GLYPHST_FONTS_DIR}" >&2
+        exit 1
+    fi
     shots="${run_dir}/screens"
     mkdir -p "${shots}"
     reader="${repo}/target/debug/glyphst-reader"

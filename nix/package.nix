@@ -2,6 +2,7 @@
   lib,
   stdenv,
   craneLib,
+  glyphstFonts,
   rustPlatform,
   pkg-config,
   clang,
@@ -135,10 +136,13 @@ in
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
       postInstall = ''
-        mkdir -p $out/share/glyphst-reader/pdf-translation
+        mkdir -p $out/share/glyphst-reader/pdf-translation $out/share/glyphst-reader/fonts
         cp -R crates/pdf-translation/assets/. $out/share/glyphst-reader/pdf-translation/
+        cp -R ${glyphstFonts}/fonts ${glyphstFonts}/README.md ${glyphstFonts}/ATTRIBUTION.md \
+          $out/share/glyphst-reader/fonts/
         wrapProgram $out/bin/glyphst-reader \
           --set FONTCONFIG_FILE ${fontsConf} \
+          --set GLYPHST_FONTS_DIR $out/share/glyphst-reader/fonts \
           --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
         install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
       '';

@@ -9,6 +9,8 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+# The glyphst-fonts checkout (typst.rs).
+glyphst-core = { path = "../core" }
 mupdf.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true

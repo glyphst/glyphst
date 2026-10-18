@@ -3011,6 +3011,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "glyphst-core",
  "mupdf",
  "reqwest",
  "serde",
@@ -3116,6 +3117,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui_extras",
+ "glyphst-core",
  "material-colors",
  "serde",
  "serde_json",

@@ -23,6 +23,30 @@ pub fn cache_dir() -> PathBuf {
     cache_base_dir().join(APP_DIR_NAME)
 }
 
+/// The glyphst-fonts checkout (CJK and translation fonts, read at run
+/// time): `$GLYPHST_FONTS_DIR` when set, else the packaged copy at
+/// `<exe>/../share/glyphst-reader/fonts`, else `fonts/` beside this
+/// repository's checkout. A checkout holds `fonts/manifest.txt`.
+pub fn fonts_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("GLYPHST_FONTS_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let packaged = std::env::current_exe().ok().and_then(|exe| {
+        Some(
+            exe.parent()?
+                .parent()?
+                .join("share")
+                .join(APP_DIR_NAME)
+                .join("fonts"),
+        )
+    });
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fonts");
+    packaged
+        .into_iter()
+        .chain([checkout])
+        .find(|dir| dir.join("fonts/manifest.txt").is_file())
+}
+
 pub fn migrate_legacy_app_dirs() -> io::Result<()> {
     migrate_legacy_dir(&config_base_dir())?;
     migrate_legacy_dir(&state_base_dir())?;
