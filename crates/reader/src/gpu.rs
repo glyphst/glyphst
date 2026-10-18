@@ -251,6 +251,8 @@ pub struct ReaderGpu {
     /// This frame's previews, by card.
     previews: HashMap<String, PreparedEffect>,
     backdrop: Option<PreparedEffect>,
+    /// While a switch sweeps the backdrop: the two backgrounds' images.
+    sweep: Option<[Snapshot; 2]>,
     pub stats: FrameStats,
     /// View targets made so far (the benchmark counts them).
     pub targets_made: u64,
@@ -369,6 +371,7 @@ impl ReaderGpu {
             samples: [0, 1].map(|index| sample_page(device, &render_state.queue, index)),
             previews: HashMap::new(),
             backdrop: None,
+            sweep: None,
             stats: FrameStats::default(),
             targets_made: 0,
         };
@@ -1379,6 +1382,24 @@ pub struct BackdropCallback {
     pub pointer: Option<[f32; 2]>,
     /// How opaque it is drawn: the window's opacity.
     pub opacity: f32,
+    /// A switch from a book with another background, under way.
+    pub sweep: Option<Sweep>,
+}
+
+/// A book switch's transition over the backdrop: both backgrounds drawn
+/// live, blended by the switch's effect where it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sweep {
+    /// The other side's background.
+    pub other: EffectUse,
+    pub effect: EffectUse,
+    pub progress: f32,
+    pub direction: f32,
+    /// In backdrop pixels.
+    pub origin: Option<[f32; 2]>,
+    pub seed: f32,
+    /// Played back: `other` is the incoming side.
+    pub reversed: bool,
 }
 
 impl CallbackTrait for BackdropCallback {
@@ -1403,34 +1424,89 @@ impl CallbackTrait for BackdropCallback {
             .retain(|_, view| frame - view.last_drawn <= VIEW_KEEP_FRAMES);
         gpu.stats = FrameStats::default();
         let size = pixel_size(self.rect, screen.pixels_per_point);
-        // Backgrounds that draw the wallpaper get it as their input.
-        let image = gpu
-            .effects
-            .find(&self.background.id)
-            .is_some_and(|def| def.image);
-        let input = match (&gpu.wallpaper, image) {
-            (Some(wallpaper), true) => wallpaper,
-            _ => &gpu.blank,
+        let resolution = [size[0] as f32, size[1] as f32];
+        // A background's draw: backgrounds that draw the wallpaper get it
+        // as their input.
+        let draw = |gpu: &ReaderGpu, background: &EffectUse, opacity: f32| {
+            let image = gpu
+                .effects
+                .find(&background.id)
+                .is_some_and(|def| def.image);
+            let input = match (&gpu.wallpaper, image) {
+                (Some(wallpaper), true) => wallpaper,
+                _ => &gpu.blank,
+            };
+            let inputs = EffectInputs {
+                from: input,
+                to: input,
+                resolution,
+                pointer: self.pointer,
+                time: self.time,
+                progress: 0.0,
+                direction: 1.0,
+                params: background.params,
+                opacity,
+                extent: [1.0; 2],
+                origin: None,
+                seed: 0.0,
+            };
+            gpu.effects
+                .prepare(device, &background.id, &inputs)
+                .or_else(|| gpu.effects.prepare(device, SOLID, &inputs))
         };
-        let inputs = EffectInputs {
-            from: input,
-            to: input,
-            resolution: [size[0] as f32, size[1] as f32],
-            pointer: self.pointer,
-            time: self.time,
-            progress: 0.0,
-            direction: 1.0,
-            params: self.background.params,
-            opacity: self.opacity,
-            extent: [1.0; 2],
-            origin: None,
-            seed: 0.0,
+        let Some(sweep) = &self.sweep else {
+            gpu.sweep = None;
+            gpu.backdrop = draw(gpu, &self.background, self.opacity);
+            return Vec::new();
         };
-        gpu.backdrop = gpu
-            .effects
-            .prepare(device, &self.background.id, &inputs)
-            .or_else(|| gpu.effects.prepare(device, SOLID, &inputs));
-        Vec::new()
+        // Each background into its own image, then the switch's effect
+        // between them (drawn opaque: the images carry the opacity).
+        if gpu
+            .sweep
+            .as_ref()
+            .is_none_or(|images| images[0].size != size)
+        {
+            gpu.sweep = Some([
+                snapshot(device, gpu.format, size),
+                snapshot(device, gpu.format, size),
+            ]);
+        }
+        let [other_image, own_image] = gpu
+            .sweep
+            .as_ref()
+            .map(|[a, b]| [a.view.clone(), b.view.clone()])
+            .expect("made above");
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for (background, image) in [(&sweep.other, &other_image), (&self.background, &own_image)] {
+            if let Some(prepared) = draw(gpu, background, self.opacity) {
+                let mut pass = clear_pass(&mut encoder, image, "sweep_background");
+                gpu.effects.draw(&prepared, &mut pass);
+            }
+        }
+        let (from, to) = if sweep.reversed {
+            (&own_image, &other_image)
+        } else {
+            (&other_image, &own_image)
+        };
+        gpu.backdrop = gpu.effects.prepare(
+            device,
+            &sweep.effect.id,
+            &EffectInputs {
+                from,
+                to,
+                resolution,
+                pointer: None,
+                time: self.time,
+                progress: sweep.progress,
+                direction: sweep.direction,
+                params: sweep.effect.params,
+                opacity: 1.0,
+                extent: [1.0; 2],
+                origin: sweep.origin,
+                seed: sweep.seed,
+            },
+        );
+        vec![encoder.finish()]
     }
 
     fn paint(

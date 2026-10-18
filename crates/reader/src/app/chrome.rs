@@ -10,7 +10,7 @@ use glyphst_ui::{motion, overlay, rail as ui_rail, text as ui_text};
 use super::*;
 use crate::{
     book_effects::{Defaults, Resolved, resolve},
-    gpu::BackdropCallback,
+    gpu::{BackdropCallback, Sweep},
     overview,
     panes::{self, Divider},
     shell::{self, ShellInput, ShellLayout},
@@ -103,6 +103,22 @@ impl ReaderApp {
                     (pos.y - backdrop.min.y) * ppp,
                 ]
             });
+        // While a switch runs between books with different backgrounds,
+        // the backdrop transitions with the pages.
+        let sweep = self.transition.as_ref().and_then(|transition| {
+            Some(Sweep {
+                other: transition.from_background.clone()?,
+                effect: transition.effect.clone(),
+                progress: transition.progress(now),
+                direction: transition.direction,
+                origin: transition.origin.map(|origin| {
+                    let at = (origin - backdrop.min) * ppp;
+                    [at.x, at.y]
+                }),
+                seed: transition.seed,
+                reversed: transition.reversed(),
+            })
+        });
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             backdrop,
             BackdropCallback {
@@ -111,6 +127,7 @@ impl ReaderApp {
                 time: self.started.elapsed().as_secs_f32(),
                 pointer,
                 opacity: tokens.opacity,
+                sweep,
             },
         ));
         let mut actions = Some(actions);
@@ -635,15 +652,27 @@ impl ReaderApp {
 
     /// The background effect behind the pages: the focused book's. Solid
     /// takes the theme's colour until the user sets one.
-    pub(super) fn background_effect(&self, tokens: &Tokens) -> EffectUse {
-        let mut background = self.effects_for(self.active).background;
+    pub(super) fn background_effect(&self, _tokens: &Tokens) -> EffectUse {
+        self.background_for(self.active)
+    }
+
+    /// The background behind tab `index`'s pages; Home (`None`) shows the
+    /// theme's base colour.
+    pub(crate) fn background_for(&self, index: Option<usize>) -> EffectUse {
+        let [r, g, b] = self.theme_bg;
+        let Some(index) = index else {
+            return EffectUse {
+                id: glyphst_effects::SOLID.into(),
+                params: [r, g, b, 1.0],
+            };
+        };
+        let mut background = self.effects_for(Some(index)).background;
         if background.id == glyphst_effects::SOLID
             && !self
                 .prefs
                 .effect_params
                 .contains_key(glyphst_effects::SOLID)
         {
-            let [r, g, b] = tokens.bg_rgb();
             background.params = [r, g, b, 1.0];
         }
         background

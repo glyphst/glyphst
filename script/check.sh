@@ -235,6 +235,7 @@ if [[ ${tier} == screens ]]; then
         "02k-switch-reduced @ # --transition disc --reduce-motion --screenshot-switch"
         "02k-close-disc @ # --transition disc --screenshot-close"
         "02k-open-disc @ # --transition disc --screenshot-open"
+        "02k-sweep-disc @ # --background image --wallpaper ^ --book-background 2:aurora --transition disc --screenshot-switch"
         "10a-switcher @ # % --command app.book_switcher"
         "10b-switcher-peek @ # % --transition disc --screenshot-peek"
         "10c-switcher-gamepad @ # % --gamepad-mode --command app.book_switcher"

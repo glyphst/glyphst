@@ -162,6 +162,10 @@ pub struct ViewTransition {
     /// The tab whose image is the outgoing view, while it is one: going
     /// back to it plays the transition in reverse.
     pub from_tab: Option<u64>,
+    /// The other side's background when it differs from the shown book's:
+    /// the backdrop transitions with the pages (the outgoing side, or the
+    /// incoming one when played back).
+    pub from_background: Option<EffectUse>,
     started: Instant,
     /// The whole transition's length, 0 to 1.
     duration: Duration,
@@ -194,6 +198,7 @@ impl ViewTransition {
             origin,
             seed: planned.seed,
             from_tab,
+            from_background: None,
             started: now,
             duration: Duration::from_millis(u64::from(planned.duration_ms.max(1))),
             start: 0.0,

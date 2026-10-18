@@ -111,6 +111,8 @@ pub struct Launch {
     pub transition: Option<String>,
     pub reduce_motion: bool,
     pub switcher_layout: Option<crate::switcher::layout::Layout>,
+    /// Backgrounds for the documents opened, by their place from 1.
+    pub book_backgrounds: Vec<(usize, String)>,
     /// The default page tint (an overlay effect id, or `none`).
     pub overlay: Option<String>,
     /// The wallpaper image.
@@ -244,6 +246,9 @@ pub struct ReaderApp {
     theme_applied: Option<theme::Appearance>,
     /// The applied theme's ink and paper, for themed page tints.
     pub(crate) theme_colours: crate::book_effects::ThemeColours,
+    /// The theme's base colour, which a solid background takes until the
+    /// user sets one (and Home shows).
+    pub(crate) theme_bg: [f32; 3],
     fonts_applied: Option<glyphst_ui::fonts::FontChoice>,
     /// Watches the desktop's light or dark choice for the System theme.
     desktop_theme: DesktopTheme,
@@ -528,6 +533,7 @@ impl ReaderApp {
             prefs,
             theme_applied: None,
             theme_colours: crate::book_effects::theme_colours(&Tokens::for_kind(ThemeKind::Light)),
+            theme_bg: Tokens::for_kind(ThemeKind::Light).bg_rgb(),
             fonts_applied,
             desktop_theme: {
                 let ctx = cc.egui_ctx.clone();
@@ -719,6 +725,16 @@ impl ReaderApp {
             }
         }
         app.transition = None;
+        for (number, id) in &launch.book_backgrounds {
+            if let Some(index) = number
+                .checked_sub(1)
+                .filter(|index| *index < app.tabs.len())
+            {
+                let key = app.book_key(index);
+                app.prefs.books.entry(key).or_default().background =
+                    crate::book_effects::Choice::Effect(id.clone());
+            }
+        }
         app.assistant.agent = launch.agent;
         Ok(app)
     }
@@ -829,23 +845,36 @@ impl ReaderApp {
             }
         });
         let origin = switch.origin.or(self.next_origin.take()).or(self.click);
-        self.begin_switch(next, capture, direction, origin, switch.speed);
+        let from_background = self.background_for(previous.filter(|_| replaced.is_some()));
+        self.begin_switch(
+            next,
+            capture,
+            from_background,
+            direction,
+            origin,
+            switch.speed,
+        );
     }
 
     /// Starts the book-switch transition into tab `index` from `capture`.
     /// Going back to the book a running switch left plays it backwards;
     /// another switch while one runs starts from what is on screen, with
     /// the same effect.
+    /// `from_background` is the background of what it leaves; the
+    /// transition sweeps it too when it differs from the new book's.
     fn begin_switch(
         &mut self,
         index: usize,
         capture: Capture,
+        from_background: EffectUse,
         direction: f32,
         origin: Option<egui::Pos2>,
         speed: f32,
     ) {
         let tab = self.tabs[index].id;
         let now = Instant::now();
+        let background = self.background_for(Some(index));
+        let sweep = (from_background != background).then_some(from_background);
         if let Some(running) = self.transition.as_mut().filter(|t| !t.finished(now)) {
             let from = match capture {
                 Capture::View(from) => Some(from),
@@ -853,15 +882,17 @@ impl ReaderApp {
             };
             if running.from_tab == Some(tab) && from == Some(running.tab) {
                 running.reverse(now);
+                running.from_background = sweep;
                 return;
             }
             if from == Some(running.tab) {
                 let composite = running.composite(now);
                 let planned = running.planned();
-                self.transition = Some(
+                let mut transition =
                     ViewTransition::new(planned, composite, tab, direction, origin, now)
-                        .faster(speed),
-                );
+                        .faster(speed);
+                transition.from_background = sweep;
+                self.transition = Some(transition);
                 return;
             }
         }
@@ -894,8 +925,10 @@ impl ReaderApp {
         if choice.id == glyphst_effects::RANDOM {
             self.last_random = Some(planned.effect.id.clone());
         }
-        self.transition =
-            Some(ViewTransition::new(planned, capture, tab, direction, origin, now).faster(speed));
+        let mut transition =
+            ViewTransition::new(planned, capture, tab, direction, origin, now).faster(speed);
+        transition.from_background = sweep;
+        self.transition = Some(transition);
     }
 
     /// Opens the Keyboard shortcuts tab, or goes to it.
@@ -2124,6 +2157,7 @@ impl ReaderApp {
         // Closing the book shown alone reveals the next one out of its last
         // image.
         let shown_alone = self.active == Some(index) && self.panes.count() == 1;
+        let closed_background = self.background_for(Some(index));
         let mut tab = self.tabs.remove(index);
         self.free_textures(&tab.take_freed_textures(true));
         self.drop_card(tab.id);
@@ -2151,7 +2185,14 @@ impl ReaderApp {
             if shown_alone {
                 let direction = if active < index { -1.0 } else { 1.0 };
                 let origin = self.click;
-                self.begin_switch(active, Capture::View(tab.id), direction, origin, 1.0);
+                self.begin_switch(
+                    active,
+                    Capture::View(tab.id),
+                    closed_background,
+                    direction,
+                    origin,
+                    1.0,
+                );
             }
         }
     }
@@ -2330,6 +2371,7 @@ impl ReaderApp {
         if self.theme_applied.as_ref() != Some(&applied) {
             theme::apply(ctx, &applied);
             self.theme_colours = crate::book_effects::theme_colours(&Tokens::get(ctx));
+            self.theme_bg = Tokens::get(ctx).bg_rgb();
             self.theme_applied = Some(applied);
         }
         if self.fonts_applied.as_ref() != Some(&self.prefs.fonts) {

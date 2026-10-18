@@ -1,7 +1,7 @@
 //! Glyphst Reader: GPU vector pages, tabs and split panes, a library home
 //! and shader effects for transitions and backgrounds.
 //!
-//! glyphst-reader [documents…] [--background ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z]
+//! glyphst-reader [documents…] [--background ID] [--book-background N:ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
@@ -96,6 +96,7 @@ fn parse_args() -> Result<Launch> {
         transition: None,
         reduce_motion: false,
         switcher_layout: None,
+        book_backgrounds: Vec::new(),
         theme: None,
         zoom: None,
         window: None,
@@ -168,6 +169,15 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-present-tools" => launch.harness = shot(ShotKind::PresentTools, value()?),
             "--screenshot-slide" => launch.harness = shot(ShotKind::SidebarSlide, value()?),
             "--background" => launch.background = Some(value()?),
+            "--book-background" => {
+                let text = value()?;
+                let (number, id) = text
+                    .split_once(':')
+                    .and_then(|(number, id)| Some((number.parse::<usize>().ok()?, id)))
+                    .filter(|(number, _)| *number >= 1)
+                    .ok_or_else(|| anyhow::anyhow!("--book-background takes N:ID, N from 1"))?;
+                launch.book_backgrounds.push((number, id.to_string()));
+            }
             "--overlay" => launch.overlay = Some(value()?),
             "--wallpaper" => launch.wallpaper = Some(value()?),
             "--background-params" => {
