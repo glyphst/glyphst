@@ -169,6 +169,16 @@ impl Family {
         }
     }
 
+    /// How its face buttons are labelled.
+    pub fn labels(self) -> glyphst_ui::pad_glyph::Labels {
+        use glyphst_ui::pad_glyph::Labels;
+        match self {
+            Self::Nintendo => Labels::Nintendo,
+            Self::PlayStation => Labels::PlayStation,
+            Self::Generic | Self::Xbox | Self::Steam => Labels::Xbox,
+        }
+    }
+
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "generic" => Self::Generic,

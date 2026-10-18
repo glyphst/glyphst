@@ -9,7 +9,7 @@ pub mod draw;
 pub mod home;
 pub mod reader;
 
-/// How long the reader's hints stay after the last input, in seconds.
+/// How long the reader's hints stay once shown, in seconds.
 pub const HINTS_SECONDS: f64 = 3.0;
 
 #[derive(Debug, Default)]
@@ -19,6 +19,12 @@ pub struct Couch {
     pub shelf: usize,
     /// Until when (egui time) the reader's hints show.
     pub hints_until: f64,
+    /// The right stick's click pinned the hints on.
+    pub hints_pinned: bool,
+    /// A book came forward: its hints show for a while.
+    pub book_opened: bool,
+    /// The keys home takes this frame, taken before the keymap could.
+    pub home_navs: Vec<Nav>,
     /// Whether the window was fullscreen before gamepad mode, to put back.
     pub saved_fullscreen: Option<bool>,
     /// The menu's fit: the whole page rather than the width.

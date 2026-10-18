@@ -285,6 +285,37 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                     egui::vec2(w as f32 * scale, h as f32 * scale),
                 );
                 let painter = ui.painter();
+                let focused = page == state.cursor;
+                if focused {
+                    // The focused page is lifted on a plate with its label,
+                    // so it reads over any wallpaper.
+                    let label_width = 96.0_f32.min(cell);
+                    let plate = egui::Rect::from_min_max(
+                        egui::pos2(
+                            paper.left().min(cell_rect.center().x - label_width / 2.0),
+                            paper.top(),
+                        ),
+                        egui::pos2(
+                            paper.right().max(cell_rect.center().x + label_width / 2.0),
+                            cell_rect.bottom() + LABEL,
+                        ),
+                    )
+                    .expand(8.0);
+                    let shadow = egui::Shadow {
+                        offset: [0, 6],
+                        blur: 18,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(90),
+                    };
+                    painter.add(shadow.as_shape(plate, tokens.pop_radius()));
+                    painter.rect(
+                        plate,
+                        tokens.pop_radius(),
+                        tokens.raised,
+                        tokens.hairline(),
+                        egui::StrokeKind::Inside,
+                    );
+                }
                 painter.rect_filled(paper, 0, tokens.page);
                 if let Some(texture) = page_texture(tab, page, paper, ppp, &mut wanted) {
                     glyphst_ui::paint::paint_turned_image(
@@ -350,8 +381,13 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                         tokens.accent,
                     );
                 }
-                if page == state.cursor {
-                    glyphst_ui::motif::corner_ticks(ui, paper, 8.0, 10.0, tokens.accent);
+                if focused {
+                    painter.rect_stroke(
+                        paper,
+                        0,
+                        egui::Stroke::new(3.0, tokens.accent),
+                        egui::StrokeKind::Outside,
+                    );
                 } else if response.hovered() {
                     painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
                 }
@@ -375,6 +411,7 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
                 } else {
                     (number, tokens.faint)
                 };
+                let color = if focused { tokens.text } else { color };
                 painter.text(
                     egui::pos2(cell_rect.center().x, cell_rect.bottom() + LABEL / 2.0 + 2.0),
                     egui::Align2::CENTER_CENTER,

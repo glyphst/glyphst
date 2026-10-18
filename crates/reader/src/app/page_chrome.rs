@@ -1,7 +1,8 @@
 //! What the glyph design draws around the pages (frame 02a): corner ticks
 //! and a meta line (`p.4 — 612 × 792 pt — page 4 of 15`) on the page being
 //! read, and a column of page ticks over the pages at the pane's right
-//! edge, the current one long and numbered, to jump with.
+//! edge, the current one long and numbered, to jump with. Gamepad mode
+//! keeps only the ticks, larger (frame 09d).
 
 use egui::{Align2, Rect, Sense, pos2};
 use glyphst_ui::{Tip, motif, text as ui_text};
@@ -9,8 +10,51 @@ use glyphst_ui::{Tip, motif, text as ui_text};
 use super::*;
 use crate::text_overlay::PageMap;
 
-/// The ticks' column at the pane's right edge.
-const MINIMAP_WIDTH: f32 = 22.0;
+/// The ticks' sizes: beside the chrome, and in gamepad mode.
+#[derive(Clone, Copy)]
+struct Ticks {
+    /// The column at the pane's right edge.
+    width: f32,
+    /// Ticks this far apart at most.
+    step: f32,
+    /// A tick's length, hovered, and the current one's.
+    length: f32,
+    hovered: f32,
+    current: f32,
+    /// Its thickness, and the current one's.
+    stroke: f32,
+    current_stroke: f32,
+    number: f32,
+    /// Room kept above and below.
+    top: f32,
+    bottom: f32,
+}
+
+const CHROME_TICKS: Ticks = Ticks {
+    width: 22.0,
+    step: 7.0,
+    length: 5.0,
+    hovered: 8.0,
+    current: 10.0,
+    stroke: 1.0,
+    current_stroke: 1.5,
+    number: 9.0,
+    top: 24.0,
+    bottom: 24.0,
+};
+
+const COUCH_TICKS: Ticks = Ticks {
+    width: 40.0,
+    step: 14.0,
+    length: 8.0,
+    hovered: 12.0,
+    current: 15.0,
+    stroke: 1.5,
+    current_stroke: 2.0,
+    number: 15.0,
+    top: 36.0,
+    bottom: crate::couch::draw::BAR + 16.0,
+};
 /// Panes narrower than this have no ticks.
 const MINIMAP_FROM: f32 = 360.0;
 /// At most this many ticks; longer documents are sampled.
@@ -58,7 +102,12 @@ impl ReaderApp {
     ) {
         let tokens = Tokens::get(ui.ctx());
         let tab = &self.tabs[active];
-        if tab.present.is_some() || self.bare() {
+        if tab.present.is_some() || self.zen {
+            return;
+        }
+        if self.prefs.gamepad_mode {
+            let (pages, current) = (tab.layout.len(), tab.current_page());
+            self.minimap(ui, rect, active, pages, current, COUCH_TICKS);
             return;
         }
         // The current page, once it is found wholly on the GPU.
@@ -162,7 +211,7 @@ impl ReaderApp {
         if let Some(page) = finished {
             self.tabs[active].finished_loading(page);
         }
-        self.minimap(ui, rect, active, pages, current);
+        self.minimap(ui, rect, active, pages, current, CHROME_TICKS);
     }
 
     /// The page ticks at the right edge of the pane at `rect`; a click
@@ -174,18 +223,19 @@ impl ReaderApp {
         active: usize,
         pages: usize,
         current: usize,
+        size: Ticks,
     ) {
         if pages < 2 || rect.height() < 160.0 || rect.width() < MINIMAP_FROM {
             return;
         }
         let tokens = Tokens::get(ui.ctx());
         let column = Rect::from_min_max(
-            pos2(rect.right() - MINIMAP_WIDTH, rect.top() + 24.0),
-            pos2(rect.right() - 4.0, rect.bottom() - 24.0),
+            pos2(rect.right() - size.width, rect.top() + size.top),
+            pos2(rect.right() - 4.0, rect.bottom() - size.bottom),
         );
         let ticks = pages.min(MAX_TICKS);
-        // Ticks 7 points apart at most: short documents keep to the top.
-        let step = (column.height() / ticks as f32).min(7.0);
+        // Short documents keep to the top.
+        let step = (column.height() / ticks as f32).min(size.step);
         let y_of = |tick: usize| column.top() + step * (tick as f32 + 0.5);
         let tick_of = |page: usize| page * ticks / pages;
         let response = ui
@@ -206,20 +256,24 @@ impl ReaderApp {
             let (length, color) = if tick == tick_of(current) {
                 continue;
             } else if hover.is_some_and(|page| tick_of(page) == tick) {
-                (8.0, tokens.text_2)
+                (size.hovered, tokens.text_2)
             } else {
-                (5.0, tokens.rule_strong)
+                (size.length, tokens.rule_strong)
             };
-            painter.hline((x - length)..=x, y, egui::Stroke::new(1.0, color));
+            painter.hline((x - length)..=x, y, egui::Stroke::new(size.stroke, color));
         }
         let y = y_of(tick_of(current));
-        painter.hline((x - 10.0)..=x, y, egui::Stroke::new(1.5, tokens.accent));
+        painter.hline(
+            (x - size.current)..=x,
+            y,
+            egui::Stroke::new(size.current_stroke, tokens.accent),
+        );
         ui_text::line(
             ui,
-            pos2(x - 14.0, y),
+            pos2(x - size.current - 4.0, y),
             Align2::RIGHT_CENTER,
             (current + 1).to_string(),
-            theme::mono(9.0),
+            theme::mono(size.number),
             tokens.accent_text,
             40.0,
         );

@@ -54,11 +54,8 @@ pub fn show(ui: &mut egui::Ui, couch: &mut Couch, view: HomeView<'_>) -> Option<
     let (_, response) = ui.allocate_exact_size(screen.size(), Sense::click());
     let books = view.docs.len();
     let mut action = None;
-    let navs = if view.input {
-        Nav::take(&ctx)
-    } else {
-        Vec::new()
-    };
+    // Taken before the keymap could (`couch_input`).
+    let navs = std::mem::take(&mut couch.home_navs);
     let events = if view.input {
         crate::pad::frame_events(&ctx)
     } else {

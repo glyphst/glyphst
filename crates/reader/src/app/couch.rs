@@ -87,9 +87,26 @@ impl ReaderApp {
         });
     }
 
-    /// The sheets take the arrows, Enter, Escape and Tab before anything
-    /// else reads them.
+    /// Whether gamepad mode's home shows and takes keys and buttons (not
+    /// under a prompt, window or sheet).
+    fn home_takes_input(&self) -> bool {
+        self.prefs.gamepad_mode
+            && self.active.is_none()
+            && !self.prompts.is_open()
+            && !self.settings_window.open
+            && !self.palette.open
+            && self.couch.overlay.is_none()
+    }
+
+    /// The sheets, and gamepad mode's home, take the arrows, Enter, Escape
+    /// and Tab before anything else reads them: the keymap would take them
+    /// for the document's commands otherwise.
     pub(super) fn couch_input(&mut self, ctx: &egui::Context) {
+        if self.home_takes_input() {
+            self.couch.home_navs = Nav::take(ctx);
+            return;
+        }
+        self.couch.home_navs.clear();
         if self.couch.overlay.is_none() {
             return;
         }
@@ -150,16 +167,14 @@ impl ReaderApp {
             _ => None,
         });
         let clock = self.clock();
+        let input = self.home_takes_input();
         let view = HomeView {
             docs: &docs,
             covers: &mut self.covers,
             clock,
             battery,
             pad: !pads.is_empty(),
-            input: !self.prompts.is_open()
-                && !self.settings_window.open
-                && !self.palette.open
-                && self.couch.overlay.is_none(),
+            input,
         };
         let action = couch::home::show(ui, &mut self.couch, view);
         match action {
@@ -226,7 +241,6 @@ impl ReaderApp {
             if let Some(Overlay::Menu { cursor }) = self.couch.overlay {
                 let view = ReaderView {
                     title: "Library",
-                    section: String::new(),
                     page: 0,
                     pages: 0,
                     outline: &[],
@@ -237,6 +251,7 @@ impl ReaderApp {
                     smooth: self.prefs.smooth_scrolling,
                     fit_page: self.couch.fit_page,
                     couch: true,
+                    ring: false,
                     strip: Vec::new(),
                     rotation: 0,
                 };
@@ -258,21 +273,14 @@ impl ReaderApp {
             Some(Overlay::GoTo { page }) => self.go_to_strip(ctx, active, page),
             _ => Vec::new(),
         };
+        if std::mem::take(&mut self.couch.book_opened) {
+            self.couch.hints_until = ctx.input(|i| i.time) + couch::HINTS_SECONDS;
+        }
         let tab = &self.tabs[active];
         let page = tab.current_page();
-        let section = crate::shell::section_path(
-            tab.outline
-                .iter()
-                .map(|entry| (entry.depth, entry.page, entry.title.as_str())),
-            page,
-        )
-        .last()
-        .map(|title| (*title).to_string())
-        .unwrap_or_default();
         let title = tab.title.clone();
         let view = ReaderView {
             title: &title,
-            section,
             page,
             pages: tab.layout.len(),
             outline: &tab.outline,
@@ -283,6 +291,7 @@ impl ReaderApp {
             smooth: self.prefs.smooth_scrolling,
             fit_page: self.couch.fit_page,
             couch: gamepad,
+            ring: self.pad_ring.is_some(),
             strip,
             rotation: tab.layout.arrangement.rotation,
         };

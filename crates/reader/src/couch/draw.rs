@@ -1,11 +1,8 @@
 //! Pieces gamepad mode draws on every screen: the hint bar (component
-//! `hint-bar`), chips, and the gradients of home's hero.
+//! `hint-bar`) and the gradients of home's hero.
 
-use egui::{Align2, Color32, Mesh, Pos2, Rect, Shape, TextureId, pos2, vec2};
-use glyphst_ui::{
-    pad_glyph::Hint,
-    theme::{self, Tokens},
-};
+use egui::{Color32, Mesh, Pos2, Rect, Shape, TextureId, pos2, vec2};
+use glyphst_ui::{pad_glyph::Hint, theme::Tokens};
 
 /// The hint bar's height.
 pub const BAR: f32 = 64.0;
@@ -30,31 +27,6 @@ pub fn hint_bar(ui: &egui::Ui, screen: Rect, left: &[Hint<'_>], right: &[Hint<'_
         hint.paint(ui, x, middle);
         x -= 28.0;
     }
-}
-
-/// A chip of mono 15 text on `surface`, at `at` aligned by `align`; an
-/// accented part follows the text.
-pub fn chip(ui: &egui::Ui, at: Pos2, align: Align2, text: &str, accent: Option<&str>) -> Rect {
-    let t = Tokens::get(ui.ctx());
-    let font = theme::mono(15.0);
-    let painter = ui.painter();
-    let main = painter.layout_no_wrap(text.to_string(), font.clone(), t.text_2);
-    let extra =
-        accent.map(|accent| painter.layout_no_wrap(accent.to_string(), font, t.accent_text));
-    let gap = 10.0;
-    let width = main.size().x + extra.as_ref().map_or(0.0, |e| e.size().x + gap);
-    let size = vec2(width + 28.0, main.size().y + 16.0);
-    let rect = align.anchor_size(at, size);
-    painter.rect_filled(rect, t.pop_radius(), Tokens::fade(t.surface, 0.9));
-    painter.rect_stroke(rect, t.pop_radius(), t.hairline(), egui::StrokeKind::Inside);
-    let left = rect.left() + 14.0;
-    let top = rect.center().y - main.size().y / 2.0;
-    let main_width = main.size().x;
-    painter.galley(pos2(left, top), main, t.text_2);
-    if let Some(extra) = extra {
-        painter.galley(pos2(left + main_width + gap, top), extra, t.accent_text);
-    }
-    rect
 }
 
 /// `rect` filled from `top` to `bottom` colour, straight down.

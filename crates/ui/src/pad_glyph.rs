@@ -1,10 +1,11 @@
 //! Gamepad glyphs and hints (frame 01b: pad/face, pad/button, pad/dpad,
 //! pad-hint, each at chrome and couch size).
 //!
-//! Face buttons are drawn by position, as Steam draws them: a diamond of
-//! four dots with the pressed one filled, so one glyph serves every brand.
-//! Bumpers, triggers, start and select are `text` pills with their names;
-//! the d-pad is a cross with its pressed arm filled.
+//! Face buttons are lettered circles, as games draw them; the letter (or
+//! PlayStation's shape) follows the pad's brand by position, which the app
+//! sets with [`set_labels`]. Bumpers, triggers, start, select and the stick
+//! clicks are `text` pills with their names; the d-pad is a cross with its
+//! pressed arm filled.
 //!
 //! Hints follow the last input, as games show them: pad glyphs after a pad,
 //! key caps after the keyboard. The app says which it was each frame with
@@ -36,6 +37,56 @@ pub fn set_input(ctx: &egui::Context, device: InputDevice) {
 
 pub fn input(ctx: &egui::Context) -> InputDevice {
     ctx.data(|data| data.get_temp(input_id()))
+        .unwrap_or_default()
+}
+
+/// What the face buttons are labelled with: the pad's brand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Labels {
+    /// Xbox's letters, which Steam's and most other pads share.
+    #[default]
+    Xbox,
+    /// Nintendo's letters, which sit the other way round.
+    Nintendo,
+    /// PlayStation's shapes.
+    PlayStation,
+}
+
+/// What a face button's circle holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Letter(&'static str),
+    Cross,
+    Circle,
+    Square,
+    Triangle,
+}
+
+impl Labels {
+    pub fn mark(self, face: Face) -> Mark {
+        match (self, face) {
+            (Self::Xbox, Face::South) | (Self::Nintendo, Face::East) => Mark::Letter("A"),
+            (Self::Xbox, Face::East) | (Self::Nintendo, Face::South) => Mark::Letter("B"),
+            (Self::Xbox, Face::West) | (Self::Nintendo, Face::North) => Mark::Letter("X"),
+            (Self::Xbox, Face::North) | (Self::Nintendo, Face::West) => Mark::Letter("Y"),
+            (Self::PlayStation, Face::South) => Mark::Cross,
+            (Self::PlayStation, Face::East) => Mark::Circle,
+            (Self::PlayStation, Face::West) => Mark::Square,
+            (Self::PlayStation, Face::North) => Mark::Triangle,
+        }
+    }
+}
+
+fn labels_id() -> egui::Id {
+    egui::Id::new("glyphst-pad-labels")
+}
+
+pub fn set_labels(ctx: &egui::Context, labels: Labels) {
+    ctx.data_mut(|data| data.insert_temp(labels_id(), labels));
+}
+
+pub fn labels(ctx: &egui::Context) -> Labels {
+    ctx.data(|data| data.get_temp(labels_id()))
         .unwrap_or_default()
 }
 
@@ -92,7 +143,7 @@ pub enum Scale {
 }
 
 impl Scale {
-    /// A dot's (or a d-pad arm's) size; the diamond is three across.
+    /// A d-pad arm's size; the cross, and a face button, are three across.
     fn dot(self) -> f32 {
         match self {
             Self::Chrome => 5.0,
@@ -154,17 +205,43 @@ pub fn paint(ui: &Ui, rect: Rect, glyph: Glyph, scale: Scale, on: Option<egui::C
     let place = |x: f32, y: f32| corner + vec2(x * d, y * d);
     match glyph {
         Glyph::Face(face) => {
-            let dots = [
-                (Face::North, place(1.5, 0.5)),
-                (Face::West, place(0.5, 1.5)),
-                (Face::East, place(2.5, 1.5)),
-                (Face::South, place(1.5, 2.5)),
-            ];
-            for (which, at) in dots {
-                if which == face {
-                    painter.circle_filled(at, d / 2.0, on);
-                } else {
-                    painter.circle_stroke(at, d / 2.0 - 0.75, Stroke::new(1.5, off));
+            let center = rect.center();
+            let radius = 1.5 * d;
+            painter.circle_filled(center, radius, on);
+            // The mark in whichever of `bg` and `text` stands out on the
+            // circle (an accent choice's circle is dark).
+            let lightness = |c: egui::Color32| egui::Rgba::from(c).intensity();
+            let mark = if (lightness(on) - lightness(t.bg)).abs()
+                >= (lightness(on) - lightness(t.text)).abs()
+            {
+                t.bg
+            } else {
+                t.text
+            };
+            let ink = Stroke::new(d / 4.0, mark);
+            let r = radius * 0.45;
+            match labels(ui.ctx()).mark(face) {
+                Mark::Letter(letter) => {
+                    let (font, _, _) = scale.pill();
+                    painter.text(center, Align2::CENTER_CENTER, letter, font, mark);
+                }
+                Mark::Cross => {
+                    painter.line_segment([center + vec2(-r, -r), center + vec2(r, r)], ink);
+                    painter.line_segment([center + vec2(-r, r), center + vec2(r, -r)], ink);
+                }
+                Mark::Circle => {
+                    painter.circle_stroke(center, r, ink);
+                }
+                Mark::Square => {
+                    let square = Rect::from_center_size(center, Vec2::splat(1.6 * r));
+                    painter.rect_stroke(square, 0.0, ink, StrokeKind::Middle);
+                }
+                Mark::Triangle => {
+                    let points = [-90.0_f32, 30.0, 150.0].map(|degrees| {
+                        let angle = degrees.to_radians();
+                        center + vec2(angle.cos(), angle.sin() + 0.15) * r * 1.1
+                    });
+                    painter.add(egui::Shape::closed_line(points.to_vec(), ink));
                 }
             }
         }
@@ -291,4 +368,27 @@ pub fn sample(ui: &mut Ui) {
         ui.add(Hint::new(&[Glyph::Face(Face::South)], "select").couch());
         ui.add(Hint::new(&[Glyph::Button("lb"), Glyph::Button("rb")], "page").couch());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn face_buttons_are_labelled_by_brand_and_position() {
+        let marks = |labels: Labels| {
+            [Face::South, Face::East, Face::West, Face::North].map(|face| labels.mark(face))
+        };
+        let letters = |l: [&'static str; 4]| l.map(Mark::Letter);
+        assert_eq!(marks(Labels::Xbox), letters(["A", "B", "X", "Y"]));
+        assert_eq!(
+            marks(Labels::Nintendo),
+            letters(["B", "A", "Y", "X"]),
+            "Nintendo's sit the other way round"
+        );
+        assert_eq!(
+            marks(Labels::PlayStation),
+            [Mark::Cross, Mark::Circle, Mark::Square, Mark::Triangle]
+        );
+    }
 }

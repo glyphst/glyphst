@@ -1,6 +1,7 @@
-//! Gamepad mode over a book (frames 09d–i): the section and page chips,
-//! the hint bar that fades a few seconds after the last input, and the
-//! contents, go-to-page and menu sheets.
+//! Gamepad mode over a book (frames 09d–i): the hint bar, shown on demand
+//! (`couch::Couch::hints_until`) and with the ring, a sheet or the
+//! overview, and the contents, go-to-page and menu sheets. The page ticks
+//! at the right edge are the app's (`app::page_chrome`).
 
 use egui::{Align2, Rect, pos2, vec2};
 use glyphst_ui::{
@@ -14,7 +15,6 @@ use crate::document::OutlineEntry;
 
 pub struct ReaderView<'a> {
     pub title: &'a str,
-    pub section: String,
     /// The page being read, from 0.
     pub page: usize,
     pub pages: usize,
@@ -27,9 +27,11 @@ pub struct ReaderView<'a> {
     pub theme: &'static str,
     pub smooth: bool,
     pub fit_page: bool,
-    /// Gamepad mode: the chips and the reading hints show (the go-to sheet
-    /// also works outside it).
+    /// Gamepad mode: the reading hints show (the go-to sheet also works
+    /// outside it).
     pub couch: bool,
+    /// The pad's ring is open.
+    pub ring: bool,
     /// The go-to sheet's pages about the one chosen, and their quarter
     /// turns.
     pub strip: Vec<StripPage>,
@@ -99,7 +101,11 @@ pub fn show(ctx: &egui::Context, couch: &Couch, view: &ReaderView<'_>) {
     let hints = motion::smooth_bool(
         ctx,
         egui::Id::new("couch-hints"),
-        now < couch.hints_until || couch.overlay.is_some() || view.overview,
+        couch.hints_pinned
+            || now < couch.hints_until
+            || couch.overlay.is_some()
+            || view.overview
+            || view.ring,
         motion::PANEL,
     );
     if now < couch.hints_until {
@@ -114,27 +120,6 @@ pub fn show(ctx: &egui::Context, couch: &Couch, view: &ReaderView<'_>) {
             let t = Tokens::get(ctx);
             if couch.overlay.is_some() {
                 ui.painter().rect_filled(screen, 0, t.scrim);
-            }
-            if view.couch && !view.overview {
-                let mut chips = ui.new_child(egui::UiBuilder::new());
-                chips.multiply_opacity(hints.max(0.35));
-                if !view.section.is_empty() {
-                    draw::chip(
-                        &chips,
-                        screen.left_top() + vec2(24.0, 20.0),
-                        Align2::LEFT_TOP,
-                        &view.section,
-                        None,
-                    );
-                }
-                let fraction = crate::shell::read_fraction(view.page, view.pages);
-                draw::chip(
-                    &chips,
-                    screen.right_top() + vec2(-24.0, 20.0),
-                    Align2::RIGHT_TOP,
-                    &format!("{} / {}", view.page + 1, view.pages),
-                    Some(&format!("{:.0}%", fraction * 100.0)),
-                );
             }
             match couch.overlay {
                 Some(Overlay::Contents { cursor }) => contents(ui, screen, view, cursor, &t),
@@ -161,6 +146,7 @@ fn hint_bar(ui: &egui::Ui, screen: Rect, overlay: Option<Overlay>, overview: boo
     const BUMPERS: [Glyph; 2] = [Glyph::Button("lb"), Glyph::Button("rb")];
     const TRIGGERS: [Glyph; 2] = [Glyph::Button("lt"), Glyph::Button("rt")];
     const STICK: [Glyph; 1] = [Glyph::Stick];
+    const STICK_CLICK: [Glyph; 1] = [Glyph::Button("rs")];
     let menu = [Hint::new(&MENU, "menu").couch()];
     let (left, right): (Vec<Hint<'_>>, Vec<Hint<'_>>) = match (overlay, overview) {
         (Some(Overlay::Contents { .. }), _) => (
@@ -202,6 +188,7 @@ fn hint_bar(ui: &egui::Ui, screen: Rect, overlay: Option<Overlay>, overview: boo
                 Hint::new(&BUMPERS, "page").couch(),
                 Hint::new(&STICK, "scroll · ring").couch(),
                 Hint::new(&TRIGGERS, "zoom").couch(),
+                Hint::new(&STICK_CLICK, "hints").couch(),
             ],
             vec![
                 Hint::new(&X, "bookmark").couch(),

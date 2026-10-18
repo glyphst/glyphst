@@ -720,6 +720,7 @@ impl ReaderApp {
         let Some(next) = next else {
             return;
         };
+        self.couch.book_opened = true;
         let tab = self.tabs[next].id;
         let replaced = self.panes.show(tab);
         let (Some(_), Some(from), Some(effect)) =
@@ -2642,6 +2643,9 @@ impl ReaderApp {
             Command::Forward => view(ViewAction::Forward),
             Command::ZoomIn => view(ViewAction::ZoomIn),
             Command::ZoomOut => view(ViewAction::ZoomOut),
+            // Gamepad mode fits the width in one step, without the second
+            // press's edge to edge.
+            Command::FitWidth if self.prefs.gamepad_mode => view(ViewAction::FitMargins),
             Command::FitWidth => view(ViewAction::FitWidth),
             Command::FitPage => view(ViewAction::FitPage),
             Command::RotateClockwise | Command::RotateCounterclockwise => {
@@ -3981,7 +3985,34 @@ impl eframe::App for ReaderApp {
         if frame.used() {
             self.last_input = glyphst_ui::pad_glyph::InputDevice::Pad;
             self.pad_pointer = ctx.input(|i| i.pointer.latest_pos());
-            self.couch.hints_until = ctx.input(|i| i.time) + crate::couch::HINTS_SECONDS;
+        }
+        let time = ctx.input(|i| i.time);
+        match routed.hints {
+            route::HintsWish::None => {}
+            route::HintsWish::Show => {
+                self.couch.hints_until = time + crate::couch::HINTS_SECONDS;
+            }
+            // Pins them on, even while they show for a while; again, hides
+            // them.
+            route::HintsWish::Toggle => {
+                self.couch.hints_pinned = !self.couch.hints_pinned;
+                self.couch.hints_until = 0.0;
+            }
+        }
+        if frame.events.iter().any(|event| {
+            matches!(
+                event,
+                crate::pad::PadEvent::Connected { .. } | crate::pad::PadEvent::Disconnected(_)
+            )
+        }) {
+            // Glyphs are labelled for the pad connected last.
+            let labels = self
+                .pads
+                .connected()
+                .last()
+                .map(|pad| pad.family.labels())
+                .unwrap_or_default();
+            glyphst_ui::pad_glyph::set_labels(ctx, labels);
         }
         // With the last pad gone its glyphs would name nothing.
         if frame

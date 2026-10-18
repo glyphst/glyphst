@@ -65,6 +65,18 @@ pub enum RingStep {
     Cancel,
 }
 
+/// What a frame asks of gamepad mode's hint bar, which stays hidden while
+/// reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HintsWish {
+    #[default]
+    None,
+    /// The right stick's click shows or hides it.
+    Toggle,
+    /// A button that does nothing here: show what the buttons do.
+    Show,
+}
+
 /// A frame of pad input, routed.
 #[derive(Debug, Default, PartialEq)]
 pub struct Routed {
@@ -76,6 +88,7 @@ pub struct Routed {
     /// When a held direction repeats, or a held button becomes a hold.
     pub wake: Option<Duration>,
     pub ring: Option<RingStep>,
+    pub hints: HintsWish,
 }
 
 #[derive(Debug, Default)]
@@ -160,6 +173,9 @@ impl Router {
                 let none = egui::Modifiers::NONE;
                 let mut events = Vec::new();
                 for event in &frame.events {
+                    if let PadEvent::Pressed(button) = event {
+                        routed.hints = routed.hints.max_with(hints_wish(*button, state, keymap));
+                    }
                     match event {
                         PadEvent::Pressed(PadButton::East) => {
                             routed.keys.push((egui::Key::Escape, none));
@@ -259,6 +275,36 @@ fn keys(dirs: &[Dir], pressed: &[PadButton]) -> Vec<(egui::Key, egui::Modifiers)
         }
     }
     keys
+}
+
+/// What pressing `button` on a document asks of the hint bar.
+fn hints_wish(button: PadButton, state: &RouteState, keymap: &PadKeymap) -> HintsWish {
+    if keymap.binds(button) {
+        return HintsWish::None;
+    }
+    match button {
+        PadButton::RightStick => HintsWish::Toggle,
+        // B and the d-pad always do something; the triggers zoom, and the
+        // guide button is the system's.
+        PadButton::East | PadButton::LeftTrigger | PadButton::RightTrigger | PadButton::Guide => {
+            HintsWish::None
+        }
+        _ if button.dir().is_some() => HintsWish::None,
+        PadButton::South if state.overview => HintsWish::None,
+        PadButton::West if state.toast_action => HintsWish::None,
+        _ => HintsWish::Show,
+    }
+}
+
+impl HintsWish {
+    /// A toggle wins over showing, which wins over nothing.
+    fn max_with(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Toggle, _) | (_, Self::Toggle) => Self::Toggle,
+            (Self::Show, _) | (_, Self::Show) => Self::Show,
+            _ => Self::None,
+        }
+    }
 }
 
 fn earliest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
@@ -556,6 +602,32 @@ mod tests {
             Some(RingStep::Cancel),
             "a window in front closes it"
         );
+    }
+
+    #[test]
+    fn the_right_stick_click_toggles_the_hints_and_an_unbound_button_shows_them() {
+        let mut router = Router::default();
+        let keymap = PadKeymap::new(&Overrides::new(), true);
+        let now = Instant::now();
+        let mut route = |button| {
+            router
+                .route(&frame(tap(button)), &DOCUMENT, &keymap, now)
+                .hints
+        };
+        assert_eq!(route(PadButton::RightStick), HintsWish::Toggle);
+        assert_eq!(route(PadButton::LeftStick), HintsWish::Show, "does nothing");
+        assert_eq!(
+            route(PadButton::RightBumper),
+            HintsWish::None,
+            "a page turn"
+        );
+        assert_eq!(route(PadButton::Down), HintsWish::None, "scrolling");
+        assert_eq!(route(PadButton::East), HintsWish::None);
+        let mut bound = Overrides::new();
+        bound.insert(Command::Outline.id().to_string(), vec!["ls".to_string()]);
+        let keymap = PadKeymap::new(&bound, true);
+        let routed = router.route(&frame(tap(PadButton::LeftStick)), &DOCUMENT, &keymap, now);
+        assert_eq!(routed.hints, HintsWish::None, "bound by the user");
     }
 
     #[test]

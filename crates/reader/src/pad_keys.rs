@@ -165,6 +165,11 @@ impl PadKeymap {
         self.chords.get(&command).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether any binding uses `button` (select always does).
+    pub fn binds(&self, button: PadButton) -> bool {
+        button == MODIFIER || self.bindings.keys().any(|chord| chord.button == button)
+    }
+
     /// Whether the button waits for its release before it fires.
     fn waits(&self, button: PadButton) -> bool {
         button == MODIFIER

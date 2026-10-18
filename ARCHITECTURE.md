@@ -183,7 +183,9 @@ it go picks; a toast's action takes X. Prompts (`prompts.rs`, glyphst-ui's
 `prompt`) show pad glyphs or key caps after whichever was used last; a pad
 connecting asks whether to switch to gamepad mode. Gamepad mode
 (`couch/`, `app/couch.rs`) replaces the docked shell, fullscreen: a home
-of the recent books, the page alone with a hint bar that fades, and
+of the recent books, the page alone with its page ticks and a hint bar
+shown on demand (a book opening, the ring or a sheet, the right stick's
+click, a button that does nothing; never page turns or scrolling), and
 contents, go-to-page and menu sheets that take the keys the pad presses.
 It has its own pad defaults and text size (a zoom over the design's
 sizes). Scripted runs never read real pads: `--pad-demo` plays a
