@@ -54,6 +54,9 @@ pub const DOTS: &str = "dots";
 pub const GENERATE: &str = "generate";
 pub const TINT: &str = "tint";
 pub const THEME_TINT: &str = "theme-tint";
+pub const DISC: &str = "disc";
+/// Draws an image smaller without aliasing (the book switcher's cards).
+pub const SHRINK: &str = "shrink";
 /// Not an effect: the transition choice that picks a different transition
 /// for every switch.
 pub const RANDOM: &str = "random";
@@ -79,7 +82,7 @@ pub fn unpack_colour(value: f32) -> [u8; 3] {
 pub const MAX_PARAMS: usize = 4;
 
 const PRELUDE: &str = include_str!("prelude.wgsl");
-const BUILTIN: [(&str, &str); 15] = [
+const BUILTIN: [(&str, &str); 25] = [
     ("present.wgsl", include_str!("builtin/present.wgsl")),
     ("crossfade.wgsl", include_str!("builtin/crossfade.wgsl")),
     ("slide_over.wgsl", include_str!("builtin/slide_over.wgsl")),
@@ -98,6 +101,16 @@ const BUILTIN: [(&str, &str); 15] = [
     ("tint.wgsl", include_str!("builtin/tint.wgsl")),
     ("theme_tint.wgsl", include_str!("builtin/theme_tint.wgsl")),
     ("generate.wgsl", include_str!("builtin/generate.wgsl")),
+    ("wipe.wgsl", include_str!("builtin/wipe.wgsl")),
+    ("disc.wgsl", include_str!("builtin/disc.wgsl")),
+    ("stripes.wgsl", include_str!("builtin/stripes.wgsl")),
+    ("zoom.wgsl", include_str!("builtin/zoom.wgsl")),
+    ("honeycomb.wgsl", include_str!("builtin/honeycomb.wgsl")),
+    ("pixelate.wgsl", include_str!("builtin/pixelate.wgsl")),
+    ("ripple.wgsl", include_str!("builtin/ripple.wgsl")),
+    ("burn.wgsl", include_str!("builtin/burn.wgsl")),
+    ("glitch.wgsl", include_str!("builtin/glitch.wgsl")),
+    ("shrink.wgsl", include_str!("builtin/shrink.wgsl")),
 ];
 
 /// A starting point for a user effect: a commented background.

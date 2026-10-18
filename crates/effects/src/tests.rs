@@ -628,3 +628,28 @@ fn night_darkens_white_pages_and_keeps_their_edges() {
         );
     }
 }
+
+#[test]
+fn shrink_averages_what_it_draws_smaller() {
+    let (device, queue) = require_device!();
+    let registry = EffectRegistry::new(&device, FORMAT);
+    // One-texel black and white checks, four times the target's size: a
+    // single tap per pixel would land on one colour, the box filter greys.
+    let size = SIZE * 4;
+    let pixels: Vec<u8> = (0..size * size)
+        .flat_map(|index| {
+            let value = if (index % size + index / size).is_multiple_of(2) {
+                255
+            } else {
+                0
+            };
+            [value, value, value, 255]
+        })
+        .collect();
+    let checks = texture_from(&device, &queue, &pixels, [size, size]);
+    let shrunk = render(&device, &queue, &registry, SHRINK, &checks, &checks, 0.0);
+    for pixel in shrunk.chunks_exact(4) {
+        assert!(pixel[0].abs_diff(128) <= 2, "{pixel:?}");
+        assert_eq!(pixel[3], 255);
+    }
+}
