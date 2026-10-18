@@ -11,7 +11,8 @@
 //
 // Kinds:
 //   background  fills the window behind the pages. With `image: true` the
-//               wallpaper is fx_from: sample it with fx_sample_image(uv, lod).
+//               wallpaper is fx_from: sample it with fx_sample_image(uv, lod),
+//               where lod > 0 blurs it smoothly (each step doubles it).
 //   transition  runs from fx_from (outgoing) to fx_to (incoming) as
 //               fx.progress goes 0 -> 1, over `duration` milliseconds.
 //   overlay     tints the pages: fx_from is the page image (transparent

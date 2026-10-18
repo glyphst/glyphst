@@ -188,7 +188,9 @@ shown on demand (a book opening, the ring or a sheet, the right stick's
 click, a button that does nothing; never page turns or scrolling), and
 contents, go-to-page and menu sheets that take the keys the pad presses.
 It has its own pad defaults and text size (a zoom over the design's
-sizes). Scripted runs never read real pads: `--pad-demo` plays a
+sizes). Pads aren't Wayland input, so evdev hands them to every app
+whatever has focus: the Reader takes them only while its window is
+focused, and lets go of held buttons and the ring when it loses focus. Scripted runs never read real pads: `--pad-demo` plays a
 scripted pad once the pages are drawn, `--gamepad-mode` and
 `--fixed-clock` set gamepad mode up for screenshots.
 

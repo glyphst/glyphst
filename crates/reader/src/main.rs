@@ -81,7 +81,7 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--opacity O] [--colours preset|background|custom] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--background-params A,B,C,D] [--opacity O] [--colours preset|background|custom] \
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
@@ -99,6 +99,7 @@ fn parse_args() -> Result<Launch> {
         split: None,
         overlay: None,
         wallpaper: None,
+        background_params: None,
         opacity: None,
         colours: None,
         arrangement: None,
@@ -150,6 +151,22 @@ fn parse_args() -> Result<Launch> {
             "--background" => launch.background = Some(value()?),
             "--overlay" => launch.overlay = Some(value()?),
             "--wallpaper" => launch.wallpaper = Some(value()?),
+            "--background-params" => {
+                let text = value()?;
+                let mut params = [0.0; glyphst_effects::MAX_PARAMS];
+                let values: Vec<&str> = text.split(',').collect();
+                anyhow::ensure!(
+                    values.len() <= params.len(),
+                    "--background-params takes at most {} numbers",
+                    params.len()
+                );
+                for (param, value) in params.iter_mut().zip(values) {
+                    *param = value.trim().parse().with_context(|| {
+                        format!("--background-params takes numbers, not {value}")
+                    })?;
+                }
+                launch.background_params = Some(params);
+            }
             "--opacity" => {
                 launch.opacity = Some(value()?.parse().context("--opacity takes a number")?);
             }

@@ -186,9 +186,27 @@ if [[ ${tier} == screens ]]; then
             }
         }' > "${wallpaper}"
     fi
+    # Hard-edged stripes and discs, where a blur that shows its texels
+    # would show blocks.
+    detail=${run_dir}/wallpaper-detail.ppm
+    if [[ ! -e ${detail} ]]; then
+        LC_ALL=C awk 'BEGIN {
+            w = 960; h = 600; printf "P6\n%d %d\n255\n", w, h
+            for (y = 0; y < h; y++) {
+                for (x = 0; x < w; x++) {
+                    stripe = int((x + y) / 24) % 2
+                    r = 20 + 30 * stripe; g = 24 + 30 * stripe; b = 40 + 40 * stripe
+                    dx = x - 300; dy = y - 260; ex = x - 690; ey = y - 360
+                    if (dx * dx + dy * dy < 140 * 140) { r = 230; g = 70; b = 60 }
+                    if (ex * ex + ey * ey < 110 * 110) { r = 60; g = 200; b = 190 }
+                    printf "%c%c%c", r, g, b
+                }
+            }
+        }' > "${detail}"
+    fi
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one, `%` for a dense drawing, `^` for the wallpaper
-    # and `@@` for a plain `@`;
+    # for the second one, `%` for a dense drawing, `^` for the wallpaper,
+    # `~` for the detailed one and `@@` for a plain `@`;
     # a `--screenshot-*` argument picks the kind of shot instead of a plain
     # one).
     states=(
@@ -231,6 +249,7 @@ if [[ ${tier} == screens ]]; then
         "07a-background @ --settings appearance:background --background image --wallpaper ^ --colours background"
         "07a-colours @ --settings appearance:colours --background image --wallpaper ^ --colours background"
         "02a-wallpaper-theme @ --background image --wallpaper ^ --colours background"
+        "02a-wallpaper-blur @ --background image --wallpaper ~ --background-params 0,6,0,0"
         "07a-tint @ --settings appearance:tint --overlay tint"
         "02a-theme-tint @ --overlay theme-tint --colours custom"
         "07-reading @ --settings reading"
@@ -317,6 +336,7 @@ if [[ ${tier} == screens ]]; then
                     \#) args+=("${second}") ;;
                     %) args+=("${dense}") ;;
                     ^) args+=("${wallpaper}") ;;
+                    \~) args+=("${detail}") ;;
                     --screenshot-*) shot=${arg} ;;
                     *) args+=("${arg}") ;;
                 esac

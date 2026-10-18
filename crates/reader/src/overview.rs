@@ -22,6 +22,8 @@ const CELL_WIDTH: f32 = 160.0;
 const GAP: f32 = 24.0;
 /// Below each page: its number.
 const LABEL: f32 = 22.0;
+/// How much the focused page grows.
+const LIFT: f32 = 0.08;
 /// The longest side a sharp render may have, in pixels.
 const MAX_RENDER: f32 = 2048.0;
 
@@ -260,171 +262,194 @@ pub fn show(ui: &mut egui::Ui, rect: egui::Rect, tab: &mut DocumentTab) -> Optio
         ui.set_height(rows as f32 * row_height + GAP);
         let origin = ui.min_rect().min;
         shown = rows_in_view(viewport.top(), viewport.height(), row_height, rows);
-        for row in shown.clone() {
-            for column in 0..columns {
-                let page = row * columns + column;
-                if page >= count {
-                    break;
-                }
-                let cell_rect = egui::Rect::from_min_size(
-                    egui::pos2(
-                        left + column as f32 * (cell + GAP),
-                        origin.y + GAP + row as f32 * row_height,
-                    ),
-                    egui::vec2(cell, box_height),
+        // The focused page comes last, so its lift overlaps its neighbours.
+        let mut order: Vec<usize> =
+            (shown.start * columns..(shown.end * columns).min(count)).collect();
+        if let Some(at) = order.iter().position(|&page| page == state.cursor) {
+            let cursor = order.remove(at);
+            order.push(cursor);
+        }
+        for page in order {
+            let (row, column) = (page / columns, page % columns);
+            let cell_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    left + column as f32 * (cell + GAP),
+                    origin.y + GAP + row as f32 * row_height,
+                ),
+                egui::vec2(cell, box_height),
+            );
+            let response = ui.interact(
+                cell_rect,
+                ui.id().with(("overview-page", page)),
+                egui::Sense::click(),
+            );
+            let [w, h] = tab.layout.page_size(page);
+            let scale = (cell / w as f32).min(box_height / h as f32);
+            let paper = egui::Rect::from_center_size(
+                cell_rect.center(),
+                egui::vec2(w as f32 * scale, h as f32 * scale),
+            );
+            let painter = ui.painter();
+            let focused = page == state.cursor;
+            // The focused page grows a little and glows in the accent,
+            // which reads over dark and light wallpapers alike.
+            let lift = glyphst_ui::motion::smooth_bool(
+                ui.ctx(),
+                egui::Id::new(("overview-lift", &tab.path, page)),
+                focused,
+                glyphst_ui::motion::PANEL,
+            );
+            let paper =
+                egui::Rect::from_center_size(paper.center(), paper.size() * (1.0 + LIFT * lift));
+            if lift > 0.0 {
+                let glow = egui::Shadow {
+                    offset: [0, 0],
+                    blur: 36,
+                    spread: 10,
+                    color: tokens.accent.gamma_multiply(0.38 * lift),
+                };
+                let drop = egui::Shadow {
+                    offset: [0, 22],
+                    blur: 40,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha((140.0 * lift) as u8),
+                };
+                painter.add(drop.as_shape(paper, 0));
+                painter.add(glow.as_shape(paper, 0));
+            }
+            painter.rect_filled(paper, 0, tokens.page);
+            if let Some(texture) = page_texture(tab, page, paper, ppp, &mut wanted) {
+                glyphst_ui::paint::paint_turned_image(
+                    painter,
+                    texture,
+                    paper,
+                    tab.layout.arrangement.rotation,
                 );
-                let response = ui.interact(
-                    cell_rect,
-                    ui.id().with(("overview-page", page)),
-                    egui::Sense::click(),
+            } else if tab.dense_pages.contains(&page) {
+                painter.text(
+                    paper.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "dense page",
+                    theme::mono(10.0),
+                    tokens.faint,
                 );
-                let [w, h] = tab.layout.page_size(page);
-                let scale = (cell / w as f32).min(box_height / h as f32);
-                let paper = egui::Rect::from_center_size(
-                    cell_rect.center(),
-                    egui::vec2(w as f32 * scale, h as f32 * scale),
-                );
-                let painter = ui.painter();
-                let focused = page == state.cursor;
-                if focused {
-                    // The focused page is lifted on a plate with its label,
-                    // so it reads over any wallpaper.
-                    let label_width = 96.0_f32.min(cell);
-                    let plate = egui::Rect::from_min_max(
-                        egui::pos2(
-                            paper.left().min(cell_rect.center().x - label_width / 2.0),
-                            paper.top(),
-                        ),
-                        egui::pos2(
-                            paper.right().max(cell_rect.center().x + label_width / 2.0),
-                            cell_rect.bottom() + LABEL,
-                        ),
-                    )
-                    .expand(8.0);
-                    let shadow = egui::Shadow {
-                        offset: [0, 6],
-                        blur: 18,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(90),
-                    };
-                    painter.add(shadow.as_shape(plate, tokens.pop_radius()));
-                    painter.rect(
-                        plate,
-                        tokens.pop_radius(),
-                        tokens.raised,
-                        tokens.hairline(),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                painter.rect_filled(paper, 0, tokens.page);
-                if let Some(texture) = page_texture(tab, page, paper, ppp, &mut wanted) {
-                    glyphst_ui::paint::paint_turned_image(
-                        painter,
-                        texture,
-                        paper,
-                        tab.layout.arrangement.rotation,
-                    );
-                } else if tab.dense_pages.contains(&page) {
-                    painter.text(
-                        paper.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "dense page",
-                        theme::mono(10.0),
-                        tokens.faint,
-                    );
-                } else {
-                    glyphst_ui::thumb::paint_placeholder_lines(ui, paper);
-                }
-                // Search matches, tinted as on the page.
-                let found = tab.find.on_page(page);
-                let matches = found.len();
-                if let Some(text) = tab.text.get(page) {
-                    let offset = tab.layout.offsets[page];
-                    let to_paper = |point: [f32; 2]| {
-                        let at = tab.layout.to_document(page, point);
-                        paper.min
-                            + egui::vec2(
-                                (at[0] - offset[0]) as f32 * scale,
-                                (at[1] - offset[1]) as f32 * scale,
-                            )
-                    };
-                    for index in found {
-                        let (tint, edge) =
-                            crate::find::match_tint(&tokens, tab.find.current == Some(index));
-                        for rect in text.selection_rects(tab.find.matches[index].range.clone()) {
-                            let rect = egui::Rect::from_two_pos(
-                                to_paper([rect[0], rect[1]]),
-                                to_paper([rect[2], rect[3]]),
-                            )
-                            .intersect(paper);
-                            painter.rect_filled(rect, 0, tint);
-                            if let Some(edge) = edge {
-                                painter.rect_stroke(
-                                    rect.expand(1.0),
-                                    0,
-                                    edge,
-                                    egui::StrokeKind::Outside,
-                                );
-                            }
+            } else {
+                glyphst_ui::thumb::paint_placeholder_lines(ui, paper);
+            }
+            // Search matches, tinted as on the page.
+            let found = tab.find.on_page(page);
+            let matches = found.len();
+            if let Some(text) = tab.text.get(page) {
+                let offset = tab.layout.offsets[page];
+                let to_paper = |point: [f32; 2]| {
+                    let at = tab.layout.to_document(page, point);
+                    paper.min
+                        + egui::vec2(
+                            (at[0] - offset[0]) as f32 * scale,
+                            (at[1] - offset[1]) as f32 * scale,
+                        )
+                };
+                for index in found {
+                    let (tint, edge) =
+                        crate::find::match_tint(&tokens, tab.find.current == Some(index));
+                    for rect in text.selection_rects(tab.find.matches[index].range.clone()) {
+                        let rect = egui::Rect::from_two_pos(
+                            to_paper([rect[0], rect[1]]),
+                            to_paper([rect[2], rect[3]]),
+                        )
+                        .intersect(paper);
+                        painter.rect_filled(rect, 0, tint);
+                        if let Some(edge) = edge {
+                            painter.rect_stroke(
+                                rect.expand(1.0),
+                                0,
+                                edge,
+                                egui::StrokeKind::Outside,
+                            );
                         }
                     }
                 }
-                // A small accent mark on pages with notes.
-                let noted = notes.get(&page).copied().unwrap_or(0);
-                if noted > 0 {
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(paper.right() - 14.0, paper.top() + 6.0),
-                            egui::vec2(8.0, 8.0),
-                        ),
-                        0,
-                        tokens.accent,
-                    );
-                }
-                if focused {
-                    painter.rect_stroke(
-                        paper,
-                        0,
-                        egui::Stroke::new(3.0, tokens.accent),
-                        egui::StrokeKind::Outside,
-                    );
-                } else if response.hovered() {
-                    painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
-                }
-                let number = format!("{:0width$}", page + 1);
-                let found = match matches {
-                    0 => String::new(),
-                    1 => "1 match".to_owned(),
-                    _ => format!("{matches} matches"),
-                };
-                let (label, color) = if page == current && matches > 0 {
-                    (format!("{number} ● current · {found}"), tokens.accent_text)
-                } else if page == current {
-                    (format!("{number} ● current"), tokens.accent_text)
-                } else if matches > 0 {
-                    (format!("{number} {found}"), tokens.accent_text)
-                } else if noted > 0 {
-                    let unit = if noted == 1 { "note" } else { "notes" };
-                    (format!("{number} {noted} {unit}"), tokens.faint)
-                } else if page < current {
-                    (format!("{number} read"), tokens.faint)
-                } else {
-                    (number, tokens.faint)
-                };
-                let color = if focused { tokens.text } else { color };
+            }
+            // A small accent mark on pages with notes.
+            let noted = notes.get(&page).copied().unwrap_or(0);
+            if noted > 0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(paper.right() - 14.0, paper.top() + 6.0),
+                        egui::vec2(8.0, 8.0),
+                    ),
+                    0,
+                    tokens.accent,
+                );
+            }
+            if focused {
+                // A gap of `bg`, then the accent: it shows on white
+                // pages and on any wallpaper.
+                painter.rect_stroke(
+                    paper,
+                    0,
+                    egui::Stroke::new(3.0, tokens.bg),
+                    egui::StrokeKind::Outside,
+                );
+                painter.rect_stroke(
+                    paper.expand(3.0),
+                    0,
+                    egui::Stroke::new(3.0, tokens.accent),
+                    egui::StrokeKind::Outside,
+                );
+            } else if response.hovered() {
+                painter.rect_stroke(paper, 0, tokens.edge(), egui::StrokeKind::Outside);
+            }
+            let number = format!("{:0width$}", page + 1);
+            let found = match matches {
+                0 => String::new(),
+                1 => "1 match".to_owned(),
+                _ => format!("{matches} matches"),
+            };
+            let (label, color) = if page == current && matches > 0 {
+                (format!("{number} ● current · {found}"), tokens.accent_text)
+            } else if page == current {
+                (format!("{number} ● current"), tokens.accent_text)
+            } else if matches > 0 {
+                (format!("{number} {found}"), tokens.accent_text)
+            } else if noted > 0 {
+                let unit = if noted == 1 { "note" } else { "notes" };
+                (format!("{number} {noted} {unit}"), tokens.faint)
+            } else if page < current {
+                (format!("{number} read"), tokens.faint)
+            } else {
+                (number, tokens.faint)
+            };
+            // The label moves down with the lift; the focused one is an
+            // accent pill.
+            let at = egui::pos2(
+                cell_rect.center().x,
+                cell_rect.bottom() + LABEL / 2.0 + 2.0 + lift * (box_height * LIFT / 2.0 + 6.0),
+            );
+            if focused {
+                let galley =
+                    painter.layout_no_wrap(label, theme::mono_bold(10.0), tokens.on_accent);
+                let pill = egui::Rect::from_center_size(at, galley.size() + egui::vec2(16.0, 4.0));
+                painter.rect_filled(pill, pill.height() / 2.0, tokens.accent);
+                painter.galley(
+                    pill.center() - galley.size() / 2.0,
+                    galley,
+                    tokens.on_accent,
+                );
+            } else {
                 painter.text(
-                    egui::pos2(cell_rect.center().x, cell_rect.bottom() + LABEL / 2.0 + 2.0),
+                    at,
                     egui::Align2::CENTER_CENTER,
                     label,
                     theme::mono(10.0),
                     color,
                 );
-                if response.clicked() {
-                    open = Some(page);
-                }
-                if response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
+            }
+            if response.clicked() {
+                open = Some(page);
+            }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
         }
     });

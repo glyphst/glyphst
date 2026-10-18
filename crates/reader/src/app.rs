@@ -111,6 +111,8 @@ pub struct Launch {
     pub overlay: Option<String>,
     /// The wallpaper image.
     pub wallpaper: Option<String>,
+    /// The background's parameters (`--background-params`).
+    pub background_params: Option<[f32; glyphst_effects::MAX_PARAMS]>,
     /// A transparent window at this opacity, in memory (`--opacity`, for
     /// screenshots of glass).
     pub opacity: Option<f32>,
@@ -250,6 +252,9 @@ pub struct ReaderApp {
     pad_ring: Option<ring::PadRing>,
     /// Pads connecting and going, for the prompts.
     pad_events: Vec<crate::pad::PadEvent>,
+    /// Whether the window had focus last frame, to let go of the pad when
+    /// it goes.
+    pad_focused: bool,
     prompts: crate::prompts::Prompts,
     pub(crate) couch: crate::couch::Couch,
     fixed_clock: bool,
@@ -424,6 +429,9 @@ impl ReaderApp {
         if let Some(wallpaper) = launch.wallpaper {
             prefs.wallpaper = Some(wallpaper);
         }
+        if let Some(params) = launch.background_params {
+            prefs.effect_params.insert(prefs.background.clone(), params);
+        }
         if launch.gamepad_mode {
             prefs.gamepad_mode = true;
         }
@@ -490,6 +498,7 @@ impl ReaderApp {
             pad_ring_steps: Vec::new(),
             pad_ring: None,
             pad_events: Vec::new(),
+            pad_focused: false,
             prompts: Default::default(),
             couch: Default::default(),
             fixed_clock: launch.fixed_clock,
@@ -3912,7 +3921,14 @@ impl eframe::App for ReaderApp {
     /// press reach every widget as typed ones do.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.note_input_device(&raw_input.events);
-        let frame = self.pads.frame();
+        // Pads reach every app (they aren't Wayland input); the window
+        // takes them only while it has focus, and lets go when it loses it.
+        let focused = raw_input.focused;
+        if self.pad_focused && !focused {
+            self.pad_ring_steps.extend(self.pad_router.lose_focus());
+        }
+        self.pad_focused = focused;
+        let frame = self.pads.frame(focused);
         let state = RouteState {
             recording: self.pages.iter().any(Page::is_recording),
             modal: self.settings_window.open

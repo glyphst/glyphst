@@ -86,9 +86,45 @@ fn fx_cover_uv(uv: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(0.5) + (uv - vec2<f32>(0.5)) * scale;
 }
 
-// The wallpaper at target `uv`, blurred by sampling mip level `lod`.
+// The wallpaper at target `uv`, blurred by `lod` (a mip level: each one
+// doubles the radius). A coarse level magnified bilinearly shows its texels
+// as blocks, so blurred samples take a cubic B-spline over the two levels
+// about `lod`: smooth at any radius, for eight taps.
 fn fx_sample_image(uv: vec2<f32>, lod: f32) -> vec4<f32> {
-    return textureSampleLevel(fx_from, fx_sampler, clamp(fx_cover_uv(uv), vec2<f32>(0.0), vec2<f32>(1.0)), lod);
+    let at = clamp(fx_cover_uv(uv), vec2<f32>(0.0), vec2<f32>(1.0));
+    let last = f32(textureNumLevels(fx_from) - 1u);
+    let level = clamp(lod, 0.0, last);
+    if level < 0.5 {
+        return textureSampleLevel(fx_from, fx_sampler, at, level);
+    }
+    let low = floor(level);
+    let high = min(low + 1.0, last);
+    return mix(fx_sample_bspline(at, low), fx_sample_bspline(at, high), level - low);
+}
+
+// `fx_from` at mip `level`, filtered with a cubic B-spline built from four
+// bilinear taps (Sigg and Hadwiger, GPU Gems 2, ch. 20).
+fn fx_sample_bspline(uv: vec2<f32>, level: f32) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(fx_from, u32(level)));
+    let st = uv * size - vec2<f32>(0.5);
+    let i = floor(st);
+    let f = st - i;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+    let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+    let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+    let w3 = f3 / 6.0;
+    // Each tap blends two texels, landing between them by their weights.
+    let s0 = w0 + w1;
+    let s1 = w2 + w3;
+    let t0 = (i - vec2<f32>(0.5) + w1 / s0) / size;
+    let t1 = (i + vec2<f32>(1.5) + w3 / s1) / size;
+    let a = textureSampleLevel(fx_from, fx_sampler, vec2<f32>(t0.x, t0.y), level);
+    let b = textureSampleLevel(fx_from, fx_sampler, vec2<f32>(t1.x, t0.y), level);
+    let c = textureSampleLevel(fx_from, fx_sampler, vec2<f32>(t0.x, t1.y), level);
+    let d = textureSampleLevel(fx_from, fx_sampler, vec2<f32>(t1.x, t1.y), level);
+    return s0.y * (s0.x * a + s1.x * b) + s1.y * (s0.x * c + s1.x * d);
 }
 
 // Overlays: the colour of premultiplied `color` before premultiplying.

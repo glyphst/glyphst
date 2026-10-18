@@ -221,6 +221,19 @@ impl Router {
 }
 
 impl Router {
+    /// The window lost focus: let go of everything held, and close the
+    /// ring without picking (its stick reads as let go from now on).
+    pub fn lose_focus(&mut self) -> Option<RingStep> {
+        self.held.clear();
+        self.stick = None;
+        self.repeat = Repeat::default();
+        self.presses = PadPresses::default();
+        self.ring.take().map(|_| {
+            self.ring_spent = true;
+            RingStep::Cancel
+        })
+    }
+
     /// The right stick opens the ring and aims it; letting go picks.
     fn ring_step(
         &mut self,
@@ -628,6 +641,27 @@ mod tests {
         let keymap = PadKeymap::new(&bound, true);
         let routed = router.route(&frame(tap(PadButton::LeftStick)), &DOCUMENT, &keymap, now);
         assert_eq!(routed.hints, HintsWish::None, "bound by the user");
+    }
+
+    #[test]
+    fn losing_focus_cancels_the_ring_and_lets_go() {
+        let mut router = Router::default();
+        let keymap = keymap();
+        let now = Instant::now();
+        // The d-pad held, then the ring opened over it.
+        router.route(
+            &frame(vec![PadEvent::Pressed(PadButton::Down)]),
+            &DOCUMENT,
+            &keymap,
+            now,
+        );
+        router.route(&right_stick(egui::vec2(0.9, 0.0)), &DOCUMENT, &keymap, now);
+        assert_eq!(router.lose_focus(), Some(RingStep::Cancel), "not a pick");
+        assert_eq!(router.lose_focus(), None, "already closed");
+        let later = now + Duration::from_millis(400);
+        let routed = router.route(&frame(Vec::new()), &DOCUMENT, &keymap, later);
+        assert_eq!(routed.commands, [], "the d-pad no longer repeats");
+        assert_eq!(routed.ring, None);
     }
 
     #[test]

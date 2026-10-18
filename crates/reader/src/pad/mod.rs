@@ -263,6 +263,19 @@ impl PadFrame {
     }
 }
 
+/// A frame while another window has focus: pads connecting and going, and
+/// buttons let go, but no presses and no sticks.
+pub fn background(frame: PadFrame) -> PadFrame {
+    PadFrame {
+        events: frame
+            .events
+            .into_iter()
+            .filter(|event| !matches!(event, PadEvent::Pressed(_)))
+            .collect(),
+        axes: Axes::default(),
+    }
+}
+
 fn events_id() -> egui::Id {
     egui::Id::new("glyphst-pad-events")
 }
@@ -348,12 +361,18 @@ impl Pads {
     }
 
     /// The events since the last call, with the axes as they are now.
-    pub fn frame(&mut self) -> PadFrame {
+    /// Real pads aren't Wayland input, so they reach every app whatever has
+    /// focus: while the window isn't `focused` only their comings and goings
+    /// (and releases) count. A scripted pad always plays.
+    pub fn frame(&mut self, focused: bool) -> PadFrame {
         match &mut self.source {
-            Ok(Source::Gilrs(pads)) => PadFrame {
-                events: pads.drain(),
-                axes: pads.axes(),
-            },
+            Ok(Source::Gilrs(pads)) => {
+                let frame = PadFrame {
+                    events: pads.drain(),
+                    axes: pads.axes(),
+                };
+                if focused { frame } else { background(frame) }
+            }
             Ok(Source::Script(script)) => script.frame(),
             Err(_) => PadFrame::default(),
         }
@@ -384,6 +403,55 @@ impl Pads {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_the_background_pads_only_come_go_and_let_go() {
+        let pad = PadInfo {
+            id: 0,
+            name: "pad".into(),
+            family: Family::Generic,
+            power: Power::Unknown,
+        };
+        let frame = PadFrame {
+            events: vec![
+                PadEvent::Connected {
+                    pad: pad.clone(),
+                    initial: false,
+                },
+                PadEvent::Pressed(PadButton::RightBumper),
+                PadEvent::Released(PadButton::South),
+                PadEvent::Disconnected(0),
+            ],
+            axes: Axes {
+                left: egui::vec2(0.0, 1.0),
+                ..Axes::default()
+            },
+        };
+        let quiet = background(frame);
+        assert_eq!(
+            quiet.events,
+            [
+                PadEvent::Connected {
+                    pad,
+                    initial: false
+                },
+                PadEvent::Released(PadButton::South),
+                PadEvent::Disconnected(0),
+            ]
+        );
+        assert_eq!(quiet.axes, Axes::default());
+        let pressed = PadFrame {
+            events: vec![PadEvent::Pressed(PadButton::South)],
+            axes: Axes {
+                right: egui::vec2(1.0, 0.0),
+                ..Axes::default()
+            },
+        };
+        assert!(
+            !background(pressed).used(),
+            "a press elsewhere isn't pad use here"
+        );
+    }
 
     #[test]
     fn sticks_have_a_deadzone_and_a_smooth_curve() {
