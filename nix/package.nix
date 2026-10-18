@@ -138,7 +138,10 @@ in
       postInstall = ''
         mkdir -p $out/share/glyphst-reader/pdf-translation $out/share/glyphst-reader/fonts
         cp -R crates/pdf-translation/assets/. $out/share/glyphst-reader/pdf-translation/
-        cp -R ${glyphstFonts}/fonts ${glyphstFonts}/README.md ${glyphstFonts}/ATTRIBUTION.md \
+        # Writable copies: crane rewrites $out's files to strip toolchain
+        # references, and the store's are read-only.
+        cp -R --no-preserve=mode \
+          ${glyphstFonts}/fonts ${glyphstFonts}/README.md ${glyphstFonts}/ATTRIBUTION.md \
           $out/share/glyphst-reader/fonts/
         wrapProgram $out/bin/glyphst-reader \
           --set FONTCONFIG_FILE ${fontsConf} \
