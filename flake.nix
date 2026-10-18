@@ -44,11 +44,12 @@
           glyphstReader = pkgs.callPackage ./nix/package.nix {
             inherit craneLib;
             # The CJK and translation fonts, kept out of this repository.
-            glyphstFonts = pkgs.fetchFromGitHub {
-              owner = "glyphst";
-              repo = "glyphst-fonts";
+            # A private repository: fetched over SSH (like the Cargo Git
+            # dependencies), not as an HTTPS tarball.
+            glyphstFonts = builtins.fetchGit {
+              url = "ssh://git@github.com/glyphst/glyphst-fonts";
               rev = "fb297ed94f5762e2ef274719da885137483803ca";
-              hash = "sha256-NdSntFQhxSChRHnhRwXiCVN4dvMTZCoZmTQZHcueIUo=";
+              shallow = true;
             };
           };
         in
