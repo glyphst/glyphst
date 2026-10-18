@@ -219,7 +219,9 @@ pub(crate) fn tone(color: Color32) -> f64 {
 /// grey enough to give a grey scheme. `None` without opaque pixels.
 pub fn seed_from_pixels(rgba: &[u8]) -> Option<[u8; 3]> {
     let pixels: Vec<Rgb> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| pixel[3] >= 128)
         .map(|pixel| Rgb::new(pixel[0], pixel[1], pixel[2]))
         .collect();

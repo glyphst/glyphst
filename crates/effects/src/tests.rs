@@ -216,7 +216,9 @@ fn render_with(
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let mapped = buffer.get_mapped_range(..).unwrap();
     mapped
-        .chunks_exact(256)
+        .as_chunks::<256>()
+        .0
+        .iter()
         .flat_map(|row| row[..(SIZE * 4) as usize].to_vec())
         .collect()
 }
@@ -445,7 +447,11 @@ fn effects_read_only_the_extent_of_their_images() {
         &device, &queue, &registry, PRESENT, &image, &image, 0.0, 1.0, [0.5; 2],
     );
     assert!(
-        shown.chunks_exact(4).all(|p| p == [200, 30, 30, 255]),
+        shown
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [200, 30, 30, 255]),
         "{:?}",
         &shown[..8]
     );
@@ -602,7 +608,7 @@ fn wallpapers_fill_the_background_cropped_to_cover() {
     // Without a wallpaper (one transparent pixel) the background is black.
     let none = solid_texture(&device, &queue, [0, 0, 0, 0]);
     let out = render_from(&device, &queue, &registry, IMAGE, &none);
-    assert!(out.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+    assert!(out.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
 }
 
 #[test]
@@ -612,18 +618,25 @@ fn night_darkens_white_pages_and_keeps_their_edges() {
     let white = solid_texture(&device, &queue, [255, 255, 255, 255]);
     let out = render_from(&device, &queue, &registry, NIGHT, &white);
     assert!(
-        out.chunks_exact(4).all(|p| p[0] < 40 && p[3] == 255),
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[0] < 40 && p[3] == 255),
         "{:?}",
         &out[..4]
     );
     let black = solid_texture(&device, &queue, [0, 0, 0, 255]);
     let out = render_from(&device, &queue, &registry, NIGHT, &black);
-    assert!(out.chunks_exact(4).all(|p| p[0] > 180), "{:?}", &out[..4]);
+    assert!(
+        out.as_chunks::<4>().0.iter().all(|p| p[0] > 180),
+        "{:?}",
+        &out[..4]
+    );
     let around = solid_texture(&device, &queue, [0, 0, 0, 0]);
     for id in [NIGHT, SEPIA, PAPER] {
         let out = render_from(&device, &queue, &registry, id, &around);
         assert!(
-            out.chunks_exact(4).all(|p| p == [0, 0, 0, 0]),
+            out.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 0]),
             "{id} outside pages"
         );
     }
@@ -648,7 +661,7 @@ fn shrink_averages_what_it_draws_smaller() {
         .collect();
     let checks = texture_from(&device, &queue, &pixels, [size, size]);
     let shrunk = render(&device, &queue, &registry, SHRINK, &checks, &checks, 0.0);
-    for pixel in shrunk.chunks_exact(4) {
+    for pixel in shrunk.as_chunks::<4>().0 {
         assert!(pixel[0].abs_diff(128) <= 2, "{pixel:?}");
         assert_eq!(pixel[3], 255);
     }

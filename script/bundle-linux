@@ -80,14 +80,14 @@ if [[ "$target_root" != /* ]]; then
     target_root="$workspace_dir/$target_root"
 fi
 
-release_dir="$target_root/$target_triple/release"
+release_dir="$target_root/$target_triple/dist"
 built_binary="$release_dir/glyphst-reader"
 archive_dir="$target_root/release"
 archive="$archive_dir/glyphst-reader-linux-$archive_arch.tar.gz"
 rpath_link_args='-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib'
 
 cargo rustc \
-    --release \
+    --profile dist \
     --target "$target_triple" \
     --package glyphst-reader \
     --bin glyphst-reader \

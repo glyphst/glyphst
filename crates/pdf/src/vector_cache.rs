@@ -296,7 +296,9 @@ impl<'a> Reader<'a> {
         let points = self.u32()? as usize;
         let points = self
             .take(points.checked_mul(8)?)?
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|point| {
                 let value = |at: usize| f32::from_le_bytes(point[at..at + 4].try_into().unwrap());
                 [value(0), value(4)]

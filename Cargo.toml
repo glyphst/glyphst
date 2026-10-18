@@ -80,7 +80,14 @@ wgpu = "30"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 
+# Quick to build for local runs: parallel codegen, no cross-crate LTO, and
+# only line tables for backtraces.
 [profile.release]
-debug = "limited"
+debug = "line-tables-only"
+
+# Shipped builds (script/bundle-linux, nix/package.nix).
+[profile.dist]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
+debug = false

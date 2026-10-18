@@ -357,7 +357,9 @@ mod tests {
                 .unwrap();
             pixmap
                 .samples()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[0] < 240 || pixel[1] < 240 || pixel[2] < 240)
         })
         .join()

@@ -85,6 +85,8 @@
 
     inherit src cargoVendorDir;
 
+    # Shipped builds use the thin-LTO profile; `release` stays quick locally.
+    CARGO_PROFILE = "dist";
     cargoExtraArgs = "--locked -p glyphst-reader";
     doCheck = false;
 

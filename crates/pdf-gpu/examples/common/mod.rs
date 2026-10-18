@@ -308,7 +308,7 @@ impl Gpu {
         let mapped = buffer.get_mapped_range(..)?;
         let mut rgb = Vec::with_capacity((width * height * 3) as usize);
         for row in mapped.chunks_exact(padded as usize) {
-            for pixel in row[..(width * 4) as usize].chunks_exact(4) {
+            for pixel in row[..(width * 4) as usize].as_chunks::<4>().0 {
                 rgb.extend_from_slice(&pixel[..3]);
             }
         }
