@@ -1,7 +1,7 @@
 //! Glyphst Reader: GPU vector pages, tabs and split panes, a library home
 //! and shader effects for transitions and backgrounds.
 //!
-//! glyphst-reader [documents…] [--background ID] [--transition ID|random|none] [--reduce-motion] [--zoom Z]
+//! glyphst-reader [documents…] [--background ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
@@ -66,6 +66,7 @@ mod settings_providers;
 mod settings_window;
 mod shell;
 mod sidebar;
+mod switcher;
 mod text_overlay;
 mod transition;
 mod translation;
@@ -85,7 +86,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
                      [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -94,6 +95,7 @@ fn parse_args() -> Result<Launch> {
         background: None,
         transition: None,
         reduce_motion: false,
+        switcher_layout: None,
         theme: None,
         zoom: None,
         window: None,
@@ -147,6 +149,19 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-switch" => launch.harness = shot(ShotKind::TabSwitch, value()?),
             "--screenshot-close" => launch.harness = shot(ShotKind::TabClose, value()?),
             "--screenshot-open" => launch.harness = shot(ShotKind::HomeOpen, value()?),
+            "--screenshot-peek" => launch.harness = shot(ShotKind::Peek, value()?),
+            "--switcher-layout" => {
+                use crate::switcher::layout::Layout;
+                let wanted = value()?;
+                launch.switcher_layout = Some(
+                    Layout::ALL
+                        .into_iter()
+                        .find(|layout| layout.label().split(' ').next() == Some(wanted.as_str()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("--switcher-layout takes fan, carousel, grid or slices")
+                        })?,
+                );
+            }
             "--reduce-motion" => launch.reduce_motion = true,
             "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
             "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),

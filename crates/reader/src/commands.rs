@@ -19,6 +19,13 @@ pub enum Command {
     CloseTab,
     NextTab,
     PreviousTab,
+    /// The book switcher held open (Ctrl+Tab): the books in recent order,
+    /// letting go keeps the one shown (frame 10a).
+    SwitchBook,
+    /// [`Command::SwitchBook`] from the least recent book.
+    SwitchBookBack,
+    /// The book switcher opened until a book is picked.
+    BookSwitcher,
     Palette,
     Settings,
     KeyboardShortcuts,
@@ -188,12 +195,15 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 81] = [
+    pub const ALL: [Self; 84] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
         Self::NextTab,
         Self::PreviousTab,
+        Self::SwitchBook,
+        Self::SwitchBookBack,
+        Self::BookSwitcher,
         Self::Palette,
         Self::Settings,
         Self::KeyboardShortcuts,
@@ -280,6 +290,9 @@ impl Command {
             Self::CloseTab => "app.close_tab",
             Self::NextTab => "app.next_tab",
             Self::PreviousTab => "app.previous_tab",
+            Self::SwitchBook => "app.switch_book",
+            Self::SwitchBookBack => "app.switch_book_back",
+            Self::BookSwitcher => "app.book_switcher",
             Self::Palette => "app.command_palette",
             Self::Settings => "app.settings",
             Self::KeyboardShortcuts => "app.keyboard_shortcuts",
@@ -370,6 +383,9 @@ impl Command {
             Self::CloseTab => "Close tab",
             Self::NextTab => "Next tab",
             Self::PreviousTab => "Previous tab",
+            Self::SwitchBook => "Switch book",
+            Self::SwitchBookBack => "Switch book, from the oldest",
+            Self::BookSwitcher => "Book switcher",
             Self::Palette => "Command palette",
             Self::Settings => "Settings…",
             Self::KeyboardShortcuts => "Keyboard shortcuts",
@@ -457,6 +473,8 @@ impl Command {
             Self::CloseTab => "x",
             Self::NextTab => "chevron-right",
             Self::PreviousTab => "chevron-left",
+            Self::SwitchBook | Self::SwitchBookBack => "arrow-left-right",
+            Self::BookSwitcher => "book-open",
             Self::Palette => "command",
             Self::Settings => "settings",
             Self::KeyboardShortcuts => "keyboard",
@@ -538,6 +556,9 @@ impl Command {
             | Self::CloseTab
             | Self::NextTab
             | Self::PreviousTab
+            | Self::SwitchBook
+            | Self::SwitchBookBack
+            | Self::BookSwitcher
             | Self::Palette
             | Self::Settings
             | Self::KeyboardShortcuts
@@ -631,8 +652,11 @@ impl Command {
             // Ctrl+T translates the selection.
             Self::NewTab => &["Ctrl+N"],
             Self::CloseTab => &["Ctrl+W"],
-            Self::NextTab => &["Ctrl+Tab"],
-            Self::PreviousTab => &["Ctrl+Shift+Tab"],
+            Self::NextTab => &["Ctrl+PageDown"],
+            Self::PreviousTab => &["Ctrl+PageUp"],
+            Self::SwitchBook => &["Ctrl+Tab"],
+            Self::SwitchBookBack => &["Ctrl+Shift+Tab"],
+            Self::BookSwitcher => &[],
             Self::Palette => &["Ctrl+K", "Ctrl+Shift+P"],
             Self::Settings => &["Ctrl+Comma"],
             Self::ToggleSidebar => &["F9"],
@@ -721,8 +745,10 @@ impl Command {
             Self::Open => &["O"],
             Self::OpenWithDialog => &["Shift+O"],
             Self::CloseTab => &["Q"],
-            Self::NextTab => &["G T", "Ctrl+Tab"],
-            Self::PreviousTab => &["G Shift+T", "Ctrl+Shift+Tab"],
+            Self::NextTab => &["G T", "Ctrl+PageDown"],
+            Self::PreviousTab => &["G Shift+T", "Ctrl+PageUp"],
+            Self::SwitchBook => &["Ctrl+Tab"],
+            Self::SwitchBookBack => &["Ctrl+Shift+Tab"],
             Self::Palette => &["Colon", "Ctrl+K", "Ctrl+Shift+P"],
             Self::ScrollDown => &["J", "Down"],
             Self::ScrollUp => &["K", "Up"],
@@ -758,6 +784,7 @@ impl Command {
             Self::Present if couch => &[],
             Self::GamepadMenu if couch => &["start"],
             Self::GamepadMode => &["select+start"],
+            Self::BookSwitcher => &["select+right"],
             Self::NextPage => &["rb", "right"],
             Self::PreviousPage => &["lb", "left"],
             Self::ScrollDown => &["down"],
@@ -799,6 +826,9 @@ impl Command {
             | Self::OpenWithDialog
             | Self::NextTab
             | Self::PreviousTab
+            | Self::SwitchBook
+            | Self::SwitchBookBack
+            | Self::BookSwitcher
             | Self::Palette
             | Self::Settings
             | Self::KeyboardShortcuts

@@ -110,6 +110,8 @@ pub struct Prefs {
     /// Effect id of the transition between books, [`glyphst_effects::RANDOM`]
     /// for a different one each switch, or `None` for a cut.
     pub switch_transition: Option<String>,
+    /// How the book switcher lays out its cards.
+    pub switcher_layout: crate::switcher::layout::Layout,
     /// Effect id of the background behind pages.
     pub background: String,
     /// The animated background last chosen, restored when Appearance's
@@ -197,6 +199,7 @@ impl Default for Prefs {
             reduce_motion: false,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             switch_transition: Some(glyphst_effects::RANDOM.into()),
+            switcher_layout: crate::switcher::layout::Layout::Fan,
             background: glyphst_effects::SOLID.into(),
             animated_background: None,
             background_fps: 30,

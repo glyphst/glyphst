@@ -788,7 +788,7 @@ mod tests {
         let keymap = Keymap::new(KeymapPreset::Vim, &overrides);
         assert_eq!(keymap.owner(&keys("G")), Some(Command::Zen));
         assert_eq!(keymap.keys(Command::FirstPage), &[keys("Home")]);
-        assert_eq!(keymap.keys(Command::NextTab), &[keys("Ctrl+Tab")]);
+        assert_eq!(keymap.keys(Command::NextTab), &[keys("Ctrl+PageDown")]);
         assert_eq!(keymap.keys(Command::LastPage)[0], keys("Shift+G"));
     }
 
@@ -915,7 +915,7 @@ mod tests {
         let keymap = Keymap::new(KeymapPreset::Vim, &overrides);
         assert_eq!(keymap.owner(&keys("G")), Some(Command::Zen));
         assert_eq!(keymap.keys(Command::FirstPage), &[keys("Home")]);
-        assert_eq!(keymap.keys(Command::PreviousTab), &[keys("Ctrl+Shift+Tab")]);
+        assert_eq!(keymap.keys(Command::PreviousTab), &[keys("Ctrl+PageUp")]);
         assert_eq!(keymap.keys(Command::Zen), &[keys("Z"), keys("G")]);
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
                 Modifiers::COMMAND | Modifiers::SHIFT,
                 false
             ),
-            [Command::PreviousTab]
+            [Command::SwitchBookBack]
         );
     }
 

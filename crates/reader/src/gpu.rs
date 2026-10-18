@@ -183,6 +183,8 @@ struct ViewState {
     shows_tinted: bool,
     prepared: Vec<PreparedEffect>,
     last_drawn: u64,
+    /// The part of the target the pane showed last, in pixels.
+    shown: [u32; 2],
 }
 
 impl ViewState {
@@ -232,6 +234,8 @@ pub struct ReaderGpu {
     frame: u64,
     /// Each shown tab's view, by tab id.
     views: HashMap<u64, ViewState>,
+    /// The book switcher's card of each tab: its view, smaller.
+    cards: HashMap<u64, Snapshot>,
     /// The last images of tabs just closed, with the frame they closed on.
     orphans: HashMap<u64, (wgpu::Texture, u64)>,
     paper: wgpu::RenderPipeline,
@@ -356,6 +360,7 @@ impl ReaderGpu {
             frame: 0,
             views: HashMap::new(),
             orphans: HashMap::new(),
+            cards: HashMap::new(),
             paper,
             paper_bind_group,
             paper_color,
@@ -694,6 +699,62 @@ impl ReaderGpu {
         if let Some(view) = self.views.remove(&tab) {
             self.orphans.insert(tab, (view.image().clone(), self.frame));
         }
+        self.cards.remove(&tab);
+    }
+
+    /// Draws `tab`'s last view, at most `max_width` wide, into its card
+    /// for the book switcher. Returns the card's image, its size, and
+    /// whether the image is new (it changed size or was not there);
+    /// `None` without a view.
+    pub fn capture_card(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tab: u64,
+        max_width: u32,
+    ) -> Option<(wgpu::TextureView, [u32; 2], bool)> {
+        let view = self.views.get(&tab)?;
+        let shown = view.shown;
+        if shown[0] == 0 || shown[1] == 0 {
+            return None;
+        }
+        let width = shown[0].min(max_width).max(1);
+        let height = ((width as f32 * shown[1] as f32 / shown[0] as f32).round() as u32).max(1);
+        let size = [width, height];
+        let target = view.target.size();
+        let prepared = self.effects.prepare(
+            device,
+            glyphst_effects::SHRINK,
+            &EffectInputs {
+                from: view.image_view(),
+                to: view.image_view(),
+                resolution: [width as f32, height as f32],
+                pointer: None,
+                time: 0.0,
+                progress: 0.0,
+                direction: 1.0,
+                params: [0.0; 4],
+                opacity: 1.0,
+                extent: [
+                    shown[0] as f32 / target[0] as f32,
+                    shown[1] as f32 / target[1] as f32,
+                ],
+                origin: None,
+                seed: 0.0,
+            },
+        )?;
+        let new = self.cards.get(&tab).is_none_or(|card| card.size != size);
+        if new {
+            self.cards.insert(tab, snapshot(device, self.format, size));
+        }
+        let card = &self.cards[&tab];
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = clear_pass(&mut encoder, &card.view, "switcher_card");
+            self.effects.draw(&prepared, &mut pass);
+        }
+        queue.submit([encoder.finish()]);
+        Some((card.view.clone(), size, new))
     }
 
     fn resident_bytes(&self) -> u64 {
@@ -729,6 +790,7 @@ impl ReaderGpu {
             shows_tinted: false,
             prepared: Vec::new(),
             last_drawn: 0,
+            shown: size,
         });
         if view.target.size() != size {
             view.target = OffscreenTarget::new(device, format, size, VIEW_TARGET_USAGE);
@@ -925,6 +987,7 @@ impl CallbackTrait for ViewCallback {
         let format = gpu.format;
         let view = gpu.view(device, self.tab, target);
         view.last_drawn = frame;
+        view.shown = size;
         if let Some(outgoing) = outgoing {
             if view
                 .snapshot

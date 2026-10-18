@@ -68,6 +68,7 @@ mod page_chrome;
 mod present;
 mod ring;
 mod status_bar;
+mod switcher;
 
 pub(crate) use ring::fits_reading_ring;
 mod tab_bar;
@@ -109,6 +110,7 @@ pub struct Launch {
     /// Book switches' and page turns' transition.
     pub transition: Option<String>,
     pub reduce_motion: bool,
+    pub switcher_layout: Option<crate::switcher::layout::Layout>,
     /// The default page tint (an overlay effect id, or `none`).
     pub overlay: Option<String>,
     /// The wallpaper image.
@@ -274,6 +276,17 @@ pub struct ReaderApp {
     pub(crate) next_origin: Option<egui::Pos2>,
     /// Where the pointer clicked this frame.
     click: Option<egui::Pos2>,
+    /// The book switcher (Ctrl+Tab) and the order books were read in.
+    pub(crate) switcher: crate::switcher::Switcher,
+    /// Each tab's card for the switcher: its last view, smaller, and the
+    /// image's size in pixels.
+    switcher_cards: std::collections::HashMap<u64, (egui::TextureId, [u32; 2])>,
+    /// Where the switcher's cards were drawn last, for the transitions
+    /// they start.
+    switcher_places: Vec<(u64, egui::Pos2)>,
+    /// The card under the pointer and since when.
+    switcher_hover: Option<(usize, Instant)>,
+    switcher_click: Option<usize>,
     /// The animations over pages that are slow to load.
     pub(crate) generations: Generations,
     started: Instant,
@@ -462,6 +475,9 @@ impl ReaderApp {
         if launch.reduce_motion {
             prefs.reduce_motion = true;
         }
+        if let Some(layout) = launch.switcher_layout {
+            prefs.switcher_layout = layout;
+        }
         if let Some(overlay) = launch.overlay {
             let tint = (overlay != "none").then_some(overlay);
             prefs.tint_light = tint.clone();
@@ -538,6 +554,11 @@ impl ReaderApp {
             last_random: None,
             next_origin: None,
             click: None,
+            switcher: crate::switcher::Switcher::default(),
+            switcher_cards: std::collections::HashMap::new(),
+            switcher_places: Vec::new(),
+            switcher_hover: None,
+            switcher_click: None,
             generations: Generations::default(),
             started: Instant::now(),
             pads,
@@ -780,6 +801,10 @@ impl ReaderApp {
             return;
         }
         let previous = self.active;
+        // The book left keeps a card of where it was, for the switcher.
+        if let Some(previous) = previous {
+            self.capture_card(self.tabs[previous].id);
+        }
         self.active = next;
         let Some(next) = next else {
             return;
@@ -2101,6 +2126,7 @@ impl ReaderApp {
         let shown_alone = self.active == Some(index) && self.panes.count() == 1;
         let mut tab = self.tabs.remove(index);
         self.free_textures(&tab.take_freed_textures(true));
+        self.drop_card(tab.id);
         self.saved_positions.remove(&tab.id);
         self.with_gpu(|gpu| gpu.drop_tab(tab.id));
         self.panes.remove_tab(tab.id);
@@ -2448,7 +2474,10 @@ impl ReaderApp {
         {
             return actions;
         }
-        let typing = self.palette.open || ctx.memory(|memory| memory.focused().is_some());
+        // The switcher takes the keys it uses; only Ctrl shortcuts get past.
+        let typing = self.palette.open
+            || self.switcher.is_open()
+            || ctx.memory(|memory| memory.focused().is_some());
         // A list drawn last frame (the palette, the @ menu, the launcher)
         // takes Ctrl+N and Ctrl+P.
         let list_open = glyphst_ui::row::take_list_open(ctx) || self.palette.open;
@@ -2601,6 +2630,10 @@ impl ReaderApp {
                 if let Some(active) = self.active {
                     self.close(active);
                 }
+                None
+            }
+            Command::SwitchBook | Command::SwitchBookBack | Command::BookSwitcher => {
+                self.switch_book(command, ctx);
                 None
             }
             Command::NextTab | Command::PreviousTab => {
@@ -4114,6 +4147,7 @@ impl eframe::App for ReaderApp {
             modal: self.settings_window.open
                 || self.palette.open
                 || self.prompts.is_open()
+                || self.switcher.is_open()
                 || self.couch.overlay.is_some(),
             document: self.active.is_some(),
             overview: self
@@ -4387,6 +4421,7 @@ impl eframe::App for ReaderApp {
                 .then(|| i.pointer.interact_pos())
                 .flatten()
         });
+        self.switcher_input(&ctx);
         let mut actions = self.global_actions(&ctx);
         actions.append(&mut self.pending_actions);
         if let Some(active) = self.active {
@@ -4500,6 +4535,7 @@ impl eframe::App for ReaderApp {
             self.chrome.tab_drag = None;
         }
         self.overlays(&ctx);
+        self.switcher_overlay(&ctx);
         if presenting && let Some(active) = self.active {
             self.present_overlay(&ctx, active, now);
         }
@@ -4544,6 +4580,7 @@ impl eframe::App for ReaderApp {
             self.last_position_save = now;
         }
 
+        self.settle_switcher();
         // A pending overview advances one tile per frame, so keep drawing.
         let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
         let continuous = animating

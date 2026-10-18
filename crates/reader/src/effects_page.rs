@@ -349,6 +349,15 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 params_editor(ui, def, &mut prefs.effect_params);
             }
         });
+        group.row(
+            "switcher",
+            Some("ctrl tab: hold, tap tab to pick a book, let go to open it"),
+            |ui| {
+                use crate::switcher::layout::Layout;
+                let options = Layout::ALL.map(|layout| (layout, layout.label()));
+                glyphst_ui::segmented::labels(ui, &mut prefs.switcher_layout, &options);
+            },
+        );
     });
 
     glyphst_ui::settings::group(ui, "Page turn", |group| {

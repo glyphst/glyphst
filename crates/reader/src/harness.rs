@@ -50,6 +50,8 @@ pub enum ShotKind {
     TabClose,
     /// Halfway through going from Home to the first tab.
     HomeOpen,
+    /// The book switcher open, its first peek halfway (frame 10b).
+    Peek,
     /// The loading animation replayed over the drawn pages, while its
     /// parts are traced.
     Generating,
@@ -545,6 +547,19 @@ impl ReaderApp {
                     return false;
                 }
                 shot.started && halfway(self)
+            }
+            ShotKind::Peek => {
+                if !shot.started {
+                    if let Err(reason) = self.run(crate::commands::Command::BookSwitcher, ctx) {
+                        eprintln!("{reason}");
+                    }
+                    if let Some(transition) = &mut self.transition {
+                        transition.freeze(0.5);
+                    }
+                    shot.started = true;
+                    return false;
+                }
+                halfway(self)
             }
             ShotKind::PresentTools => {
                 // Drawn the frame after the tools are set out.
