@@ -3,9 +3,9 @@
 //! with tab ids as panels and exactly one panel per group; tabs in no pane
 //! wait in the top bar. Plain data, tested without a window.
 
-use craft_ui::docking::{Action, Layout, Node, Placement, Zone};
-use craft_ui::layout::{SplitAxis, SplitSize, split_rect};
 use egui::Rect;
+use glyphst_ui::craft::docking::{Action, Layout, Node, Placement, Zone};
+use glyphst_ui::craft::layout::{SplitAxis, SplitSize, split_rect};
 
 /// Space between panes, where the divider is.
 pub const GAP: f32 = 12.0;

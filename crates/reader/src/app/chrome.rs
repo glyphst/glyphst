@@ -522,7 +522,7 @@ impl ReaderApp {
     fn pane_dividers(&mut self, ui: &mut egui::Ui, dividers: &[Divider]) {
         let tokens = Tokens::get(ui.ctx());
         for divider in dividers {
-            let horizontal = divider.axis == craft_ui::layout::SplitAxis::Horizontal;
+            let horizontal = divider.axis == glyphst_ui::craft::layout::SplitAxis::Horizontal;
             if horizontal {
                 ui.painter().vline(
                     divider.rect.center().x,
@@ -536,7 +536,7 @@ impl ReaderApp {
                     tokens.hairline(),
                 );
             }
-            let style = craft_ui::layout::ResizeHandleStyle {
+            let style = glyphst_ui::craft::layout::ResizeHandleStyle {
                 hovered: tokens.rule_strong,
                 dragged: tokens.accent,
                 focused: tokens.accent,
@@ -546,7 +546,7 @@ impl ReaderApp {
             } else {
                 Rect::from_center_size(divider.rect.center(), vec2(divider.rect.width(), 4.0))
             };
-            let delta = craft_ui::layout::ResizeHandle::new(
+            let delta = glyphst_ui::craft::layout::ResizeHandle::new(
                 Id::new(("pane-divider", divider.path_bits, divider.depth)),
                 divider.axis,
                 handle,
@@ -563,7 +563,7 @@ impl ReaderApp {
                 );
                 self.panes.resize(
                     divider.path(),
-                    craft_ui::layout::SplitSize::Ratio(first / divider.available.max(1.0)),
+                    glyphst_ui::craft::layout::SplitSize::Ratio(first / divider.available.max(1.0)),
                 );
             }
         }
@@ -582,8 +582,12 @@ impl ReaderApp {
                 .iter()
                 .find(|(_, rect)| rect.contains(pos))
                 .and_then(|&(pane, rect)| {
-                    let zone = craft_ui::docking::drop_zone(rect, 0.0, pos)?;
-                    Some((pane, zone, craft_ui::docking::zone_rect(rect, zone)?))
+                    let zone = glyphst_ui::craft::docking::drop_zone(rect, 0.0, pos)?;
+                    Some((
+                        pane,
+                        zone,
+                        glyphst_ui::craft::docking::zone_rect(rect, zone)?,
+                    ))
                 })
         });
         if released {
@@ -612,10 +616,10 @@ impl ReaderApp {
             dots(r.right_bottom(), r.left_bottom());
             dots(r.left_bottom(), r.left_top());
             let label = match zone {
-                craft_ui::docking::Zone::Left => "split left",
-                craft_ui::docking::Zone::Right => "split right",
-                craft_ui::docking::Zone::Top => "split up",
-                craft_ui::docking::Zone::Bottom => "split down",
+                glyphst_ui::craft::docking::Zone::Left => "split left",
+                glyphst_ui::craft::docking::Zone::Right => "split right",
+                glyphst_ui::craft::docking::Zone::Top => "split up",
+                glyphst_ui::craft::docking::Zone::Bottom => "split down",
                 _ => "open here",
             };
             painter.text(
@@ -965,14 +969,14 @@ fn resize_handle(
     min: f32,
 ) -> f32 {
     let handle = Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom()));
-    let style = craft_ui::layout::ResizeHandleStyle {
+    let style = glyphst_ui::craft::layout::ResizeHandleStyle {
         hovered: tokens.rule_strong,
         dragged: tokens.accent,
         focused: tokens.accent,
     };
-    craft_ui::layout::ResizeHandle::new(
+    glyphst_ui::craft::layout::ResizeHandle::new(
         Id::new((id, "resize")),
-        craft_ui::layout::SplitAxis::Horizontal,
+        glyphst_ui::craft::layout::SplitAxis::Horizontal,
         handle,
         "Resize",
         style,

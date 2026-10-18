@@ -7,8 +7,10 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-craft-ui.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
 material-colors.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

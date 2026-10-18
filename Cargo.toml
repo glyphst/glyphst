@@ -31,8 +31,6 @@ base64 = "0.23"
 # eframe's dependencies); MIT OR Apache-2.0.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 bytemuck = { version = "1", features = ["derive"] }
-# Shared egui controls of the Craft apps (tabs, docking, theme helpers); MIT OR Apache-2.0.
-craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675", features = ["serde"] }
 dirs = "7"
 eframe = { version = "0.36", default-features = false }
 egui = "0.36"

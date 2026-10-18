@@ -183,8 +183,8 @@ fn parse_args() -> Result<Launch> {
             "--spread" => launch.arrangement.get_or_insert_default().spread = true,
             "--split" => {
                 launch.split = match value()?.as_str() {
-                    "right" => Some(craft_ui::docking::Zone::Right),
-                    "down" => Some(craft_ui::docking::Zone::Bottom),
+                    "right" => Some(glyphst_ui::craft::docking::Zone::Right),
+                    "down" => Some(glyphst_ui::craft::docking::Zone::Bottom),
                     other => bail!("--split takes right or down, not {other}"),
                 };
             }

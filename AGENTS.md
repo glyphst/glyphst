@@ -1,7 +1,8 @@
 # Glyphst
 
 Glyphst Reader, a Rust PDF and EPUB reader on egui and wgpu (GPU vector
-pages through `pdf-gpu`), with artcraft's craft-ui components.
+pages through `pdf-gpu`), with artcraft's craft-ui components copied into
+`glyphst-ui` (`glyphst_ui::craft`).
 
 ## Working agreements
 

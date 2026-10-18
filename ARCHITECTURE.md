@@ -373,10 +373,12 @@ When redb reports a file from an older file format
 ## Dependency maintenance
 
 [Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin crates.io
-versions and Git revisions (craft-libs for craft-ui, merman for Mermaid).
+versions and Git revisions (merman for Mermaid).
 Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml). egui, eframe,
-egui_extras and craft-ui move together (craft-ui follows egui's releases),
-and `pdf-gpu` uses egui's wgpu. Exact renderer/compiler/math pins and major
+egui_extras and egui_commonmark move together, and `pdf-gpu` uses egui's
+wgpu. The craft-ui parts the Reader uses are a copy in
+`crates/ui/src/craft/` (from craft-libs at a recorded revision, MIT), so
+they follow egui upgrades here instead of waiting on craft-libs. Exact renderer/compiler/math pins and major
 library upgrades require compatibility work.
 
 The workspace's `../references/` holds read-only clones of upstream projects

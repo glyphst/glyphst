@@ -1341,15 +1341,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-ui"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5c874d51eeb3de70e735c8ce87a59a7dedd47675#5c874d51eeb3de70e735c8ce87a59a7dedd47675"
-dependencies = [
- "egui",
- "serde",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3042,7 +3033,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "craft-ui",
  "dirs 7.0.0",
  "eframe",
  "egui",
@@ -3111,11 +3101,11 @@ dependencies = [
 name = "glyphst-ui"
 version = "0.1.0"
 dependencies = [
- "craft-ui",
  "egui",
  "egui_extras",
  "material-colors",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

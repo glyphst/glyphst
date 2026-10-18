@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use craft_ui::docking::Zone;
 use eframe::egui_wgpu;
 use glyphst_ai::chatgpt_subscription::ChatGptSubscription;
 use glyphst_core::{
@@ -16,6 +15,7 @@ use glyphst_core::{
 use glyphst_effects::EffectDef;
 use glyphst_library::{ActivityKind, DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
+use glyphst_ui::craft::docking::Zone;
 use glyphst_ui::{Tip, layout};
 
 use crate::{

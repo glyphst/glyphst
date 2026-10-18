@@ -1,7 +1,7 @@
 //! Document tabs (pen components `tab` and `tab/active`): 36pt cells split
 //! by hairlines; the active one is `surface` with a `▌` accent mark in the
 //! icon's place, the title in full text and a dirty dot; others are faint
-//! on the base. Laid out with `craft_ui::tabs`, painted here.
+//! on the base. Laid out with `crate::craft::tabs`, painted here.
 
 use egui::{Align2, Rect, Response, Ui, Vec2, vec2};
 

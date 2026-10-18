@@ -5,7 +5,7 @@
 //! component reads [`Tokens::get`]. A [`Palette`] generated from a seed
 //! colour tints the same tokens (see [`crate::scheme`]).
 
-use craft_ui::theme::WidgetPalette;
+use crate::craft::theme::WidgetPalette;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 

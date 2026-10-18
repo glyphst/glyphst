@@ -2,7 +2,7 @@
 //! the `g▌` mark (home, on `surface` while home shows), the document
 //! tabs, the page tabs (shortcuts, new tabs, reading activity), `+` for a
 //! new tab, and at the right the palette's search field, theme, settings
-//! and the menu. Tabs are laid out by `craft_ui::tabs` and painted by
+//! and the menu. Tabs are laid out by `glyphst_ui::craft::tabs` and painted by
 //! `glyphst_ui::tab::DocTab`.
 
 use egui::{Rect, Sense, pos2, vec2};
@@ -105,7 +105,7 @@ impl ReaderApp {
             + 3.0 * 30.0
             + 24.0
             + page_widths.iter().sum::<f32>();
-        let fit = craft_ui::tabs::fit(
+        let fit = glyphst_ui::craft::tabs::fit(
             &natural,
             self.active.unwrap_or(0),
             (bar.width() - controls).max(0.0),
@@ -135,7 +135,7 @@ impl ReaderApp {
                 BarTab::Page(index) => ("bar-page", index as u64),
                 BarTab::Document(index) => ("bar-tab", ids[index]),
             });
-            let response = craft_ui::tabs::Tab::new(id, tab.title, tab.active)
+            let response = glyphst_ui::craft::tabs::Tab::new(id, tab.title, tab.active)
                 .sense(Sense::click_and_drag())
                 .focus_stroke(egui::Stroke::new(1.0, tokens.accent))
                 .show_at(ui, rect, |_, _| {});

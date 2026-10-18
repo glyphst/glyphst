@@ -30,11 +30,15 @@
 //! | toolbox (frames 01, 02h) | [`toolbox`] |
 //! | pad/face, pad/button, pad/dpad, pad-hint (frame 01b) | [`pad_glyph`] |
 //! | prompt, prompt/choice (frames 01b, 09a, 09j) | [`prompt`] |
+//!
+//! [`craft`] holds the artcraft craft-ui pieces underneath: icon buttons, the
+//! SVG icon set, tabs, split geometry, resize handles and the docking model.
 
 pub mod badge;
 pub mod button;
 pub mod chat;
 pub mod cover;
+pub mod craft;
 pub mod field;
 pub mod fonts;
 pub mod gallery;

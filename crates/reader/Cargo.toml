@@ -9,7 +9,6 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-craft-ui.workspace = true
 dirs.workspace = true
 eframe = { workspace = true, features = [
     "accesskit",

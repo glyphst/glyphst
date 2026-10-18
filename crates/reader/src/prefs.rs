@@ -236,7 +236,7 @@ pub struct LastSession {
     pub active: Option<usize>,
     /// The split panes, with indices into `files`.
     #[serde(default)]
-    pub panes: Option<craft_ui::docking::Layout<usize>>,
+    pub panes: Option<glyphst_ui::craft::docking::Layout<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -422,15 +422,15 @@ mod tests {
                     },
                 ],
                 active: Some(1),
-                panes: Some(craft_ui::docking::Layout {
-                    root: Some(craft_ui::docking::Node::Split {
-                        axis: craft_ui::layout::SplitAxis::Horizontal,
-                        size: craft_ui::layout::SplitSize::Ratio(0.4),
-                        first: Box::new(craft_ui::docking::Node::Tabs {
+                panes: Some(glyphst_ui::craft::docking::Layout {
+                    root: Some(glyphst_ui::craft::docking::Node::Split {
+                        axis: glyphst_ui::craft::layout::SplitAxis::Horizontal,
+                        size: glyphst_ui::craft::layout::SplitSize::Ratio(0.4),
+                        first: Box::new(glyphst_ui::craft::docking::Node::Tabs {
                             panels: vec![0],
                             active: 0,
                         }),
-                        second: Box::new(craft_ui::docking::Node::Tabs {
+                        second: Box::new(glyphst_ui::craft::docking::Node::Tabs {
                             panels: vec![1],
                             active: 0,
                         }),
