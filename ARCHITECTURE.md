@@ -61,7 +61,14 @@ Images and image masks become textures at their own resolution. In the
 photocraft's `gpu_canvas`): `prepare` renders paper and resident pages into a
 multisampled `OffscreenTarget`, and a content effect composites the pages,
 or a transition from a snapshot of the previous view (another tab, the page
-before a turn), over the background effect. Raster layers are
+before a turn, a closed tab's last image, kept a few frames, or nothing
+coming from Home), over the background effect. A switch while another runs
+snapshots what is on screen by drawing the running transition once more
+into the new view's snapshot; going back to the book being left plays it
+backwards (the live view as `from`, the snapshot as `to`). Transitions get
+an origin (the click or switcher card that caused them) and a seed. While
+a switch runs between books with different backgrounds, the backdrop draws
+both live into two images and blends them with the same transition. Raster layers are
 re-rasterized for the view once it is still. Each page is scissored to its
 page box, as MuPDF clips to its pixmap. Pages load on a worker thread per
 document (which also builds image mip chains) and stay within a GPU byte
@@ -87,8 +94,9 @@ window's transparency; the sections only the GPUI Reader read are ignored
 and dropped on the next save. Keys the file held stay in it and other keys
 go to the keychain.
 Scripted runs and fake providers keep settings and keys in memory. Its own
-preferences (theme and the rest of Settings › Appearance, transition,
-background, smooth scrolling and reduce motion, keyboard shortcuts, last
+preferences (theme and the rest of Settings › Appearance, the book-switch
+and page-turn transitions, the switcher's layout, background, smooth
+scrolling and reduce motion, keyboard shortcuts, last
 session with its panes, page counts for home) live in eframe storage under the config directory
 (`glyphst/reader-egui/app.ron`, the path from before the switch); scripted
 runs (`--bench`, `--screenshot…`) save nothing and leave the library
@@ -101,13 +109,17 @@ built-in by id, and the user layer is reloaded whole when the folder's
 files change (checked once a second while the window has focus). Three
 kinds are chosen in the Reader: the background behind the whole stage
 (the focused book's; `image: true` backgrounds draw the wallpaper, read
-and mipmapped on a worker thread), the page transition (the incoming
-book's) and the page tint, an overlay that each view draws from its pages
+and mipmapped on a worker thread), the book switch's transition (the
+incoming book's; `random` picks another each switch, `transition.rs` plans
+it: a manifest's `random:` parameters vary unless the user set them, and
+reduce motion makes every transition a 150 ms crossfade), the page turn's
+transition and the page tint, an overlay that each view draws from its pages
 into a tinted image before the content effect, so tints survive
 transitions and splits. Defaults are set in Settings (the background in
 Appearance as a theme colour, a colour, the wallpaper with its dim, blur
 and parallax, or an effect; a page tint per light and dark theme, also in
-Appearance; transitions in Effects), with parameters per effect (a
+Appearance; transitions and the switcher's layout in Effects), with
+parameters per effect (a
 `colour` parameter is sRGB packed in a float; `themed` tints get the
 theme's text and pane colours from the app); a book's own choices (the Effects drawer) live in
 the Reader's preferences by document path, not in the library, whose
@@ -167,6 +179,17 @@ converts between page and document coordinates); the camera turns them,
 so nothing reloads, and the library's document preferences keep both. A
 document reloads in place (same tab, same position) on the Reload command
 or when its file changed while the window was in the background.
+
+The book switcher (`switcher/` for its state and layouts, `app/switcher.rs`
+on screen) keeps the open books in the order they were last read, settled
+once a frame unless it is peeking. Ctrl+Tab held opens it on the previous
+book and each move activates that book as a peek (its transition faster,
+no card or order update); letting go of the modifier, read each frame from
+egui's input since the keymap sees only presses, keeps it; a tap shorter
+than 180 ms shows nothing. While it is open it takes Tab, the arrows, Enter
+and Escape before the keymap, and the pad presses keys. Cards are each
+book's last view drawn smaller (the hidden `shrink` effect) when the book is
+left, else its cover.
 
 Gamepads (`pad/`) are read on a thread that owns gilrs, blocks on pad
 events and wakes the app, so a press on an idle window lands at once. Before
