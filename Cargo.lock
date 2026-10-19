@@ -3097,6 +3097,7 @@ dependencies = [
  "glyphst-pdf",
  "glyphst-pdf-gpu",
  "glyphst-pdf-translation-service",
+ "glyphst-search",
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-ui",

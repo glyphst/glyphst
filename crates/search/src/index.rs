@@ -318,6 +318,18 @@ impl Store {
         )?)
     }
 
+    /// The document with this content, if the index has it.
+    pub fn doc_id(&self, sha256: &[u8; 32]) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM docs WHERE sha256 = ?1",
+                [sha256.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// The path the index last saw for a file, by its content hash.
     pub fn doc_path(&self, sha256: &[u8; 32]) -> Result<Option<PathBuf>> {
         Ok(self

@@ -11,11 +11,12 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 10] = [
+pub const STATES: [&str; 11] = [
     "all",
     "item",
     "duplicate",
     "merged",
+    "search",
     "review",
     "backfill",
     "folder",
@@ -366,6 +367,143 @@ pub fn duplicate(library: &mut LibraryStore) -> Option<DocumentId> {
         .collect::<Vec<_>>();
     let _ = library.set_related_items(copy, &related);
     Some(copy)
+}
+
+/// Passages of the demo papers for the search (frame 04n): title start,
+/// 0-based page, section, text.
+const PASSAGES: &[(&str, usize, &str, &str)] = &[
+    (
+        "Attention Is All",
+        2,
+        "3 Model Architecture",
+        "Most competitive neural sequence transduction models have an encoder-decoder structure; the Transformer follows this overall architecture using stacked self-attention.",
+    ),
+    (
+        "Attention Is All",
+        3,
+        "3.2 Attention",
+        "We call our particular attention “Scaled Dot-Product Attention”. The input consists of queries and keys of dimension d_k, and values of dimension d_v.",
+    ),
+    (
+        "Attention Is All",
+        4,
+        "3.2.2 Multi-Head Attention",
+        "Multi-Head Attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.",
+    ),
+    (
+        "Attention Is All",
+        5,
+        "3.2.3 Applications of Attention",
+        "The Transformer uses multi-head attention in three different ways: encoder-decoder attention, encoder self-attention and masked decoder self-attention.",
+    ),
+    (
+        "Attention Is All",
+        8,
+        "6.2 Model Variations",
+        "In Table 3 rows (A), we vary the number of attention heads and the attention key and value dimensions.",
+    ),
+    (
+        "BERT",
+        2,
+        "3 BERT",
+        "BERT's model architecture is a multi-layer bidirectional Transformer encoder whose layers use multi-head self-attention over the whole input sequence.",
+    ),
+    (
+        "BERT",
+        5,
+        "5 Ablation Studies",
+        "We use 12 attention heads in BERT-base and 16 in BERT-large, with a hidden size of 768 and 1024.",
+    ),
+    (
+        "Mamba",
+        0,
+        "1 Introduction",
+        "Many subquadratic-time architectures address the computational inefficiency of Transformers on long sequences, replacing multi-head attention whose cost grows quadratically with sequence length.",
+    ),
+    (
+        "Transformers are Inherently",
+        5,
+        "4 Succinctness",
+        "We show that a single attention head can express any regular language recognised by a small automaton, and that heads compose.",
+    ),
+    (
+        "Denoising Diffusion",
+        1,
+        "4 Experiments",
+        "The U-Net backbone uses self-attention at the 16×16 feature map resolution, between the convolutional residual blocks.",
+    ),
+    (
+        "Retrieval-Augmented",
+        3,
+        "2 Methods",
+        "The generator attends to the retrieved passages; we use the attention of the decoder over the concatenated inputs.",
+    ),
+];
+
+/// A search index of the demo library (frame 04n), its text partly read:
+/// the papers with passages are done, the rest wait.
+pub fn search_index(library: &LibraryStore) -> Option<PathBuf> {
+    use glyphst_search::{
+        Store,
+        chunk::{Chunk, PageChunks},
+        index::Step,
+    };
+    let path =
+        std::env::temp_dir().join(format!("glyphst-search-demo-{}.sqlite", std::process::id()));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let mut store = Store::open(&path).ok()?;
+    let snapshot = crate::library_search::snapshot(library);
+    store.reconcile(&snapshot, 0).ok()?;
+    for item in library.library_items() {
+        let pages = PASSAGES
+            .iter()
+            .filter(|(title, ..)| item.title.starts_with(title))
+            .map(|(_, page, section, text)| {
+                (
+                    *page,
+                    PageChunks {
+                        chunks: vec![Chunk {
+                            page: *page,
+                            glyph_start: 0,
+                            glyph_end: text.chars().count(),
+                            doc_offset: page * 2_000,
+                            quote: text.chars().take(32).collect(),
+                            prefix: String::new(),
+                            suffix: String::new(),
+                            rects: Vec::new(),
+                            section: section.to_string(),
+                            text: text.to_string(),
+                        }],
+                        chars: text.chars().count(),
+                        image_only: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if pages.is_empty() {
+            continue;
+        }
+        let Some(file) = snapshot.files.iter().find(|file| file.item_id == item.id.0) else {
+            continue;
+        };
+        let Ok(Some(doc_id)) = store.doc_id(&file.sha256) else {
+            continue;
+        };
+        let _ = store.save_step(
+            &Step {
+                doc_id,
+                format: "pdf",
+                page_count: 12,
+                pages: &pages,
+                pages_done: 12,
+                glyphs_done: 24_000,
+            },
+            0,
+        );
+    }
+    Some(path)
 }
 
 /// The demo's first paper, chosen in the `item` state.

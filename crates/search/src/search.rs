@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    path::PathBuf,
 };
 
 use anyhow::Result;
@@ -35,6 +36,8 @@ pub struct SearchRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageHit {
     pub chunk_id: i64,
+    /// The file the passage is in.
+    pub path: PathBuf,
     /// 0-based.
     pub page: usize,
     pub section: String,
@@ -68,7 +71,8 @@ pub struct ItemHit {
 pub struct SearchResults {
     /// Strong matches first.
     pub items: Vec<ItemHit>,
-    /// How many of `items`, from the end, score under half the best.
+    /// How many of `items`, from the end, are weaker: under half the best
+    /// score, or with under half the words.
     pub weaker: usize,
     /// The words searched for.
     pub words: Vec<String>,
@@ -185,6 +189,7 @@ fn stem(word: &str) -> &str {
 
 struct Candidate {
     chunk_id: i64,
+    path: String,
     doc_id: i64,
     page: usize,
     section: String,
@@ -237,6 +242,7 @@ impl Store {
             let (snippet, highlights) = marked(&candidate.snippet);
             let hit = PageHit {
                 chunk_id: candidate.chunk_id,
+                path: PathBuf::from(&candidate.path),
                 page: candidate.page,
                 section: candidate.section,
                 snippet,
@@ -284,7 +290,8 @@ impl Store {
                 more_pages: 0,
             });
             entry.in_details = true;
-            entry.score = entry.score.max(keyword_score(coverage, 1.0) + 0.5);
+            // Added to its best passage's score below.
+            entry.score = 0.25 + 0.5 * coverage;
         }
 
         let mut items = by_item
@@ -295,29 +302,40 @@ impl Store {
                 // One passage per page.
                 let mut pages_seen = HashSet::new();
                 item.pages.retain(|hit| pages_seen.insert(hit.page));
+                // Its best passage, more for each further page that matched
+                // and for its own text matching.
                 if let Some(best) = item.pages.first() {
-                    item.score = item.score.max(best.score);
+                    let others = item.pages.len().saturating_sub(1) as f32;
+                    item.score += best.score + 0.15 * others.ln_1p();
                 }
                 item.more_pages = item.pages.len().saturating_sub(PAGES_PER_ITEM);
                 item.pages.truncate(PAGES_PER_ITEM);
                 item
             })
-            // Half the words, at least, or nothing.
-            .filter(|item| {
-                item.in_details
-                    || item
-                        .pages
-                        .first()
-                        .is_some_and(|hit| hit.coverage >= 0.5 || query.terms() == 1)
-            })
             .collect::<Vec<_>>();
-        items.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.item_id.cmp(&b.item_id)));
+        // Strong: half the words at least, or the item's own text. The rest,
+        // and those under half the best score, fold as weaker matches.
+        let qualifies = |item: &ItemHit| {
+            item.in_details
+                || query.terms() == 1
+                || item.pages.first().is_some_and(|hit| hit.coverage >= 0.5)
+        };
+        let best = items
+            .iter()
+            .filter(|item| qualifies(item))
+            .map(|item| item.score)
+            .fold(0.0_f32, f32::max);
+        let weak = |item: &ItemHit| !qualifies(item) || item.score < best * 0.5;
+        items.sort_by(|a, b| {
+            weak(a)
+                .cmp(&weak(b))
+                .then(b.score.total_cmp(&a.score))
+                .then(a.item_id.cmp(&b.item_id))
+        });
         if request.limit > 0 {
             items.truncate(request.limit);
         }
-        let weaker = items.first().map(|top| top.score * 0.5).map_or(0, |half| {
-            items.iter().filter(|item| item.score < half).count()
-        });
+        let weaker = items.iter().filter(|item| weak(item)).count();
         Ok(SearchResults {
             items,
             weaker,
@@ -335,8 +353,8 @@ impl Store {
         let sql = format!(
             "SELECT c.id, c.doc_id, c.page, c.section,
                     snippet({table}, 0, '{OPEN}', '{CLOSE}', '…', 24),
-                    c.text, c.doc_offset, c.quote, c.prefix, c.suffix, {rank}
-             FROM {table} JOIN chunks c ON c.id = {table}.rowid
+                    c.text, c.doc_offset, c.quote, c.prefix, c.suffix, {rank}, d.path
+             FROM {table} JOIN chunks c ON c.id = {table}.rowid JOIN docs d ON d.id = c.doc_id
              WHERE {table} MATCH ?1 ORDER BY {rank} LIMIT {CANDIDATES}"
         );
         let mut statement = self.conn.prepare(&sql)?;
@@ -354,6 +372,7 @@ impl Store {
                 suffix: row.get(9)?,
                 // bm25 is lower for better matches.
                 rank: -(row.get::<_, f64>(10)? as f32),
+                path: row.get(11)?,
             })
         })?;
         for row in rows {
@@ -365,8 +384,10 @@ impl Store {
     /// One or two CJK characters, below what trigrams can match.
     fn collect_like(&self, run: &str, out: &mut Vec<Candidate>) -> Result<()> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT id, doc_id, page, section, text, doc_offset, quote, prefix, suffix
-             FROM chunks WHERE instr(text, ?1) > 0 LIMIT {CANDIDATES}"
+            "SELECT c.id, c.doc_id, c.page, c.section, c.text, c.doc_offset, c.quote, c.prefix,
+                    c.suffix, d.path
+             FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE instr(c.text, ?1) > 0 LIMIT {CANDIDATES}"
         ))?;
         let rows = statement.query_map([run], |row| {
             let text: String = row.get(4)?;
@@ -382,6 +403,7 @@ impl Store {
                 prefix: row.get(7)?,
                 suffix: row.get(8)?,
                 rank: 1.0,
+                path: row.get(9)?,
             })
         })?;
         for row in rows {

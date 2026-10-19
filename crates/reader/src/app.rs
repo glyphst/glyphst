@@ -453,6 +453,9 @@ pub struct ReaderApp {
     work_adds: Vec<crate::library_dialogs::WorkAdd>,
     /// Importing from Zotero (frame 04j).
     zotero: Option<Box<crate::zotero_import::ZoteroImport>>,
+    /// The library's text search (frame 04n); started when the app keeps
+    /// its data, or by a demo.
+    library_search: Option<crate::library_search::SearchService>,
 }
 
 impl ReaderApp {
@@ -689,6 +692,7 @@ impl ReaderApp {
             folder_move: None,
             work_adds: Vec::new(),
             zotero: None,
+            library_search: None,
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
@@ -711,6 +715,10 @@ impl ReaderApp {
                         tab.selected = id;
                     }
                     "review" => tab.view = crate::library_tab::View::NeedsReview,
+                    "search" => {
+                        tab.filter = "multi-head attention".to_string();
+                        tab.selected = crate::library_demo::first_item(&app.library);
+                    }
                     "duplicate" | "merged" => {
                         let first = crate::library_demo::first_item(&app.library);
                         let copy = crate::library_demo::duplicate(&mut app.library);
@@ -726,6 +734,18 @@ impl ReaderApp {
                         }
                     }
                     _ => {}
+                }
+            }
+            // The search reads the demo's index, partly read and paused.
+            if state == "search"
+                && let Some(path) = crate::library_demo::search_index(&app.library)
+            {
+                match crate::library_search::SearchService::start(&path, &cc.egui_ctx) {
+                    Ok(service) => {
+                        service.set_paused(true);
+                        app.library_search = Some(service);
+                    }
+                    Err(error) => eprintln!("failed to start the demo search: {error:#}"),
                 }
             }
             // Merged as the item pane's `[ merge ]` does, toast and all.
@@ -1420,6 +1440,7 @@ impl ReaderApp {
                         docs: &docs,
                         vault: vault.as_deref(),
                         import: self.importer.progress(),
+                        search: self.library_search.as_mut(),
                     },
                 );
                 if let Some(action) = action {
@@ -1546,6 +1567,18 @@ impl ReaderApp {
                 })
             }
             Action::TagColor(tag, color) => self.library.set_tag_color(tag, color),
+            Action::OpenAt { path, page, anchor } => {
+                self.open(&path, ctx, Some(page));
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.path == path) {
+                    tab.go_to_passage(page, anchor);
+                }
+                Ok(())
+            }
+            Action::AskLibrary(question) => {
+                self.notices
+                    .push(format!("Asking the library comes next: “{question}”"));
+                Ok(())
+            }
             Action::AddByIdentifier => {
                 let mailto = Some(self.prefs.library.contact_email.trim().to_string())
                     .filter(|address| !address.is_empty());
@@ -5051,6 +5084,19 @@ impl eframe::App for ReaderApp {
             for notice in self.vault_sync.poll(&mut self.library, vault) {
                 self.notices.push(notice);
             }
+            if self.library_search.is_none() {
+                let path = crate::library_search::SearchService::default_path();
+                match crate::library_search::SearchService::start(&path, &ctx) {
+                    Ok(service) => self.library_search = Some(service),
+                    Err(error) => {
+                        log::warn!("the library's search could not start: {error:#}");
+                    }
+                }
+            }
+        }
+        if let Some(search) = &mut self.library_search {
+            search.follow(&self.library);
+            search.poll();
         }
         // Pictures dropped while the assistant is open go with its next
         // message.

@@ -1008,6 +1008,21 @@ impl DocumentTab {
         }
     }
 
+    /// Goes to a passage the library's search found: its page and, in a
+    /// reflowed book (where pages depend on the layout), its words.
+    pub fn go_to_passage(&mut self, page: usize, anchor: Option<SemanticTextAnchor>) {
+        self.remember();
+        let page = page.min(self.layout.len().saturating_sub(1));
+        self.go_to_point(page, None);
+        if self.is_reflowed()
+            && let Some(anchor) = anchor
+        {
+            self.view.clamp(&self.layout, self.viewport);
+            self.pending_anchor = Some((anchor, 0.2, self.view.origin));
+            self.resolve_pending_anchor();
+        }
+    }
+
     /// The first words at the top of the view, to name a bookmark.
     pub fn words_at_top(&self, count: usize) -> Option<String> {
         let page = self.position().page.saturating_sub(1);

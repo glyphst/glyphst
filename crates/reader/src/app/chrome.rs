@@ -902,6 +902,7 @@ impl ReaderApp {
                 docs: &docs,
                 vault: vault.as_deref(),
                 import: None,
+                search: None,
             },
             card,
             id,

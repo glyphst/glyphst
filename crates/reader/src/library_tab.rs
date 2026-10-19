@@ -20,6 +20,10 @@ use glyphst_ui::{
     text,
 };
 
+mod search_view;
+
+use search_view::{filter_words, search_words};
+
 use crate::{
     covers::Covers,
     home::Doc,
@@ -79,6 +83,14 @@ pub enum LibraryTabAction {
     },
     /// Colour a tag, or take its colour off.
     TagColor(LibraryTagId, Option<HighlightColor>),
+    /// Open a search hit's file at its page.
+    OpenAt {
+        path: PathBuf,
+        page: usize,
+        anchor: Option<glyphst_core::SemanticTextAnchor>,
+    },
+    /// Ask the assistant about the library, starting from a search.
+    AskLibrary(String),
 }
 
 /// What the tab needs from the app this frame.
@@ -91,6 +103,8 @@ pub struct TabContext<'a> {
     pub vault: Option<&'a Path>,
     /// The import under way, or the last one's tally.
     pub import: Option<&'a crate::import::ImportProgress>,
+    /// The library's text search, when the index runs.
+    pub search: Option<&'a mut crate::library_search::SearchService>,
 }
 
 #[derive(Default)]
@@ -103,6 +117,8 @@ pub struct LibraryTab {
     folded: HashSet<LibraryCollectionId>,
     /// The chosen item's note text, read once per choice.
     note: Option<(DocumentId, String)>,
+    /// The search's weaker matches are shown.
+    weaker_open: bool,
 }
 
 impl LibraryTab {
@@ -364,7 +380,29 @@ impl LibraryTab {
         let ui = &mut ui;
         let width = inner.width();
         let ids = self.query(library);
-        let (kicker, heading) = self.titles(library);
+        let (mut kicker, mut heading) = self.titles(library);
+        // Words that are not `by:`/`tag:`/`year:` search the text (04n).
+        let searching = context
+            .search
+            .is_some()
+            .then(|| search_words(&self.filter))
+            .filter(|words| !words.is_empty());
+        if let (Some(words), Some(service)) = (&searching, context.search.as_deref_mut()) {
+            let scoped = LibraryTab {
+                view: self.view,
+                filter: filter_words(&self.filter),
+                sort: self.sort,
+                ..LibraryTab::default()
+            };
+            service.search(glyphst_search::SearchRequest {
+                text: words.clone(),
+                items: Some(scoped.query(library).iter().map(|id| id.0).collect()),
+                typing: !self.filter.ends_with(char::is_whitespace),
+                limit: 200,
+            });
+            kicker = format!("{kicker} / search");
+            heading = words.clone();
+        }
 
         // Heading: `── library / machine learning ──`, the name, counts, and
         // the add buttons at the right.
@@ -395,6 +433,21 @@ impl LibraryTab {
         if review > 0 {
             counts.push_str(&format!(" · {review} need review"));
         }
+        if searching.is_some() {
+            counts = context
+                .search
+                .as_deref()
+                .and_then(|service| service.results())
+                .map(|results| {
+                    let passages = results
+                        .items
+                        .iter()
+                        .map(|item| item.pages.len() + item.more_pages)
+                        .sum::<usize>();
+                    format!("{} items · {passages} passages", results.items.len())
+                })
+                .unwrap_or_default();
+        }
         text::line(
             ui,
             pos2(title.right() + 12.0, line.center().y + 4.0),
@@ -410,7 +463,11 @@ impl LibraryTab {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         buttons.spacing_mut().item_spacing.x = 8.0;
-        if buttons
+        if let Some(words) = &searching {
+            if buttons.add(Button::bracket("◆ ask the library")).clicked() {
+                action = Some(LibraryTabAction::AskLibrary(words.clone()));
+            }
+        } else if buttons
             .add(Button::bracket_muted("import zotero"))
             .clicked()
         {
@@ -422,6 +479,7 @@ impl LibraryTab {
             .filter(|item| item.trashed_at.is_none() && library.item_enrichment(item.id).is_none())
             .count();
         if unenriched > 0
+            && searching.is_none()
             && buttons
                 .add(Button::bracket_muted(&format!("◆ enrich {unenriched}")))
                 .on_hover_text("summarise, tag and file the items without an ai pass")
@@ -429,25 +487,45 @@ impl LibraryTab {
         {
             action = Some(LibraryTabAction::Backfill);
         }
-        let add = buttons.add(Button::bracket("+ add"));
-        egui::Popup::menu(&add).show(|ui| {
-            menu::style(ui);
-            if menu::Item::new("files or folders…")
-                .icon("file-plus")
-                .show(ui)
-                .clicked()
-            {
-                action = Some(LibraryTabAction::OpenDialog);
-            }
-            if menu::Item::new("by doi, arxiv or isbn…")
-                .icon("hash")
-                .show(ui)
-                .clicked()
-            {
-                action = Some(LibraryTabAction::AddByIdentifier);
-            }
-        });
+        let add = if searching.is_none() {
+            Some(buttons.add(Button::bracket("+ add")))
+        } else {
+            None
+        };
+        if let Some(add) = &add {
+            egui::Popup::menu(add).show(|ui| {
+                menu::style(ui);
+                if menu::Item::new("files or folders…")
+                    .icon("file-plus")
+                    .show(ui)
+                    .clicked()
+                {
+                    action = Some(LibraryTabAction::OpenDialog);
+                }
+                if menu::Item::new("by doi, arxiv or isbn…")
+                    .icon("hash")
+                    .show(ui)
+                    .clicked()
+                {
+                    action = Some(LibraryTabAction::AddByIdentifier);
+                }
+            });
+        }
         ui.add_space(14.0);
+        // How much of the library's text is read yet.
+        if searching.is_some()
+            && let Some(service) = context.search.as_deref()
+        {
+            let status = service.status();
+            if status.done < status.docs {
+                let line = format!(
+                    "◌ text of {} / {} documents read · the rest are searched as they are read",
+                    status.done, status.docs
+                );
+                mono_line(ui, &line, tokens.faint, 11.0);
+                ui.add_space(10.0);
+            }
+        }
 
         // The filter and the order.
         let (controls, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
@@ -457,7 +535,12 @@ impl LibraryTab {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         controls_ui.spacing_mut().item_spacing.x = 12.0;
-        let sort = controls_ui.add(Button::plain(&format!("{} ▾", sort_label(self.sort))).small());
+        let sort_text = if searching.is_some() {
+            "best match".to_string()
+        } else {
+            format!("{} ▾", sort_label(self.sort))
+        };
+        let sort = controls_ui.add_enabled(searching.is_none(), Button::plain(&sort_text).small());
         egui::Popup::menu(&sort).show(|ui| {
             menu::style(ui);
             for field in [
@@ -508,6 +591,9 @@ impl LibraryTab {
         }
         if library.library_items().is_empty() {
             return self.empty(ui, tokens, context, width).or(action);
+        }
+        if searching.is_some() {
+            return self.search_part(ui, tokens, context, width).or(action);
         }
         if self.view == View::NeedsReview {
             return review_list(ui, tokens, library, &ids, width).or(action);
