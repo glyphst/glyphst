@@ -3221,6 +3221,74 @@ impl ReaderApp {
                 self.open_library();
                 None
             }
+            Command::LibraryImport => {
+                self.library_tab_action(crate::library_tab::LibraryTabAction::OpenDialog, ctx);
+                None
+            }
+            Command::LibraryAddByIdentifier => {
+                self.library_tab_action(crate::library_tab::LibraryTabAction::AddByIdentifier, ctx);
+                None
+            }
+            Command::LibraryEnrichAll => {
+                self.library_tab_action(crate::library_tab::LibraryTabAction::Backfill, ctx);
+                None
+            }
+            Command::LibraryImportZotero => {
+                self.library_tab_action(crate::library_tab::LibraryTabAction::ImportZotero, ctx);
+                None
+            }
+            Command::LibraryReviewAi => {
+                self.open_library();
+                if let Some(Page::Library(tab)) = self
+                    .page_focused
+                    .and_then(|index| self.pages.get_mut(index))
+                {
+                    tab.view = crate::library_tab::View::NeedsReview;
+                }
+                None
+            }
+            Command::LibraryMove => {
+                self.library_dialog = Some(self.choose_folder_dialog());
+                None
+            }
+            Command::LibraryPauseJobs => {
+                if self.library_jobs.is_paused() {
+                    self.library_jobs.resume();
+                    self.notices
+                        .push("The library's AI pass goes on.".to_string());
+                } else {
+                    self.library_jobs.pause();
+                    self.notices
+                        .push("The library's AI pass is paused.".to_string());
+                }
+                None
+            }
+            Command::LibraryOpenNote => {
+                let active = self.active.ok_or(Needs::Document.reason())?;
+                let note = self
+                    .library
+                    .library_item_for_path(&self.tabs[active].path)
+                    .and_then(|item| self.library.vault_note(item.id))
+                    .map(|record| record.relative_path.clone());
+                let vault = self
+                    .prefs
+                    .library
+                    .vault_root(self.library.files_root(), self.library.files_root_chosen());
+                match note.zip(vault) {
+                    Some((relative, vault)) => self.library_tab_action(
+                        crate::library_tab::LibraryTabAction::OpenNote(vault.join(relative)),
+                        ctx,
+                    ),
+                    None => return Err("This document has no note yet"),
+                }
+                None
+            }
+            Command::SidebarItem => {
+                let shown = self.prefs.show_sidebar && self.prefs.sidebar == SidebarTab::Item;
+                self.prefs.show_sidebar = !shown;
+                self.prefs.sidebar = SidebarTab::Item;
+                None
+            }
             Command::Home => {
                 self.activate(None);
                 None

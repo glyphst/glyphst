@@ -114,6 +114,11 @@ impl LibraryJobs {
         self.paused = None;
     }
 
+    /// Holds the AI pass until [`Self::resume`].
+    pub fn pause(&mut self) {
+        self.paused = Some("paused".to_string());
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused.is_some()
     }

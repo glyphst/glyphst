@@ -35,6 +35,18 @@ pub enum Command {
     ReadingActivity,
     /// The library tab (frame 04d).
     Library,
+    /// The library's imports, AI pass and folder (frames 04g–04k, 06d).
+    LibraryImport,
+    LibraryAddByIdentifier,
+    LibraryEnrichAll,
+    LibraryReviewAi,
+    LibraryImportZotero,
+    LibraryMove,
+    LibraryPauseJobs,
+    /// The active document's note in the vault, in the system's editor.
+    LibraryOpenNote,
+    /// The sidebar's item card for the active document (frame 03b).
+    SidebarItem,
     /// The home tab.
     Home,
     /// Gamepad mode (frames 09c–j), on or off.
@@ -195,7 +207,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 93] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -210,6 +222,15 @@ impl Command {
         Self::NewTab,
         Self::ReadingActivity,
         Self::Library,
+        Self::LibraryImport,
+        Self::LibraryAddByIdentifier,
+        Self::LibraryEnrichAll,
+        Self::LibraryReviewAi,
+        Self::LibraryImportZotero,
+        Self::LibraryMove,
+        Self::LibraryPauseJobs,
+        Self::LibraryOpenNote,
+        Self::SidebarItem,
         Self::Home,
         Self::GamepadMode,
         Self::GamepadMenu,
@@ -299,6 +320,15 @@ impl Command {
             Self::NewTab => "app.new_tab",
             Self::ReadingActivity => "app.reading_activity",
             Self::Library => "app.library",
+            Self::LibraryImport => "library.import",
+            Self::LibraryAddByIdentifier => "library.add_by_identifier",
+            Self::LibraryEnrichAll => "library.enrich_all",
+            Self::LibraryReviewAi => "library.review_ai",
+            Self::LibraryImportZotero => "library.import_zotero",
+            Self::LibraryMove => "library.move",
+            Self::LibraryPauseJobs => "library.pause_jobs",
+            Self::LibraryOpenNote => "library.open_note",
+            Self::SidebarItem => "view.sidebar_item",
             Self::Home => "app.home",
             Self::GamepadMode => "app.gamepad_mode",
             Self::GamepadMenu => "app.gamepad_menu",
@@ -392,6 +422,15 @@ impl Command {
             Self::NewTab => "New tab",
             Self::ReadingActivity => "Reading activity",
             Self::Library => "Library",
+            Self::LibraryImport => "Import a folder into the library",
+            Self::LibraryAddByIdentifier => "Add to the library by DOI, arXiv id or ISBN",
+            Self::LibraryEnrichAll => "Run the AI pass over the library",
+            Self::LibraryReviewAi => "Review the AI's tags and collections",
+            Self::LibraryImportZotero => "Import from Zotero",
+            Self::LibraryMove => "Move the library to another folder",
+            Self::LibraryPauseJobs => "Pause or resume the library's AI pass",
+            Self::LibraryOpenNote => "Open the document's note",
+            Self::SidebarItem => "Show the library item in the sidebar",
             Self::Home => "Home",
             Self::GamepadMode => "Gamepad mode",
             Self::GamepadMenu => "Gamepad mode's menu",
@@ -481,6 +520,15 @@ impl Command {
             Self::NewTab => "plus",
             Self::ReadingActivity => "activity",
             Self::Library => "library",
+            Self::LibraryImport => "folder-open",
+            Self::LibraryAddByIdentifier => "file-plus",
+            Self::LibraryEnrichAll => "sparkles",
+            Self::LibraryReviewAi => "inbox",
+            Self::LibraryImportZotero => "download",
+            Self::LibraryMove => "folder-open",
+            Self::LibraryPauseJobs => "pause",
+            Self::LibraryOpenNote => "file-text",
+            Self::SidebarItem => "library-big",
             Self::Home => "house",
             Self::GamepadMode | Self::GamepadMenu => "gamepad-2",
             Self::ToggleTransparency => "eye",
@@ -565,6 +613,15 @@ impl Command {
             | Self::NewTab
             | Self::ReadingActivity
             | Self::Library
+            | Self::LibraryImport
+            | Self::LibraryAddByIdentifier
+            | Self::LibraryEnrichAll
+            | Self::LibraryReviewAi
+            | Self::LibraryImportZotero
+            | Self::LibraryMove
+            | Self::LibraryPauseJobs
+            | Self::LibraryOpenNote
+            | Self::SidebarItem
             | Self::Home
             | Self::GamepadMode
             | Self::GamepadMenu
@@ -716,6 +773,15 @@ impl Command {
             | Self::KeyboardShortcuts
             | Self::ReadingActivity
             | Self::Library
+            | Self::LibraryImport
+            | Self::LibraryAddByIdentifier
+            | Self::LibraryEnrichAll
+            | Self::LibraryReviewAi
+            | Self::LibraryImportZotero
+            | Self::LibraryMove
+            | Self::LibraryPauseJobs
+            | Self::LibraryOpenNote
+            | Self::SidebarItem
             | Self::Home
             | Self::ToggleTransparency
             | Self::KeysStandard
@@ -835,6 +901,13 @@ impl Command {
             | Self::NewTab
             | Self::ReadingActivity
             | Self::Library
+            | Self::LibraryImport
+            | Self::LibraryAddByIdentifier
+            | Self::LibraryEnrichAll
+            | Self::LibraryReviewAi
+            | Self::LibraryImportZotero
+            | Self::LibraryMove
+            | Self::LibraryPauseJobs
             | Self::Home
             | Self::GamepadMode
             | Self::GamepadMenu
