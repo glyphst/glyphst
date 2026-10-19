@@ -598,7 +598,35 @@ fn the_reranker_reorders_the_strong_items_by_their_best_passage() {
     let reranked = store.search_reranked(&request, None, &Prefers).unwrap();
     assert!(reranked.reranked);
     assert_eq!(reranked.items[0].item_id, 2, "{reranked:#?}");
-    assert_eq!(reranked.items[0].pages[0].rerank, Some(5.0));
+    // Logits (5 and 1) read as probabilities: 0.99 and 0.73, both strong.
+    let first = reranked.items[0].pages[0].rerank.unwrap();
+    assert!((first - 1.0 / (1.0 + (-5.0f32).exp())).abs() < 1e-6);
     assert_eq!(reranked.items.len(), plain.items.len());
+    assert_eq!(reranked.weaker, 0);
+
+    // A weak match by its words is read too, and rises when it answers.
+    struct Bread;
+    impl Reranker for Bread {
+        fn rerank(&self, _query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
+            Ok(passages
+                .iter()
+                .map(|text| if text.contains("bread") { 0.9 } else { 0.1 })
+                .collect())
+        }
+    }
+    let request = SearchRequest {
+        text: "sequence models bread".to_string(),
+        ..SearchRequest::default()
+    };
+    let plain = store.search(&request).unwrap();
+    let bread = plain.items.iter().position(|item| item.item_id == 3);
+    assert!(bread.is_some_and(|at| at > 0), "{plain:#?}");
+    let reranked = store.search_reranked(&request, None, &Bread).unwrap();
+    assert_eq!(reranked.items[0].item_id, 3, "{reranked:#?}");
+    assert_eq!(
+        reranked.weaker,
+        reranked.items.len() - 1,
+        "0.1 is under half of 0.9"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

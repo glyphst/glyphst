@@ -518,8 +518,9 @@ pub fn first_item(library: &LibraryStore) -> Option<glyphst_library::DocumentId>
         .map(|item| item.id)
 }
 
-/// The demo's reranker: passages holding more of the query's words (by
-/// their first five letters) score higher. No model; screens only.
+/// The demo's reranker: a passage scores the share of the query's words
+/// (by their first five letters) it holds, a probability as a real
+/// reranker's. No model; screens only.
 pub struct DemoReranker;
 
 impl glyphst_search::embed::Reranker for DemoReranker {
@@ -531,9 +532,10 @@ impl glyphst_search::embed::Reranker for DemoReranker {
                 .collect::<std::collections::HashSet<_>>()
         };
         let query = stems(query);
+        let words = query.len().max(1) as f32;
         Ok(passages
             .iter()
-            .map(|passage| stems(passage).intersection(&query).count() as f32)
+            .map(|passage| stems(passage).intersection(&query).count() as f32 / words)
             .collect())
     }
 }

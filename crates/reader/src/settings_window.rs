@@ -522,7 +522,7 @@ fn library(
             let caption = if downloaded && !library.rerank {
                 "off · downloaded".to_string()
             } else {
-                model_caption(card, "Qwen3 Reranker 0.6B")
+                model_caption(card, "bge-reranker-v2-m3")
             };
             group.row("rerank the best matches", Some(&*caption), |ui| {
                 if downloaded {

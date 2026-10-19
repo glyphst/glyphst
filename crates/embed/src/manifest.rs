@@ -32,12 +32,16 @@ pub const MODEL: Asset = Asset {
 };
 
 /// The reranker: a cross-encoder that rereads the best passages against
-/// the query, run by the same engine.
+/// the query, run by the same engine. bge-reranker-v2-m3 (multilingual)
+/// over Qwen3-Reranker-0.6B: on the labelled set it put 7 of 8
+/// paraphrases first from keyword results (Qwen3: 6), kept the hybrid
+/// search's order (Qwen3 pushed one down), and took 46 ms a query
+/// against 129 on the Arc.
 pub const RERANKER: Asset = Asset {
-    name: "qwen3-reranker-0.6b-q8_0.gguf",
-    url: "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/a02f48bb4f057028298c21fa033da2b30d7742d5/qwen3-reranker-0.6b-q8_0.gguf",
-    sha256: "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
-    size: 639_153_184,
+    name: "bge-reranker-v2-m3-Q8_0.gguf",
+    url: "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q8_0.gguf",
+    sha256: "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3",
+    size: 635_676_416,
 };
 
 /// What the vectors are, for the index: a new model, revision, size or

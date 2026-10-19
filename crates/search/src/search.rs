@@ -130,6 +130,19 @@ pub struct SearchResults {
     pub reranked: bool,
 }
 
+/// A reranker's scores as probabilities: as they are when they already
+/// are (Qwen3's), else through a sigmoid (logits, bge's).
+fn probabilities(scores: Vec<f32>) -> Vec<f32> {
+    if scores.iter().all(|score| (0.0..=1.0).contains(score)) {
+        scores
+    } else {
+        scores
+            .into_iter()
+            .map(|score| 1.0 / (1.0 + (-score).exp()))
+            .collect()
+    }
+}
+
 /// A query's parts: words for the word index, runs of CJK characters for
 /// the trigram one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -481,8 +494,10 @@ impl Store {
     }
 
     /// `search_with`, then the reranker rereads the best `RERANK_TOP`
-    /// passages of the strong items: they are ordered by what it scores,
-    /// and so are the items, by their best. Weaker matches stay folded.
+    /// passages, strong items' first, then the weaker ones' (a paraphrase's
+    /// answer is often weak by its words). The items it read are ordered by
+    /// their best passage, and those under half the best item's score
+    /// (as a probability) fold as weaker, after them the ones it did not read.
     pub fn search_reranked(
         &self,
         request: &SearchRequest,
@@ -490,8 +505,8 @@ impl Store {
         reranker: &dyn crate::embed::Reranker,
     ) -> Result<SearchResults> {
         let mut results = self.search_with(request, meaning)?;
-        let strong = results.items.len() - results.weaker;
-        let chosen = results.items[..strong]
+        let chosen = results
+            .items
             .iter()
             .flat_map(|item| item.pages.iter().map(|hit| hit.chunk_id))
             .take(RERANK_TOP)
@@ -513,9 +528,9 @@ impl Store {
             .iter()
             .map(|id| texts[id].as_str())
             .collect::<Vec<_>>();
-        let scores = reranker.rerank(&request.text, &passages)?;
+        let scores = probabilities(reranker.rerank(&request.text, &passages)?);
         let reranked = order.into_iter().zip(scores).collect::<HashMap<_, _>>();
-        for item in &mut results.items[..strong] {
+        for item in &mut results.items {
             for hit in &mut item.pages {
                 hit.rerank = reranked.get(&hit.chunk_id).copied();
             }
@@ -529,9 +544,22 @@ impl Store {
             item.pages
                 .iter()
                 .filter_map(|hit| hit.rerank)
-                .fold(f32::MIN, f32::max)
+                .reduce(f32::max)
         };
-        results.items[..strong].sort_by(|a, b| best(b).total_cmp(&best(a)));
+        // Read first, by score; the rest keep their order after them.
+        results.items.sort_by(|a, b| match (best(a), best(b)) {
+            (Some(a), Some(b)) => b.total_cmp(&a),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        let top = results.items.first().and_then(best).unwrap_or(0.0);
+        let strong = results
+            .items
+            .iter()
+            .take_while(|item| best(item).is_some_and(|score| score >= 0.5 * top))
+            .count();
+        results.weaker = results.items.len() - strong;
         results.reranked = true;
         Ok(results)
     }
