@@ -1164,6 +1164,9 @@ pub struct AiSettings {
     pub main_model: Option<ModelRef>,
     pub title_model: Option<ModelRef>,
     pub translation_model: Option<ModelRef>,
+    /// Summaries, tags and filing of library items; `None` uses the titles'
+    /// model. Never falls back to the main model, which costs more.
+    pub library_model: Option<ModelRef>,
     pub thinking_level: AiThinkingLevel,
     pub page_text_format: PageTextFormat,
     pub page_image_quality: PageImageQuality,
@@ -1266,6 +1269,7 @@ impl Default for AiSettings {
             main_model: Some(ModelRef::new(provider, provider.default_model())),
             title_model: Some(ModelRef::new(provider, provider.default_title_model())),
             translation_model: Some(ModelRef::new(provider, provider.default_model())),
+            library_model: None,
             thinking_level: AiThinkingLevel::Medium,
             page_text_format: PageTextFormat::Block,
             page_image_quality: PageImageQuality::Medium,
@@ -1330,6 +1334,16 @@ impl AiSettings {
             model_ref.sanitize();
         }
         if let Some(model_ref) = self.translation_model.as_mut() {
+            model_ref.sanitize();
+        }
+        if self
+            .library_model
+            .as_ref()
+            .is_some_and(|model_ref| !self.is_enabled_model_ref(model_ref))
+        {
+            self.library_model = None;
+        }
+        if let Some(model_ref) = self.library_model.as_mut() {
             model_ref.sanitize();
         }
     }
@@ -1422,6 +1436,23 @@ impl AiSettings {
             .filter(|model_ref| self.is_enabled_model_ref(model_ref))?;
         let resolved =
             self.resolved_for(title_model.provider, title_model.id, AiThinkingLevel::Off);
+        resolved.can_request().then_some(resolved)
+    }
+
+    /// The library model, or else the titles' model.
+    pub fn resolved_library(&self) -> Option<ResolvedAiConfig> {
+        let Some(library_model) = self
+            .library_model
+            .clone()
+            .filter(|model_ref| self.is_enabled_model_ref(model_ref))
+        else {
+            return self.resolved_title();
+        };
+        let resolved = self.resolved_for(
+            library_model.provider,
+            library_model.id,
+            AiThinkingLevel::Off,
+        );
         resolved.can_request().then_some(resolved)
     }
 

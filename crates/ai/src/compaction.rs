@@ -7,7 +7,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::{
-    agent::{AgentCancellationToken, AgentLimits, AgentMessage, AgentRun, run_agent},
+    agent::{AgentCancellationToken, AgentLimits, AgentMessage, AgentRun, AgentUsage, run_agent},
     ai_chat::{TITLE_GENERATION_PROMPT, title_from_response},
     settings::{ModelLimits, ResolvedAiConfig},
     tools::ToolContext,
@@ -70,6 +70,15 @@ fn answer(
     messages: Vec<AgentMessage>,
     cancel: AgentCancellationToken,
 ) -> Result<String> {
+    answer_with_usage(settings, messages, cancel).map(|(text, _)| text)
+}
+
+/// One answer without tools, and the tokens it took.
+pub(crate) fn answer_with_usage(
+    settings: ResolvedAiConfig,
+    messages: Vec<AgentMessage>,
+    cancel: AgentCancellationToken,
+) -> Result<(String, AgentUsage)> {
     let result = run_agent(
         AgentRun {
             settings,
@@ -87,12 +96,13 @@ fn answer(
         },
         &mut |_| Ok(()),
     )?;
-    Ok(result
+    let text = result
         .appended_messages
         .iter()
         .map(AgentMessage::text)
         .collect::<Vec<_>>()
-        .join(""))
+        .join("");
+    Ok((text, result.usage))
 }
 
 #[cfg(test)]

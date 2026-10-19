@@ -141,6 +141,9 @@ impl Settings {
             if let Some(model_ref) = ai.get("main_model").and_then(ModelRef::from_node) {
                 settings.ai.main_model = Some(model_ref);
             }
+            if let Some(model_ref) = ai.get("library_model").and_then(ModelRef::from_node) {
+                settings.ai.library_model = Some(model_ref);
+            }
             if let Some(model_ref) = ai.get("translation_model").and_then(ModelRef::from_node) {
                 settings.ai.translation_model = Some(model_ref);
             }
@@ -368,6 +371,9 @@ impl Settings {
             }
             if let Some(title_model) = &self.ai.title_model {
                 title_model.write_to_document(ai_children, "title_model");
+            }
+            if let Some(library_model) = &self.ai.library_model {
+                library_model.write_to_document(ai_children, "library_model");
             }
             if let Some(translation_model) = &self.ai.translation_model {
                 translation_model.write_to_document(ai_children, "translation_model");

@@ -501,4 +501,36 @@ mod user_tests {
         );
         fs::remove_dir_all(&directory).unwrap();
     }
+
+    #[test]
+    fn the_library_model_is_saved_and_falls_back_to_the_titles_model() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.ai.library_model, None);
+        assert_eq!(
+            defaults
+                .ai
+                .resolved_library()
+                .map(|resolved| resolved.model),
+            defaults.ai.resolved_title().map(|resolved| resolved.model)
+        );
+
+        let directory = std::env::temp_dir().join(format!(
+            "glyphst-settings-library-model-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let path = directory.join("config.kdl");
+        let mut edited = Settings::default();
+        let provider = edited
+            .ai
+            .main_model
+            .as_ref()
+            .map(|model_ref| model_ref.provider)
+            .unwrap();
+        edited.ai.library_model = Some(ModelRef::new(provider, provider.default_title_model()));
+        save_user_settings_to(&path, &edited, &BTreeSet::new()).unwrap();
+        let saved = load_settings(&path).unwrap();
+        assert_eq!(saved.ai.library_model, edited.ai.library_model);
+        fs::remove_dir_all(&directory).unwrap();
+    }
 }

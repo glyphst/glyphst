@@ -936,21 +936,7 @@ fn parse_translations(content: &str, expected_count: usize) -> Result<Vec<String
 }
 
 fn parse_json_object(content: &str) -> Result<Value> {
-    let content = content.trim();
-    let value = match serde_json::from_str::<Value>(content) {
-        Ok(value) => value,
-        Err(_) => {
-            let start = content
-                .find('{')
-                .ok_or_else(|| anyhow!("AI translation response was not JSON"))?;
-            let end = content
-                .rfind('}')
-                .ok_or_else(|| anyhow!("AI translation response was not JSON"))?;
-            serde_json::from_str::<Value>(&content[start..=end])
-                .context("AI translation response was not JSON")?
-        }
-    };
-    Ok(value)
+    crate::json::parse_json_object(content, "AI translation response")
 }
 
 #[cfg(test)]
