@@ -16,9 +16,12 @@ use crate::{
 };
 
 /// The states `--assistant-demo` takes.
-pub const DEMO_STATES: [&str; 9] = [
-    "empty", "menu", "hover", "running", "done", "edit", "error", "history", "markdown",
+pub const DEMO_STATES: [&str; 10] = [
+    "empty", "menu", "hover", "running", "done", "edit", "error", "history", "markdown", "library",
 ];
+
+/// The `library` state's answer: passages from two papers, cited.
+const LIBRARY_ANSWER: &str = "Two of them take it on directly. Mamba replaces attention with a selective state space, so its cost grows linearly with the length of the sequence rather than quadratically. [Mamba · p.1](glyphst://open?id=9&page=1&chunk=412)\n\nRetrieval-Augmented Generation sidesteps it: the generator reads a few retrieved passages instead of the whole corpus. [RAG · p.4](glyphst://open?id=8&page=4&chunk=88)";
 
 const ANSWER: &str = "The paper argues that **attention alone** is enough for sequence transduction: the Transformer drops recurrence and convolutions entirely.\n\n- **Encoder and decoder** are stacks of six identical layers, each with multi-head self-attention and a feed-forward network.\n- **Scaled dot-product attention** divides the scores by √dₖ so the softmax keeps useful gradients.\n- **Positional encodings** use sines and cosines, so the model can attend by relative position.\n\nOn WMT 2014 English–German it reaches `28.4` BLEU, more than 2 points above the best ensembles, at a fraction of the training cost.";
 
@@ -87,6 +90,49 @@ impl Assistant {
         self.new_session();
         let (sender, events) = mpsc::channel();
         self.demo = Some(sender);
+        // Asking the library, with no document (frame 05 · ask the library).
+        if state == "library" {
+            let now = current_timestamp();
+            self.title = Some("Ask the library".into());
+            self.answerer = "claude-opus-5-5".into();
+            let question = Draft::plain("Which of my papers deal with long context, and how?");
+            self.messages
+                .push(ChatMessage::user_text(question.text.clone()));
+            self.views.push(MessageView {
+                draft: Some(question),
+                sent_at: Some(now - 40),
+                ..MessageView::default()
+            });
+            self.messages
+                .push(ChatMessage::assistant(LIBRARY_ANSWER.into()));
+            self.views.push(MessageView {
+                segments: vec![
+                    tool(
+                        "search_library",
+                        r#"{"query":"long context"}"#,
+                        "Items for \"long context\": …",
+                        ToolState::Done,
+                    ),
+                    tool(
+                        "read_chunk",
+                        r#"{"chunk_id":"c_412"}"#,
+                        "From lib_9 Mamba …",
+                        ToolState::Done,
+                    ),
+                    tool(
+                        "read_chunk",
+                        r#"{"chunk_id":"c_88"}"#,
+                        "From lib_8 Retrieval-Augmented Generation …",
+                        ToolState::Done,
+                    ),
+                    Segment::Text(LIBRARY_ANSWER.into()),
+                ],
+                duration_ms: Some(3_100),
+                ..MessageView::default()
+            });
+            self.compose(ctx, Draft::plain("and which of them is newest?"));
+            return;
+        }
         let Some(document) = sources.documents.first().cloned() else {
             return;
         };

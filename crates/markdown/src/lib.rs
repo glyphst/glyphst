@@ -43,6 +43,9 @@ pub struct MarkdownStyle {
     pub strong_text: Color32,
     pub muted: Color32,
     pub link: Color32,
+    /// Behind links into the reader (`glyphst://`), the assistant's
+    /// citations: they show as chips.
+    pub cite_bg: Color32,
     pub code_bg: Color32,
     pub block_bg: Color32,
     pub rule: Color32,
@@ -71,6 +74,7 @@ impl MarkdownStyle {
             strong_text: tokens.text,
             muted: tokens.muted,
             link: tokens.accent_text,
+            cite_bg: tokens.accent_soft,
             code_bg: tokens.raised,
             block_bg: tokens.bg,
             rule: tokens.rule,

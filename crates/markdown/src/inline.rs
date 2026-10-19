@@ -71,6 +71,16 @@ pub(crate) fn layout(
                 strike,
                 link,
             } => {
+                // A citation (a link into the reader) is a chip.
+                if let Some(url) = link
+                    && url.starts_with("glyphst://")
+                {
+                    let mut chip = format(&style.code, style.link);
+                    chip.background = style.cite_bg;
+                    let range = append(&mut job, &format!("\u{2009}{text}\u{2009}"), 0.0, chip);
+                    links.push((range, url.clone()));
+                    continue;
+                }
                 let strong = *strong || base.all_strong;
                 let color = match (link, strong) {
                     (Some(_), _) => style.link,

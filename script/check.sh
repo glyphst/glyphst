@@ -290,6 +290,7 @@ if [[ ${tier} == screens ]]; then
         "05-error @ --assistant-demo error"
         "05-history @ --assistant-demo history"
         "05-edit @ --assistant-demo edit"
+        "05-library-ask --assistant-demo library --library-demo all"
         "06a-palette @ --palette tra"
         "06a-palette-sections @ --palette @@"
         "06b-path-prompt @ --command app.open"

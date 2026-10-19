@@ -186,6 +186,7 @@ impl ReaderApp {
                     }
                 }
             }
+            self.prepare_translation(ctx);
             return false;
         };
         for command in std::mem::take(&mut self.launch_commands) {
@@ -229,6 +230,14 @@ impl ReaderApp {
     /// are read; returns whether one is still running.
     pub(crate) fn prepare_translation(&mut self, ctx: &egui::Context) -> bool {
         let Some(active) = self.active else {
+            // Asking the library needs no document.
+            if self.launch_demo.as_deref() == Some("library") {
+                let state = self.launch_demo.take().unwrap_or_default();
+                let sources =
+                    crate::app::agent::mention_sources(&self.tabs, self.active, &self.library);
+                self.assistant.open = true;
+                self.assistant.demo(&state, ctx, sources);
+            }
             return false;
         };
         // The assistant in a canned state once the page's text is read.

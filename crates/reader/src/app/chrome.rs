@@ -287,7 +287,7 @@ impl ReaderApp {
                 layout.overlay,
                 Edge::Left,
                 |app, ui| {
-                    app.assistant_pane(ui, rect, active);
+                    app.assistant_pane(ui, rect, Some(active));
                 },
             );
         }
@@ -914,21 +914,27 @@ impl ReaderApp {
         }
     }
 
-    /// The assistant docked at the right.
-    fn assistant_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize) {
+    /// The assistant docked at the right: beside a document, or beside the
+    /// library's pages, where it asks about the library.
+    pub(crate) fn assistant_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: Option<usize>) {
         let ctx = ui.ctx().clone();
-        let tab = &self.tabs[active];
-        // Not waiting for the page's text: the page mention reads the file,
-        // and the suggestions would flicker on every jump.
-        let page = (tab.layout.len() > 0).then(|| tab.current_page());
-        let selection_words = tab
-            .selection
-            .is_some()
-            .then(|| tab.selected_text())
-            .flatten()
-            .map(|text| text.split_whitespace().count())
-            .filter(|words| *words > 0);
-        let document = Some(tab.title.clone());
+        let (document, page, selection_words) = match active {
+            Some(active) => {
+                let tab = &self.tabs[active];
+                // Not waiting for the page's text: the page mention reads
+                // the file, and the suggestions would flicker on every jump.
+                let page = (tab.layout.len() > 0).then(|| tab.current_page());
+                let selection_words = tab
+                    .selection
+                    .is_some()
+                    .then(|| tab.selected_text())
+                    .flatten()
+                    .map(|text| text.split_whitespace().count())
+                    .filter(|words| *words > 0);
+                (Some(tab.title.clone()), page, selection_words)
+            }
+            None => (Some("the library".to_string()), None, None),
+        };
         let (models, model) = match self.user_settings.get() {
             Some(settings) => {
                 let main = settings.ai.resolved_main();

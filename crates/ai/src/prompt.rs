@@ -82,6 +82,9 @@ pub struct ReaderState {
     pub selected_pages: Vec<usize>,
     /// The other open documents.
     pub other_documents: Vec<DocumentFacts>,
+    /// Asking about the whole library, of this many items, rather than a
+    /// document.
+    pub library_items: Option<usize>,
 }
 
 impl ReaderState {
@@ -99,7 +102,12 @@ impl ReaderState {
                     lines.push(line);
                 }
             }
-            None => lines.push("No document is open.".to_string()),
+            None => match self.library_items {
+                Some(items) => lines.push(format!(
+                    "No document is open: the question is about the user's library ({items} items). Find passages with search_library and cite them."
+                )),
+                None => lines.push("No document is open.".to_string()),
+            },
         }
         if let Some(chars) = self.selection_chars {
             lines.push(format!("Selected text: {chars} characters"));
@@ -180,6 +188,7 @@ mod tests {
             selection_chars: Some(120),
             selected_pages: vec![3, 4],
             other_documents: Vec::new(),
+            library_items: None,
         };
         assert_eq!(
             state.block(),
@@ -190,5 +199,15 @@ mod tests {
                 .block()
                 .contains("No document is open.")
         );
+        let library = ReaderState {
+            library_items: Some(128),
+            ..ReaderState::default()
+        }
+        .block();
+        assert!(
+            library.contains("about the user's library (128 items)"),
+            "{library}"
+        );
+        assert!(library.contains("search_library"));
     }
 }

@@ -82,6 +82,28 @@ pub struct AskContext {
     pub current_page: usize,
     pub page_text: Option<String>,
     pub selection: Option<String>,
+    /// Asking about the whole library (of this many items), no document.
+    pub library: Option<usize>,
+}
+
+impl AskContext {
+    /// A question about the library, with no document open.
+    pub fn library(items: usize, others: Vec<DocumentFacts>) -> Self {
+        Self {
+            path: PathBuf::from("library"),
+            id: String::new(),
+            title: "the library".to_string(),
+            authors: None,
+            section: None,
+            others,
+            layout: DocumentLayout::Fixed,
+            page_count: 0,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+            library: Some(items),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -475,12 +497,12 @@ impl Assistant {
                 selection.clone(),
             ));
         }
-        let scope = DocumentContextScope {
+        let scope = ask.library.is_none().then(|| DocumentContextScope {
             path: ask.path.clone(),
             label: ask.title.clone(),
-        };
+        });
         let state = ReaderState {
-            document: Some(DocumentFacts {
+            document: ask.library.is_none().then(|| DocumentFacts {
                 id: Some(ask.id.clone()),
                 title: ask.title.clone(),
                 format: match ask.layout {
@@ -491,14 +513,15 @@ impl Assistant {
                 authors: ask.authors.clone(),
                 page_count: ask.page_count,
             }),
-            current_page: Some(page),
+            current_page: ask.library.is_none().then_some(page),
             section: ask.section.clone(),
             selection_chars: ask.selection.as_ref().map(|text| text.chars().count()),
             other_documents: ask.others.clone(),
+            library_items: ask.library,
             ..ReaderState::default()
         };
         let mut message = ChatMessage::user(text.clone(), text, contexts, Vec::new())
-            .with_document_scope(Some(scope))
+            .with_document_scope(scope)
             .with_reader_state(state.block());
         let mut thumbnails = Vec::new();
         for attachment in draft.images() {
@@ -1741,6 +1764,7 @@ mod tests {
             current_page: 0,
             page_text: None,
             selection: None,
+            library: None,
         };
         let mut quick = Assistant::default();
         quick.send(
@@ -1981,6 +2005,7 @@ cat > /dev/null
             current_page: 0,
             page_text: None,
             selection: None,
+            library: None,
         };
         let external = ExternalAccess {
             agent: AgentSpec::known(glyphst_agent_host::external::AgentKind::ClaudeCode, program),
@@ -2116,6 +2141,7 @@ cat > /dev/null
             current_page: 0,
             page_text: None,
             selection: None,
+            library: None,
         };
         assistant.send(draft, ask(), ToolRegistry::new(), None, &settings, &ctx);
         let images = |message: &ChatMessage| {
@@ -2169,6 +2195,7 @@ cat > /dev/null
             current_page: 0,
             page_text: Some("Here the story begins.".into()),
             selection: None,
+            library: None,
         };
         let documents = crate::ai_tools::DocumentDirectory::default();
         documents.update(
@@ -2281,6 +2308,7 @@ cat > /dev/null
             current_page: 0,
             page_text: None,
             selection: None,
+            library: None,
         };
         reopened.send(
             Draft::plain("And then?"),
@@ -2330,6 +2358,7 @@ cat > /dev/null
             current_page: 0,
             page_text: None,
             selection: None,
+            library: None,
         };
         unconfigured.send(
             Draft::plain("Hello?"),

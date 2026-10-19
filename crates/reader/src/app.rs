@@ -1578,9 +1578,19 @@ impl ReaderApp {
                 }
                 Ok(())
             }
-            Action::AskLibrary(question) => {
-                self.notices
-                    .push(format!("Asking the library comes next: “{question}”"));
+            Action::AskLibrary(words) => {
+                // A new conversation about the library, the question ready
+                // to edit (frame 05 · ask the library).
+                if !self.assistant.open {
+                    self.toggle_assistant();
+                }
+                self.assistant.new_session();
+                self.assistant.compose(
+                    ctx,
+                    crate::ai_editor::Draft::plain(format!(
+                        "What does my library say about {words}?"
+                    )),
+                );
                 Ok(())
             }
             Action::AddByIdentifier => {
@@ -2437,9 +2447,19 @@ impl ReaderApp {
             .send(draft, ask, tools, external, &settings, ctx);
     }
 
-    /// What a question knows about the active document.
+    /// What a question knows about the active document; with none open, a
+    /// question about the library.
     fn ask_context(&self) -> Option<AskContext> {
-        let tab = &self.tabs[self.active?];
+        let Some(active) = self.active else {
+            let items = self
+                .library
+                .library_items()
+                .iter()
+                .filter(|item| item.trashed_at.is_none())
+                .count();
+            return Some(AskContext::library(items, Vec::new()));
+        };
+        let tab = &self.tabs[active];
         let current_page = tab.current_page();
         let others = self
             .tabs
@@ -2471,6 +2491,7 @@ impl ReaderApp {
             current_page,
             page_text: tab.text.get(current_page).map(|text| text.plain_text()),
             selection: tab.selected_text(),
+            library: None,
         })
     }
 
@@ -5371,7 +5392,32 @@ impl eframe::App for ReaderApp {
                 } else if let Some(gallery) = self.gallery.as_mut() {
                     gallery.show(ui);
                 } else if let Some(index) = self.page_focused {
-                    self.show_page(ui, index, &ctx);
+                    // The assistant beside the library's pages asks about
+                    // the library (frame 05 · ask the library).
+                    if self.assistant.open {
+                        let area = ui.max_rect();
+                        let width = self.prefs.assistant_width.min(area.width() * 0.5);
+                        let right = egui::Rect::from_min_max(
+                            egui::pos2(area.right() - width, area.top()),
+                            area.max,
+                        );
+                        let left = egui::Rect::from_min_max(
+                            area.min,
+                            egui::pos2(right.left(), area.bottom()),
+                        );
+                        let mut page_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(left)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        self.show_page(&mut page_ui, index, &ctx);
+                        let tokens = Tokens::get(&ctx);
+                        ui.painter().rect_filled(right, 0, tokens.surface);
+                        glyphst_ui::pane::vline(ui, right.left() + 0.5, right.y_range());
+                        self.assistant_pane(ui, right, None);
+                    } else {
+                        self.show_page(ui, index, &ctx);
+                    }
                 } else if let Some(action) = self.home.ui(
                     ui,
                     crate::home::HomeContext {
