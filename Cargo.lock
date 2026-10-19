@@ -3122,6 +3122,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "glyphst-pdf",
+ "log",
+ "mupdf",
+ "rusqlite",
+]
+
+[[package]]
 name = "glyphst-settings"
 version = "0.1.0"
 dependencies = [

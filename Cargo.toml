@@ -13,6 +13,7 @@ members = [
     "crates/pdf-translation",
     "crates/pdf-translation-service",
     "crates/reader",
+    "crates/search",
     "crates/settings",
     "crates/translation",
     "crates/ui",

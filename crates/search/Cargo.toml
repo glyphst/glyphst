@@ -1,0 +1,22 @@
+[package]
+name = "glyphst-search"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# A deterministic embedder, for other crates' tests and screens.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+glyphst-core = { path = "../core" }
+glyphst-pdf = { path = "../pdf" }
+log.workspace = true
+mupdf.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+glyphst-pdf = { path = "../pdf", features = ["test-support"] }

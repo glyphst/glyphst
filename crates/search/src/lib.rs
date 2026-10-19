@@ -1,0 +1,18 @@
+//! Searching the library's text: an index of every item's pages in chunks
+//! (keywords through SQLite FTS5, meaning through an embedder's vectors),
+//! the thread that builds it, and the search over it.
+
+pub mod chunk;
+pub mod extract;
+pub mod index;
+pub mod indexer;
+pub mod search;
+pub mod store;
+
+pub use index::{IndexStatus, ItemText, LibraryFile, Snapshot};
+pub use indexer::Indexer;
+pub use search::{ItemHit, PageHit, Query, SearchRequest, SearchResults};
+pub use store::{SCHEMA_VERSION, Store};
+
+#[cfg(test)]
+mod tests;

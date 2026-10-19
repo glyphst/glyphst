@@ -59,3 +59,59 @@ pub fn text_pdf(lines: &[&str]) -> Vec<u8> {
     content.push_str(" ET");
     single_page_pdf(&content, HELVETICA, "")
 }
+
+/// A document with one 200×100 pt page per entry of `pages`, each the
+/// lines of 12 pt Helvetica from the top left.
+pub fn text_pages_pdf(pages: &[&[&str]]) -> Vec<u8> {
+    let count = pages.len();
+    // Objects: catalog, pages, the font, then a page and its content each.
+    let kids = (0..count)
+        .map(|index| format!("{} 0 R", 4 + index * 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    for (index, lines) in pages.iter().enumerate() {
+        let mut content = String::from("BT /F1 12 Tf 10 80 Td");
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                content.push_str(" 0 -16 Td");
+            }
+            content.push_str(&format!(" ({line}) Tj"));
+        }
+        content.push_str(" ET");
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
+             /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+            5 + index * 2
+        ));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len() + 1
+        ));
+    }
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
