@@ -2097,6 +2097,7 @@ mod annotations;
 mod bookmarks;
 mod catalog;
 mod edits;
+mod files_root;
 mod history;
 mod jobs;
 mod model;
@@ -2114,6 +2115,7 @@ pub use ai_catalog::{
     MetadataSource,
 };
 pub use catalog::*;
+pub use files_root::FilesMove;
 pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState};
 use storage_helpers::require_storage_version;
 pub use vault_notes::VaultNoteRecord;

@@ -748,7 +748,7 @@ fn modified_seconds(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn hash_file(path: &Path, cancelled: &AtomicBool) -> Result<[u8; 32]> {
+pub(super) fn hash_file(path: &Path, cancelled: &AtomicBool) -> Result<[u8; 32]> {
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -1060,7 +1060,11 @@ fn collection_is_within(
     false
 }
 
-fn migrate_document_path_in_library(library: &mut Library, old_path: &Path, new_path: &Path) {
+pub(super) fn migrate_document_path_in_library(
+    library: &mut Library,
+    old_path: &Path,
+    new_path: &Path,
+) {
     for entry in &mut library.history {
         if entry.path == old_path {
             entry.path = new_path.to_path_buf();

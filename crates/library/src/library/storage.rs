@@ -84,6 +84,9 @@ impl LibraryStore {
         }
         restrict_library_file(&path)?;
         ensure_current_tables(&database)?;
+        // The folder the user chose for the files, when they did.
+        let managed_library_root =
+            super::files_root::read_files_root(&database)?.unwrap_or(managed_library_root);
         ensure_managed_library_directories(&managed_library_root)?;
         let library = load_current_library(&database, &managed_library_root)?;
         let ai_catalog = super::ai_catalog::load_ai_catalog(&database)?;

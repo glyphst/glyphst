@@ -3514,3 +3514,97 @@ fn recorded_tag_collection_and_metadata_edits_revert_and_detect_conflicts() {
     );
     let _ = fs::remove_file(path);
 }
+
+#[test]
+fn moving_the_files_keeps_items_highlights_and_history_with_them() {
+    let database_path = temp_library_path("files-move");
+    let old_root = database_path.with_extension("managed-library");
+    let new_root = database_path.with_extension("chosen-folder");
+    let source = database_path.with_extension("source.pdf");
+    fs::write(&source, b"%PDF-1.4\nmoving").unwrap();
+
+    let (item_id, new_path) = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let LibraryAddOutcome::Added(item_id) = store
+            .add_linked_item(&source, LibraryItemMetadata::for_path(&source))
+            .unwrap()
+        else {
+            panic!("expected item");
+        };
+        let old_path = store.primary_attachment(item_id).unwrap().path.clone();
+        assert!(old_path.starts_with(&old_root));
+        store
+            .add_highlight(
+                &old_path,
+                HighlightColor::Yellow,
+                vec![HighlightRect {
+                    page_idx: 0,
+                    x0: 1.0,
+                    y0: 2.0,
+                    x1: 3.0,
+                    y1: 4.0,
+                }],
+                "a quote",
+                "",
+            )
+            .unwrap();
+        store
+            .replace_history_entries(vec![HistoryEntry {
+                path: old_path.clone(),
+                opened: 1,
+                position: position(1),
+            }])
+            .unwrap();
+        let mut steps = Vec::new();
+        let moved = store
+            .move_files_root(&new_root, &AtomicBool::new(false), |done, total| {
+                steps.push((done, total))
+            })
+            .unwrap();
+        assert_eq!(moved.files, 1);
+        assert_eq!(steps.last(), Some(&(1, 1)));
+        let new_path = store.primary_attachment(item_id).unwrap().path.clone();
+        assert!(new_path.starts_with(&new_root), "{}", new_path.display());
+        assert!(new_path.is_file());
+        assert!(!old_path.exists(), "the old copy is removed");
+        assert_eq!(store.highlights_for(&new_path).len(), 1);
+        (item_id, new_path)
+    };
+
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.files_root(), Some(new_root.as_path()));
+    assert_eq!(store.primary_attachment(item_id).unwrap().path, new_path);
+    assert_eq!(store.highlights_for(&new_path).len(), 1);
+    assert_eq!(store.history_entries()[0].path, new_path);
+
+    drop(store);
+    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(old_root);
+    let _ = fs::remove_dir_all(new_root);
+}
+
+#[test]
+fn a_moved_linked_file_is_found_again() {
+    let folder = temp_library_path("moved-linked").with_extension("dir");
+    let inbox = folder.join("inbox");
+    let read = folder.join("read");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&read).unwrap();
+    let original = inbox.join("paper.pdf");
+    fs::write(&original, b"%PDF-1.4\nfind me").unwrap();
+    let mut store = LibraryStore::memory();
+    let LibraryImportOutcome::Added(id) = store
+        .link_item(&original, LibraryItemMetadata::for_path(&original), None)
+        .unwrap()
+    else {
+        panic!("expected item");
+    };
+    assert!(store.find_moved_linked_files().is_empty());
+    let moved = read.join("renamed.pdf");
+    fs::rename(&original, &moved).unwrap();
+    assert_eq!(store.find_moved_linked_files(), vec![(id, moved.clone())]);
+    store.relink_library_attachment(id, &moved).unwrap();
+    assert!(store.find_moved_linked_files().is_empty());
+    let _ = fs::remove_dir_all(folder);
+}

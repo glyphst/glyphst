@@ -7,7 +7,7 @@ pub use library::{
     AssignmentOrigin, AssignmentState, AssignmentTarget, AttachmentStorage, Bookmark,
     BrowserPresentation, DocumentBrowserSize, DocumentEditRevision, DocumentFormat, DocumentId,
     DocumentPageLayout, DocumentPosition, DocumentPreferences, DocumentRotation, EnrichmentApplied,
-    EnrichmentApply, EnrichmentStatus, EpubReaderPreferences, FileIdentity, Highlight,
+    EnrichmentApply, EnrichmentStatus, EpubReaderPreferences, FileIdentity, FilesMove, Highlight,
     HighlightColor, HighlightRect, HistoryEntry, HistoryEntryPersistenceSnapshot, HomeDestination,
     HomePreferences, ItemEnrichment, Library, LibraryAddOutcome, LibraryAttachment,
     LibraryAttachmentId, LibraryCollection, LibraryCollectionId, LibraryCreator,
