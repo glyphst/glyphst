@@ -513,6 +513,7 @@ fn write_catalog_tables(
         let retained = library
             .library_attachments
             .iter()
+            .filter(|attachment| !attachment.is_linked())
             .map(|attachment| attachment.id.0)
             .collect::<HashSet<_>>();
         let mut table = write_txn.open_table(LIBRARY_ATTACHMENTS_V2_TABLE)?;
@@ -524,8 +525,37 @@ fn write_catalog_tables(
         for id in stale {
             table.remove(id)?;
         }
-        for attachment in &library.library_attachments {
+        for attachment in library
+            .library_attachments
+            .iter()
+            .filter(|attachment| !attachment.is_linked())
+        {
             let encoded = encode(&StoredLibraryAttachmentV2::new(attachment, managed_root)?)?;
+            table.insert(attachment.id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        let retained = library
+            .library_attachments
+            .iter()
+            .filter(|attachment| attachment.is_linked())
+            .map(|attachment| attachment.id.0)
+            .collect::<HashSet<_>>();
+        let mut table = write_txn.open_table(LIBRARY_LINKED_ATTACHMENTS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !retained.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for attachment in library
+            .library_attachments
+            .iter()
+            .filter(|attachment| attachment.is_linked())
+        {
+            let encoded = encode(&StoredLinkedAttachmentV1::new(attachment)?)?;
             table.insert(attachment.id.0, encoded.as_slice())?;
         }
     }
@@ -632,6 +662,34 @@ fn write_catalog_tables(
         for location in &library.library_item_locations {
             let encoded = encode(&StoredLibraryItemLocationV2::new(location))?;
             table.insert(location.item_id.0, encoded.as_slice())?;
+        }
+    }
+    {
+        // Every item gets a row, an empty one when it is in no collection,
+        // so an empty table only ever means a library from before this one.
+        let mut grouped = library
+            .library_items
+            .iter()
+            .map(|item| (item.id.0, Vec::new()))
+            .collect::<HashMap<u64, Vec<LibraryCollectionId>>>();
+        for membership in &library.library_item_collections {
+            grouped
+                .entry(membership.item_id.0)
+                .or_default()
+                .push(membership.collection_id);
+        }
+        let mut table = write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        let stale = table
+            .iter()?
+            .filter_map(|entry| entry.ok().map(|(id, _)| id.value()))
+            .filter(|id| !grouped.contains_key(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            table.remove(id)?;
+        }
+        for (item_id, collection_ids) in grouped {
+            let encoded = encode(&StoredLibraryItemCollectionsV1::new(collection_ids))?;
+            table.insert(item_id, encoded.as_slice())?;
         }
     }
     Ok(())

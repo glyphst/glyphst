@@ -19,6 +19,13 @@ pub(super) const LIBRARY_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_collections_v1");
 pub(super) const LIBRARY_ITEM_LOCATIONS_V2_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_item_locations_v2");
+/// An item's collections (it can be in several); the location's parent is
+/// kept as the first of them.
+pub(super) const LIBRARY_ITEM_COLLECTIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("library_item_collections_v1");
+/// Attachments that stay where the user keeps them (not copied in).
+pub(super) const LIBRARY_LINKED_ATTACHMENTS_V1_TABLE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("library_linked_attachments_v1");
 pub(super) const LIBRARY_CATALOG_STORAGE_VERSION: u8 = 1;
 pub(super) const MANAGED_LIBRARY_STORAGE_VERSION: u8 = 2;
 
@@ -104,12 +111,65 @@ pub struct LibraryAttachment {
     pub file_size: u64,
     pub modified: u64,
     pub primary: bool,
+    #[serde(default)]
+    pub storage: AttachmentStorage,
+    /// A linked file's device and inode when it was added, to find it again
+    /// after the user moves it.
+    #[serde(default)]
+    pub file_identity: Option<FileIdentity>,
 }
 
 impl LibraryAttachment {
     pub fn is_missing(&self) -> bool {
         !self.path.exists()
     }
+
+    pub fn is_linked(&self) -> bool {
+        self.storage == AttachmentStorage::Linked
+    }
+}
+
+/// Where an attachment's file lives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachmentStorage {
+    /// Copied into the managed library's `files/`.
+    #[default]
+    Managed,
+    /// Left in place; the library only records its path.
+    Linked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl FileIdentity {
+    pub fn of(metadata: &fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            Some(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
+}
+
+/// An item's membership in one collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LibraryItemCollection {
+    pub item_id: DocumentId,
+    pub collection_id: LibraryCollectionId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +276,12 @@ pub struct LibraryFilter {
     pub year_min: Option<i32>,
     pub year_max: Option<i32>,
     pub trash: LibraryTrashFilter,
+    /// Items in this collection or any collection under it.
+    #[serde(default)]
+    pub collection_id: Option<LibraryCollectionId>,
+    /// Items in no collection.
+    #[serde(default)]
+    pub unfiled: bool,
 }
 
 impl Default for LibraryFilter {
@@ -230,6 +296,8 @@ impl Default for LibraryFilter {
             year_min: None,
             year_max: None,
             trash: LibraryTrashFilter::Active,
+            collection_id: None,
+            unfiled: false,
         }
     }
 }
@@ -383,7 +451,94 @@ impl StoredLibraryAttachmentV2 {
             file_size: self.file_size,
             modified: self.modified,
             primary: self.primary,
+            storage: AttachmentStorage::Managed,
+            file_identity: None,
         })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct StoredLinkedAttachmentV1 {
+    version: u8,
+    id: LibraryAttachmentId,
+    item_id: DocumentId,
+    path: StoredPathV1,
+    content_sha256: [u8; 32],
+    format: DocumentFormat,
+    file_size: u64,
+    modified: u64,
+    primary: bool,
+    file_identity: Option<FileIdentity>,
+}
+
+impl StoredLinkedAttachmentV1 {
+    pub(super) fn new(attachment: &LibraryAttachment) -> Result<Self> {
+        if !attachment.path.is_absolute() {
+            return Err(anyhow!(
+                "linked attachment path is not absolute: {}",
+                attachment.path.display()
+            ));
+        }
+        Ok(Self {
+            version: LIBRARY_CATALOG_STORAGE_VERSION,
+            id: attachment.id,
+            item_id: attachment.item_id,
+            path: StoredPathV1::from_path(&attachment.path),
+            content_sha256: attachment.content_sha256,
+            format: attachment.format,
+            file_size: attachment.file_size,
+            modified: attachment.modified,
+            primary: attachment.primary,
+            file_identity: attachment.file_identity,
+        })
+    }
+
+    pub(super) fn into_domain(self) -> Result<LibraryAttachment> {
+        require_storage_version(self.version, LIBRARY_CATALOG_STORAGE_VERSION)?;
+        let path = self.path.into_path()?;
+        if !path.is_absolute() {
+            return Err(anyhow!(
+                "linked attachment path is not absolute: {}",
+                path.display()
+            ));
+        }
+        Ok(LibraryAttachment {
+            id: self.id,
+            item_id: self.item_id,
+            path,
+            storage_key: linked_storage_key(self.id),
+            content_sha256: self.content_sha256,
+            format: self.format,
+            file_size: self.file_size,
+            modified: self.modified,
+            primary: self.primary,
+            storage: AttachmentStorage::Linked,
+            file_identity: self.file_identity,
+        })
+    }
+}
+
+fn linked_storage_key(id: LibraryAttachmentId) -> String {
+    format!("linked-{}", id.0)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct StoredLibraryItemCollectionsV1 {
+    version: u8,
+    collection_ids: Vec<LibraryCollectionId>,
+}
+
+impl StoredLibraryItemCollectionsV1 {
+    pub(super) fn new(collection_ids: Vec<LibraryCollectionId>) -> Self {
+        Self {
+            version: LIBRARY_CATALOG_STORAGE_VERSION,
+            collection_ids,
+        }
+    }
+
+    pub(super) fn into_domain(self) -> Result<Vec<LibraryCollectionId>> {
+        require_storage_version(self.version, LIBRARY_CATALOG_STORAGE_VERSION)?;
+        Ok(self.collection_ids)
     }
 }
 
@@ -698,6 +853,51 @@ pub fn prepare_managed_import(
     })
 }
 
+/// A file to link in place, hashed off the UI thread.
+#[derive(Clone, Debug)]
+pub struct PreparedLinkedImport {
+    path: PathBuf,
+    content_sha256: [u8; 32],
+    format: DocumentFormat,
+    file_size: u64,
+    modified: u64,
+    file_identity: Option<FileIdentity>,
+}
+
+impl PreparedLinkedImport {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub fn prepare_linked_import(
+    source: &Path,
+    cancelled: &AtomicBool,
+) -> Result<PreparedLinkedImport> {
+    let path = normalize_path(source);
+    if !path.is_absolute() {
+        return Err(anyhow!(
+            "linked files need an absolute path: {}",
+            path.display()
+        ));
+    }
+    let metadata =
+        fs::metadata(&path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(anyhow!("library import is not a file: {}", path.display()));
+    }
+    let format = document_format_for_path(&path)?;
+    let content_sha256 = hash_file(&path, cancelled)?;
+    Ok(PreparedLinkedImport {
+        content_sha256,
+        format,
+        file_size: metadata.len(),
+        modified: modified_seconds(&metadata),
+        file_identity: FileIdentity::of(&metadata),
+        path,
+    })
+}
+
 fn cleanup_prepared_import(prepared: &PreparedManagedImport) {
     let _ = fs::remove_file(&prepared.staged_path);
     let _ = fs::remove_dir(&prepared.staged_directory);
@@ -753,6 +953,8 @@ fn push_library_item(
     modified: u64,
     metadata: LibraryItemMetadata,
     parent_id: Option<LibraryCollectionId>,
+    storage: AttachmentStorage,
+    file_identity: Option<FileIdentity>,
 ) {
     let now = current_timestamp();
     library.library_items.push(LibraryItem {
@@ -785,12 +987,77 @@ fn push_library_item(
         file_size,
         modified,
         primary: true,
+        storage,
+        file_identity,
     });
     library.library_item_locations.push(LibraryItemLocation {
         item_id,
         parent_id,
         trash_origin: None,
     });
+    if let Some(collection_id) = parent_id {
+        library
+            .library_item_collections
+            .push(LibraryItemCollection {
+                item_id,
+                collection_id,
+            });
+    }
+}
+
+/// The collections an item is in, in id order.
+fn item_collection_ids(library: &Library, item_id: DocumentId) -> Vec<LibraryCollectionId> {
+    library
+        .library_item_collections
+        .iter()
+        .filter(|membership| membership.item_id == item_id)
+        .map(|membership| membership.collection_id)
+        .collect()
+}
+
+/// Puts an item in exactly these collections.
+fn replace_item_collections(
+    library: &mut Library,
+    item_id: DocumentId,
+    collection_ids: impl IntoIterator<Item = LibraryCollectionId>,
+) {
+    library
+        .library_item_collections
+        .retain(|membership| membership.item_id != item_id);
+    library
+        .library_item_collections
+        .extend(
+            collection_ids
+                .into_iter()
+                .map(|collection_id| LibraryItemCollection {
+                    item_id,
+                    collection_id,
+                }),
+        );
+}
+
+/// Whether `collection_id` is `ancestor` or under it.
+fn collection_is_within(
+    library: &Library,
+    collection_id: LibraryCollectionId,
+    ancestor: LibraryCollectionId,
+) -> bool {
+    let mut cursor = Some(collection_id);
+    let mut visited = HashSet::new();
+    while let Some(candidate) = cursor {
+        if candidate == ancestor {
+            return true;
+        }
+        if !visited.insert(candidate) {
+            return false;
+        }
+        cursor = library
+            .library_collections
+            .iter()
+            .find(|collection| collection.id == candidate)
+            .and_then(|collection| collection.parent_id);
+    }
+    false
 }
 
 fn migrate_document_path_in_library(library: &mut Library, old_path: &Path, new_path: &Path) {
@@ -1037,6 +1304,21 @@ impl Library {
         self.library_item_locations
             .sort_by_key(|location| location.item_id.0);
 
+        self.library_item_collections.retain(|membership| {
+            item_ids.contains(&membership.item_id)
+                && collection_ids.contains(&membership.collection_id)
+        });
+        self.library_item_collections
+            .sort_by_key(|membership| (membership.item_id.0, membership.collection_id.0));
+        self.library_item_collections.dedup();
+        for location in &mut self.library_item_locations {
+            location.parent_id = self
+                .library_item_collections
+                .iter()
+                .find(|membership| membership.item_id == location.item_id)
+                .map(|membership| membership.collection_id);
+        }
+
         self.library_saved_views.retain_mut(|view| {
             view.name = clean_text(&view.name);
             view.filter
@@ -1146,17 +1428,18 @@ impl LibraryStore {
         collections
     }
 
+    pub fn library_item_collections(&self) -> &[LibraryItemCollection] {
+        &self.library.library_item_collections
+    }
+
     pub fn collections_for_item(&self, id: DocumentId) -> Vec<&LibraryCollection> {
-        self.library
-            .library_item_locations
-            .iter()
-            .find(|location| location.item_id == id)
-            .and_then(|location| location.parent_id)
-            .and_then(|parent_id| self.library_collection(parent_id))
+        item_collection_ids(&self.library, id)
             .into_iter()
+            .filter_map(|collection_id| self.library_collection(collection_id))
             .collect()
     }
 
+    /// The item's first collection.
     pub fn item_parent(&self, id: DocumentId) -> Option<LibraryCollectionId> {
         self.library
             .library_item_locations
@@ -1165,6 +1448,8 @@ impl LibraryStore {
             .and_then(|location| location.parent_id)
     }
 
+    /// The items in a collection (not its subcollections), or with `None`
+    /// the items in no collection.
     pub fn direct_collection_items(
         &self,
         collection_id: Option<LibraryCollectionId>,
@@ -1172,7 +1457,19 @@ impl LibraryStore {
         self.library
             .library_items
             .iter()
-            .filter(|item| self.item_parent(item.id) == collection_id)
+            .filter(|item| {
+                let mut memberships = self
+                    .library
+                    .library_item_collections
+                    .iter()
+                    .filter(|membership| membership.item_id == item.id);
+                match collection_id {
+                    Some(collection_id) => {
+                        memberships.any(|membership| membership.collection_id == collection_id)
+                    }
+                    None => memberships.next().is_none(),
+                }
+            })
             .map(|item| item.id)
             .collect()
     }
@@ -1328,8 +1625,78 @@ impl LibraryStore {
                 modified,
                 metadata,
                 None,
+                AttachmentStorage::Linked,
+                FileIdentity::of(&file_metadata),
             );
             Ok(LibraryAddOutcome::Added(item_id))
+        })
+    }
+
+    /// Adds a file where it is, without copying it in. History, highlights
+    /// and notes stay keyed to its path. Hashes the file on this thread; use
+    /// [`prepare_linked_import`] on a worker for large files.
+    pub fn link_item(
+        &mut self,
+        path: &Path,
+        metadata: LibraryItemMetadata,
+        parent_id: Option<LibraryCollectionId>,
+    ) -> Result<LibraryImportOutcome> {
+        let prepared = prepare_linked_import(path, &AtomicBool::new(false))?;
+        self.finalize_linked_import(prepared, metadata, parent_id)
+    }
+
+    pub fn finalize_linked_import(
+        &mut self,
+        prepared: PreparedLinkedImport,
+        mut metadata: LibraryItemMetadata,
+        parent_id: Option<LibraryCollectionId>,
+    ) -> Result<LibraryImportOutcome> {
+        if parent_id.is_some_and(|id| self.library_collection(id).is_none()) {
+            return Err(anyhow!("target folder does not exist"));
+        }
+        let duplicate = self
+            .library
+            .library_attachments
+            .iter()
+            .find(|attachment| {
+                attachment.path == prepared.path
+                    || (attachment.content_sha256 == prepared.content_sha256
+                        && attachment.file_size == prepared.file_size)
+            })
+            .map(|attachment| attachment.item_id);
+        if let Some(item_id) = duplicate {
+            return Ok(
+                if self
+                    .library_item(item_id)
+                    .is_some_and(|item| item.trashed_at.is_some())
+                {
+                    LibraryImportOutcome::DuplicateInTrash(item_id)
+                } else {
+                    LibraryImportOutcome::Duplicate(item_id)
+                },
+            );
+        }
+        if metadata.title.trim().is_empty() {
+            metadata.title = LibraryItemMetadata::for_path(&prepared.path).title;
+        }
+        self.persist_catalog_change(|library| {
+            let (item_id, attachment_id) = allocate_library_ids(library);
+            push_library_item(
+                library,
+                item_id,
+                attachment_id,
+                prepared.path,
+                linked_storage_key(attachment_id),
+                prepared.content_sha256,
+                prepared.format,
+                prepared.file_size,
+                prepared.modified,
+                metadata,
+                parent_id,
+                AttachmentStorage::Linked,
+                prepared.file_identity,
+            );
+            Ok(LibraryImportOutcome::Added(item_id))
         })
     }
 
@@ -1404,6 +1771,8 @@ impl LibraryStore {
             prepared.modified,
             metadata,
             parent_id,
+            AttachmentStorage::Managed,
+            None,
         );
         migrate_document_path_in_library(&mut self.library, &prepared.source_path, &final_path);
         self.library.sanitize();
@@ -1817,22 +2186,37 @@ impl LibraryStore {
                     )
                 })
                 .collect::<HashMap<_, _>>();
-            for location in &mut library.library_item_locations {
-                let Some(parent_id) = location.parent_id else {
-                    continue;
-                };
-                if !removed.contains(&parent_id) {
+            // An item left in no collection goes to the trash, remembering
+            // where it was; one still in another collection stays there.
+            let affected = library
+                .library_item_collections
+                .iter()
+                .filter(|membership| removed.contains(&membership.collection_id))
+                .map(|membership| (membership.item_id, membership.collection_id))
+                .collect::<Vec<_>>();
+            library
+                .library_item_collections
+                .retain(|membership| !removed.contains(&membership.collection_id));
+            for (item_id, collection_id) in affected {
+                if !item_collection_ids(library, item_id).is_empty() {
                     continue;
                 }
-                location.trash_origin = Some(LibraryTrashLocation {
-                    parent_id: Some(parent_id),
-                    path: paths.get(&parent_id).cloned().unwrap_or_default(),
-                });
-                location.parent_id = None;
+                if let Some(location) = library
+                    .library_item_locations
+                    .iter_mut()
+                    .find(|location| location.item_id == item_id)
+                    && location.trash_origin.is_none()
+                {
+                    location.trash_origin = Some(LibraryTrashLocation {
+                        parent_id: Some(collection_id),
+                        path: paths.get(&collection_id).cloned().unwrap_or_default(),
+                    });
+                    location.parent_id = None;
+                }
                 if let Some(item) = library
                     .library_items
                     .iter_mut()
-                    .find(|item| item.id == location.item_id)
+                    .find(|item| item.id == item_id)
                     && item.trashed_at.is_none()
                 {
                     item.trashed_at = Some(now);
@@ -1864,13 +2248,12 @@ impl LibraryStore {
                 .collect::<Vec<_>>();
             let mut changed = 0;
             for item_id in valid_ids {
-                let location = library
-                    .library_item_locations
-                    .iter_mut()
-                    .find(|location| location.item_id == item_id)
-                    .ok_or_else(|| anyhow!("library item {} has no location", item_id.0))?;
-                if location.parent_id != Some(collection_id) {
-                    location.parent_id = Some(collection_id);
+                let membership = LibraryItemCollection {
+                    item_id,
+                    collection_id,
+                };
+                if !library.library_item_collections.contains(&membership) {
+                    library.library_item_collections.push(membership);
                     changed += 1;
                 }
             }
@@ -1885,17 +2268,15 @@ impl LibraryStore {
     ) -> Result<usize> {
         let ids = ids.iter().copied().collect::<HashSet<_>>();
         self.persist_catalog_change(|library| {
-            let mut changed = 0;
-            for location in &mut library.library_item_locations {
-                if ids.contains(&location.item_id) && location.parent_id == Some(collection_id) {
-                    location.parent_id = None;
-                    changed += 1;
-                }
-            }
-            Ok(changed)
+            let before = library.library_item_collections.len();
+            library.library_item_collections.retain(|membership| {
+                !(ids.contains(&membership.item_id) && membership.collection_id == collection_id)
+            });
+            Ok(before - library.library_item_collections.len())
         })
     }
 
+    /// Puts an item in exactly these collections (none files it nowhere).
     pub fn set_item_collections(
         &mut self,
         id: DocumentId,
@@ -1904,20 +2285,15 @@ impl LibraryStore {
         if self.library_item(id).is_none() {
             return Err(anyhow!("library item {} does not exist", id.0));
         }
-        if collection_ids.len() > 1 {
-            return Err(anyhow!("a library item can belong to only one folder"));
-        }
-        let parent_id = collection_ids.first().copied();
-        if parent_id.is_some_and(|id| self.library_collection(id).is_none()) {
+        if collection_ids
+            .iter()
+            .any(|collection_id| self.library_collection(*collection_id).is_none())
+        {
             return Err(anyhow!("folder does not exist"));
         }
+        let collection_ids = collection_ids.to_vec();
         self.persist_catalog_change(|library| {
-            let location = library
-                .library_item_locations
-                .iter_mut()
-                .find(|location| location.item_id == id)
-                .ok_or_else(|| anyhow!("library item {} has no location", id.0))?;
-            location.parent_id = parent_id;
+            replace_item_collections(library, id, collection_ids);
             Ok(())
         })
     }
@@ -1938,7 +2314,16 @@ impl LibraryStore {
                     LibraryNodeId::Collection(id) => self
                         .library_collection(*id)
                         .and_then(|collection| collection.parent_id),
-                    LibraryNodeId::Item(id) => self.item_parent(*id),
+                    LibraryNodeId::Item(id) => {
+                        // An item inside a selected collection moves with it.
+                        return !item_collection_ids(&self.library, *id).iter().any(
+                            |collection_id| {
+                                selected_collections.iter().any(|selected| {
+                                    collection_is_within(&self.library, *collection_id, *selected)
+                                })
+                            },
+                        );
+                    }
                 };
                 let mut visited = HashSet::new();
                 while let Some(parent_id) = cursor {
@@ -2038,13 +2423,10 @@ impl LibraryStore {
                         }
                     }
                     LibraryNodeId::Item(id) => {
-                        let location = library
-                            .library_item_locations
-                            .iter_mut()
-                            .find(|location| location.item_id == id)
-                            .ok_or_else(|| anyhow!("library item {} has no location", id.0))?;
-                        if location.parent_id != target_parent {
-                            location.parent_id = target_parent;
+                        // Moving an item takes it out of its other collections.
+                        let target = target_parent.into_iter().collect::<Vec<_>>();
+                        if item_collection_ids(library, id) != target {
+                            replace_item_collections(library, id, target);
                             changed += 1;
                         }
                     }
@@ -2157,23 +2539,36 @@ impl LibraryStore {
                     .iter()
                     .find(|location| location.item_id == item_id)
                     .and_then(|location| location.trash_origin.clone());
-                let parent_id = origin.as_ref().and_then(|origin| {
-                    origin
-                        .parent_id
-                        .filter(|id| {
-                            library
-                                .library_collections
-                                .iter()
-                                .any(|collection| collection.id == *id)
-                        })
-                        .or_else(|| ensure_collection_path_in(library, &origin.path))
-                });
+                // An item that kept its collections goes back to them; one
+                // whose collection was deleted gets the collection's path again.
+                let parent_id = if item_collection_ids(library, item_id).is_empty() {
+                    origin.as_ref().and_then(|origin| {
+                        origin
+                            .parent_id
+                            .filter(|id| {
+                                library
+                                    .library_collections
+                                    .iter()
+                                    .any(|collection| collection.id == *id)
+                            })
+                            .or_else(|| ensure_collection_path_in(library, &origin.path))
+                    })
+                } else {
+                    None
+                };
+                if let Some(collection_id) = parent_id {
+                    library
+                        .library_item_collections
+                        .push(LibraryItemCollection {
+                            item_id,
+                            collection_id,
+                        });
+                }
                 if let Some(location) = library
                     .library_item_locations
                     .iter_mut()
                     .find(|location| location.item_id == item_id)
                 {
-                    location.parent_id = parent_id;
                     location.trash_origin = None;
                 }
                 if let Some(item) = library
@@ -2201,11 +2596,14 @@ impl LibraryStore {
             .collect::<HashSet<_>>();
         let mut quarantined = Vec::new();
         if let Some(root) = &self.managed_library_root {
+            // A linked file is the user's own; deleting the item leaves it.
             for attachment in self
                 .library
                 .library_attachments
                 .iter()
-                .filter(|attachment| deletable_ids.contains(&attachment.item_id))
+                .filter(|attachment| {
+                    deletable_ids.contains(&attachment.item_id) && !attachment.is_linked()
+                })
             {
                 let expected = root.join("files").join(&attachment.storage_key);
                 if attachment.path.parent() != Some(expected.as_path()) {
@@ -2278,7 +2676,10 @@ impl LibraryStore {
     }
 
     pub fn relink_library_attachment(&mut self, id: DocumentId, new_path: &Path) -> Result<()> {
-        if self.managed_library_root.is_some() {
+        let linked = self
+            .primary_attachment(id)
+            .is_some_and(LibraryAttachment::is_linked);
+        if self.managed_library_root.is_some() && !linked {
             return self.replace_managed_attachment(id, new_path);
         }
         let new_path = normalize_path(new_path);
@@ -2327,6 +2728,7 @@ impl LibraryStore {
         attachment.format = format;
         attachment.file_size = file_metadata.len();
         attachment.modified = modified;
+        attachment.file_identity = FileIdentity::of(&file_metadata);
         for entry in &mut self.library.history {
             if entry.path == old_path {
                 entry.path = new_path.clone();
@@ -2562,6 +2964,18 @@ impl LibraryStore {
                     .tag_ids
                     .iter()
                     .all(|tag_id| tags.iter().any(|tag| tag.id == *tag_id))
+            })
+            .filter(|item| {
+                filter.collection_id.is_none_or(|ancestor| {
+                    item_collection_ids(&self.library, item.id)
+                        .into_iter()
+                        .any(|collection_id| {
+                            collection_is_within(&self.library, collection_id, ancestor)
+                        })
+                })
+            })
+            .filter(|item| {
+                !filter.unfiled || item_collection_ids(&self.library, item.id).is_empty()
             })
             .filter(|item| query.is_empty() || self.item_matches_text(item, &query))
             .collect::<Vec<_>>();

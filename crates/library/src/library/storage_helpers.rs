@@ -123,6 +123,12 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(LIBRARY_ITEM_LOCATIONS_V2_TABLE)?;
     }
+    {
+        write_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+    }
+    {
+        write_txn.open_table(LIBRARY_LINKED_ATTACHMENTS_V1_TABLE)?;
+    }
     write_txn.commit()?;
     Ok(())
 }
@@ -232,6 +238,58 @@ fn load_catalog(
                 Ok(location) => library.library_item_locations.push(location),
                 Err(error) => eprintln!("failed to decode library item location: {error:#}"),
             }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_LINKED_ATTACHMENTS_V1_TABLE)?;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            match decode::<StoredLinkedAttachmentV1>(value.value())
+                .and_then(StoredLinkedAttachmentV1::into_domain)
+            {
+                Ok(attachment) => library.library_attachments.push(attachment),
+                Err(error) => eprintln!("failed to decode linked library attachment: {error:#}"),
+            }
+        }
+    }
+    {
+        let table = read_txn.open_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)?;
+        let mut rows = 0;
+        for entry in table.iter()? {
+            let (item_id, value) = entry?;
+            rows += 1;
+            match decode::<StoredLibraryItemCollectionsV1>(value.value())
+                .and_then(StoredLibraryItemCollectionsV1::into_domain)
+            {
+                Ok(collection_ids) => {
+                    library
+                        .library_item_collections
+                        .extend(collection_ids.into_iter().map(|collection_id| {
+                            LibraryItemCollection {
+                                item_id: DocumentId(item_id.value()),
+                                collection_id,
+                            }
+                        }))
+                }
+                Err(error) => eprintln!("failed to decode library item collections: {error:#}"),
+            }
+        }
+        // A library written before items could be in several collections
+        // starts from each item's one folder.
+        if rows == 0 {
+            library.library_item_collections.extend(
+                library
+                    .library_item_locations
+                    .iter()
+                    .filter_map(|location| {
+                        location
+                            .parent_id
+                            .map(|collection_id| LibraryItemCollection {
+                                item_id: location.item_id,
+                                collection_id,
+                            })
+                    }),
+            );
         }
     }
     Ok(())

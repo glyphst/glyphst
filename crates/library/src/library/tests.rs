@@ -2301,7 +2301,7 @@ fn catalog_persists_items_tags_saved_views_and_trash() {
 }
 
 #[test]
-fn catalog_persists_nested_folders_and_single_parent_locations() {
+fn catalog_persists_nested_folders_and_items_in_several_collections() {
     let database_path = temp_library_path("catalog-folders");
     let first_path = database_path.with_extension("first.pdf");
     let second_path = database_path.with_extension("second.pdf");
@@ -2343,12 +2343,18 @@ fn catalog_persists_nested_folders_and_single_parent_locations() {
                 .unwrap(),
             1
         );
-        assert!(store.direct_collection_items(Some(ml_id)).is_empty());
+        assert_eq!(
+            store.add_items_to_collection(&[first_id], ml_id).unwrap(),
+            0,
+            "adding an item to a collection it is in changes nothing"
+        );
+        assert_eq!(store.direct_collection_items(Some(ml_id)), vec![first_id]);
         assert_eq!(
             store.direct_collection_items(Some(books_id)),
             vec![first_id]
         );
         assert_eq!(store.direct_collection_items(None), vec![second_id]);
+        assert_eq!(store.item_parent(first_id), Some(ml_id));
         assert_eq!(
             store.collection_path_label(ml_id),
             "Papers/Machine Learning"
@@ -2365,11 +2371,15 @@ fn catalog_persists_nested_folders_and_single_parent_locations() {
                 .into_iter()
                 .map(|collection| collection.id)
                 .collect::<Vec<_>>(),
-            vec![books_id]
+            vec![ml_id, books_id]
         );
         assert_eq!(store.delete_library_collection(papers_id).unwrap(), 2);
         assert!(store.library_collection(papers_id).is_none());
         assert!(store.library_collection(ml_id).is_none());
+        assert!(
+            store.library_item(first_id).unwrap().trashed_at.is_none(),
+            "an item still in another collection is not trashed"
+        );
         assert_eq!(
             store
                 .collections_for_item(first_id)
@@ -2378,6 +2388,7 @@ fn catalog_persists_nested_folders_and_single_parent_locations() {
                 .collect::<Vec<_>>(),
             vec![books_id]
         );
+        assert_eq!(store.item_parent(first_id), Some(books_id));
         assert_eq!(store.direct_collection_items(None), vec![second_id]);
         assert!(first_path.exists());
         assert!(second_path.exists());
@@ -2870,4 +2881,193 @@ fn ai_session_chips_and_times_round_trip_and_chats_can_be_deleted() {
     assert_eq!(sessions[0].id, kept);
     assert_eq!(sessions[0].messages[0], message);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn linked_items_stay_in_place_and_survive_reopening() {
+    let database_path = temp_library_path("linked-items");
+    let document_path = database_path.with_extension("linked.pdf");
+    fs::write(&document_path, b"%PDF-1.4\nlinked").unwrap();
+    let managed_root = database_path.with_extension("managed-library");
+
+    let item_id = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let papers = store.create_library_collection(None, "Papers").unwrap();
+        let LibraryImportOutcome::Added(item_id) = store
+            .link_item(
+                &document_path,
+                LibraryItemMetadata::for_path(&document_path),
+                Some(papers),
+            )
+            .unwrap()
+        else {
+            panic!("expected the file to be linked");
+        };
+        assert_eq!(
+            store
+                .link_item(
+                    &document_path,
+                    LibraryItemMetadata::for_path(&document_path),
+                    None
+                )
+                .unwrap(),
+            LibraryImportOutcome::Duplicate(item_id),
+            "linking the same file again finds the item"
+        );
+        let attachment = store.primary_attachment(item_id).unwrap();
+        assert!(attachment.is_linked());
+        assert_eq!(attachment.path, normalize_path(&document_path));
+        assert_eq!(store.direct_collection_items(Some(papers)), vec![item_id]);
+        item_id
+    };
+
+    {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let attachment = store.primary_attachment(item_id).unwrap().clone();
+        assert!(attachment.is_linked());
+        assert_eq!(attachment.path, normalize_path(&document_path));
+        #[cfg(unix)]
+        assert!(attachment.file_identity.is_some());
+        assert_eq!(
+            store.library_item_for_path(&document_path).unwrap().id,
+            item_id
+        );
+        assert_eq!(store.trash_library_items(&[item_id]).unwrap(), 1);
+        assert_eq!(
+            store.permanently_delete_library_items(&[item_id]).unwrap(),
+            1
+        );
+        assert!(
+            document_path.exists(),
+            "deleting a linked item leaves the user's file"
+        );
+    }
+
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert!(store.library_items().is_empty());
+    assert!(store.library_attachments().is_empty());
+
+    let _ = fs::remove_file(document_path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(managed_root);
+}
+
+#[test]
+fn a_library_from_before_several_collections_keeps_each_items_folder() {
+    let database_path = temp_library_path("collections-fill");
+    let document_path = database_path.with_extension("fill.pdf");
+    fs::write(&document_path, b"%PDF-1.4\nfill").unwrap();
+
+    let (item_id, topic) = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let LibraryImportOutcome::Added(item_id) = store
+            .link_item(
+                &document_path,
+                LibraryItemMetadata::for_path(&document_path),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected item");
+        };
+        let topic = store.create_library_collection(None, "Topic").unwrap();
+        store.add_items_to_collection(&[item_id], topic).unwrap();
+        (item_id, topic)
+    };
+    {
+        let database = Database::open(&database_path).unwrap();
+        let write_txn = database.begin_write().unwrap();
+        write_txn
+            .delete_table(LIBRARY_ITEM_COLLECTIONS_V1_TABLE)
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.item_parent(item_id), Some(topic));
+    assert_eq!(store.direct_collection_items(Some(topic)), vec![item_id]);
+
+    let _ = fs::remove_file(document_path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn collections_filter_items_with_their_subcollections_and_moves_replace_them() {
+    let paths = (0..3)
+        .map(|index| {
+            let path =
+                temp_library_path(&format!("collection-filter-{index}")).with_extension("pdf");
+            fs::write(&path, format!("document {index}")).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let mut store = LibraryStore::memory();
+    let ids = paths
+        .iter()
+        .map(|path| {
+            let LibraryAddOutcome::Added(id) = store
+                .add_linked_item(path, LibraryItemMetadata::for_path(path))
+                .unwrap()
+            else {
+                panic!("expected item");
+            };
+            id
+        })
+        .collect::<Vec<_>>();
+    let ml = store.create_library_collection(None, "ML").unwrap();
+    let llms = store.create_library_collection(Some(ml), "LLMs").unwrap();
+    let reading = store.create_library_collection(None, "Reading").unwrap();
+    store.add_items_to_collection(&[ids[0]], llms).unwrap();
+    store
+        .add_items_to_collection(&[ids[0], ids[1]], reading)
+        .unwrap();
+
+    let query = |store: &LibraryStore, filter: LibraryFilter| {
+        let mut found = store.query_library_items(&filter, LibrarySort::default());
+        found.sort_by_key(|id| id.0);
+        found
+    };
+    let in_ml = LibraryFilter {
+        collection_id: Some(ml),
+        ..LibraryFilter::default()
+    };
+    assert_eq!(query(&store, in_ml.clone()), vec![ids[0]]);
+    let unfiled = LibraryFilter {
+        unfiled: true,
+        ..LibraryFilter::default()
+    };
+    assert_eq!(query(&store, unfiled.clone()), vec![ids[2]]);
+
+    store.trash_library_items(&[ids[0]]).unwrap();
+    store.restore_library_items(&[ids[0]]).unwrap();
+    assert_eq!(
+        store
+            .collections_for_item(ids[0])
+            .into_iter()
+            .map(|collection| collection.id)
+            .collect::<Vec<_>>(),
+        vec![llms, reading],
+        "trash and restore keep every collection"
+    );
+
+    store
+        .move_library_nodes(&[LibraryNodeId::Item(ids[0])], Some(ml))
+        .unwrap();
+    assert_eq!(
+        store
+            .collections_for_item(ids[0])
+            .into_iter()
+            .map(|collection| collection.id)
+            .collect::<Vec<_>>(),
+        vec![ml],
+        "moving an item takes it out of its other collections"
+    );
+    store.set_item_collections(ids[2], &[ml, reading]).unwrap();
+    assert!(query(&store, unfiled).is_empty());
+    assert_eq!(query(&store, in_ml), vec![ids[0], ids[2]]);
+
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
 }

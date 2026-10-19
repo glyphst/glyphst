@@ -1923,6 +1923,8 @@ pub struct Library {
     pub library_saved_views: Vec<LibrarySavedView>,
     pub library_collections: Vec<LibraryCollection>,
     pub library_item_locations: Vec<LibraryItemLocation>,
+    /// Which collections each item is in; an item can be in several.
+    pub library_item_collections: Vec<LibraryItemCollection>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
