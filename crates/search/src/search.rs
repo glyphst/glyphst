@@ -23,6 +23,8 @@ const NEAREST: usize = 200;
 const MEANING_GATE: f32 = 2.0;
 /// The floor of the spread meaning scores are measured against.
 const MIN_SPREAD: f32 = 0.02;
+/// The share of the meaning score a passage with every word keeps.
+const MEANING_FLOOR: f32 = 0.15;
 /// Passages the reranker rereads, from the strong items, best first.
 pub const RERANK_TOP: usize = 30;
 /// Pages shown per item.
@@ -252,6 +254,7 @@ fn stem(word: &str) -> &str {
     word
 }
 
+#[derive(Clone)]
 struct Candidate {
     chunk_id: i64,
     path: String,
@@ -360,27 +363,62 @@ impl Store {
                 .all(|word| word.chars().any(|c| c.is_ascii_digit()));
         let (meaning_weight, words_weight) = if lookup { (0.5, 4.0) } else { (1.0, 2.0) };
 
+        // Each passage's words and closeness in meaning (None: no vector yet).
+        let scored = candidates
+            .into_iter()
+            .map(|candidate| {
+                let coverage = query.coverage(&candidate.text);
+                let z = meaning.as_ref().zip(spread).and_then(|(meaning, spread)| {
+                    let cosine = meaning.index.score(candidate.chunk_id, meaning.query)?;
+                    Some((cosine - spread.mean) / spread.std.max(MIN_SPREAD))
+                });
+                (candidate, coverage, z)
+            })
+            .collect::<Vec<_>>();
+        // While the index embeds, a passage without its vector is not worse
+        // than one with: it is given the mean meaning of the embedded
+        // passages that match at least as many of the words.
+        let imputed = |coverage: f32| {
+            let (sum, count) = scored
+                .iter()
+                .filter_map(|(_, other, z)| Some((*other, (*z)?)))
+                .filter(|(other, _)| *other >= coverage - 1e-6)
+                .fold((0.0, 0), |(sum, count), (_, z)| {
+                    (sum + z.max(0.0), count + 1)
+                });
+            if count == 0 { 0.0 } else { sum / count as f32 }
+        };
+
         let owners = self.owners()?;
         let mut by_item: HashMap<u64, ItemHit> = HashMap::new();
-        for candidate in candidates {
-            let coverage = query.coverage(&candidate.text);
-            let z = meaning.as_ref().zip(spread).and_then(|(meaning, spread)| {
-                let cosine = meaning.index.score(candidate.chunk_id, meaning.query)?;
-                Some((cosine - spread.mean) / spread.std.max(MIN_SPREAD))
-            });
+        for (candidate, coverage, z) in scored.iter().cloned() {
             let score = match request.fusion {
                 Fusion::ZScore => {
+                    let meant = match z {
+                        Some(z) => z.max(0.0),
+                        None if spread.is_some() => imputed(coverage),
+                        None => 0.0,
+                    };
+                    // Meaning counts most where words are missing: it finds
+                    // what is said in other words, and orders passages with
+                    // the same words, but does not outvote an exact match.
+                    let room = (1.0 - coverage).powi(2).max(MEANING_FLOOR);
                     words_weight * coverage.powf(1.5)
                         + 0.05 * candidate.rank.max(0.0).ln_1p()
-                        + meaning_weight * z.unwrap_or(0.0).max(0.0)
+                        + meaning_weight * meant * room
                 }
                 Fusion::Rrf => {
                     let reciprocal = |rank: Option<&usize>| {
                         rank.map_or(0.0, |rank| 1.0 / (60.0 + *rank as f32 + 1.0))
                     };
+                    let keyword = keyword_rank.get(&candidate.chunk_id);
+                    // No vector yet: its meaning taken to agree with its words.
+                    let meant = match (z, spread) {
+                        (None, Some(_)) => keyword,
+                        _ => meaning_rank.get(&candidate.chunk_id),
+                    };
                     // Scaled to the same range as the z mix.
-                    60.0 * (reciprocal(keyword_rank.get(&candidate.chunk_id))
-                        + reciprocal(meaning_rank.get(&candidate.chunk_id)))
+                    60.0 * (reciprocal(keyword) + reciprocal(meant))
                 }
             };
             let (snippet, highlights) = marked(&candidate.snippet);

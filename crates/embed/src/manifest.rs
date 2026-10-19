@@ -35,8 +35,8 @@ pub const MODEL: Asset = Asset {
 /// the query, run by the same engine. bge-reranker-v2-m3 (multilingual)
 /// over Qwen3-Reranker-0.6B: on the labelled set it put 7 of 8
 /// paraphrases first from keyword results (Qwen3: 6), kept the hybrid
-/// search's order (Qwen3 pushed one down), and took 46 ms a query
-/// against 129 on the Arc.
+/// search's order (Qwen3 pushed one down), and reread 30 passages in
+/// about 390 ms against 1,400 on the Arc.
 pub const RERANKER: Asset = Asset {
     name: "bge-reranker-v2-m3-Q8_0.gguf",
     url: "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q8_0.gguf",

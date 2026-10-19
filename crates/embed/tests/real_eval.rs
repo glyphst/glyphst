@@ -16,11 +16,9 @@ use glyphst_embed::{
     server::ServerConfig,
 };
 use glyphst_search::{
-    Fusion, Indexer, ItemText, LibraryFile, SearchRequest, Snapshot, Store,
-    embed::Embedder,
-    eval::{EvalSet, Scores, rank},
-    search::Meaning,
-    vectors::VectorIndex,
+    Indexer, ItemText, LibraryFile, Snapshot, Store,
+    embed::{Embedder, Reranker},
+    eval::{EvalSet, compare},
 };
 
 #[derive(serde::Deserialize)]
@@ -100,85 +98,21 @@ fn the_labelled_set_with_the_real_model() {
         })
         .unwrap()
     });
-    let mut rerank_time = Duration::ZERO;
     let store = Store::open_reader(&index_path).unwrap();
-    let vectors = VectorIndex::load(&store, embedder.model_key()).unwrap();
-    let mut table: BTreeMap<(&str, &str), Vec<Option<usize>>> = BTreeMap::new();
-    for query in &set.queries {
-        let request = SearchRequest {
-            text: query.q.clone(),
-            ..SearchRequest::default()
-        };
-        let vector = embedder.embed_query(&query.q).unwrap();
-        let meaning = || Meaning {
-            index: &vectors,
-            query: &vector,
-        };
-        let keyword = store.search(&request).unwrap();
-        let z = store.search_with(&request, Some(meaning())).unwrap();
-        let rrf = store
-            .search_with(
-                &SearchRequest {
-                    fusion: Fusion::Rrf,
-                    ..request.clone()
-                },
-                Some(meaning()),
-            )
-            .unwrap();
-        let mut runs = vec![("keyword", keyword), ("z-score", z), ("rrf", rrf)];
-        if let Some(reranker) = &reranker {
-            let started = Instant::now();
-            let reranked = store
-                .search_reranked(&request, Some(meaning()), reranker)
-                .unwrap();
-            rerank_time += started.elapsed();
-            let rrf_reranked = store
-                .search_reranked(
-                    &SearchRequest {
-                        fusion: Fusion::Rrf,
-                        ..request.clone()
-                    },
-                    Some(meaning()),
-                    reranker,
-                )
-                .unwrap();
-            // The reranker alone ordering what keywords found.
-            runs.push((
-                "kw+rerank",
-                store.search_reranked(&request, None, reranker).unwrap(),
-            ));
-            runs.push(("z+rerank", reranked));
-            runs.push(("rrf+rerank", rrf_reranked));
-        }
-        for (name, results) in &runs {
-            let found = rank(results, query);
-            table
-                .entry((name, query.tag.as_str()))
-                .or_default()
-                .push(found);
-            table.entry((name, "all")).or_default().push(found);
-        }
+    let report = compare(
+        &store,
+        &set,
+        Some(embedder.as_ref()),
+        reranker.as_ref().map(|reranker| reranker as &dyn Reranker),
+    )
+    .unwrap();
+    for row in &report.rows {
+        eprintln!("{:10} {:8} {}", row.run, row.tag, row.scores);
     }
-    for ((fusion, tag), ranks) in &table {
-        eprintln!("{fusion:10} {tag:8} {}", Scores::of(ranks));
-    }
-    if let Some(reranker) = &reranker {
-        use glyphst_search::embed::Reranker as _;
-        let scores = reranker
-            .rerank(
-                "stopping a big network from memorising its training data",
-                &[
-                    "It is a simple way to reduce overfitting in large neural networks.",
-                    "Dropout randomly drops units during training to prevent co-adaptation.",
-                    "Sample quality on CIFAR10 reaches an FID score of 3.17.",
-                    "A collection of recipes for baking bread at home",
-                ],
-            )
-            .unwrap();
-        eprintln!("scores (overfitting, dropout, FID, bread): {scores:?}");
+    if let Some(time) = report.rerank_time {
         eprintln!(
             "rerank: {:.0} ms a query (search and rereading)",
-            rerank_time.as_secs_f64() * 1000.0 / set.queries.len() as f64
+            time.as_secs_f64() * 1000.0
         );
     }
     let _ = std::fs::remove_dir_all(dir);

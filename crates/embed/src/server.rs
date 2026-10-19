@@ -66,6 +66,10 @@ pub enum Mode {
 /// A running server, stopped when dropped.
 pub struct Server {
     child: Mutex<Child>,
+    /// Keeps the thread that started the server alive while it runs: on
+    /// Linux the server is stopped when that thread ends, so a crashed or
+    /// killed app leaves no server behind.
+    _keeper: std::sync::mpsc::Sender<()>,
     client: Client,
     log: Arc<Mutex<VecDeque<String>>>,
     pid_file: Option<PathBuf>,
@@ -106,8 +110,7 @@ impl Server {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
+        let (mut child, keeper) = spawn_kept(command)
             .with_context(|| format!("failed to start {}", config.exe.display()))
             .map_err(ServerError::Other)?;
         if let Some(pid_file) = &config.pid_file {
@@ -141,6 +144,7 @@ impl Server {
         }
         let server = Self {
             child: Mutex::new(child),
+            _keeper: keeper,
             client: Client::new(format!("http://127.0.0.1:{port}"), key),
             log,
             pid_file: config.pid_file.clone(),
@@ -208,6 +212,44 @@ impl Drop for Server {
             let _ = std::fs::remove_file(pid_file);
         }
     }
+}
+
+/// Starts `command` from a thread that lives until the returned sender is
+/// dropped. On Linux the child gets SIGTERM when that thread ends, which
+/// it also does when the app is killed or crashes.
+fn spawn_kept(mut command: Command) -> Result<(Child, std::sync::mpsc::Sender<()>)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: the hook runs in the forked child before exec, and calls
+        // only prctl and getppid, which are async-signal-safe.
+        #[allow(unsafe_code)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The parent may have gone before the line above.
+                if libc::getppid() == 1 {
+                    return Err(std::io::Error::other("the app has gone"));
+                }
+                Ok(())
+            });
+        }
+    }
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let (started, child) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("engine-keeper".to_string())
+        .spawn(move || {
+            let _ = started.send(command.spawn());
+            // Until the server is dropped (or the app ends).
+            let _ = stopped.recv();
+        })?;
+    let child = child
+        .recv()
+        .map_err(|_| anyhow!("the engine's keeper stopped"))??;
+    Ok((child, stop))
 }
 
 fn base_command(config: &ServerConfig) -> Command {
@@ -452,6 +494,32 @@ mod tests {
             }
         });
         address
+    }
+
+    /// The server ends when the thread that started it does, as it does
+    /// when the app is killed: nothing else stops it here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_server_ends_with_its_keeper() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let (mut child, keeper) = spawn_kept(command).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none(), "it runs while kept");
+        drop(keeper);
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "it outlived its keeper"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
     #[test]

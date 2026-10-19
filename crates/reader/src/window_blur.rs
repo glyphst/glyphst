@@ -141,8 +141,8 @@ mod wayland {
             };
             // SAFETY: the pointer is winit's live `wl_display`, which
             // outlives the app; a backend from a foreign display never
-            // closes it. (One of the two unsafe calls the workspace allows,
-            // here only: there is no safe way onto winit's connection.)
+            // closes it. (One of this file's two unsafe calls: there is no
+            // safe way onto winit's connection.)
             #[allow(unsafe_code)]
             let backend = unsafe { Backend::from_foreign_display(display.display.as_ptr().cast()) };
             let connection = Connection::from_backend(backend);

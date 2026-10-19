@@ -2961,6 +2961,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-pdf",
  "glyphst-search",
+ "libc",
  "log",
  "rand 0.10.3",
  "reqwest",

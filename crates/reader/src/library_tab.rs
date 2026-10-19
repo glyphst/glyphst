@@ -83,11 +83,13 @@ pub enum LibraryTabAction {
     },
     /// Colour a tag, or take its colour off.
     TagColor(LibraryTagId, Option<HighlightColor>),
-    /// Open a search hit's file at its page.
+    /// Open a search hit's file at its page; `query` when it was opened
+    /// from a search's results (kept to measure search by).
     OpenAt {
         path: PathBuf,
         page: usize,
         anchor: Option<glyphst_core::SemanticTextAnchor>,
+        query: Option<String>,
     },
     /// Ask the assistant about the library, starting from a search.
     AskLibrary(String),

@@ -164,8 +164,10 @@ transparency is on (off by default). Then the base layer and the docked
 panes take the window's opacity; everything raised over them (popovers,
 menus, dialogs, fields) and the pages stay opaque. Blur behind the window
 is the compositor's, asked for through `ext-background-effect-v1` on
-winit's Wayland connection (`window_blur.rs`, the workspace's one allowance
-of `unsafe`, for its two FFI calls).
+winit's Wayland connection (`window_blur.rs`, for its two FFI calls, is one
+of the workspace's two allowances of `unsafe`; the other is the search
+engine's `pre_exec` hook in `crates/embed/src/server.rs`, which ties the
+server's life to the app's on Linux).
 The layout is a docked shell (`shell.rs`, plain geometry): a 36pt tab bar,
 a 24pt status bar, and between them a 40pt icon rail, the sidebar, the
 reading column (a 28pt breadcrumb over the pages) and the assistant, side

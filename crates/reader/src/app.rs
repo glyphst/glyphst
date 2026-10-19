@@ -1636,7 +1636,20 @@ impl ReaderApp {
                 })
             }
             Action::TagColor(tag, color) => self.library.set_tag_color(tag, color),
-            Action::OpenAt { path, page, anchor } => {
+            Action::OpenAt {
+                path,
+                page,
+                anchor,
+                query,
+            } => {
+                if let Some(query) = query
+                    && self.prefs.library.learn_from_opened
+                    && self.persist
+                    && let Some(search) = &self.library_search
+                    && let Err(error) = search.record_opened(&query, &path, page)
+                {
+                    log::warn!("could not keep the search opened: {error:#}");
+                }
                 self.open(&path, ctx, Some(page));
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.path == path) {
                     tab.go_to_passage(page, anchor);
@@ -1791,7 +1804,12 @@ impl ReaderApp {
             .map(|item| item.title.clone())
             .unwrap_or_else(|| path.display().to_string());
         self.library_tab_action(
-            crate::library_tab::LibraryTabAction::OpenAt { path, page, anchor },
+            crate::library_tab::LibraryTabAction::OpenAt {
+                path,
+                page,
+                anchor,
+                query: None,
+            },
             ctx,
         );
         Ok(format!("Showing \"{title}\" at page {}.", page + 1))

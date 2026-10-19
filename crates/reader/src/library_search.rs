@@ -444,6 +444,31 @@ impl SearchService {
         self.path.with_file_name("opened.jsonl")
     }
 
+    /// Keeps a search and the passage opened from it, in the labelled
+    /// set's form: the file and its page are what the search should find.
+    pub fn record_opened(&self, query: &str, path: &Path, page: usize) -> Result<()> {
+        use std::io::Write as _;
+        let query = query.trim();
+        let Some(name) = path.file_name() else {
+            return Ok(());
+        };
+        if query.is_empty() {
+            return Ok(());
+        }
+        let line = serde_json::json!({
+            "q": query,
+            "expect": [format!("{}@{}", name.to_string_lossy(), page + 1)],
+            "tag": "opened",
+            "at": glyphst_library::current_timestamp(),
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.opened_path())?;
+        writeln!(file, "{line}")?;
+        Ok(())
+    }
+
     /// Forgets them.
     pub fn forget_opened(&self) {
         let _ = std::fs::remove_file(self.opened_path());
@@ -604,6 +629,35 @@ mod tests {
         let results = service.results().unwrap();
         assert!(results.reranked && results.meaning);
         assert_eq!(results.items[0].item_id, 2);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opened_passages_become_a_labelled_set_and_are_forgotten() {
+        let dir = std::env::temp_dir().join(format!("glyphst-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let service = SearchService::start(&dir.join("search.sqlite"), &ctx).unwrap();
+        let snapshot = papers(&dir, &["attention models", "recurrent networks", "bread"]);
+        let recurrent = snapshot.files[1].path.clone();
+        service.indexer.reconcile(snapshot);
+        let started = Instant::now();
+        while service.status().done < 3 {
+            assert!(started.elapsed().as_secs() < 30, "{:?}", service.status());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        service.record_opened("recurrent", &recurrent, 0).unwrap();
+        service.record_opened("  ", &recurrent, 0).unwrap();
+        let set = glyphst_search::eval::EvalSet::load(&service.opened_path()).unwrap();
+        assert_eq!(set.queries.len(), 1, "an empty search is not kept");
+        assert_eq!(set.queries[0].expect, ["1.pdf@1"]);
+        let store = Store::open_reader(service.path()).unwrap();
+        let report = glyphst_search::eval::compare(&store, &set, None, None).unwrap();
+        assert_eq!(report.rows[0].scores.at1, 1.0, "{report:?}");
+        service.forget_opened();
+        assert!(!service.opened_path().exists());
         drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }

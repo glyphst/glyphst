@@ -630,3 +630,61 @@ fn the_reranker_reorders_the_strong_items_by_their_best_passage() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn compare_scores_every_run_the_models_allow() {
+    use crate::embed::{Embedder as _, FakeEmbedder, FakeReranker};
+    let (mut store, set, dir) = eval_corpus("eval-compare");
+    let crate::eval::Report {
+        rows,
+        rerank_time: time,
+        ..
+    } = crate::eval::compare(&store, &set, None, None).unwrap();
+    assert!(rows.iter().all(|row| row.run == "keyword"), "{rows:#?}");
+    assert!(time.is_none());
+    let words = rows.iter().find(|row| row.tag == "words").unwrap().scores;
+    assert!(words.at1 >= 0.85, "{words}");
+
+    // Vectors from the fake model: meaning and the reranker join.
+    let pending = store
+        .next_to_embed(FakeEmbedder.model_key(), 1_000)
+        .unwrap();
+    let vectors = FakeEmbedder
+        .embed_documents(
+            &pending
+                .iter()
+                .map(|p| (p.title.as_str(), p.text.as_str()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let rows_to_save = pending
+        .into_iter()
+        .zip(vectors)
+        .map(|(p, v)| (p.chunk_id, p.title, v))
+        .collect::<Vec<_>>();
+    store
+        .save_vectors(FakeEmbedder.model_key(), &rows_to_save)
+        .unwrap();
+    let report =
+        crate::eval::compare(&store, &set, Some(&FakeEmbedder), Some(&FakeReranker)).unwrap();
+    let (rows, time) = (report.rows, report.rerank_time);
+    let runs = rows
+        .iter()
+        .filter(|row| row.tag == "all")
+        .map(|row| row.run)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        runs,
+        [
+            "keyword",
+            "kw+rerank",
+            "rrf",
+            "rrf+rerank",
+            "z+rerank",
+            "z-score"
+        ]
+        .into()
+    );
+    assert!(time.is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -7,6 +7,7 @@
 //!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
 //!     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
+//! glyphst-reader --eval-search [SET]   measures the library's search and exits
 //!
 //! Mouse: Ctrl+wheel or pinch zooms at the pointer; wheel and drag scroll,
 //! dragging on text selects it (Alt+drag a column), double and triple
@@ -38,6 +39,7 @@ mod doc_text;
 mod document;
 mod document_tab;
 mod effects_page;
+mod eval_search;
 mod fake_providers;
 mod find;
 mod generation;
@@ -442,6 +444,10 @@ fn main() -> Result<()> {
     // as a relay to the running Reader's server.
     if std::env::args().nth(1).as_deref() == Some("--mcp-stdio") {
         return glyphst_agent_host::mcp_stdio::run();
+    }
+    // Measuring the library's search runs headless and exits.
+    if std::env::args().nth(1).as_deref() == Some("--eval-search") {
+        return eval_search::run(std::env::args().nth(2).map(PathBuf::from));
     }
     let launch = parse_args()?;
     // Scripted runs keep no preferences, so they cannot change the user's.

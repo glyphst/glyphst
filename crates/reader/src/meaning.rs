@@ -166,6 +166,8 @@ pub enum EngineStatus {
 /// A model served by its own `llama-server`: the embedder or the reranker.
 pub trait Served: Send + Sync + Sized + 'static {
     const NAME: &'static str;
+    /// Its running server's id, to stop it after a crash.
+    const PID_FILE: &'static str;
     fn start(config: &ServerConfig) -> Result<Self, ServerError>;
     fn is_alive(&self) -> bool;
     fn log_tail(&self) -> String;
@@ -177,6 +179,7 @@ pub trait Served: Send + Sync + Sized + 'static {
 
 impl Served for LlamaEmbedder {
     const NAME: &'static str = "meaning";
+    const PID_FILE: &'static str = "server.pid";
     fn start(config: &ServerConfig) -> Result<Self, ServerError> {
         LlamaEmbedder::start(config)
     }
@@ -193,6 +196,7 @@ impl Served for LlamaEmbedder {
 
 impl Served for LlamaReranker {
     const NAME: &'static str = "rerank";
+    const PID_FILE: &'static str = "rerank-server.pid";
     fn start(config: &ServerConfig) -> Result<Self, ServerError> {
         LlamaReranker::start(config)
     }
@@ -268,9 +272,7 @@ impl<T: Served> Runtime<T> {
                     exe,
                     model,
                     library_dirs: glyphst_embed::server::vulkan_dirs(),
-                    pid_file: Some(
-                        glyphst_embed::install::root().join(format!("{}-server.pid", T::NAME)),
-                    ),
+                    pid_file: Some(glyphst_embed::install::root().join(T::PID_FILE)),
                 };
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let ctx = ctx.clone();

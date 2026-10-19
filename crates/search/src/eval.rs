@@ -8,9 +8,15 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
-use crate::search::SearchResults;
+use crate::{
+    Fusion, SearchRequest, Store,
+    embed::{Embedder, Reranker},
+    search::{Meaning, SearchResults},
+    vectors::VectorIndex,
+};
 
-/// `{"queries": [{"q": "…", "expect": ["paper.pdf@3-4"]}]}`.
+/// `{"queries": [{"q": "…", "expect": ["paper.pdf@3-4"]}]}`, or one
+/// query a line (the Reader's `opened.jsonl`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct EvalSet {
     pub queries: Vec<EvalQuery>,
@@ -29,6 +35,17 @@ impl EvalSet {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            let queries = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str)
+                .collect::<Result<Vec<EvalQuery>, _>>()?;
+            return Ok(Self { queries });
+        }
         Ok(serde_json::from_str(&text)?)
     }
 }
@@ -109,6 +126,150 @@ impl std::fmt::Display for Scores {
             self.at1, self.at5, self.mrr, self.queries
         )
     }
+}
+
+/// One way of searching, scored on a group of the set's queries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    /// `keyword`, `z-score`, `rrf`, and with the reranker `kw+rerank`,
+    /// `z+rerank`, `rrf+rerank`.
+    pub run: &'static str,
+    /// A tag of the set's, or `all`.
+    pub tag: String,
+    pub scores: Scores,
+}
+
+/// A query's rank (1-based, or not found) in each run.
+pub type RunRanks = Vec<(&'static str, Option<usize>)>;
+
+/// What `compare` found.
+#[derive(Clone, Debug, Default)]
+pub struct Report {
+    pub rows: Vec<Row>,
+    /// Each query with its rank in each run, in the set's order.
+    pub queries: Vec<(String, RunRanks)>,
+    /// The reranker's time a query (with meaning), when it ran.
+    pub rerank_time: Option<std::time::Duration>,
+}
+
+impl Report {
+    /// Queries some run ranks worse than keywords alone: `q · keyword 1 ·
+    /// z-score 4`.
+    pub fn worse_than_keywords(&self) -> Vec<String> {
+        let shown = |rank: Option<usize>| rank.map_or("-".to_string(), |rank| rank.to_string());
+        let worse = |rank: Option<usize>, keyword: Option<usize>| match (rank, keyword) {
+            (None, Some(_)) => true,
+            (Some(rank), Some(keyword)) => rank > keyword,
+            _ => false,
+        };
+        self.queries
+            .iter()
+            .filter_map(|(q, ranks)| {
+                let keyword = ranks.iter().find(|(run, _)| *run == "keyword")?.1;
+                ranks
+                    .iter()
+                    .any(|(_, rank)| worse(*rank, keyword))
+                    .then(|| {
+                        let runs = ranks
+                            .iter()
+                            .map(|(run, rank)| format!("{run} {}", shown(*rank)))
+                            .collect::<Vec<_>>();
+                        format!("{q} · {}", runs.join(" · "))
+                    })
+            })
+            .collect()
+    }
+}
+
+/// Every way of searching that the models given allow, on every query of
+/// `set`, scored by tag and over all.
+pub fn compare(
+    store: &Store,
+    set: &EvalSet,
+    embedder: Option<&dyn Embedder>,
+    reranker: Option<&dyn Reranker>,
+) -> Result<Report> {
+    let vectors = embedder
+        .map(|embedder| VectorIndex::load(store, embedder.model_key()))
+        .transpose()?;
+    let mut ranks: std::collections::BTreeMap<(&'static str, String), Vec<Option<usize>>> =
+        Default::default();
+    let mut rerank_time = std::time::Duration::ZERO;
+    let mut per_query = Vec::new();
+    for query in &set.queries {
+        let request = SearchRequest {
+            text: query.q.clone(),
+            ..SearchRequest::default()
+        };
+        let rrf_request = SearchRequest {
+            fusion: Fusion::Rrf,
+            ..request.clone()
+        };
+        let vector = embedder
+            .map(|embedder| embedder.embed_query(&query.q))
+            .transpose()?;
+        let meaning = || match (&vectors, &vector) {
+            (Some(index), Some(vector)) => Some(Meaning {
+                index,
+                query: vector,
+            }),
+            _ => None,
+        };
+        let mut runs = vec![("keyword", store.search(&request)?)];
+        if meaning().is_some() {
+            runs.push(("z-score", store.search_with(&request, meaning())?));
+            runs.push(("rrf", store.search_with(&rrf_request, meaning())?));
+        }
+        if let Some(reranker) = reranker {
+            runs.push((
+                "kw+rerank",
+                store.search_reranked(&request, None, reranker)?,
+            ));
+            if meaning().is_some() {
+                let started = std::time::Instant::now();
+                runs.push((
+                    "z+rerank",
+                    store.search_reranked(&request, meaning(), reranker)?,
+                ));
+                rerank_time += started.elapsed();
+                runs.push((
+                    "rrf+rerank",
+                    store.search_reranked(&rrf_request, meaning(), reranker)?,
+                ));
+            }
+        }
+        let mut found_by_run = Vec::new();
+        for (run, results) in &runs {
+            let found = rank(results, query);
+            found_by_run.push((*run, found));
+            if !query.tag.is_empty() && query.tag != "all" {
+                ranks
+                    .entry((run, query.tag.clone()))
+                    .or_default()
+                    .push(found);
+            }
+            ranks
+                .entry((run, "all".to_string()))
+                .or_default()
+                .push(found);
+        }
+        per_query.push((query.q.clone(), found_by_run));
+    }
+    let rows = ranks
+        .into_iter()
+        .map(|((run, tag), ranks)| Row {
+            run,
+            tag,
+            scores: Scores::of(&ranks),
+        })
+        .collect();
+    let rerank_time = (reranker.is_some() && embedder.is_some() && !set.queries.is_empty())
+        .then(|| rerank_time / set.queries.len() as u32);
+    Ok(Report {
+        rows,
+        queries: per_query,
+        rerank_time,
+    })
 }
 
 #[cfg(test)]

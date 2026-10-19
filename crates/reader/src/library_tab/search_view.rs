@@ -204,6 +204,7 @@ impl LibraryTab {
                 action = Some(LibraryTabAction::OpenAt {
                     path: page.path.clone(),
                     page: page.page,
+                    query: Some(search_words(&self.filter)),
                     anchor: Some(glyphst_core::SemanticTextAnchor::new(
                         page.doc_offset,
                         page.quote.clone(),
