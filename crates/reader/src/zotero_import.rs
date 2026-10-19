@@ -5,7 +5,7 @@
 //! skips what it brought in before.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -118,6 +118,9 @@ pub struct Report {
     pub notes: usize,
     pub skipped: usize,
     pub skipped_epub: usize,
+    /// Related-item links and tag colours brought over.
+    pub related: usize,
+    pub coloured: usize,
     pub missing: Vec<String>,
     pub failed: Vec<String>,
     pub finished: bool,
@@ -134,7 +137,17 @@ struct Run {
     /// The library's collections and tags before, to count what came.
     before: (usize, usize),
     pending: Vec<Ready>,
-    standalone: Receiver<Vec<(String, String)>>,
+    extras: Receiver<Extras>,
+}
+
+/// What the worker reads once for the whole library, applied at the end.
+#[derive(Default)]
+struct Extras {
+    standalone: Vec<(String, String)>,
+    /// Pairs of Zotero ids (`zotero:<library>/<key>`).
+    related: Vec<(String, String)>,
+    /// Tag names and their colours.
+    tag_colors: Vec<(String, HighlightColor)>,
 }
 
 impl Run {
@@ -156,7 +169,7 @@ impl Run {
             .filter_map(|item| library.metadata_record(item.id))
             .flat_map(|record| record.external_ids.iter().cloned())
             .collect::<HashSet<_>>();
-        let (standalone_sender, standalone) = channel();
+        let (extras_sender, extras) = channel();
         std::thread::spawn(move || {
             let scratch = scratch_dir("import");
             let read = zotero::read_data_dir(&data_dir, &scratch, None);
@@ -179,11 +192,7 @@ impl Run {
                 items: items.len(),
                 ..preview(&zotero_library)
             }));
-            let _ = standalone_sender.send(if options.notes {
-                zotero_library.standalone_notes.clone()
-            } else {
-                Vec::new()
-            });
+            let _ = extras_sender.send(extras_of(&zotero_library, &items, options));
             for item in items {
                 if worker_cancel.load(Ordering::Acquire) {
                     break;
@@ -219,7 +228,7 @@ impl Run {
                 library.library_tags().len(),
             ),
             pending: Vec::new(),
-            standalone,
+            extras,
         }
     }
 
@@ -257,9 +266,46 @@ impl Run {
         self.report.tags = library.library_tags().len().saturating_sub(self.before.1);
         self.report.seconds = self.started.elapsed().as_secs();
         if done {
-            let standalone = self.standalone.try_recv().unwrap_or_default();
-            self.report.notes += write_standalone(&standalone, vault);
+            let extras = self.extras.try_recv().unwrap_or_default();
+            self.report.notes += write_standalone(&extras.standalone, vault);
+            self.link(library, &extras);
             self.report.finished = true;
+        }
+    }
+
+    /// Relates the items Zotero relates and colours the tags it colours,
+    /// once every item is in.
+    fn link(&mut self, library: &mut LibraryStore, extras: &Extras) {
+        let ids = library
+            .library_items()
+            .iter()
+            .filter_map(|item| Some((item.id, library.metadata_record(item.id)?)))
+            .flat_map(|(id, record)| record.external_ids.iter().map(move |key| (key.clone(), id)))
+            .collect::<HashMap<_, _>>();
+        let pairs = extras
+            .related
+            .iter()
+            .filter_map(|(a, b)| Some((*ids.get(a)?, *ids.get(b)?)))
+            .collect::<Vec<_>>();
+        match library.add_related_pairs(&pairs) {
+            Ok(added) => self.report.related += added,
+            Err(error) => self.report.failed.push(format!("{error:#}")),
+        }
+        let colors = extras
+            .tag_colors
+            .iter()
+            .filter_map(|(name, color)| {
+                let name = name.trim().to_lowercase();
+                library
+                    .library_tags()
+                    .iter()
+                    .find(|tag| tag.name.to_lowercase() == name)
+                    .map(|tag| (tag.id, *color))
+            })
+            .collect::<Vec<_>>();
+        match library.fill_tag_colors(&colors) {
+            Ok(coloured) => self.report.coloured += coloured,
+            Err(error) => self.report.failed.push(format!("{error:#}")),
         }
     }
 
@@ -342,6 +388,33 @@ fn scratch_dir(purpose: &str) -> PathBuf {
 
 fn external_id(item: &zotero::Item) -> String {
     format!("zotero:{}/{}", item.library_id, item.key)
+}
+
+fn extras_of(library: &zotero::Library, items: &[&zotero::Item], options: ImportOptions) -> Extras {
+    let mut extras = Extras::default();
+    if options.notes {
+        extras.standalone = library.standalone_notes.clone();
+    }
+    if options.catalog {
+        // Relations to items in another library (a group) are left out.
+        extras.related = items
+            .iter()
+            .flat_map(|item| {
+                item.related.iter().map(|key| {
+                    (
+                        external_id(item),
+                        format!("zotero:{}/{key}", item.library_id),
+                    )
+                })
+            })
+            .collect();
+        extras.tag_colors = library
+            .tag_colors
+            .iter()
+            .map(|(name, hex)| (name.clone(), nearest_color(hex)))
+            .collect();
+    }
+    extras
 }
 
 /// Counts what `library` holds, for the wizard.
@@ -1185,6 +1258,15 @@ impl ZoteroImport {
                 Some(tokens.text),
             ),
             (
+                "linked",
+                format!(
+                    "{} · {}",
+                    plural(report.related, "related link"),
+                    plural(report.coloured, "tag colour")
+                ),
+                None,
+            ),
+            (
                 "merged",
                 format!(
                     "{} already in the library (same doi or file){}",
@@ -1275,10 +1357,12 @@ impl ZoteroImport {
 /// The report as Markdown, to keep.
 fn report_text(report: &Report) -> String {
     let mut text = format!(
-        "# Imported from Zotero\n\n- added: {} items, {} collections, {} tags\n- merged: {} already in the library, {} imported before\n- notes: {}\n- highlights: {}\n- skipped: {} ink and image annotations, {} epub highlights\n- took: {}\n",
+        "# Imported from Zotero\n\n- added: {} items, {} collections, {} tags\n- linked: {} related items, {} tag colours\n- merged: {} already in the library, {} imported before\n- notes: {}\n- highlights: {}\n- skipped: {} ink and image annotations, {} epub highlights\n- took: {}\n",
         report.added,
         report.collections,
         report.tags,
+        report.related,
+        report.coloured,
         report.merged,
         report.already,
         report.notes,
@@ -1417,6 +1501,56 @@ mod tests {
         );
         assert_eq!(metadata.creators[0].name, "Ashish Vaswani");
         assert_eq!(byline(&item), "Vaswani 2017");
+    }
+
+    #[test]
+    fn an_import_relates_items_colours_tags_and_runs_again_without_adding() {
+        let dir = std::env::temp_dir().join(format!("glyphst-zotero-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("zotero");
+        zotero::sample::write(&data).unwrap();
+        let mut library =
+            LibraryStore::open_apart(dir.join("library.redb"), dir.join("library")).unwrap();
+        let ctx = egui::Context::default();
+        let import = |library: &mut LibraryStore| {
+            let mut run = Run::start(data.clone(), library, ImportOptions::default(), &ctx);
+            let started = Instant::now();
+            while !run.report.finished {
+                run.poll(library, None);
+                assert!(started.elapsed().as_secs() < 60, "the import finishes");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            run.report
+        };
+
+        let report = import(&mut library);
+        assert_eq!(report.added, 5, "{report:?}");
+        assert_eq!(report.related, 1, "the pair Zotero stores both ways");
+        assert_eq!(report.coloured, 1);
+        let id = |library: &LibraryStore, key: &str| {
+            library
+                .item_with_external_id(&format!("zotero:1/{key}"))
+                .unwrap()
+        };
+        let attention = id(&library, "PAPER001");
+        assert_eq!(
+            library.related_items(attention),
+            vec![id(&library, "PAPER002")]
+        );
+        let transformers = library
+            .library_tags()
+            .iter()
+            .find(|tag| tag.name == "transformers")
+            .unwrap()
+            .id;
+        assert_eq!(library.tag_color(transformers), Some(HighlightColor::Blue));
+
+        let again = import(&mut library);
+        assert_eq!(again.added, 0);
+        assert_eq!(again.already, 5);
+        assert_eq!(again.related, 0, "nothing new to link");
+        drop(library);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

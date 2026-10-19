@@ -515,7 +515,7 @@ impl LibraryStore {
     }
 }
 
-fn write_catalog_tables(
+pub(super) fn write_catalog_tables(
     write_txn: &redb::WriteTransaction,
     library: &Library,
     managed_root: &Path,
@@ -723,6 +723,7 @@ fn write_catalog_tables(
             table.insert(item_id, encoded.as_slice())?;
         }
     }
+    super::item_links::write_item_link_tables(write_txn, library)?;
     Ok(())
 }
 

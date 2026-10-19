@@ -55,6 +55,28 @@ pub(super) fn load_vault_notes(
     Ok(notes)
 }
 
+/// Writes the item's row inside a transaction someone else commits.
+pub(super) fn write_vault_note_in(
+    write_txn: &redb::WriteTransaction,
+    id: DocumentId,
+    note: Option<&VaultNoteRecord>,
+) -> Result<()> {
+    let mut table = write_txn.open_table(LIBRARY_VAULT_NOTES_V1_TABLE)?;
+    match note {
+        Some(note) => {
+            let encoded = encode(&StoredVaultNoteV1 {
+                version: VAULT_NOTES_STORAGE_VERSION,
+                note: note.clone(),
+            })?;
+            table.insert(id.0, encoded.as_slice())?;
+        }
+        None => {
+            table.remove(id.0)?;
+        }
+    }
+    Ok(())
+}
+
 impl LibraryStore {
     pub fn vault_note(&self, id: DocumentId) -> Option<&VaultNoteRecord> {
         self.vault_notes.get(&id)
@@ -75,21 +97,7 @@ impl LibraryStore {
                 return Ok(());
             };
             let write_txn = database.begin_write()?;
-            {
-                let mut table = write_txn.open_table(LIBRARY_VAULT_NOTES_V1_TABLE)?;
-                match &note {
-                    Some(note) => {
-                        let encoded = encode(&StoredVaultNoteV1 {
-                            version: VAULT_NOTES_STORAGE_VERSION,
-                            note: note.clone(),
-                        })?;
-                        table.insert(id.0, encoded.as_slice())?;
-                    }
-                    None => {
-                        table.remove(id.0)?;
-                    }
-                }
-            }
+            write_vault_note_in(&write_txn, id, note.as_ref())?;
             write_txn.commit()?;
             Ok(())
         })();

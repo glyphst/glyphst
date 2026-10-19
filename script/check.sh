@@ -272,6 +272,8 @@ if [[ ${tier} == screens ]]; then
         "04d-library --library-demo all"
         "04d-library-history --command app.library"
         "04f-library-item --library-demo item"
+        "04l-library-duplicate --library-demo duplicate"
+        "04m-library-merged --library-demo merged"
         "04i-library-review --library-demo review"
         "04h-library-backfill --ai-fake --library-demo backfill"
         "04k-library-folder --library-demo folder"

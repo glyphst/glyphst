@@ -181,5 +181,15 @@ fn the_sample_library_reads_back() {
         .collect::<Vec<_>>();
     assert_eq!(missing, vec!["storage/8XK2QF7A/rag.pdf"]);
     assert_eq!(library.standalone_notes.len(), 1);
+    let related = |key: &str| {
+        library
+            .items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.related.clone())
+            .unwrap()
+    };
+    assert_eq!(related("PAPER001"), vec!["PAPER002".to_string()]);
+    assert_eq!(related("PAPER002"), vec!["PAPER001".to_string()]);
     let _ = fs::remove_dir_all(dir);
 }

@@ -574,8 +574,16 @@ pub fn apply_metadata(library: &mut LibraryStore, id: DocumentId, recognized: &R
         ));
     }
     record.fetched_at = current_timestamp();
-    record.possible_duplicate_of =
-        glyphst_metadata::find_duplicate(&item, library.library_items()).map(|(other, _)| other);
+    // Items the user kept apart from this one are never flagged again.
+    let distinct = library.distinct_items(id);
+    record.possible_duplicate_of = glyphst_metadata::find_duplicate(
+        &item,
+        library
+            .library_items()
+            .iter()
+            .filter(|other| !distinct.contains(&other.id)),
+    )
+    .map(|(other, _)| other);
     if !changed.is_empty()
         && let Err(error) = library.update_library_item_metadata(item)
     {

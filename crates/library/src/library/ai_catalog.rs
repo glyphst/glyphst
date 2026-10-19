@@ -228,6 +228,14 @@ pub struct EnrichmentApplied {
     pub fields_filled: Vec<MetadataField>,
 }
 
+/// One item's rows in the AI catalog, moved together by a merge.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct AiRows {
+    pub(super) metadata: Option<MetadataRecord>,
+    pub(super) assignments: Vec<AiAssignment>,
+    pub(super) enrichment: Option<ItemEnrichment>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct AiCatalogState {
     assignments: HashMap<DocumentId, Vec<AiAssignment>>,
@@ -366,9 +374,15 @@ impl AiCatalogState {
             }
             keep
         });
-        self.metadata.retain(|id, _| {
+        self.metadata.retain(|id, record| {
             let keep = items.contains(id);
             if !keep {
+                changed.push(*id);
+            } else if record
+                .possible_duplicate_of
+                .is_some_and(|other| !items.contains(&other))
+            {
+                record.possible_duplicate_of = None;
                 changed.push(*id);
             }
             keep
@@ -902,6 +916,17 @@ impl LibraryStore {
             return Ok(());
         };
         let write_txn = database.begin_write()?;
+        self.write_ai_rows_in(&write_txn, ids)?;
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Writes these items' rows inside a transaction someone else commits.
+    pub(super) fn write_ai_rows_in(
+        &self,
+        write_txn: &redb::WriteTransaction,
+        ids: &[DocumentId],
+    ) -> Result<()> {
         {
             let mut assignments = write_txn.open_table(LIBRARY_AI_ASSIGNMENTS_V1_TABLE)?;
             let mut enrichments = write_txn.open_table(LIBRARY_ENRICHMENTS_V1_TABLE)?;
@@ -945,7 +970,68 @@ impl LibraryStore {
                 }
             }
         }
-        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn ai_rows(&self, id: DocumentId) -> AiRows {
+        AiRows {
+            metadata: self.ai_catalog.metadata.get(&id).cloned(),
+            assignments: self.ai_assignments(id).to_vec(),
+            enrichment: self.ai_catalog.enrichments.get(&id).cloned(),
+        }
+    }
+
+    /// Replaces the item's rows in memory; the caller writes them.
+    pub(super) fn put_ai_rows(&mut self, id: DocumentId, rows: AiRows) {
+        let catalog = &mut self.ai_catalog;
+        match rows.metadata {
+            Some(record) => catalog.metadata.insert(id, record),
+            None => catalog.metadata.remove(&id),
+        };
+        if rows.assignments.is_empty() {
+            catalog.assignments.remove(&id);
+        } else {
+            catalog.assignments.insert(id, rows.assignments);
+        }
+        match rows.enrichment {
+            Some(enrichment) => catalog.enrichments.insert(id, enrichment),
+            None => catalog.enrichments.remove(&id),
+        };
+    }
+
+    /// Clears `possible_duplicate_of` in memory wherever `(item, other)`
+    /// matches; returns the items to write.
+    pub(super) fn clear_possible_duplicates_in_memory(
+        &mut self,
+        matches: impl Fn(DocumentId, DocumentId) -> bool,
+    ) -> Vec<DocumentId> {
+        let mut changed = Vec::new();
+        for (id, record) in &mut self.ai_catalog.metadata {
+            if record
+                .possible_duplicate_of
+                .is_some_and(|other| matches(*id, other))
+            {
+                record.possible_duplicate_of = None;
+                changed.push(*id);
+            }
+        }
+        changed
+    }
+
+    /// Clears `possible_duplicate_of` wherever `(item, other)` matches.
+    pub(super) fn clear_possible_duplicates(
+        &mut self,
+        matches: impl Fn(DocumentId, DocumentId) -> bool,
+    ) -> Result<()> {
+        let previous = self.ai_catalog.metadata.clone();
+        let changed = self.clear_possible_duplicates_in_memory(matches);
+        if changed.is_empty() {
+            return Ok(());
+        }
+        if let Err(error) = self.write_ai_rows(&changed) {
+            self.ai_catalog.metadata = previous;
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -959,7 +1045,7 @@ fn item_collection_ids_of(store: &LibraryStore, id: DocumentId) -> Vec<LibraryCo
         .collect()
 }
 
-fn field_is_empty(field: MetadataField, item: &LibraryItem) -> bool {
+pub(super) fn field_is_empty(field: MetadataField, item: &LibraryItem) -> bool {
     match field {
         // The kind always has a value; see `guessed` in `apply_enrichment`.
         MetadataField::Kind => false,

@@ -5,15 +5,17 @@
 use std::path::PathBuf;
 
 use glyphst_library::{
-    EnrichmentApply, EnrichmentStatus, ItemEnrichment, LibraryCreator, LibraryCreatorRole,
-    LibraryImportOutcome, LibraryItemKind, LibraryItemMetadata, LibraryStore, MetadataRecord,
-    MetadataSource,
+    DocumentId, EnrichmentApply, EnrichmentStatus, HighlightColor, ItemEnrichment, LibraryCreator,
+    LibraryCreatorRole, LibraryImportOutcome, LibraryItemKind, LibraryItemMetadata, LibraryStore,
+    MetadataRecord, MetadataSource,
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 8] = [
+pub const STATES: [&str; 10] = [
     "all",
     "item",
+    "duplicate",
+    "merged",
     "review",
     "backfill",
     "folder",
@@ -302,6 +304,70 @@ pub fn library(document: Option<&std::path::Path>) -> LibraryStore {
     library
 }
 
+/// For frames 04l and 04m: tag colours, the first paper's related items,
+/// and a second copy of it, flagged as its duplicate. Returns the copy.
+pub fn duplicate(library: &mut LibraryStore) -> Option<DocumentId> {
+    for (name, color) in [
+        ("transformers", HighlightColor::Blue),
+        ("to read", HighlightColor::Yellow),
+        ("nlp", HighlightColor::Green),
+        ("diffusion", HighlightColor::Pink),
+    ] {
+        let tag = library
+            .library_tags()
+            .iter()
+            .find(|tag| tag.name == name)
+            .map(|tag| tag.id);
+        if let Some(tag) = tag {
+            let _ = library.set_tag_color(tag, Some(color));
+        }
+    }
+    let first = first_item(library)?;
+    let doi = "10.48550/arXiv.1706.03762";
+    let mut item = library.library_item(first)?.clone();
+    item.identifiers.doi = Some(doi.to_string());
+    let _ = library.update_library_item_metadata(item.clone());
+
+    let folder = std::env::temp_dir().join(format!("glyphst-library-demo-{}", std::process::id()));
+    let path = folder.join("attention-is-all-you-need (1).pdf");
+    let _ = std::fs::write(&path, "%PDF-1.4\n% a second copy\n");
+    let Ok(LibraryImportOutcome::Added(copy)) =
+        library.link_item(&path, LibraryItemMetadata::for_path(&path), None)
+    else {
+        return None;
+    };
+    let mut copy_item = library.library_item(copy)?.clone();
+    copy_item.title = item.title.clone();
+    copy_item.creators = item.creators.clone();
+    copy_item.year = item.year;
+    copy_item.publication = "NeurIPS".to_string();
+    copy_item.identifiers.doi = Some(doi.to_string());
+    let _ = library.update_library_item_metadata(copy_item);
+    let _ = library.set_item_tag_names(copy, &["transformers".to_string(), "to read".to_string()]);
+    let _ = library.set_item_collection_paths(copy, &library.item_collection_paths(first));
+    let _ = library.set_metadata_record(
+        copy,
+        MetadataRecord {
+            source: MetadataSource::Crossref,
+            matched_identifier: Some(format!("doi:{doi}")),
+            possible_duplicate_of: Some(first),
+            ..MetadataRecord::default()
+        },
+    );
+    let related = ["BERT", "Language Models are Few-Shot"]
+        .iter()
+        .filter_map(|start| {
+            library
+                .library_items()
+                .iter()
+                .find(|item| item.title.starts_with(start))
+                .map(|item| item.id)
+        })
+        .collect::<Vec<_>>();
+    let _ = library.set_related_items(copy, &related);
+    Some(copy)
+}
+
 /// The demo's first paper, chosen in the `item` state.
 pub fn first_item(library: &LibraryStore) -> Option<glyphst_library::DocumentId> {
     library
@@ -328,6 +394,28 @@ mod tests {
                 .library_collections()
                 .iter()
                 .any(|collection| collection.name == "LLMs")
+        );
+    }
+
+    #[test]
+    fn the_duplicate_merges_into_the_first_paper() {
+        let mut library = library(None);
+        let first = first_item(&library).unwrap();
+        let copy = duplicate(&mut library).unwrap();
+        assert_eq!(
+            library.metadata_record(copy).unwrap().possible_duplicate_of,
+            Some(first)
+        );
+        assert_eq!(library.related_items(copy).len(), 2);
+        library.merge_library_items(first, copy).unwrap();
+        assert_eq!(library.related_items(first).len(), 2);
+        assert_eq!(
+            library
+                .library_attachments()
+                .iter()
+                .filter(|attachment| attachment.item_id == first)
+                .count(),
+            2
         );
     }
 }

@@ -303,6 +303,16 @@ pub fn write(dir: &Path) -> Result<()> {
             "<h1>Ideas for the survey</h1><ul><li>attention variants</li><li>retrieval</li></ul>"
         ],
     )?;
+    // Related items, stored both ways as Zotero does.
+    for (from, to) in [("PAPER001", "PAPER002"), ("PAPER002", "PAPER001")] {
+        connection.execute(
+            "INSERT INTO itemRelations SELECT itemID, 1, ?2 FROM items WHERE key = ?1",
+            params![
+                from,
+                format!("http://zotero.org/users/local/sample/items/{to}")
+            ],
+        )?;
+    }
     Ok(())
 }
 

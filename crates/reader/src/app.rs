@@ -243,6 +243,14 @@ struct NoteEditor {
     fresh: bool,
 }
 
+/// What a toast's `[ undo ]` takes back.
+enum ToastUndo {
+    /// The highlight just saved.
+    Highlight(AnnotationId),
+    /// The merge just made.
+    Merge(Box<glyphst_library::LibraryEdit>),
+}
+
 pub struct ReaderApp {
     pub(crate) prefs: Prefs,
     /// The theme and window opacity applied to egui.
@@ -391,8 +399,8 @@ pub struct ReaderApp {
     /// Actions queued for the next frame of the document view.
     pub(crate) pending_actions: Vec<ViewAction>,
     chrome: chrome::StageChrome,
-    /// The highlight the toast's `[ undo ]` removes.
-    undo_highlight: Option<AnnotationId>,
+    /// What the toast's `[ undo ]` takes back.
+    toast_undo: Option<ToastUndo>,
     /// The presentation's tools and clock while presenting.
     pub(crate) presenting: Option<crate::present::Presenting>,
     /// The user's effects folder, what it held when last loaded, and when
@@ -653,7 +661,7 @@ impl ReaderApp {
             upload_complete_ms: Vec::new(),
             pending_actions: Vec::new(),
             chrome: Default::default(),
-            undo_highlight: None,
+            toast_undo: None,
             presenting: None,
             effects_dir: user_effects,
             effects_stamp,
@@ -689,6 +697,7 @@ impl ReaderApp {
             if launch.files.is_empty() {
                 app.open_library();
             }
+            let mut demo_merge = None;
             if let Some(Page::Library(tab)) = app.pages.last_mut() {
                 match state.as_str() {
                     "item" => {
@@ -702,8 +711,29 @@ impl ReaderApp {
                         tab.selected = id;
                     }
                     "review" => tab.view = crate::library_tab::View::NeedsReview,
+                    "duplicate" | "merged" => {
+                        let first = crate::library_demo::first_item(&app.library);
+                        let copy = crate::library_demo::duplicate(&mut app.library);
+                        tab.view = first
+                            .and_then(|id| {
+                                app.library.collections_for_item(id).first().map(|c| c.id)
+                            })
+                            .map(crate::library_tab::View::Collection)
+                            .unwrap_or_default();
+                        tab.selected = copy;
+                        if state == "merged" {
+                            demo_merge = first.zip(copy);
+                        }
+                    }
                     _ => {}
                 }
+            }
+            // Merged as the item pane's `[ merge ]` does, toast and all.
+            if let Some((keep, absorb)) = demo_merge {
+                app.library_tab_action(
+                    crate::library_tab::LibraryTabAction::Merge { keep, absorb },
+                    &cc.egui_ctx,
+                );
             }
             app.library_dialog = match state.as_str() {
                 "backfill" => app.backfill_dialog(None),
@@ -1498,6 +1528,24 @@ impl ReaderApp {
             }
             Action::AcceptAll(ids) => self.review_all(&ids, true),
             Action::RejectAll(ids) => self.review_all(&ids, false),
+            Action::KeepBoth(a, b) => self.library.mark_distinct(a, b),
+            Action::Merge { keep, absorb } => {
+                self.library.merge_library_items(keep, absorb).map(|edit| {
+                    let title = self
+                        .library
+                        .library_item(keep)
+                        .map(|item| item.title.clone())
+                        .unwrap_or_default();
+                    // `merged into “…” [ undo ]` (frame 04m).
+                    self.notices.push_with(
+                        format!("merged into “{title}”"),
+                        glyphst_ui::overlay::Tone::Ok,
+                        Some("undo"),
+                    );
+                    self.toast_undo = Some(ToastUndo::Merge(Box::new(edit)));
+                })
+            }
+            Action::TagColor(tag, color) => self.library.set_tag_color(tag, color),
             Action::AddByIdentifier => {
                 let mailto = Some(self.prefs.library.contact_email.trim().to_string())
                     .filter(|address| !address.is_empty());
@@ -1830,7 +1878,7 @@ impl ReaderApp {
                         glyphst_ui::overlay::Tone::Ok,
                         Some("undo"),
                     );
-                    self.undo_highlight = Some(id);
+                    self.toast_undo = Some(ToastUndo::Highlight(id));
                 }
             }
             Err(error) => self.notices.push(format!("Could not save: {error:#}")),
@@ -5255,10 +5303,17 @@ impl eframe::App for ReaderApp {
         } else {
             glyphst_ui::status::HEIGHT + 16.0
         };
-        if self.notices.show(&ctx, lift).as_deref() == Some("undo")
-            && let Some(id) = self.undo_highlight.take()
-        {
-            self.remove_annotation(id);
+        if self.notices.show(&ctx, lift).as_deref() == Some("undo") {
+            match self.toast_undo.take() {
+                Some(ToastUndo::Highlight(id)) => self.remove_annotation(id),
+                Some(ToastUndo::Merge(edit)) => {
+                    if let Err(error) = self.library.revert_edit(&edit) {
+                        self.notices
+                            .push(format!("Could not undo the merge: {error:#}"));
+                    }
+                }
+                None => {}
+            }
         }
         self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();

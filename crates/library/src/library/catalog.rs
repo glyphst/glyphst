@@ -1338,12 +1338,17 @@ impl Library {
         self.library_saved_views.sort_by_key(|view| view.id.0);
         self.library_saved_views.dedup_by_key(|view| view.id.0);
 
+        self.sanitize_item_links(&item_ids, &tag_ids);
+
+        // A merged-away id is never given out again: notes and links may
+        // still name it.
         self.next_library_item_id = self.next_library_item_id.max(
             self.library_items
                 .iter()
                 .map(|item| item.id.0)
                 .max()
                 .unwrap_or(0)
+                .max(self.highest_merged_item_id())
                 .saturating_add(1),
         );
         self.next_library_attachment_id = self.next_library_attachment_id.max(
@@ -2014,7 +2019,7 @@ impl LibraryStore {
         names
     }
 
-    pub(super) fn item_collection_paths(&self, id: DocumentId) -> Vec<Vec<String>> {
+    pub fn item_collection_paths(&self, id: DocumentId) -> Vec<Vec<String>> {
         item_collection_ids(&self.library, id)
             .into_iter()
             .map(|collection_id| collection_path_names_in(&self.library, collection_id))
@@ -2107,6 +2112,18 @@ impl LibraryStore {
                     for tag_id in &mut view.filter.tag_ids {
                         if *tag_id == id {
                             *tag_id = target_id;
+                        }
+                    }
+                }
+                // The target keeps its colour, else takes this tag's.
+                if !library
+                    .library_tag_colors
+                    .iter()
+                    .any(|entry| entry.tag_id == target_id)
+                {
+                    for entry in &mut library.library_tag_colors {
+                        if entry.tag_id == id {
+                            entry.tag_id = target_id;
                         }
                     }
                 }

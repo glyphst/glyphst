@@ -3784,3 +3784,229 @@ fn an_import_batch_brings_items_files_tags_collections_and_trash_in_one_write() 
     }
     let _ = fs::remove_dir_all(managed_root);
 }
+
+#[test]
+fn tag_colours_and_related_items_persist_and_follow_tags_and_items() {
+    let database_path = temp_library_path("item-links");
+    let paths = ["a", "b", "c"].map(|name| database_path.with_extension(format!("{name}.pdf")));
+    let (a, b, c, transformers) = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let [a, b, c] = paths
+            .clone()
+            .map(|path| linked_test_item(&mut store, &path));
+        store
+            .set_item_tag_names(a, &["transformers".to_string(), "attention".to_string()])
+            .unwrap();
+        let tag = |store: &LibraryStore, name: &str| {
+            store
+                .library_tags()
+                .iter()
+                .find(|tag| tag.name == name)
+                .unwrap()
+                .id
+        };
+        let transformers = tag(&store, "transformers");
+        let attention = tag(&store, "attention");
+        store
+            .set_tag_color(attention, Some(HighlightColor::Blue))
+            .unwrap();
+        // Renamed into another tag, its colour goes with it when the other
+        // has none.
+        assert_eq!(
+            store.rename_library_tag(attention, "Transformers").unwrap(),
+            transformers
+        );
+        assert_eq!(store.tag_color(transformers), Some(HighlightColor::Blue));
+
+        store.set_related_items(a, &[b, c, a]).unwrap();
+        assert_eq!(store.related_items(a), vec![b, c]);
+        assert_eq!(store.related_items(c), vec![a], "relations go both ways");
+        (a, b, c, transformers)
+    };
+
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.tag_color(transformers), Some(HighlightColor::Blue));
+    assert_eq!(store.related_items(a), vec![b, c]);
+    store.trash_library_items(&[c]).unwrap();
+    store.permanently_delete_library_items(&[c]).unwrap();
+    assert_eq!(store.related_items(a), vec![b], "a deleted item drops out");
+    store.delete_library_tag(transformers).unwrap();
+    assert!(store.tag_colors().is_empty());
+    drop(store);
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.related_items(b), vec![a]);
+    assert!(store.tag_colors().is_empty());
+
+    drop(store);
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn a_merge_moves_everything_onto_the_kept_item_and_undoes() {
+    let database_path = temp_library_path("merge");
+    let keep_path = database_path.with_extension("keep.pdf");
+    let copy_path = database_path.with_extension("copy.pdf");
+    let other_path = database_path.with_extension("other.pdf");
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    let keep = linked_test_item(&mut store, &keep_path);
+    let other = linked_test_item(&mut store, &other_path);
+    let copy = linked_test_item(&mut store, &copy_path);
+    let mut item = store.library_item(keep).unwrap().clone();
+    item.title = "Attention Is All You Need".to_string();
+    item.year = Some(2017);
+    store.update_library_item_metadata(item).unwrap();
+    let mut item = store.library_item(copy).unwrap().clone();
+    item.title = "Attention Is All You Need".to_string();
+    item.publication = "NeurIPS".to_string();
+    store.update_library_item_metadata(item).unwrap();
+    store
+        .set_library_item_note(copy, "Compare with RoPE.".to_string())
+        .unwrap();
+    store
+        .set_item_tag_names(keep, &["transformers".to_string()])
+        .unwrap();
+    store
+        .set_item_tag_names(copy, &["nlp".to_string()])
+        .unwrap();
+    store
+        .set_item_collection_paths(copy, &[vec!["reading".to_string()]])
+        .unwrap();
+    store.set_related_items(copy, &[other]).unwrap();
+    store
+        .set_metadata_record(
+            copy,
+            MetadataRecord {
+                source: MetadataSource::Zotero,
+                external_ids: vec!["zotero:1/COPY0001".to_string()],
+                possible_duplicate_of: Some(keep),
+                ..MetadataRecord::default()
+            },
+        )
+        .unwrap();
+    let rect = HighlightRect {
+        page_idx: 0,
+        x0: 1.0,
+        y0: 2.0,
+        x1: 3.0,
+        y1: 4.0,
+    };
+    store
+        .add_highlight(
+            &copy_path,
+            HighlightColor::Yellow,
+            vec![rect],
+            "a quote",
+            "",
+        )
+        .unwrap();
+
+    let (edit, edits) = store.record_edits(|store| store.merge_library_items(keep, copy));
+    let edit = edit.unwrap();
+    assert_eq!(edits, vec![edit.clone()]);
+    assert_eq!(
+        edit.describe(),
+        "Merged “Attention Is All You Need” into “Attention Is All You Need”"
+    );
+    let check_merged = |store: &LibraryStore| {
+        assert!(store.library_item(copy).is_none());
+        let item = store.library_item(keep).unwrap();
+        assert_eq!(item.year, Some(2017));
+        assert_eq!(item.publication, "NeurIPS", "an empty field is filled");
+        assert_eq!(item.work_note, "Compare with RoPE.");
+        assert_eq!(
+            store.primary_attachment(keep).unwrap().path,
+            normalize_path(&keep_path)
+        );
+        assert_eq!(
+            store.library_item_for_path(&copy_path).map(|item| item.id),
+            Some(keep),
+            "the merged file is the kept item's now"
+        );
+        assert_eq!(store.highlights_for(&copy_path).len(), 1);
+        assert_eq!(store.item_tag_names(keep), vec!["nlp", "transformers"]);
+        assert_eq!(store.item_collection_paths(keep), vec![vec!["reading"]]);
+        assert_eq!(store.related_items(keep), vec![other]);
+        let record = store.metadata_record(keep).unwrap();
+        assert_eq!(record.external_ids, vec!["zotero:1/COPY0001"]);
+        assert_eq!(record.possible_duplicate_of, None);
+        assert_eq!(store.resolve_item_id(copy), keep);
+    };
+    check_merged(&store);
+    drop(store);
+
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    check_merged(&store);
+    let fresh_path = database_path.with_extension("fresh.pdf");
+    let fresh = linked_test_item(&mut store, &fresh_path);
+    assert!(
+        fresh.0 > copy.0,
+        "a merged-away id is never given out again"
+    );
+
+    store.revert_edit(&edit).unwrap();
+    let restored = store.library_item(copy).unwrap();
+    assert_eq!(restored.publication, "NeurIPS");
+    assert_eq!(store.item_tag_names(copy), vec!["nlp"]);
+    assert_eq!(store.item_tag_names(keep), vec!["transformers"]);
+    assert_eq!(store.library_item(keep).unwrap().publication, "");
+    assert_eq!(
+        store.primary_attachment(copy).unwrap().path,
+        normalize_path(&copy_path)
+    );
+    assert_eq!(store.related_items(copy), vec![other]);
+    assert!(store.related_items(keep).is_empty());
+    assert_eq!(
+        store.metadata_record(copy).unwrap().external_ids,
+        vec!["zotero:1/COPY0001"]
+    );
+    assert_eq!(store.resolve_item_id(copy), copy);
+
+    // Merged again, then the kept item's details change: undo refuses.
+    store.reapply_edit(&edit).unwrap();
+    let mut item = store.library_item(keep).unwrap().clone();
+    item.publication = "NIPS 2017".to_string();
+    store.update_library_item_metadata(item).unwrap();
+    let error = store.revert_edit(&edit).unwrap_err();
+    assert!(is_edit_conflict(&error), "{error:#}");
+
+    drop(store);
+    for path in [keep_path, copy_path, other_path, fresh_path] {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn keeping_both_clears_the_duplicate_flag_for_good() {
+    let mut store = LibraryStore::memory();
+    let base = temp_library_path("keep-both");
+    let paths = ["a", "b"].map(|name| base.with_extension(format!("{name}.pdf")));
+    let [a, b] = paths
+        .clone()
+        .map(|path| linked_test_item(&mut store, &path));
+    store
+        .set_metadata_record(
+            b,
+            MetadataRecord {
+                possible_duplicate_of: Some(a),
+                ..MetadataRecord::default()
+            },
+        )
+        .unwrap();
+    store.mark_distinct(a, b).unwrap();
+    assert_eq!(
+        store.metadata_record(b).unwrap().possible_duplicate_of,
+        None
+    );
+    assert_eq!(store.distinct_items(a), vec![b]);
+    assert_eq!(store.distinct_items(b), vec![a]);
+    assert!(store.merge_library_items(a, a).is_err());
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}

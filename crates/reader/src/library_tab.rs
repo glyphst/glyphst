@@ -11,9 +11,9 @@ use std::{
 
 use egui::{Align2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use glyphst_library::{
-    AssignmentState, AssignmentTarget, DocumentId, LibraryCollectionId, LibraryFilter, LibraryItem,
-    LibraryItemKind, LibrarySort, LibrarySortDirection, LibrarySortField, LibraryStore,
-    LibraryTagId, LibraryTrashFilter, MetadataSource,
+    AssignmentState, AssignmentTarget, DocumentId, HighlightColor, LibraryCollectionId,
+    LibraryFilter, LibraryItem, LibraryItemKind, LibrarySort, LibrarySortDirection,
+    LibrarySortField, LibraryStore, LibraryTagId, LibraryTrashFilter, MetadataSource,
 };
 use glyphst_ui::{
     button::Button, field::TextField, menu, meter::Meter, motif, pane, row::ListRow, row::TreeRow,
@@ -70,6 +70,15 @@ pub enum LibraryTabAction {
     /// Keep, or reject, everything the AI suggested for these items.
     AcceptAll(Vec<DocumentId>),
     RejectAll(Vec<DocumentId>),
+    /// The item and the one it may duplicate are different works.
+    KeepBoth(DocumentId, DocumentId),
+    /// Merge `absorb` into `keep` (frames 04l and 04m).
+    Merge {
+        keep: DocumentId,
+        absorb: DocumentId,
+    },
+    /// Colour a tag, or take its colour off.
+    TagColor(LibraryTagId, Option<HighlightColor>),
 }
 
 /// What the tab needs from the app this frame.
@@ -102,12 +111,11 @@ impl LibraryTab {
         let tokens = Tokens::get(ui.ctx());
         let area = ui.max_rect();
         ui.painter().rect_filled(area, 0, tokens.bg);
-        if self
+        // A merged item's selection moves to the item it went into.
+        self.selected = self
             .selected
-            .is_some_and(|id| context.library.library_item(id).is_none())
-        {
-            self.selected = None;
-        }
+            .map(|id| context.library.resolve_item_id(id))
+            .filter(|id| context.library.library_item(*id).is_some());
         let left = Rect::from_min_size(area.min, vec2(LEFT, area.height()));
         let item = self
             .selected
@@ -128,7 +136,9 @@ impl LibraryTab {
         };
         {
             let mut ui = child(left, "collections");
-            self.collections_pane(&mut ui, &tokens, context.library);
+            if let Some(chosen) = self.collections_pane(&mut ui, &tokens, context.library) {
+                action = Some(chosen);
+            }
         }
         {
             let mut ui = child(center, "items");
@@ -147,7 +157,13 @@ impl LibraryTab {
 
     // ── the collections pane ──────────────────────────────────────────
 
-    fn collections_pane(&mut self, ui: &mut Ui, tokens: &Tokens, library: &LibraryStore) {
+    fn collections_pane(
+        &mut self,
+        ui: &mut Ui,
+        tokens: &Tokens,
+        library: &LibraryStore,
+    ) -> Option<LibraryTabAction> {
+        let mut action = None;
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0, tokens.surface);
         pane::vline(ui, rect.right() - 0.5, rect.y_range());
@@ -192,7 +208,7 @@ impl LibraryTab {
                 ui.add_space(10.0);
                 let tags = library.library_tags().len();
                 rule(ui, "tags", Some(&tags.to_string()));
-                self.tag_cloud(ui, tokens, library);
+                action = self.tag_cloud(ui, tokens, library);
             });
         // The folder at the foot.
         let foot = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 64.0), rect.max);
@@ -224,6 +240,7 @@ impl LibraryTab {
                 foot.width() - 24.0,
             );
         }
+        action
     }
 
     fn choose(&mut self, view: View) {
@@ -265,7 +282,12 @@ impl LibraryTab {
         }
     }
 
-    fn tag_cloud(&mut self, ui: &mut Ui, tokens: &Tokens, library: &LibraryStore) {
+    fn tag_cloud(
+        &mut self,
+        ui: &mut Ui,
+        tokens: &Tokens,
+        library: &LibraryStore,
+    ) -> Option<LibraryTabAction> {
         let mut counts = HashMap::<LibraryTagId, usize>::new();
         for relation in library.library_item_tags() {
             *counts.entry(relation.tag_id).or_default() += 1;
@@ -274,31 +296,52 @@ impl LibraryTab {
         tags.sort_by_key(|tag| std::cmp::Reverse(counts.get(&tag.id).copied().unwrap_or(0)));
         if tags.is_empty() {
             empty_line(ui, "the ai tags items as they come in");
-            return;
+            return None;
         }
         ui.add_space(4.0);
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(12, 0))
-            .show(ui, |ui| self.tag_chips(ui, tokens, tags, &counts));
+            .show(ui, |ui| self.tag_chips(ui, tokens, library, tags, &counts))
+            .inner
     }
 
     fn tag_chips(
         &mut self,
         ui: &mut Ui,
         tokens: &Tokens,
+        library: &LibraryStore,
         tags: Vec<&glyphst_library::LibraryTag>,
         counts: &HashMap<LibraryTagId, usize>,
-    ) {
+    ) -> Option<LibraryTabAction> {
+        let mut action = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             for tag in tags.into_iter().take(40) {
                 let count = counts.get(&tag.id).copied().unwrap_or(0);
                 let active = self.view == View::Tag(tag.id);
-                if tag_chip(ui, tokens, &format!("#{}", tag.name), Some(count), active).clicked() {
+                let color = library.tag_color(tag.id);
+                let label = format!("#{}", tag.name);
+                let response = tag_chip(
+                    ui,
+                    tokens,
+                    &label,
+                    Some(count),
+                    active,
+                    color.map(crate::annotations::color),
+                );
+                if response.clicked() {
                     self.choose(View::Tag(tag.id));
                 }
+                // Right-click: the tag's colour (frame 04l).
+                response.context_menu(|ui| {
+                    if let Some(chosen) = tag_menu(ui, tokens, &label, color) {
+                        action = Some(LibraryTabAction::TagColor(tag.id, chosen));
+                        ui.close();
+                    }
+                });
             }
         });
+        action
     }
 
     // ── the items ─────────────────────────────────────────────────────
@@ -509,12 +552,43 @@ impl LibraryTab {
                     };
                     let selected = self.selected == Some(*id);
                     let (row, response) = glyphst_ui::row::list_row(ui, ROW, selected);
+                    let duplicate = possible_duplicate(library, item);
                     if ui.is_rect_visible(row) {
                         let path = library
                             .primary_attachment(*id)
                             .map(|attachment| attachment.path.clone());
                         let doc = path.as_ref().and_then(|path| progress.get(path).copied());
-                        paint_item_row(ui, tokens, row, &columns, library, item, doc, selected);
+                        match duplicate {
+                            // The row of a possible duplicate (frame 04g).
+                            Some(other) => {
+                                if !selected {
+                                    ui.painter().rect_filled(row, 0, tokens.accent_soft);
+                                }
+                                paint_duplicate_row(ui, tokens, row, &columns, item, other);
+                            }
+                            None => paint_item_row(
+                                ui, tokens, row, &columns, library, item, doc, selected,
+                            ),
+                        }
+                    }
+                    if let Some(other) = duplicate {
+                        let right = row.right() - 8.0;
+                        let buttons = Rect::from_min_max(
+                            pos2(row.left() + columns[3], row.top()),
+                            pos2(right, row.bottom()),
+                        );
+                        let mut buttons_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(buttons)
+                                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        );
+                        buttons_ui.spacing_mut().item_spacing.x = 8.0;
+                        if buttons_ui.add(Button::bracket("merge")).clicked() {
+                            action = Some(merge_action(item, other));
+                        }
+                        if buttons_ui.add(Button::bracket_muted("keep both")).clicked() {
+                            action = Some(LibraryTabAction::KeepBoth(item.id, other.id));
+                        }
                     }
                     if response.clicked() {
                         self.selected = Some(*id);
@@ -844,21 +918,17 @@ impl LibraryTab {
                     })
                     .unwrap_or_else(|| "looking it up…".to_string());
                 mono_line(ui, &source, tokens.faint, 10.0);
-                if let Some(other) = library
-                    .metadata_record(id)
-                    .and_then(|record| record.possible_duplicate_of)
-                    .and_then(|other| library.library_item(other))
-                {
-                    mono_line(
-                        ui,
-                        &format!("≡ maybe the same as “{}”", other.title),
-                        tokens.accent_text,
-                        10.0,
-                    );
-                }
             });
         });
         ui.add_space(10.0);
+
+        // The work it may duplicate, to merge or keep apart (frame 04l).
+        if let Some(other) = possible_duplicate(library, item) {
+            if let Some(chosen) = duplicate_box(ui, tokens, library, item, other) {
+                action = Some(chosen);
+            }
+            ui.add_space(10.0);
+        }
 
         // The AI's summary.
         if let Some(enrichment) = library.item_enrichment(id) {
@@ -940,7 +1010,8 @@ impl LibraryTab {
                             }
                         }
                         None => {
-                            tag_chip(ui, tokens, &format!("#{}", tag.name), None, false);
+                            let color = library.tag_color(tag.id).map(crate::annotations::color);
+                            tag_chip(ui, tokens, &format!("#{}", tag.name), None, false, color);
                         }
                     }
                 }
@@ -1033,6 +1104,60 @@ impl LibraryTab {
                 });
         }
         ui.add_space(10.0);
+
+        // Its files, when a merge gave it more than one (frame 04m).
+        let attachments = library
+            .library_attachments()
+            .iter()
+            .filter(|attachment| attachment.item_id == id)
+            .collect::<Vec<_>>();
+        if attachments.len() > 1 {
+            flush_rule(ui, "files", None);
+            let merged_at = library
+                .library_item_merges()
+                .iter()
+                .filter(|merge| merge.into == id)
+                .map(|merge| merge.at)
+                .max();
+            for attachment in &attachments {
+                let name = attachment
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let highlights = library.highlights_for(&attachment.path).len();
+                let detail = match merged_at {
+                    Some(at) if !attachment.primary => format!("merged · {}", short_date(at)),
+                    _ if highlights > 0 => plural(highlights, "highlight"),
+                    _ => String::new(),
+                };
+                let color = if attachment.primary {
+                    tokens.text_2
+                } else {
+                    tokens.muted
+                };
+                if link_row(ui, tokens, "▤", &name, &detail, color).double_clicked() {
+                    action = Some(LibraryTabAction::Open(attachment.path.clone()));
+                }
+            }
+            ui.add_space(10.0);
+        }
+
+        // The items related to it, from Zotero or an assistant.
+        let related = library.related_items(id);
+        if !related.is_empty() {
+            flush_rule(ui, "related", None);
+            for other in related {
+                let Some(other) = library.library_item(other) else {
+                    continue;
+                };
+                let year = other.year.map(|year| year.to_string()).unwrap_or_default();
+                if link_row(ui, tokens, "↔", &other.title, &year, tokens.text_2).clicked() {
+                    action = Some(LibraryTabAction::ShowInLibrary(other.id));
+                }
+            }
+            ui.add_space(10.0);
+        }
 
         // The note.
         let note_name = note_path
@@ -1503,6 +1628,48 @@ fn paint_item_row(
     }
 }
 
+/// A possible duplicate's row: its file and what it shares with the other
+/// item across the title and authors, then its year; the buttons go on top.
+fn paint_duplicate_row(
+    ui: &Ui,
+    tokens: &Tokens,
+    rect: Rect,
+    columns: &[f32; 6],
+    item: &LibraryItem,
+    other: &LibraryItem,
+) {
+    ui.painter()
+        .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
+    let y = rect.center().y;
+    let left = rect.left() + columns[0] + 8.0;
+    let width = columns[2] - columns[0] - 12.0;
+    let title = text::line(
+        ui,
+        pos2(left, y),
+        Align2::LEFT_CENTER,
+        &item.title,
+        theme::regular(13.0),
+        tokens.text,
+        width * 0.45,
+    );
+    text::row(
+        ui,
+        pos2(title.right() + 12.0, y),
+        duplicate_line(item, other),
+        theme::mono(11.0),
+        tokens.accent_text,
+        (left + width - title.right() - 12.0).max(0.0),
+    );
+    text::row(
+        ui,
+        pos2(rect.left() + columns[2] + 8.0, y),
+        item.year.map(|year| year.to_string()).unwrap_or_default(),
+        theme::mono(11.0),
+        tokens.muted,
+        columns[3] - columns[2] - 12.0,
+    );
+}
+
 fn authors_short(item: &LibraryItem) -> String {
     let surname = |name: &str| match name.split_once(',') {
         Some((last, _)) => last.trim().to_string(),
@@ -1683,21 +1850,26 @@ fn empty_line(ui: &mut Ui, line: &str) {
     );
 }
 
-/// A tag (`#name 12`) on the hover fill, on `accent-soft` when chosen.
+/// A tag (`#name 12`) on the hover fill, on `accent-soft` when chosen,
+/// with its colour as a dot before the name.
 fn tag_chip(
     ui: &mut Ui,
     tokens: &Tokens,
     label: &str,
     count: Option<usize>,
     active: bool,
+    color: Option<egui::Color32>,
 ) -> egui::Response {
     let count = count.map(|count| count.to_string());
     let label_width = text::width(ui, label, &theme::mono(11.0));
     let count_width = count.as_ref().map_or(0.0, |count| {
         text::width(ui, count, &theme::mono(10.0)) + 4.0
     });
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(label_width + count_width + 12.0, 19.0), Sense::click());
+    let dot = if color.is_some() { 11.0 } else { 0.0 };
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(dot + label_width + count_width + 12.0, 19.0),
+        Sense::click(),
+    );
     let fill = if active {
         tokens.accent_soft
     } else if response.hovered() {
@@ -1706,8 +1878,12 @@ fn tag_chip(
         tokens.hover
     };
     ui.painter().rect_filled(rect, tokens.ctl_radius(), fill);
+    if let Some(color) = color {
+        ui.painter()
+            .circle_filled(pos2(rect.left() + 9.5, rect.center().y), 3.5, color);
+    }
     ui.painter().text(
-        pos2(rect.left() + 6.0, rect.center().y),
+        pos2(rect.left() + 6.0 + dot, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         theme::mono(11.0),
@@ -1719,7 +1895,7 @@ fn tag_chip(
     );
     if let Some(count) = count {
         ui.painter().text(
-            pos2(rect.left() + 6.0 + label_width + 4.0, rect.center().y),
+            pos2(rect.left() + 6.0 + dot + label_width + 4.0, rect.center().y),
             Align2::LEFT_CENTER,
             count,
             theme::mono(10.0),
@@ -1727,6 +1903,207 @@ fn tag_chip(
         );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The tag's menu: its name, then the five colours (the chosen one
+/// ringed) and `none`. Returns the colour picked.
+fn tag_menu(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    label: &str,
+    current: Option<HighlightColor>,
+) -> Option<Option<HighlightColor>> {
+    let mut chosen = None;
+    ui.set_min_width(212.0);
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| mono_line(ui, label, tokens.muted, 11.0));
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                for color in HighlightColor::ALL {
+                    let (rect, response) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                    let hovered = response.hovered();
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        if hovered { 6.5 } else { 6.0 },
+                        crate::annotations::color(color),
+                    );
+                    if current == Some(color) {
+                        ui.painter().circle_stroke(
+                            rect.center(),
+                            8.5,
+                            Stroke::new(1.0, tokens.text),
+                        );
+                    }
+                    if response
+                        .on_hover_text(crate::annotations::color_name(color))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        chosen = Some(Some(color));
+                    }
+                }
+                let none = ui.add(Button::plain("none").small());
+                if none.clicked() {
+                    chosen = Some(None);
+                }
+            });
+        });
+    chosen
+}
+
+/// The item that `item` may duplicate, unless it is gone.
+fn possible_duplicate<'a>(
+    library: &'a LibraryStore,
+    item: &LibraryItem,
+) -> Option<&'a LibraryItem> {
+    library
+        .metadata_record(item.id)
+        .and_then(|record| record.possible_duplicate_of)
+        .and_then(|other| library.library_item(other))
+}
+
+/// `same doi as “Title”`: what the two share, by Zotero's rules.
+fn duplicate_line(item: &LibraryItem, other: &LibraryItem) -> String {
+    let reason = match glyphst_metadata::find_duplicate(item, [other]) {
+        Some((_, glyphst_metadata::DuplicateReason::Doi)) => "same doi as",
+        Some((_, glyphst_metadata::DuplicateReason::Isbn)) => "same isbn as",
+        Some((_, glyphst_metadata::DuplicateReason::Arxiv)) => "same arxiv id as",
+        Some((_, glyphst_metadata::DuplicateReason::Title)) => "same title as",
+        None => "maybe the same as",
+    };
+    format!("≡ {reason} “{}”", other.title)
+}
+
+/// The older item stays; a trashed one never does.
+fn merge_action(item: &LibraryItem, other: &LibraryItem) -> LibraryTabAction {
+    if other.trashed_at.is_some() {
+        LibraryTabAction::Merge {
+            keep: item.id,
+            absorb: other.id,
+        }
+    } else {
+        LibraryTabAction::Merge {
+            keep: other.id,
+            absorb: item.id,
+        }
+    }
+}
+
+/// The `accent-soft` box under an item's source (frame 04l): what it
+/// shares with the other, how long that one has been here, and
+/// `[ keep both ] [ merge ]`.
+fn duplicate_box(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    library: &LibraryStore,
+    item: &LibraryItem,
+    other: &LibraryItem,
+) -> Option<LibraryTabAction> {
+    let mut action = None;
+    egui::Frame::new()
+        .fill(tokens.accent_soft)
+        .corner_radius(tokens.ctl_radius())
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(duplicate_line(item, other))
+                        .font(theme::mono(11.0))
+                        .color(tokens.accent_text),
+                )
+                .wrap(),
+            );
+            let highlights = library
+                .primary_attachment(other.id)
+                .map_or(0, |attachment| {
+                    library.highlights_for(&attachment.path).len()
+                });
+            let mut since = format!("in the library since {}", month_year(other.created));
+            if highlights > 0 {
+                since.push_str(&format!(" · {}", plural(highlights, "highlight")));
+            }
+            mono_line(ui, &since, tokens.muted, 10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if ui.add(Button::bracket_muted("keep both")).clicked() {
+                    action = Some(LibraryTabAction::KeepBoth(item.id, other.id));
+                }
+                if ui.add(Button::bracket("merge")).clicked() {
+                    action = Some(merge_action(item, other));
+                }
+            });
+        });
+    action
+}
+
+/// A row of a list in the item pane: a glyph, a name and a faint detail
+/// on the right.
+fn link_row(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    glyph: &str,
+    name: &str,
+    detail: &str,
+    color: egui::Color32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
+    let y = rect.center().y;
+    let detail_rect = text::line(
+        ui,
+        pos2(rect.right(), y),
+        Align2::RIGHT_CENTER,
+        detail,
+        theme::mono(10.0),
+        tokens.faint,
+        rect.width() / 2.0,
+    );
+    ui.painter().text(
+        pos2(rect.left(), y),
+        Align2::LEFT_CENTER,
+        glyph,
+        theme::mono(11.0),
+        tokens.faint,
+    );
+    text::row(
+        ui,
+        pos2(rect.left() + 18.0, y),
+        name,
+        theme::mono(11.0),
+        if response.hovered() {
+            tokens.text
+        } else {
+            color
+        },
+        (detail_rect.left() - rect.left() - 26.0).max(0.0),
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// `oct 19`.
+fn short_date(seconds: u64) -> String {
+    chrono::DateTime::from_timestamp(seconds as i64, 0)
+        .map(|time| time.format("%b %d").to_string().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// `mar 2024`.
+fn month_year(seconds: u64) -> String {
+    chrono::DateTime::from_timestamp(seconds as i64, 0)
+        .map(|time| time.format("%b %Y").to_string().to_lowercase())
+        .unwrap_or_default()
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        _ => format!("{count} {noun}s"),
+    }
 }
 
 /// An AI tag (`◆ name ✓ ×`), outlined in the accent; returns whether ✓ or

@@ -1925,6 +1925,12 @@ pub struct Library {
     pub library_item_locations: Vec<LibraryItemLocation>,
     /// Which collections each item is in; an item can be in several.
     pub library_item_collections: Vec<LibraryItemCollection>,
+    /// Tag colours, related items, pairs kept apart and merged items
+    /// (`item_links.rs`).
+    pub library_tag_colors: Vec<LibraryTagColor>,
+    pub library_related_items: Vec<LibraryItemPair>,
+    pub library_distinct_items: Vec<LibraryItemPair>,
+    pub library_item_merges: Vec<LibraryItemMerge>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub highlights: Vec<Highlight>,
@@ -2101,7 +2107,9 @@ mod catalog;
 mod edits;
 mod files_root;
 mod history;
+mod item_links;
 mod jobs;
+mod merge;
 mod model;
 mod preferences;
 mod reader_session;
@@ -2118,6 +2126,7 @@ pub use ai_catalog::{
 };
 pub use catalog::*;
 pub use files_root::{FilesMove, FilesMovePlan, copy_planned_files};
+pub use item_links::{LibraryItemMerge, LibraryItemPair, LibraryTagColor};
 pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState};
 use storage_helpers::require_storage_version;
 pub use vault_notes::VaultNoteRecord;

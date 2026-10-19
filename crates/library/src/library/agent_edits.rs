@@ -2,6 +2,7 @@
 //! snapshot that can be reverted and re-applied on its own, and refuses
 //! when the data changed since.
 
+use super::merge::ItemState;
 use super::*;
 
 /// One change to the library, as a before/after snapshot.
@@ -33,6 +34,19 @@ enum EditKind {
     Metadata {
         before: Box<LibraryItem>,
         after: Box<LibraryItem>,
+    },
+    /// The items related to an item.
+    Related {
+        item: DocumentId,
+        title: String,
+        before: Vec<DocumentId>,
+        after: Vec<DocumentId>,
+    },
+    /// An item merged into another (`merge.rs`).
+    Merge {
+        keep_before: Box<ItemState>,
+        keep_after: Box<ItemState>,
+        absorbed: Box<ItemState>,
     },
 }
 
@@ -83,6 +97,32 @@ impl LibraryEdit {
         })
     }
 
+    pub(super) fn related(
+        item: DocumentId,
+        title: String,
+        before: Vec<DocumentId>,
+        after: Vec<DocumentId>,
+    ) -> Self {
+        Self(EditKind::Related {
+            item,
+            title,
+            before,
+            after,
+        })
+    }
+
+    pub(super) fn merge(
+        keep_before: ItemState,
+        keep_after: ItemState,
+        absorbed: ItemState,
+    ) -> Self {
+        Self(EditKind::Merge {
+            keep_before: Box::new(keep_before),
+            keep_after: Box::new(keep_after),
+            absorbed: Box::new(absorbed),
+        })
+    }
+
     /// The document the edit belongs to, for annotations and bookmarks.
     pub fn path(&self) -> Option<&Path> {
         match &self.0 {
@@ -96,7 +136,10 @@ impl LibraryEdit {
         match &self.0 {
             EditKind::Document(_) => None,
             EditKind::Item { after, .. } | EditKind::Metadata { after, .. } => Some(after.id),
-            EditKind::Tags { item, .. } | EditKind::Collections { item, .. } => Some(*item),
+            EditKind::Tags { item, .. }
+            | EditKind::Collections { item, .. }
+            | EditKind::Related { item, .. } => Some(*item),
+            EditKind::Merge { keep_after, .. } => Some(keep_after.id()),
         }
     }
 
@@ -203,6 +246,20 @@ impl LibraryEdit {
                 }
             }
             EditKind::Metadata { after, .. } => format!("Changed the details of “{}”", after.title),
+            EditKind::Related { title, after, .. } => match after.len() {
+                0 => format!("Unlinked the items related to “{title}”"),
+                1 => format!("Linked “{title}” to 1 related item"),
+                count => format!("Linked “{title}” to {count} related items"),
+            },
+            EditKind::Merge {
+                keep_after,
+                absorbed,
+                ..
+            } => format!(
+                "Merged {} into “{}”",
+                quote(absorbed.title()),
+                keep_after.title()
+            ),
         }
     }
 }
@@ -342,6 +399,44 @@ impl LibraryStore {
                 }
                 self.update_library_item_metadata(item)
             }
+            EditKind::Related {
+                item,
+                before,
+                after,
+                ..
+            } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after, before),
+                    DocumentEditDirection::Redo => (before, after),
+                };
+                if &self.related_items(*item) != expected {
+                    return Err(DocumentEditConflict("related library items").into());
+                }
+                self.persist_related_items(*item, target)
+            }
+            EditKind::Merge {
+                keep_before,
+                keep_after,
+                absorbed,
+            } => match direction {
+                DocumentEditDirection::Undo => {
+                    self.unmerge_items(keep_before, keep_after, absorbed)
+                }
+                DocumentEditDirection::Redo => {
+                    let current = self.library_item(keep_before.id()).ok_or_else(|| {
+                        anyhow!("library item {} does not exist", keep_before.id().0)
+                    })?;
+                    if self.library_item(absorbed.id()).is_none()
+                        || MetadataField::ALL
+                            .into_iter()
+                            .any(|field| field.differs(current, &keep_before.item_fields()))
+                    {
+                        return Err(DocumentEditConflict("merged library item").into());
+                    }
+                    self.merge_items(keep_before.id(), absorbed.id())
+                        .map(|_| ())
+                }
+            },
         }
     }
 }
