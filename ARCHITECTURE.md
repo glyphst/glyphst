@@ -10,8 +10,8 @@
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `metadata` | Recognising library items: identifiers in a document's first pages, lookups in arXiv, Crossref, OpenAlex and Open Library, duplicate detection, merging into an item |
 | `vault` | The Markdown vault: one Obsidian-compatible note per library item; the frontmatter keys and `glyphst:` blocks Glyphst owns, merged without touching the user's text |
-| `search` | The library's text search: an SQLite index (FTS5 words, trigrams for Chinese, Japanese and Korean, float16 vectors) of every item's pages in chunks with their anchors; the thread that reads and embeds documents in resumable steps; keyword and meaning search mixed by z-scores (or RRF); the `Embedder` trait; the evaluation set and its scores |
-| `embed` | Search by meaning's engine: pinned llama.cpp `llama-server` builds and EmbeddingGemma 2, downloaded resumably and checked by SHA-256; the server run on loopback with its key in the environment; the `Embedder` over it |
+| `search` | The library's text search: an SQLite index (FTS5 words, trigrams for Chinese, Japanese and Korean, float16 vectors) of every item's pages in chunks with their anchors; the thread that reads and embeds documents in resumable steps; keyword and meaning search mixed by z-scores (or RRF), and reread by a reranker; the `Embedder` and `Reranker` traits; the evaluation set, its scores and the comparison of every run |
+| `embed` | Search by meaning's engine: pinned llama.cpp `llama-server` builds, EmbeddingGemma 2 and the bge-reranker-v2-m3 reranker, downloaded resumably and checked by SHA-256 (the engine once, for both); each model's server run on loopback with its key in the environment, ending with the app; the `Embedder` and `Reranker` over them |
 | `zotero-import` | Reading a Zotero library for import from a copy of `zotero.sqlite` (with its write-ahead log): items, creators, tags, collections, attachments, notes as Markdown and PDF annotations in user space; read only |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
 | `agent-host` | External agents (Claude Code, Codex, Pi, ACP agents): their drivers, working folders with git checkpoints, and the MCP server that serves them the Reader's tools |
@@ -444,7 +444,17 @@ reading and embedding take hours, so it is not in the cache. Its schema is
 index's thread writes it; searches and the agents' tools read through their
 own read-only connections. Search by meaning's engine and model live in
 `meaning-search/` in the data folder (`engines/llama.cpp-b<N>/`,
-`models/`, partial downloads beside their targets with a JSON sidecar).
+`models/`, partial downloads beside their targets with a JSON sidecar,
+`server.pid` and `rerank-server.pid` to stop a leftover server).
+`search-v1/opened.jsonl` keeps the searches and the passages opened from
+them while "learn from what I open" is on, in the evaluation set's form;
+`glyphst-reader --eval-search` measures the index against it.
+
+A search answers in passes on the service's query thread: keywords on each
+keystroke, meaning 120 ms after typing stops, then the reranker's pass when
+it is on; a pass never replaces a later one. The assistant's
+`search_library` goes through the same thread (every pass that runs) and
+falls back to keywords on its own connection without it.
 
 When redb reports a file from an older file format
 (`UpgradeRequired`), the library and the translation cache rename it aside as

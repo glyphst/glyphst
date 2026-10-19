@@ -81,7 +81,13 @@ and the abandoned Files app in M5). It has:
   library and cites `glyphst://` passages; asking with no document open
   asks the library (05 · ask the library). On the Meteor Lake Arc the
   model embeds about 5.5 passages a second (3.3 on the CPU); on the
-  labelled set meaning lifts paraphrase queries from R@1 0.38 to 1.00.
+  labelled set meaning lifts paraphrase queries from R@1 0.38 to 0.88.
+  A reranker (bge-reranker-v2-m3, 636 MB, off until turned on in
+  Settings) rereads the best 30 passages in about 0.4 s and lifts
+  weak keyword matches. The assistant's search uses meaning and the
+  reranker too. Opened passages are kept (locally, forgettable) as a
+  labelled set, and `glyphst-reader --eval-search` measures every run
+  on the user's own index.
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
@@ -148,20 +154,21 @@ Known gaps:
   from the library tab yet. The AI pass, the lookups, the import and
   merging are checked by tests on fakes and by screenshots; a real Zotero
   library and real providers are not yet checked by hand.
-- Library search: the agents' `search_library` uses keywords only (no
-  meaning pass). Pages with almost no text are marked for OCR or image
+- Library search: pages with almost no text are marked for OCR or image
   embedding but not searched. The engine has run by hand only on this
-  Linux machine: macOS (Metal) and Windows (Vulkan) are untried, as is
-  indexing a real library (its size and hours). The labelled set is too
-  small to choose between z-scores and RRF; a set from a real library
-  should decide.
+  Linux machine: macOS (Metal) and Windows (Vulkan) are untried, and an
+  engine left by a killed app is stopped only at the next start there
+  (Linux ties it to the app). On a small real index meaning still costs
+  known-item queries (R@1 0.70 against keywords' 0.90, partly word-salad
+  queries); z-scores against RRF and the meaning weight wait for the
+  user's opened log (`--eval-search`).
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates: the
-library's M3, syncing the library folder over WebDAV or S3; the reranker
-(Qwen3-Reranker through the same server) and the agents' meaning search;
+library's M3, syncing the library folder over WebDAV or S3; scanned
+pages (EmbeddingGemma 2's vision part, or OCR); M4's knowledge layer;
 then, from the gaps above, restoring translation
 sessions from the cache, and a dense page's
 first load (MuPDF's interpretation
