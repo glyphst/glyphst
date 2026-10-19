@@ -11,7 +11,7 @@ pub mod store;
 
 pub use index::{IndexStatus, ItemText, LibraryFile, Snapshot};
 pub use indexer::Indexer;
-pub use search::{ItemHit, PageHit, Query, SearchRequest, SearchResults};
+pub use search::{ChunkLocation, ItemHit, PageHit, Query, SearchRequest, SearchResults};
 pub use store::{SCHEMA_VERSION, Store};
 
 #[cfg(test)]

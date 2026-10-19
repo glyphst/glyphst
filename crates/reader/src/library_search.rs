@@ -28,6 +28,8 @@ pub struct SearchService {
     request: Option<SearchRequest>,
     results: Option<SearchResults>,
     followed: Option<u64>,
+    /// A reader for finding passages from the UI (one row by its key).
+    locator: Option<Store>,
 }
 
 impl SearchService {
@@ -78,6 +80,7 @@ impl SearchService {
             request: None,
             results: None,
             followed: None,
+            locator: None,
         })
     }
 
@@ -143,6 +146,14 @@ impl SearchService {
 
     pub fn reindex(&self) {
         self.indexer.reindex();
+    }
+
+    /// Where a passage is, for a link to it.
+    pub fn locate(&mut self, chunk: i64) -> Option<glyphst_search::ChunkLocation> {
+        if self.locator.is_none() {
+            self.locator = Store::open_reader(&self.path).ok();
+        }
+        self.locator.as_ref()?.chunk(chunk).ok().flatten()
     }
 
     /// The index's file.

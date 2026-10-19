@@ -369,6 +369,8 @@ pub struct ReaderApp {
     agent_calls: std::sync::mpsc::Receiver<crate::ai_bridge::UiCall>,
     /// The open documents, for the agents' reading tools.
     agent_documents: crate::ai_tools::DocumentDirectory,
+    /// The search index, for the assistant's library search.
+    search_index: crate::search_tools::IndexHandle,
     /// What agents changed, for review and undo.
     pub(crate) agent_changes: crate::ai_changes::ChangeLog,
     /// The MCP server for external agents, started when first needed.
@@ -643,6 +645,7 @@ impl ReaderApp {
             agent_bridge,
             agent_calls,
             agent_documents: Default::default(),
+            search_index: Default::default(),
             agent_changes: Default::default(),
             mcp: None,
             mcp_tokens: HashMap::new(),
@@ -743,6 +746,7 @@ impl ReaderApp {
                 match crate::library_search::SearchService::start(&path, &cc.egui_ctx) {
                     Ok(service) => {
                         service.set_paused(true);
+                        app.search_index.set(Some(path));
                         app.library_search = Some(service);
                     }
                     Err(error) => eprintln!("failed to start the demo search: {error:#}"),
@@ -1605,6 +1609,57 @@ impl ReaderApp {
         if let Err(error) = result {
             self.notices.push(format!("{error:#}"));
         }
+    }
+
+    /// Opens what a `glyphst://` link names: a passage the index knows, or
+    /// an item at a page.
+    pub(crate) fn open_link(
+        &mut self,
+        link: crate::links::OpenLink,
+        ctx: &egui::Context,
+    ) -> Result<String, String> {
+        let passage = link
+            .chunk
+            .and_then(|chunk| self.library_search.as_mut()?.locate(chunk));
+        let (path, page, anchor) = match passage {
+            Some(chunk) => (
+                chunk.path.clone(),
+                chunk.page,
+                Some(glyphst_core::SemanticTextAnchor::new(
+                    chunk.doc_offset,
+                    chunk.quote,
+                    chunk.prefix,
+                    chunk.suffix,
+                )),
+            ),
+            None => {
+                let item = link
+                    .item
+                    .ok_or("that passage is not in the index any more")?;
+                let id = self
+                    .library
+                    .resolve_item_id(glyphst_library::DocumentId(item));
+                let attachment = self
+                    .library
+                    .primary_attachment(id)
+                    .ok_or_else(|| format!("lib_{item} has no file to open"))?;
+                (
+                    attachment.path.clone(),
+                    link.page.unwrap_or(1).saturating_sub(1),
+                    None,
+                )
+            }
+        };
+        let title = self
+            .library
+            .library_item_for_path(&path)
+            .map(|item| item.title.clone())
+            .unwrap_or_else(|| path.display().to_string());
+        self.library_tab_action(
+            crate::library_tab::LibraryTabAction::OpenAt { path, page, anchor },
+            ctx,
+        );
+        Ok(format!("Showing \"{title}\" at page {}.", page + 1))
     }
 
     /// Keeps (or rejects) every unreviewed AI change of these items.
@@ -5100,7 +5155,10 @@ impl eframe::App for ReaderApp {
             if self.library_search.is_none() {
                 let path = crate::library_search::SearchService::default_path();
                 match crate::library_search::SearchService::start(&path, &ctx) {
-                    Ok(service) => self.library_search = Some(service),
+                    Ok(service) => {
+                        self.search_index.set(Some(path));
+                        self.library_search = Some(service);
+                    }
                     Err(error) => {
                         log::warn!("the library's search could not start: {error:#}");
                     }
@@ -5398,6 +5456,12 @@ impl eframe::App for ReaderApp {
             self.last_position_save = now;
         }
 
+        // Links to the library (the assistant's citations) open here.
+        for link in crate::links::take(&ctx) {
+            if let Err(error) = self.open_link(link, &ctx) {
+                self.notices.push(error);
+            }
+        }
         self.settle_switcher();
         // A pending overview advances one tile per frame, so keep drawing.
         let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);

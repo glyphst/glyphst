@@ -241,18 +241,22 @@ static SPECS: &[Spec] = &[
         describe: |_| "Listed the annotations".into(),
     },
     Spec {
-        name: "search_library",
-        description: "Search the library's books by title, author, abstract or note. Returns library ids for open_document.",
-        effect: ToolEffect::Read,
+        name: "open_at",
+        description: "Open a library item at a page, or at a passage search_library found (chunk_id), and show it to the user.",
+        effect: ToolEffect::Navigate,
         properties: || {
             json!({
-                "query": {"type": "string"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 50}
+                "library_id": {"type": "string", "description": "lib_12; not needed with chunk_id"},
+                "page": {"type": "integer", "minimum": 1},
+                "chunk_id": {"type": "string", "description": "c_381"}
             })
         },
-        required: &["query"],
+        required: &[],
         document: false,
-        describe: |arguments| format!("Searched the library for “{}”", text_of(arguments, "query")),
+        describe: |arguments| match arguments["page"].as_u64() {
+            Some(page) => format!("Opened page {page}"),
+            None => "Opened the passage".into(),
+        },
     },
     Spec {
         name: "list_commands",

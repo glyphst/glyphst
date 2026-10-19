@@ -47,9 +47,13 @@ fn tool_guidance(tools: &[AgentToolDefinition]) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Some(format!(
+    let mut guidance = format!(
         "You can call these tools:\n{list}\n\nCall independent reading tools together in one turn. Prefer text tools before rendering pages. Tools that change the user's data (annotations, bookmarks, the library) take effect immediately and the user can undo them, so make the changes they ask for without asking for confirmation, then say what you changed. Do not claim tool results you did not receive."
-    ))
+    );
+    if tools.iter().any(|tool| tool.name == "search_library") {
+        guidance.push_str(" When you use passages from the library, cite each as a Markdown link with its glyphst:// link, such as [Vaswani 2017, p. 5](glyphst://open?id=12&page=5&chunk=381); the user opens it with a click.");
+    }
+    Some(guidance)
 }
 
 /// A document as the reader shows it.

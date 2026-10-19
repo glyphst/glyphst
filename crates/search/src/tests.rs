@@ -369,3 +369,34 @@ fn reading_speed_is_learned_and_gives_the_time_left() {
     // 60 pages left, and the unopened document about 50 more.
     assert_eq!(status.seconds_left(), Some(11));
 }
+
+#[test]
+fn a_chunk_is_found_with_its_neighbours_and_its_items() {
+    let dir = folder("chunks");
+    let (attention, _) = library(&dir);
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .reconcile(
+            &Snapshot {
+                files: vec![file(1, attention, 1)],
+                items: vec![ItemText {
+                    creators: "Ashish Vaswani, Noam Shazeer".to_string(),
+                    ..item(1, "Attention Is All You Need")
+                }],
+            },
+            0,
+        )
+        .unwrap();
+    let store = run_steps(store, 5);
+    let hit = search(&store, "dot product").items[0].pages[0].clone();
+    let chunk = store.chunk(hit.chunk_id).unwrap().unwrap();
+    assert_eq!((chunk.page, chunk.items.clone()), (1, vec![1]));
+    assert!(chunk.text.contains("Scaled dot product attention"));
+    let around = store.chunk_with_neighbours(hit.chunk_id, 1).unwrap();
+    assert_eq!(around.len(), 2, "the page before is its neighbour");
+    assert_eq!(
+        store.item_titles(&[1]).unwrap()[&1],
+        "Attention Is All You Need (Ashish Vaswani)"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

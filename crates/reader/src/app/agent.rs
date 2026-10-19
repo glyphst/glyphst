@@ -33,6 +33,7 @@ impl ReaderApp {
         self.agent_documents.register(&mut registry);
         self.library_jobs.lookups().register(&mut registry);
         self.agent_bridge.register(&mut registry);
+        self.search_index.register(&mut registry);
         registry
     }
 
@@ -208,7 +209,7 @@ impl ReaderApp {
             "get_outline" => text(self.agent_outline(self.agent_tab(a)?)),
             "get_selection" => text(self.agent_selection()?),
             "list_annotations" => text(self.agent_annotations(self.agent_tab(a)?)),
-            "search_library" => text(self.agent_search_library(a)?),
+            "open_at" => text(self.agent_open_at(a, ctx)?),
             "list_commands" => text(self.agent_commands()),
             "run_command" => text(self.agent_run_command(a, ctx)?),
             "go_to_page" => {
@@ -558,45 +559,6 @@ impl ReaderApp {
         } else {
             lines.join("\n")
         }
-    }
-
-    fn agent_search_library(&self, arguments: &Value) -> Result<String, String> {
-        let query = arguments["query"]
-            .as_str()
-            .map(|query| query.trim().to_lowercase())
-            .filter(|query| !query.is_empty())
-            .ok_or("query must not be empty")?;
-        let limit = arguments["max_results"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
-        let matches = self
-            .library
-            .library_items()
-            .iter()
-            .filter(|item| item.trashed_at.is_none())
-            .filter(|item| {
-                let creators = item
-                    .creators
-                    .iter()
-                    .map(|creator| creator.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                [
-                    item.title.as_str(),
-                    &creators,
-                    &item.abstract_text,
-                    &item.subject,
-                    &item.work_note,
-                ]
-                .iter()
-                .any(|field| field.to_lowercase().contains(&query))
-            })
-            .take(limit)
-            .map(|item| format!("- {}", describe_item(item)))
-            .collect::<Vec<_>>();
-        Ok(if matches.is_empty() {
-            format!("No books match \"{query}\".")
-        } else {
-            matches.join("\n")
-        })
     }
 
     fn agent_commands(&self) -> String {

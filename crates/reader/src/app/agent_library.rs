@@ -85,6 +85,33 @@ impl ReaderApp {
         })
     }
 
+    /// `open_at`: a passage, or an item at a page.
+    pub(super) fn agent_open_at(
+        &mut self,
+        arguments: &Value,
+        ctx: &egui::Context,
+    ) -> Result<String, String> {
+        let chunk = arguments["chunk_id"]
+            .as_str()
+            .and_then(|id| id.trim().trim_start_matches("c_").parse().ok())
+            .or_else(|| arguments["chunk_id"].as_i64());
+        let item = match arguments["library_id"].as_str().filter(|id| !id.is_empty()) {
+            Some(id) => Some(super::agent::parse_library_id(id)?.0),
+            None => None,
+        };
+        if chunk.is_none() && item.is_none() {
+            return Err("give a library_id or a chunk_id".into());
+        }
+        self.open_link(
+            crate::links::OpenLink {
+                item,
+                page: arguments["page"].as_u64().map(|page| page as usize),
+                chunk,
+            },
+            ctx,
+        )
+    }
+
     /// The item a call names with `library_id`, else the document's.
     pub(super) fn agent_item_id(&self, arguments: &Value) -> Result<DocumentId, String> {
         let id = match arguments["library_id"].as_str().filter(|id| !id.is_empty()) {

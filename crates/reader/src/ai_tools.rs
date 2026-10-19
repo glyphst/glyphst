@@ -639,6 +639,8 @@ pub fn describe_step(name: &str, arguments: &str) -> Step {
             format!("the library for {}", quoted("query")),
             StepKind::Search,
         ),
+        "read_chunk" => step("Reading", "Read", "a passage".into(), StepKind::Read),
+        "open_at" => step("Opening", "Opened", "a passage".into(), StepKind::Navigate),
         "list_commands" => step("Listing", "Listed", "the commands".into(), StepKind::Check),
         "run_command" => step(
             "Running",

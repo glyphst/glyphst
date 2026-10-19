@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::Result;
-use rusqlite::params_from_iter;
+use rusqlite::{OptionalExtension as _, params_from_iter};
 
 use crate::{index::is_cjk, store::Store};
 
@@ -65,6 +65,23 @@ pub struct ItemHit {
     pub pages: Vec<PageHit>,
     /// Further pages that matched.
     pub more_pages: usize,
+}
+
+/// A chunk to read or open: its file, page, anchor, and the items that
+/// have its file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChunkLocation {
+    pub chunk_id: i64,
+    pub path: PathBuf,
+    /// 0-based.
+    pub page: usize,
+    pub section: String,
+    pub text: String,
+    pub doc_offset: usize,
+    pub quote: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub items: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -450,18 +467,99 @@ impl Store {
         Ok(owners)
     }
 
-    /// The text of chunks by id, with their neighbours, for the assistant.
-    pub fn chunk_texts(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
-        if ids.is_empty() {
+    /// A chunk and where it is, with the items that have its file.
+    pub fn chunk(&self, chunk_id: i64) -> Result<Option<ChunkLocation>> {
+        Ok(self
+            .chunks_where("c.id = ?1", &[chunk_id])?
+            .into_iter()
+            .next())
+    }
+
+    /// A chunk and the `around` chunks before and after it in its document.
+    pub fn chunk_with_neighbours(
+        &self,
+        chunk_id: i64,
+        around: usize,
+    ) -> Result<Vec<ChunkLocation>> {
+        let Some((doc_id, ord)) = self
+            .conn
+            .query_row(
+                "SELECT doc_id, ord FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        else {
             return Ok(Vec::new());
-        }
-        let marks = vec!["?"; ids.len()].join(", ");
+        };
+        let around = around as i64;
+        self.chunks_where(
+            "c.doc_id = ?1 AND c.ord BETWEEN ?2 AND ?3",
+            &[doc_id, ord - around, ord + around],
+        )
+    }
+
+    fn chunks_where(&self, condition: &str, values: &[i64]) -> Result<Vec<ChunkLocation>> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT id, text FROM chunks WHERE id IN ({marks})"
+            "SELECT c.id, d.path, c.page, c.section, c.text, c.doc_offset, c.quote, c.prefix,
+                    c.suffix, c.doc_id
+             FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE {condition} ORDER BY c.ord"
         ))?;
-        let rows =
-            statement.query_map(params_from_iter(ids), |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok((
+                ChunkLocation {
+                    chunk_id: row.get(0)?,
+                    path: PathBuf::from(row.get::<_, String>(1)?),
+                    page: row.get::<_, i64>(2)? as usize,
+                    section: row.get(3)?,
+                    text: row.get(4)?,
+                    doc_offset: row.get::<_, i64>(5)? as usize,
+                    quote: row.get(6)?,
+                    prefix: row.get(7)?,
+                    suffix: row.get(8)?,
+                    items: Vec::new(),
+                },
+                row.get::<_, i64>(9)?,
+            ))
+        })?;
+        let owners = self.owners()?;
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (mut chunk, doc_id) = row?;
+            chunk.items = owners.get(&doc_id).cloned().unwrap_or_default();
+            chunks.push(chunk);
+        }
+        Ok(chunks)
+    }
+
+    /// Items' titles (and first author) as the index has them.
+    pub fn item_titles(&self, ids: &[u64]) -> Result<HashMap<u64, String>> {
+        let mut titles = HashMap::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT title, creators FROM items_fts WHERE rowid = ?1")?;
+        for id in ids {
+            if let Some((title, creators)) = statement
+                .query_row([*id as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()?
+            {
+                let first = creators
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let label = if first.is_empty() {
+                    title
+                } else {
+                    format!("{title} ({first})")
+                };
+                titles.insert(*id, label);
+            }
+        }
+        Ok(titles)
     }
 }
 
