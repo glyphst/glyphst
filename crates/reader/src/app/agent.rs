@@ -224,7 +224,9 @@ impl ReaderApp {
             "remove_annotation" => self.agent_remove_annotation(a),
             "add_bookmark" => self.agent_add_bookmark(a),
             "set_reading_status" | "set_library_note" => self.agent_edit_item(&call.tool, a),
-            other => Err(format!("unknown tool: {other}")),
+            other => self
+                .agent_library_call(other, a)
+                .unwrap_or_else(|| Err(format!("unknown tool: {other}"))),
         }
     }
 
@@ -310,7 +312,7 @@ impl ReaderApp {
     }
 
     /// The tab a call names with `document_id`, or the active one.
-    fn agent_tab(&self, arguments: &Value) -> Result<usize, String> {
+    pub(super) fn agent_tab(&self, arguments: &Value) -> Result<usize, String> {
         match arguments["document_id"]
             .as_str()
             .filter(|id| !id.is_empty())
@@ -956,7 +958,7 @@ fn file_name(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-fn describe_item(item: &LibraryItem) -> String {
+pub(super) fn describe_item(item: &LibraryItem) -> String {
     let mut text = format!("lib_{} \"{}\"", item.id.0, item.title);
     let creators = item
         .creators
@@ -977,7 +979,7 @@ fn describe_item(item: &LibraryItem) -> String {
     text
 }
 
-fn parse_library_id(id: &str) -> Result<DocumentId, String> {
+pub(super) fn parse_library_id(id: &str) -> Result<DocumentId, String> {
     id.trim_start_matches("lib_")
         .parse()
         .map(DocumentId)

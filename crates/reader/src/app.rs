@@ -61,6 +61,7 @@ use crate::{
 };
 
 pub(crate) mod agent;
+mod agent_library;
 mod chrome;
 mod couch;
 mod page_chrome;
@@ -1121,32 +1122,7 @@ impl ReaderApp {
                     && only.is_none_or(|only| only.contains(&item.id))
             })
             .collect::<Vec<_>>();
-        let tags = self
-            .library
-            .library_tags()
-            .iter()
-            .map(|tag| tag.name.clone())
-            .collect::<Vec<_>>();
-        let (mut tokens_in, mut tokens_out) = (0, 0);
-        for item in &items {
-            let input = glyphst_ai::enrichment::EnrichInput {
-                item: glyphst_ai::enrichment::ItemFacts {
-                    title: item.title.clone(),
-                    ..Default::default()
-                },
-                // Without an abstract the model reads the first pages.
-                excerpt: if item.abstract_text.is_empty() {
-                    "x".repeat(glyphst_ai::enrichment::EXCERPT_CHARS)
-                } else {
-                    item.abstract_text.clone()
-                },
-                tags: tags.clone(),
-                ..Default::default()
-            };
-            let (input_tokens, output_tokens) = glyphst_ai::enrichment::estimate_tokens(&input);
-            tokens_in += input_tokens;
-            tokens_out += output_tokens;
-        }
+        let (tokens_in, tokens_out) = crate::library_jobs::enrich_estimate(&self.library, &items);
         Some(crate::library_dialogs::Dialog::Backfill {
             items: items.iter().map(|item| item.id).collect(),
             model: model.model,

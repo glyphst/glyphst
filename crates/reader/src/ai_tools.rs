@@ -699,6 +699,37 @@ pub fn describe_step(name: &str, arguments: &str) -> Step {
             "the book's note".into(),
             StepKind::Change,
         ),
+        "get_library_item" => step("Reading", "Read", "the library item".into(), StepKind::Read),
+        "list_library" => step(
+            "Listing",
+            "Listed",
+            arguments["collection"]
+                .as_str()
+                .map_or("the library".to_string(), str::to_string),
+            StepKind::Search,
+        ),
+        "list_library_vocabulary" => step(
+            "Reading",
+            "Read",
+            "the library's tags and collections".into(),
+            StepKind::Check,
+        ),
+        "read_vault_note" => step("Reading", "Read", "the item's note".into(), StepKind::Read),
+        "update_library_item" => step(
+            "Editing",
+            "Edited",
+            "the item's details".into(),
+            StepKind::Change,
+        ),
+        "set_item_tags" => step("Tagging", "Tagged", "the item".into(), StepKind::Change),
+        "set_item_collections" => step("Filing", "Filed", "the item".into(), StepKind::Change),
+        "add_library_item" => step(
+            "Adding",
+            "Added",
+            "a document to the library".into(),
+            StepKind::Change,
+        ),
+        "enrich_library_items" => step("Queuing", "Queued", "the AI pass".into(), StepKind::Change),
         // External agents' steps are already titles; the Reader's own tools
         // among them ("read document") count as theirs.
         other if other.contains(' ') => {

@@ -395,13 +395,217 @@ static SPECS: &[Spec] = &[
         document: true,
         describe: |_| "Edited the book's note".into(),
     },
+    Spec {
+        name: "get_library_item",
+        description: "Get a library item in full: its metadata and identifiers, where the metadata came from, tags and collections (the AI's marked with whether the user kept them), the AI summary and key points, its file and its note in the vault.",
+        effect: ToolEffect::Read,
+        properties: || json!({"library_id": library_id_property()}),
+        required: &[],
+        document: true,
+        describe: |_| "Read the library item".into(),
+    },
+    Spec {
+        name: "list_library",
+        description: "List library items, newest first or as the view sorts them. `query` takes words plus by:author, tag:name, year:2020 or year:>2019. Returns library ids with title, authors, year, status and tags.",
+        effect: ToolEffect::Read,
+        properties: || {
+            json!({
+                "view": {"type": "string", "enum": ["all", "recent", "needs_review", "unfiled", "missing", "trash"]},
+                "collection": {"type": "string", "description": "A collection path such as Machine learning/LLMs"},
+                "query": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+            })
+        },
+        required: &[],
+        document: false,
+        describe: |arguments| match arguments["collection"].as_str() {
+            Some(collection) => format!("Listed {collection}"),
+            None => "Listed the library".into(),
+        },
+    },
+    Spec {
+        name: "list_library_vocabulary",
+        description: "List the library's tags and collection paths with how many items each has, to reuse their spelling before tagging or filing.",
+        effect: ToolEffect::Read,
+        properties: || json!({}),
+        required: &[],
+        document: false,
+        describe: |_| "Read the library's tags and collections".into(),
+    },
+    Spec {
+        name: "read_vault_note",
+        description: "Read a library item's Markdown note in the vault (frontmatter, the AI summary block and the user's notes).",
+        effect: ToolEffect::Read,
+        properties: || json!({"library_id": library_id_property()}),
+        required: &[],
+        document: true,
+        describe: |_| "Read the item's note".into(),
+    },
+    Spec {
+        name: "update_library_item",
+        description: "Correct a library item's metadata. Only the fields given change, and they are then kept from lookups and the AI pass. The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_id": library_id_property(),
+                "title": {"type": "string"},
+                "authors": {"type": "array", "items": {"type": "string"}},
+                "year": {"type": "integer"},
+                "kind": {"type": "string", "enum": ["paper", "book", "other"]},
+                "publication": {"type": "string", "description": "The journal, proceedings or repository"},
+                "publisher": {"type": "string"},
+                "abstract": {"type": "string"},
+                "language": {"type": "string"},
+                "doi": {"type": "string"},
+                "arxiv": {"type": "string"},
+                "isbn": {"type": "string"}
+            })
+        },
+        required: &[],
+        document: true,
+        describe: |_| "Edited the item's details".into(),
+    },
+    Spec {
+        name: "set_item_tags",
+        description: "Replace a library item's tags (names; missing ones are created). Prefer the spellings list_library_vocabulary returns. The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_id": library_id_property(),
+                "tags": {"type": "array", "items": {"type": "string"}}
+            })
+        },
+        required: &["tags"],
+        document: true,
+        describe: |arguments| {
+            let tags = string_list(arguments, "tags");
+            format!("Tagged it {}", tags.join(", "))
+        },
+    },
+    Spec {
+        name: "set_item_collections",
+        description: "Replace the collections a library item is in, as paths such as Machine learning/LLMs (missing ones are created). The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_id": library_id_property(),
+                "collections": {"type": "array", "items": {"type": "string"}}
+            })
+        },
+        required: &["collections"],
+        document: true,
+        describe: |arguments| {
+            let collections = string_list(arguments, "collections");
+            match collections.as_slice() {
+                [] => "Took it out of its collections".into(),
+                _ => format!("Filed it in {}", collections.join(", ")),
+            }
+        },
+    },
+    Spec {
+        name: "add_library_item",
+        description: "Add a PDF or EPUB on this computer to the library, linked where it is. Its metadata is looked up and the AI pass runs as the user set them. Returns its library id.",
+        effect: ToolEffect::Mutate,
+        properties: || json!({"path": {"type": "string", "description": "An absolute path"}}),
+        required: &["path"],
+        document: false,
+        describe: |arguments| format!("Added {} to the library", text_of(arguments, "path")),
+    },
+    Spec {
+        name: "enrich_library_items",
+        description: "Queue the library model's pass (summary, key points, tags, collection) for up to 20 items, run again even when it ran before. Returns the estimated tokens; the work happens in the background.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20}
+            })
+        },
+        required: &["library_ids"],
+        document: false,
+        describe: |arguments| {
+            format!(
+                "Queued the AI pass for {} items",
+                string_list(arguments, "library_ids").len()
+            )
+        },
+    },
 ];
+
+fn library_id_property() -> Value {
+    json!({"type": "string", "description": "The item's library id (lib_12); the document's item when omitted"})
+}
+
+/// The strings of an array argument.
+pub fn string_list(arguments: &Value, key: &str) -> Vec<String> {
+    arguments[key]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests {
     use std::thread;
 
     use super::*;
+
+    /// The library tools are in the registry the assistant and the MCP
+    /// server list, the edits as changes the user can undo.
+    #[test]
+    fn the_library_tools_are_offered_with_their_schemas() {
+        let ctx = egui::Context::default();
+        let (bridge, _calls) = UiBridge::new(&ctx);
+        let mut registry = ToolRegistry::new();
+        bridge.register(&mut registry);
+        for (name, effect) in [
+            ("get_library_item", ToolEffect::Read),
+            ("list_library", ToolEffect::Read),
+            ("list_library_vocabulary", ToolEffect::Read),
+            ("read_vault_note", ToolEffect::Read),
+            ("update_library_item", ToolEffect::Mutate),
+            ("set_item_tags", ToolEffect::Mutate),
+            ("set_item_collections", ToolEffect::Mutate),
+            ("add_library_item", ToolEffect::Mutate),
+            ("enrich_library_items", ToolEffect::Mutate),
+        ] {
+            let tool = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not offered"));
+            assert_eq!(tool.effect(), effect, "{name}");
+        }
+        let schema = registry
+            .get("set_item_tags")
+            .unwrap()
+            .definition()
+            .input_schema;
+        assert!(schema["properties"]["library_id"].is_object());
+        assert!(schema["properties"]["document_id"].is_object());
+        assert_eq!(schema["required"], json!(["tags"]));
+        assert_eq!(
+            registry.describe("set_item_tags", r#"{"tags": ["nlp", "rag"]}"#),
+            "Tagged it nlp, rag"
+        );
+        assert_eq!(
+            registry.describe("set_item_collections", r#"{"collections": []}"#),
+            "Took it out of its collections"
+        );
+        assert!(
+            registry
+                .get("list_library")
+                .unwrap()
+                .definition()
+                .input_schema["properties"]
+                .get("document_id")
+                .is_none()
+        );
+    }
 
     #[test]
     fn calls_reach_the_app_and_return_its_reply() {

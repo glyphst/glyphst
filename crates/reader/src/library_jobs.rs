@@ -426,6 +426,40 @@ fn recognize(
 }
 
 /// The hash an enrichment's input is remembered by.
+/// The tokens the library model's pass over `items` would read and
+/// write, roughly.
+pub fn enrich_estimate(
+    library: &LibraryStore,
+    items: &[&glyphst_library::LibraryItem],
+) -> (u64, u64) {
+    let tags = library
+        .library_tags()
+        .iter()
+        .map(|tag| tag.name.clone())
+        .collect::<Vec<_>>();
+    let (mut tokens_in, mut tokens_out) = (0, 0);
+    for item in items {
+        let input = glyphst_ai::enrichment::EnrichInput {
+            item: glyphst_ai::enrichment::ItemFacts {
+                title: item.title.clone(),
+                ..Default::default()
+            },
+            // Without an abstract the model reads the first pages.
+            excerpt: if item.abstract_text.is_empty() {
+                "x".repeat(glyphst_ai::enrichment::EXCERPT_CHARS)
+            } else {
+                item.abstract_text.clone()
+            },
+            tags: tags.clone(),
+            ..Default::default()
+        };
+        let (input_tokens, output_tokens) = glyphst_ai::enrichment::estimate_tokens(&input);
+        tokens_in += input_tokens;
+        tokens_out += output_tokens;
+    }
+    (tokens_in, tokens_out)
+}
+
 pub fn input_hash(model: &str, input: &EnrichInput) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(enrichment::PROMPT_VERSION.to_le_bytes());
