@@ -49,6 +49,35 @@ enum Query {
     },
     Embedder(Option<Arc<dyn Embedder>>),
     Reranker(Option<Arc<dyn Reranker>>),
+    /// The assistant's search: every pass that runs, answered to `reply`.
+    Tool {
+        request: SearchRequest,
+        reply: Sender<Result<SearchResults, String>>,
+    },
+    /// The service is gone (the assistant's handles may outlive it).
+    Stop,
+}
+
+/// How long the assistant's search waits for the query thread (the
+/// meaning and rerank passes take a second or two).
+const TOOL_WAIT: Duration = Duration::from_secs(60);
+
+/// The assistant's way into the search service, from the agent's thread:
+/// the same vectors and reranker as the library tab's searches.
+#[derive(Clone)]
+pub struct ToolSearcher(Sender<Query>);
+
+impl ToolSearcher {
+    pub fn search(&self, request: SearchRequest) -> Result<SearchResults> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(Query::Tool { request, reply })
+            .map_err(|_| anyhow::anyhow!("the library's search stopped"))?;
+        answer
+            .recv_timeout(TOOL_WAIT)
+            .map_err(|_| anyhow::anyhow!("the library's search did not answer"))?
+            .map_err(|error| anyhow::anyhow!(error))
+    }
 }
 
 struct Answer {
@@ -167,6 +196,7 @@ impl SearchService {
                 while let Ok(first) = receiver.recv() {
                     // The models as they now are, and only the newest search.
                     let mut search = None;
+                    let mut tools = Vec::new();
                     for query in std::iter::once(first).chain(receiver.try_iter()) {
                         match query {
                             Query::Embedder(next) => {
@@ -175,7 +205,22 @@ impl SearchService {
                             }
                             Query::Reranker(next) => models.reranker = next,
                             Query::Search { .. } => search = Some(query),
+                            Query::Tool { request, reply } => tools.push((request, reply)),
+                            Query::Stop => return,
                         }
+                    }
+                    if store.is_none() {
+                        store = Store::open_reader(&path).ok();
+                    }
+                    // Each of the assistant's searches is answered.
+                    for (request, reply) in tools {
+                        let result = match &store {
+                            Some(store) => models
+                                .answer(store, &request, Pass::Rerank)
+                                .map_err(|error| format!("{error:#}")),
+                            None => Err("the search index is not ready".to_string()),
+                        };
+                        let _ = reply.send(result);
                     }
                     let Some(Query::Search {
                         asked,
@@ -185,9 +230,6 @@ impl SearchService {
                     else {
                         continue;
                     };
-                    if store.is_none() {
-                        store = Store::open_reader(&path).ok();
-                    }
                     let result = match &store {
                         Some(store) => models
                             .answer(store, &request, pass)
@@ -346,6 +388,16 @@ impl SearchService {
         });
     }
 
+    #[cfg(test)]
+    pub fn indexer(&self) -> &Indexer {
+        &self.indexer
+    }
+
+    /// A handle for the assistant's search.
+    pub fn tool_searcher(&self) -> ToolSearcher {
+        ToolSearcher(self.queries.clone())
+    }
+
     /// The pass the shown results come from.
     #[cfg(test)]
     pub fn shown_pass(&self) -> Pass {
@@ -400,6 +452,12 @@ impl SearchService {
     /// The index's file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for SearchService {
+    fn drop(&mut self) {
+        let _ = self.queries.send(Query::Stop);
     }
 }
 

@@ -808,7 +808,8 @@ impl ReaderApp {
                                 crate::library_demo::DemoReranker,
                             )));
                         }
-                        app.search_index.set(Some(path));
+                        app.search_index
+                            .set_service(Some((path, Some(service.tool_searcher()))));
                         app.library_search = Some(service);
                     }
                     Err(error) => eprintln!("failed to start the demo search: {error:#}"),
@@ -5329,7 +5330,8 @@ impl eframe::App for ReaderApp {
                 let path = crate::library_search::SearchService::default_path();
                 match crate::library_search::SearchService::start(&path, &ctx) {
                     Ok(service) => {
-                        self.search_index.set(Some(path));
+                        self.search_index
+                            .set_service(Some((path, Some(service.tool_searcher()))));
                         self.library_search = Some(service);
                     }
                     Err(error) => {

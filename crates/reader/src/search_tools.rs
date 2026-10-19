@@ -1,7 +1,9 @@
 //! The assistant's library search: `search_library` finds passages in the
 //! text of every item and `read_chunk` reads one with what is around it.
-//! They run on the agent's thread with their own read-only connection to
-//! the index, and cite passages with `glyphst://` links.
+//! They run on the agent's thread: searches go through the library's
+//! search service (with meaning and the reranker when they run), else by
+//! keywords on their own read-only connection to the index. Passages are
+//! cited with `glyphst://` links.
 
 use std::{
     path::PathBuf,
@@ -13,20 +15,52 @@ use glyphst_ai::{
     agent::{AgentToolCall, AgentToolDefinition, AgentToolResult},
     tools::{Tool, ToolContext, ToolEffect, ToolRegistry},
 };
-use glyphst_search::{SearchRequest, Store};
+use glyphst_search::{SearchRequest, SearchResults, Store};
+
+use crate::library_search::ToolSearcher;
 use serde_json::{Value, json};
 
 const DEFAULT_ITEMS: u64 = 8;
 const MAX_ITEMS: u64 = 20;
 
-/// Where the index is, once the library's search runs.
+/// Where the index is, and the search service, once the library's search
+/// runs.
 #[derive(Clone, Default)]
-pub struct IndexHandle(Arc<RwLock<Option<PathBuf>>>);
+pub struct IndexHandle(Arc<RwLock<Option<Service>>>);
+
+/// The index's file, and the service searching it.
+type Service = (PathBuf, Option<ToolSearcher>);
 
 impl IndexHandle {
+    #[cfg(test)]
     pub fn set(&self, path: Option<PathBuf>) {
+        self.set_service(path.map(|path| (path, None)));
+    }
+
+    /// The index and the service that searches it.
+    pub fn set_service(&self, service: Option<Service>) {
         if let Ok(mut slot) = self.0.write() {
-            *slot = path;
+            *slot = service;
+        }
+    }
+
+    fn searcher(&self) -> Option<ToolSearcher> {
+        self.0.read().ok()?.as_ref()?.1.clone()
+    }
+
+    /// Through the service, with meaning and the reranker; by keywords
+    /// on `store` when it does not run or answer.
+    fn find(&self, store: &Store, request: &SearchRequest) -> Result<SearchResults> {
+        match self
+            .searcher()
+            .map(|searcher| searcher.search(request.clone()))
+        {
+            Some(Ok(results)) => Ok(results),
+            Some(Err(error)) => {
+                log::warn!("search_library through the service: {error:#}");
+                store.search(request)
+            }
+            None => store.search(request),
         }
     }
 
@@ -35,7 +69,7 @@ impl IndexHandle {
             .0
             .read()
             .ok()
-            .and_then(|slot| slot.clone())
+            .and_then(|slot| slot.as_ref().map(|(path, _)| path.clone()))
             .ok_or_else(|| anyhow!("the library's search is not running; use list_library"))?;
         Store::open_reader(&path)
     }
@@ -66,7 +100,7 @@ impl Tool for SearchLibrary {
     fn definition(&self) -> AgentToolDefinition {
         let mut tool = AgentToolDefinition::new(
             "search_library",
-            "Search the text of every library item (papers and books) and their titles, authors and notes. Returns items with their best passages: page, section, chunk id and a glyphst:// link to cite. Use words that would appear in the text; read_chunk gives a passage in full.",
+            "Search the text of every library item (papers and books) and their titles, authors and notes. Returns items with their best passages: page, section, chunk id and a glyphst:// link to cite. It finds passages by their words, and by meaning when search by meaning is on (the reply says which passes ran); read_chunk gives a passage in full.",
             json!({
                 "type": "object",
                 "properties": {
@@ -97,7 +131,13 @@ impl Tool for SearchLibrary {
                 .unwrap_or(DEFAULT_ITEMS)
                 .clamp(1, MAX_ITEMS) as usize;
             let store = self.0.open()?;
-            search(&store, query, limit)
+            let request = SearchRequest {
+                text: query.to_string(),
+                limit: limit * 2,
+                ..SearchRequest::default()
+            };
+            let results = self.0.find(&store, &request)?;
+            describe_results(&store, query, limit, &results)
         })
     }
 
@@ -109,13 +149,24 @@ impl Tool for SearchLibrary {
     }
 }
 
-/// The results as text for the model.
+/// Keyword results as text for the model.
+#[cfg(test)]
 pub fn search(store: &Store, query: &str, limit: usize) -> Result<String> {
     let results = store.search(&SearchRequest {
         text: query.to_string(),
         limit: limit * 2,
         ..SearchRequest::default()
     })?;
+    describe_results(store, query, limit, &results)
+}
+
+/// The results as text for the model, saying which passes ran.
+fn describe_results(
+    store: &Store,
+    query: &str,
+    limit: usize,
+    results: &SearchResults,
+) -> Result<String> {
     let status = store.status()?;
     let strong = results.items.len() - results.weaker;
     let shown = &results.items[..strong.min(limit)];
@@ -126,10 +177,16 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<String> {
         .collect::<Vec<_>>();
     let titles = store.item_titles(&ids)?;
     let mut lines = Vec::new();
+    let passes = match (results.meaning, results.reranked) {
+        (_, true) if results.meaning => "keywords + meaning, reranked",
+        (_, true) => "keywords, reranked",
+        (true, false) => "keywords + meaning",
+        (false, false) => "keywords only: use words that would appear in the text",
+    };
     if shown.is_empty() {
-        lines.push(format!("No good matches for \"{query}\"."));
+        lines.push(format!("No good matches for \"{query}\" ({passes})."));
     } else {
-        lines.push(format!("Items for \"{query}\":"));
+        lines.push(format!("Items for \"{query}\" ({passes}):"));
     }
     for (index, item) in shown.iter().enumerate() {
         let title = titles
@@ -328,6 +385,71 @@ mod tests {
                 .unwrap()
                 .starts_with("No good matches")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_assistant_searches_through_the_service_with_meaning() {
+        use glyphst_search::embed::{FakeEmbedder, FakeReranker};
+        let dir = std::env::temp_dir().join(format!("glyphst-tool-service-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(
+            &pdf,
+            glyphst_pdf::test_pdf::text_pages_pdf(&[&["Scaled dot product attention"]]),
+        )
+        .unwrap();
+        let path = dir.join("search.sqlite");
+        let ctx = egui::Context::default();
+        let mut service = crate::library_search::SearchService::start(&path, &ctx).unwrap();
+        service.indexer().reconcile(Snapshot {
+            files: vec![LibraryFile {
+                item_id: 3,
+                attachment_id: 30,
+                path: pdf,
+                sha256: [3; 32],
+                size: 10,
+                priority: 0,
+            }],
+            items: vec![ItemText {
+                item_id: 3,
+                title: "Attention Is All You Need".to_string(),
+                ..ItemText::default()
+            }],
+        });
+        service.set_embedder(Some(Arc::new(FakeEmbedder)));
+        let started = std::time::Instant::now();
+        while service.status().embedded < 1 {
+            assert!(started.elapsed().as_secs() < 30, "{:?}", service.status());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let request = SearchRequest {
+            text: "dot product".to_string(),
+            limit: 10,
+            ..SearchRequest::default()
+        };
+        let handle = IndexHandle::default();
+        // By keywords on its own connection while no service is named.
+        handle.set(Some(path.clone()));
+        let store = handle.open().unwrap();
+        let plain = handle.find(&store, &request).unwrap();
+        assert!(!plain.meaning);
+        let text = describe_results(&store, "dot product", 5, &plain).unwrap();
+        assert!(text.contains("keywords only"), "{text}");
+        // Through the service: meaning, then the reranker too.
+        handle.set_service(Some((path.clone(), Some(service.tool_searcher()))));
+        let found = handle.find(&store, &request).unwrap();
+        assert!(found.meaning && !found.reranked);
+        assert_eq!(found.items[0].item_id, 3);
+        service.set_reranker(Some(Arc::new(FakeReranker)));
+        let found = handle.find(&store, &request).unwrap();
+        assert!(found.reranked);
+        let text = describe_results(&store, "dot product", 5, &found).unwrap();
+        assert!(text.contains("keywords + meaning, reranked"), "{text}");
+        // The service gone: keywords again.
+        drop(service);
+        assert!(!handle.find(&store, &request).unwrap().meaning);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
