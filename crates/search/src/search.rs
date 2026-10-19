@@ -16,6 +16,13 @@ use crate::{index::is_cjk, store::Store};
 
 /// Chunks read from each full-text index per query.
 const CANDIDATES: usize = 300;
+/// Chunks the meaning pass adds.
+const NEAREST: usize = 200;
+/// A passage this unusual in meaning qualifies without the words
+/// (DigUp's zGate).
+const MEANING_GATE: f32 = 2.0;
+/// The floor of the spread meaning scores are measured against.
+const MIN_SPREAD: f32 = 0.02;
 /// Pages shown per item.
 pub const PAGES_PER_ITEM: usize = 3;
 /// Snippet markers around matched words.
@@ -53,7 +60,16 @@ pub struct PageHit {
     pub coverage: f32,
     /// FTS5's rank, higher better.
     pub rank: f32,
+    /// How unusual its closeness in meaning is (standard deviations above
+    /// the collection's mean), when the meaning pass ran.
+    pub meaning: Option<f32>,
     pub score: f32,
+}
+
+/// The meaning pass: the vectors and the query's.
+pub struct Meaning<'a> {
+    pub index: &'a crate::vectors::VectorIndex,
+    pub query: &'a [f32],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -220,7 +236,19 @@ struct Candidate {
 }
 
 impl Store {
+    /// Keywords only.
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResults> {
+        self.search_with(request, None)
+    }
+
+    /// Keywords, and meaning when given: each passage's closeness is put
+    /// against the whole collection's (z-scores), and mixed with how many
+    /// of the words it has, as DigUp does.
+    pub fn search_with(
+        &self,
+        request: &SearchRequest,
+        meaning: Option<Meaning<'_>>,
+    ) -> Result<SearchResults> {
         let query = Query::parse(&request.text);
         if query.is_empty() {
             return Ok(SearchResults::default());
@@ -250,12 +278,39 @@ impl Store {
         // Each chunk once.
         let mut seen = HashSet::new();
         candidates.retain(|candidate| seen.insert(candidate.chunk_id));
+        // The passages closest in meaning, and how all of them scored.
+        let mut spread = None;
+        if let Some(meaning) = &meaning {
+            let (nearest, all) = meaning.index.nearest(meaning.query, NEAREST);
+            spread = Some(all);
+            let extra = nearest
+                .iter()
+                .map(|(chunk_id, _)| *chunk_id)
+                .filter(|chunk_id| seen.insert(*chunk_id))
+                .collect::<Vec<_>>();
+            for chunk in self.chunks_by_id(&extra)? {
+                candidates.push(chunk.into_candidate(&query));
+            }
+        }
+        // Codes and numbers ("1706.03762") are found by their words.
+        let lookup = !query.words.is_empty()
+            && query
+                .words
+                .iter()
+                .all(|word| word.chars().any(|c| c.is_ascii_digit()));
+        let (meaning_weight, words_weight) = if lookup { (0.5, 4.0) } else { (1.0, 2.0) };
 
         let owners = self.owners()?;
         let mut by_item: HashMap<u64, ItemHit> = HashMap::new();
         for candidate in candidates {
             let coverage = query.coverage(&candidate.text);
-            let score = keyword_score(coverage, candidate.rank);
+            let z = meaning.as_ref().zip(spread).and_then(|(meaning, spread)| {
+                let cosine = meaning.index.score(candidate.chunk_id, meaning.query)?;
+                Some((cosine - spread.mean) / spread.std.max(MIN_SPREAD))
+            });
+            let score = words_weight * coverage.powf(1.5)
+                + 0.05 * candidate.rank.max(0.0).ln_1p()
+                + meaning_weight * z.unwrap_or(0.0).max(0.0);
             let (snippet, highlights) = marked(&candidate.snippet);
             let hit = PageHit {
                 chunk_id: candidate.chunk_id,
@@ -270,6 +325,7 @@ impl Store {
                 suffix: candidate.suffix,
                 coverage,
                 rank: candidate.rank,
+                meaning: z,
                 score,
             };
             for item_id in owners.get(&candidate.doc_id).into_iter().flatten() {
@@ -335,7 +391,9 @@ impl Store {
         let qualifies = |item: &ItemHit| {
             item.in_details
                 || query.terms() == 1
-                || item.pages.first().is_some_and(|hit| hit.coverage >= 0.5)
+                || item.pages.iter().any(|hit| {
+                    hit.coverage >= 0.5 || hit.meaning.is_some_and(|z| z >= MEANING_GATE)
+                })
         };
         let best = items
             .iter()
@@ -532,6 +590,33 @@ impl Store {
         Ok(chunks)
     }
 
+    fn chunks_by_id(&self, ids: &[i64]) -> Result<Vec<ChunkRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT c.id, c.doc_id, c.page, c.section, c.text, c.doc_offset, c.quote, c.prefix,
+                    c.suffix, d.path
+             FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE c.id IN ({marks})"
+        ))?;
+        let rows = statement.query_map(params_from_iter(ids), |row| {
+            Ok(ChunkRow {
+                chunk_id: row.get(0)?,
+                doc_id: row.get(1)?,
+                page: row.get::<_, i64>(2)? as usize,
+                section: row.get(3)?,
+                text: row.get(4)?,
+                doc_offset: row.get::<_, i64>(5)? as usize,
+                quote: row.get(6)?,
+                prefix: row.get(7)?,
+                suffix: row.get(8)?,
+                path: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Items' titles (and first author) as the index has them.
     pub fn item_titles(&self, ids: &[u64]) -> Result<HashMap<u64, String>> {
         let mut titles = HashMap::new();
@@ -563,10 +648,61 @@ impl Store {
     }
 }
 
-/// A passage's keyword score: how many of the words it has counts most
-/// (DigUp weighs words twice, `coverage^1.5`), the rank breaks ties.
-fn keyword_score(coverage: f32, rank: f32) -> f32 {
-    2.0 * coverage.powf(1.5) + 0.05 * rank.max(0.0).ln_1p()
+struct ChunkRow {
+    chunk_id: i64,
+    doc_id: i64,
+    page: usize,
+    section: String,
+    text: String,
+    doc_offset: usize,
+    quote: String,
+    prefix: String,
+    suffix: String,
+    path: String,
+}
+
+impl ChunkRow {
+    /// A passage the meaning pass found: its snippet around the first word
+    /// of the query it has, else its start.
+    fn into_candidate(self, query: &Query) -> Candidate {
+        let folded = self.text.to_lowercase();
+        let snippet = query
+            .words
+            .iter()
+            .map(|word| stem(word))
+            .chain(query.cjk.iter().map(String::as_str))
+            .find_map(|word| {
+                let at = folded.find(word)?;
+                let len = word.len();
+                // Byte positions in the folded text match the original's
+                // only for ASCII; fall back to the start otherwise.
+                self.text
+                    .get(at..at + len)
+                    .map(|found| snippet_around(&self.text, found))
+            })
+            .unwrap_or_else(|| {
+                let start = self.text.chars().take(160).collect::<String>();
+                if self.text.chars().count() > 160 {
+                    format!("{start}…")
+                } else {
+                    start
+                }
+            });
+        Candidate {
+            chunk_id: self.chunk_id,
+            path: self.path,
+            doc_id: self.doc_id,
+            page: self.page,
+            section: self.section,
+            snippet,
+            text: self.text,
+            doc_offset: self.doc_offset,
+            quote: self.quote,
+            prefix: self.prefix,
+            suffix: self.suffix,
+            rank: 0.0,
+        }
+    }
 }
 
 /// A snippet with its markers taken out and their places kept.

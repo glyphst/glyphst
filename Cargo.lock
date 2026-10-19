@@ -3146,6 +3146,7 @@ dependencies = [
  "anyhow",
  "glyphst-core",
  "glyphst-pdf",
+ "half",
  "log",
  "mupdf",
  "rusqlite",

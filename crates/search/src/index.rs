@@ -74,6 +74,9 @@ pub struct IndexStatus {
     pub unopened: usize,
     /// How long a page takes to read on this machine, once measured.
     pub ms_per_page: Option<f64>,
+    /// Meaning search runs, and this many passages have their vector.
+    pub meaning: bool,
+    pub embedded: usize,
 }
 
 impl IndexStatus {
@@ -332,6 +335,8 @@ impl Store {
                     chunks: row.get::<_, i64>(5)? as usize,
                     unopened: row.get::<_, i64>(6)? as usize,
                     ms_per_page: row.get(7)?,
+                    meaning: false,
+                    embedded: 0,
                 })
             },
         )?)

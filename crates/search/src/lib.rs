@@ -9,6 +9,7 @@ pub mod index;
 pub mod indexer;
 pub mod search;
 pub mod store;
+pub mod vectors;
 
 pub use index::{IndexStatus, ItemText, LibraryFile, Snapshot};
 pub use indexer::Indexer;

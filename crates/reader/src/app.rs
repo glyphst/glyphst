@@ -463,6 +463,8 @@ pub struct ReaderApp {
     meaning: glyphst_embed::setup::Setup,
     /// The `llama-server` path `meaning` was made with.
     meaning_engine: String,
+    /// Its engine, once downloaded.
+    meaning_runtime: crate::meaning::MeaningRuntime,
 }
 
 impl ReaderApp {
@@ -712,6 +714,7 @@ impl ReaderApp {
             zotero: None,
             library_search: None,
             meaning_engine: prefs_engine,
+            meaning_runtime: Default::default(),
             meaning,
         };
         app.rebuild_keymap();
@@ -1672,9 +1675,12 @@ impl ReaderApp {
     /// declined (unless a download is under way) and once it is on.
     fn meaning_card(&self) -> Option<crate::meaning::MeaningCard> {
         use crate::meaning::MeaningCard;
-        let card = crate::meaning::card(&self.meaning.state());
+        let card = crate::meaning::with_engine(
+            crate::meaning::card(&self.meaning.state()),
+            &self.meaning_runtime.status(),
+        );
         match card {
-            MeaningCard::Ready => None,
+            MeaningCard::Ready | MeaningCard::OnCpu => None,
             MeaningCard::Offer { kept: 0, .. } if self.prefs.library.meaning_offer_hidden => None,
             card => Some(card),
         }
@@ -1688,6 +1694,8 @@ impl ReaderApp {
     ) {
         use crate::meaning::MeaningAction;
         match action {
+            // Download, resume, retry: or, downloaded, start the engine again.
+            MeaningAction::Download if self.meaning.is_ready() => self.meaning_runtime.retry(),
             MeaningAction::Download => {
                 let ctx = ctx.clone();
                 self.meaning.start(move || ctx.request_repaint());
@@ -3882,7 +3890,10 @@ impl ReaderApp {
                 zotero: dirs::home_dir()
                     .map(|home| home.join("Zotero").join("zotero.sqlite"))
                     .filter(|path| path.is_file()),
-                meaning: Some(crate::meaning::card(&self.meaning.state())),
+                meaning: Some(crate::meaning::with_engine(
+                    crate::meaning::card(&self.meaning.state()),
+                    &self.meaning_runtime.status(),
+                )),
                 index: self.library_search.as_ref().map(|search| {
                     (
                         search.status(),
@@ -5281,12 +5292,14 @@ impl eframe::App for ReaderApp {
             self.meaning_engine = self.prefs.library.llama_server.clone();
             self.meaning = crate::meaning::setup(Some(self.meaning_engine.as_str()));
         }
+        self.meaning_runtime
+            .poll(&self.meaning, self.library_search.as_mut(), &ctx);
         if let Some(search) = &mut self.library_search {
             if self.persist {
                 search.set_paused(self.prefs.library.index_paused);
             }
             search.follow(&self.library);
-            search.poll();
+            search.poll(&ctx);
         }
         // Pictures dropped while the assistant is open go with its next
         // message.

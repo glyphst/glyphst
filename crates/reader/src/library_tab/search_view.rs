@@ -243,7 +243,10 @@ fn meaning_card(
 ) -> Option<MeaningAction> {
     use crate::meaning::{megabytes, speed};
     let mut action = None;
-    let failed = matches!(card, MeaningCard::Failed { .. });
+    let failed = matches!(
+        card,
+        MeaningCard::Failed { .. } | MeaningCard::EngineFailed { .. }
+    );
     let (title, color) = match card {
         MeaningCard::Offer { .. } => ("◇ search by meaning".to_string(), tokens.text),
         MeaningCard::Downloading { what, .. } => (format!("◇ downloading · {what}"), tokens.text),
@@ -253,6 +256,12 @@ fn meaning_card(
         ),
         MeaningCard::Paused { .. } => ("◇ paused".to_string(), tokens.text_2),
         MeaningCard::Failed { title, .. } => (format!("◇ {title}"), tokens.err),
+        MeaningCard::Starting => ("◇ starting search by meaning".to_string(), tokens.text_2),
+        MeaningCard::EngineFailed { .. } => ("◇ engine did not start".to_string(), tokens.err),
+        MeaningCard::OnCpu => (
+            "◇ search by meaning is on · on the CPU".to_string(),
+            tokens.text_2,
+        ),
         MeaningCard::Ready => ("◆ search by meaning is on".to_string(), tokens.accent_text),
     };
     egui::Frame::new()
@@ -301,7 +310,14 @@ fn meaning_card(
                             let label = if *again { "download again" } else { "retry" };
                             button(label, true, MeaningAction::Download);
                         }
-                        MeaningCard::Ready => button("settings", false, MeaningAction::Settings),
+                        MeaningCard::EngineFailed { .. } => {
+                            button("retry", true, MeaningAction::Download);
+                            button("settings", false, MeaningAction::Settings);
+                        }
+                        MeaningCard::Starting => {}
+                        MeaningCard::OnCpu | MeaningCard::Ready => {
+                            button("settings", false, MeaningAction::Settings);
+                        }
                     }
                 });
             });
@@ -323,8 +339,21 @@ fn meaning_card(
                     ))
                 }
                 MeaningCard::Failed { detail, .. } if !detail.is_empty() => Some(detail.clone()),
+                MeaningCard::OnCpu => Some(
+                    "No GPU it can use was found, so passages are read more slowly.".to_string(),
+                ),
                 _ => None,
             };
+            if let MeaningCard::EngineFailed { log } = card {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(log)
+                            .font(theme::mono(10.0))
+                            .color(tokens.faint),
+                    )
+                    .wrap(),
+                );
+            }
             if let Some(body) = body {
                 ui.add(
                     egui::Label::new(

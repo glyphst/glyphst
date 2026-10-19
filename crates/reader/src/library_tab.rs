@@ -522,11 +522,17 @@ impl LibraryTab {
             && let Some(service) = context.search.as_deref()
         {
             let status = service.status();
-            if status.done < status.docs {
-                let line = format!(
-                    "◌ text of {} / {} documents read · the rest are searched as they are read",
-                    status.done, status.docs
-                );
+            let meaning_waits = status.meaning && status.embedded < status.chunks;
+            if status.done < status.docs || meaning_waits {
+                let mut line =
+                    format!("◌ text of {} / {} documents read", status.done, status.docs);
+                if meaning_waits {
+                    line.push_str(&format!(
+                        " · meaning of {} / {} passages",
+                        status.embedded, status.chunks
+                    ));
+                }
+                line.push_str(" · the rest are searched as they are read");
                 mono_line(ui, &line, tokens.faint, 11.0);
                 ui.add_space(10.0);
             }

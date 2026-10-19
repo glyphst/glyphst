@@ -400,3 +400,106 @@ fn a_chunk_is_found_with_its_neighbours_and_its_items() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Words of one meaning share a dimension: a model that knows synonyms.
+struct Synonyms;
+
+impl Synonyms {
+    const GROUPS: &[&[&str]] = &[
+        &["cheap", "inexpensive", "efficient", "cheaper"],
+        &["long", "lengthy", "longer"],
+        &["sequence", "sequences", "series"],
+        &["picture", "image", "images", "vision"],
+        &["cooking", "recipe", "kitchen"],
+        &["music", "melody", "song"],
+    ];
+
+    fn vector(text: &str) -> Vec<f32> {
+        let mut vector = vec![0.01_f32; Self::GROUPS.len() + 1];
+        for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+            if let Some(group) = Self::GROUPS.iter().position(|group| group.contains(&word)) {
+                vector[group] += 1.0;
+            }
+        }
+        crate::embed::truncate(&vector, vector.len()).unwrap()
+    }
+}
+
+impl crate::embed::Embedder for Synonyms {
+    fn model_key(&self) -> &str {
+        "synonyms/7/1"
+    }
+
+    fn embed_documents(&self, passages: &[(&str, &str)]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(passages
+            .iter()
+            .map(|(_, text)| Self::vector(text))
+            .collect())
+    }
+
+    fn embed_query(&self, query: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(Self::vector(query))
+    }
+}
+
+#[test]
+fn meaning_finds_passages_without_the_words_and_mixes_with_them() {
+    use crate::{embed::Embedder as _, search::Meaning, vectors::VectorIndex};
+    let dir = folder("meaning");
+    let texts = [
+        "Efficient models for long sequences",
+        "A recipe book for the kitchen",
+        "Songs and melody in music",
+        "Image classification with vision models",
+        "Kitchen tools and cooking",
+        "Music theory for beginners",
+    ];
+    let mut files = Vec::new();
+    let mut items = Vec::new();
+    for (index, text) in texts.iter().enumerate() {
+        let path = dir.join(format!("{index}.pdf"));
+        std::fs::write(&path, text_pages_pdf(&[&[text]])).unwrap();
+        files.push(file(index as u64 + 1, path, index as u8 + 1));
+        items.push(item(index as u64 + 1, "untitled"));
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    store.reconcile(&Snapshot { files, items }, 0).unwrap();
+    let store = run_steps(store, 20);
+    let store = crate::indexer::run_embed(store, std::sync::Arc::new(Synonyms), 5);
+    assert_eq!(store.vector_count("synonyms/7/1").unwrap(), texts.len());
+
+    // The words alone find nothing.
+    let request = SearchRequest {
+        text: "inexpensive lengthy series".to_string(),
+        ..SearchRequest::default()
+    };
+    assert!(
+        store
+            .search(&request)
+            .unwrap()
+            .items
+            .iter()
+            .all(|item| item.item_id != 1)
+    );
+    // Meaning finds the passage that says it in other words.
+    let index = VectorIndex::load(&store, "synonyms/7/1").unwrap();
+    let query = Synonyms.embed_query(&request.text).unwrap();
+    let results = store
+        .search_with(
+            &request,
+            Some(Meaning {
+                index: &index,
+                query: &query,
+            }),
+        )
+        .unwrap();
+    let top = &results.items[0];
+    assert_eq!(top.item_id, 1, "{results:?}");
+    assert!(top.pages[0].meaning.unwrap() >= 2.0);
+    assert_eq!(results.weaker, results.items.len() - 1);
+
+    // Another model's vectors are dropped and made again.
+    let mut store = store;
+    assert_eq!(store.drop_other_vectors("other/1").unwrap(), texts.len());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -3,7 +3,14 @@
 //! and quitting, then running. The card in the search results and the row
 //! in Settings › Library show the same state.
 
-use glyphst_embed::setup::{Phase, Setup, SetupState};
+use std::sync::{Arc, mpsc::Receiver};
+
+use glyphst_embed::{
+    llama::LlamaEmbedder,
+    server::ServerConfig,
+    setup::{Phase, Setup, SetupState},
+};
+use glyphst_search::embed::Embedder;
 
 /// What the card says.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +44,14 @@ pub enum MeaningCard {
         /// The download was deleted (a checksum): start over.
         again: bool,
     },
+    /// Downloaded; the engine starts.
+    Starting,
+    /// The engine did not start, or stopped: the line that says why.
+    EngineFailed {
+        log: String,
+    },
+    /// On, on the CPU: no GPU it could use.
+    OnCpu,
     Ready,
 }
 
@@ -124,6 +139,135 @@ pub fn card(state: &SetupState) -> MeaningCard {
             }
         }
         SetupState::Ready => MeaningCard::Ready,
+    }
+}
+
+/// The card once the engine's state is known: a ready setup is only
+/// ready once its engine runs.
+pub fn with_engine(card: MeaningCard, engine: &EngineStatus) -> MeaningCard {
+    match (card, engine) {
+        (MeaningCard::Ready, EngineStatus::Off | EngineStatus::Starting) => MeaningCard::Starting,
+        (MeaningCard::Ready, EngineStatus::Failed(log)) => {
+            MeaningCard::EngineFailed { log: log.clone() }
+        }
+        (MeaningCard::Ready, EngineStatus::Running { on_gpu: false }) => MeaningCard::OnCpu,
+        (card, _) => card,
+    }
+}
+
+/// Where the engine is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineStatus {
+    Off,
+    Starting,
+    Running { on_gpu: bool },
+    Failed(String),
+}
+
+enum Engine {
+    Off,
+    Starting(Receiver<Result<Arc<LlamaEmbedder>, String>>),
+    Running(Arc<LlamaEmbedder>),
+    Failed(String),
+}
+
+/// The engine once the setup is ready: started on a thread (loading the
+/// model takes a moment), handed to the search, watched, and stopped with
+/// the app.
+pub struct MeaningRuntime {
+    engine: Engine,
+}
+
+impl Default for MeaningRuntime {
+    fn default() -> Self {
+        Self {
+            engine: Engine::Off,
+        }
+    }
+}
+
+impl MeaningRuntime {
+    pub fn status(&self) -> EngineStatus {
+        match &self.engine {
+            Engine::Off => EngineStatus::Off,
+            Engine::Starting(_) => EngineStatus::Starting,
+            Engine::Running(embedder) => EngineStatus::Running {
+                on_gpu: embedder.on_gpu(),
+            },
+            Engine::Failed(log) => EngineStatus::Failed(log.clone()),
+        }
+    }
+
+    /// Tries starting again after a failure.
+    pub fn retry(&mut self) {
+        if matches!(self.engine, Engine::Failed(_)) {
+            self.engine = Engine::Off;
+        }
+    }
+
+    /// Starts the engine when the setup is ready and a search wants it, and
+    /// hands it over once it runs.
+    pub fn poll(
+        &mut self,
+        setup: &Setup,
+        search: Option<&mut crate::library_search::SearchService>,
+        ctx: &egui::Context,
+    ) {
+        let Some(search) = search else {
+            return;
+        };
+        match &self.engine {
+            Engine::Off => {
+                let Some((exe, model)) = setup.paths() else {
+                    return;
+                };
+                let config = ServerConfig {
+                    exe,
+                    model,
+                    library_dirs: glyphst_embed::server::vulkan_dirs(),
+                    pid_file: Some(glyphst_embed::install::root().join("server.pid")),
+                };
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let ctx = ctx.clone();
+                let started = std::thread::Builder::new()
+                    .name("meaning-engine".to_string())
+                    .spawn(move || {
+                        let result = LlamaEmbedder::start(&config)
+                            .map(Arc::new)
+                            .map_err(|error| error.to_string());
+                        let _ = sender.send(result);
+                        ctx.request_repaint();
+                    });
+                self.engine = match started {
+                    Ok(_) => Engine::Starting(receiver),
+                    Err(error) => Engine::Failed(error.to_string()),
+                };
+            }
+            Engine::Starting(receiver) => match receiver.try_recv() {
+                Ok(Ok(embedder)) => {
+                    log::info!("search by meaning runs on {:?}", embedder.devices());
+                    search.set_embedder(Some(embedder.clone() as Arc<dyn Embedder>));
+                    self.engine = Engine::Running(embedder);
+                }
+                Ok(Err(error)) => self.engine = Engine::Failed(error),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.engine = Engine::Failed("the engine's starter stopped".to_string());
+                }
+            },
+            Engine::Running(embedder) => {
+                if !embedder.is_alive() {
+                    let log = embedder.log_tail();
+                    search.set_embedder(None);
+                    self.engine = Engine::Failed(if log.is_empty() {
+                        "the engine stopped".to_string()
+                    } else {
+                        log
+                    });
+                }
+            }
+            Engine::Failed(_) => {}
+        }
     }
 }
 

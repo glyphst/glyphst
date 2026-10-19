@@ -17,6 +17,7 @@ use anyhow::Result;
 
 use crate::{
     chunk::chunk_page,
+    embed::Embedder,
     extract::{DocReader, format_name},
     index::{DocJob, IndexStatus, Snapshot, Step},
     store::Store,
@@ -26,10 +27,16 @@ use crate::{
 pub const STEP_PAGES: usize = 30;
 /// Characters carried from the previous page for the first anchor's prefix.
 const TAIL_CHARS: usize = 24;
+/// Passages embedded between saves.
+const EMBED_BATCH: usize = 32;
+/// How long embedding rests after the engine failed.
+const EMBED_BACKOFF: Duration = Duration::from_secs(30);
 
 enum Command {
     Reconcile(Snapshot),
     Reindex,
+    /// Embed passages with this model, or stop embedding.
+    Embedder(Option<Arc<dyn Embedder>>),
     Stop,
 }
 
@@ -65,6 +72,8 @@ impl Indexer {
                     error: worker_error,
                     notify: Box::new(notify),
                     open: None,
+                    embedder: None,
+                    embed_rest_until: None,
                 }
                 .run()
             })?;
@@ -84,6 +93,12 @@ impl Indexer {
 
     pub fn reindex(&self) {
         let _ = self.commands.send(Command::Reindex);
+    }
+
+    /// Embeds every passage with `embedder` once the text is read (and
+    /// drops other models' vectors); `None` stops.
+    pub fn set_embedder(&self, embedder: Option<Arc<dyn Embedder>>) {
+        let _ = self.commands.send(Command::Embedder(embedder));
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -130,6 +145,9 @@ struct Worker {
     error: Arc<Mutex<Option<String>>>,
     notify: Box<dyn Fn() + Send>,
     open: Option<Open>,
+    embedder: Option<Arc<dyn Embedder>>,
+    /// After the engine failed, embedding waits until then.
+    embed_rest_until: Option<std::time::Instant>,
 }
 
 impl Worker {
@@ -160,6 +178,8 @@ impl Worker {
             };
             match job {
                 Some(job) => self.step(job),
+                // Text first; then meaning, a batch at a time.
+                None if !self.paused.load(Ordering::Acquire) && self.embed_step() => {}
                 None => {
                     // Nothing to do: wait for the app, or the next retry.
                     let wait = self
@@ -190,6 +210,18 @@ impl Worker {
             Command::Reindex => {
                 self.open = None;
                 self.store.reindex_all()
+            }
+            Command::Embedder(embedder) => {
+                self.embed_rest_until = None;
+                let result = match &embedder {
+                    Some(embedder) => self
+                        .store
+                        .drop_other_vectors(embedder.model_key())
+                        .map(drop),
+                    None => Ok(()),
+                };
+                self.embedder = embedder;
+                result
             }
         };
         if let Err(error) = result {
@@ -280,12 +312,70 @@ impl Worker {
     }
 
     fn publish(&self) {
-        if let Ok(status) = self.store.status()
+        if let Ok(mut status) = self.store.status()
             && let Ok(mut shared) = self.status.lock()
         {
+            if let Some(embedder) = &self.embedder {
+                status.embedded = self.store.vector_count(embedder.model_key()).unwrap_or(0);
+                status.meaning = true;
+            }
             *shared = status;
         }
         (self.notify)();
+    }
+
+    /// Embeds the next batch of passages; false when there were none (or
+    /// no model, or the engine is resting after a failure).
+    fn embed_step(&mut self) -> bool {
+        let Some(embedder) = self.embedder.clone() else {
+            return false;
+        };
+        if self
+            .embed_rest_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return false;
+        }
+        let key = embedder.model_key().to_string();
+        let pending = match self.store.next_to_embed(&key, EMBED_BATCH) {
+            Ok(pending) if !pending.is_empty() => pending,
+            Ok(_) => return false,
+            Err(error) => {
+                self.report_error(format!("{error:#}"));
+                return false;
+            }
+        };
+        let started = std::time::Instant::now();
+        let passages = pending
+            .iter()
+            .map(|chunk| (chunk.title.as_str(), chunk.text.as_str()))
+            .collect::<Vec<_>>();
+        match embedder.embed_documents(&passages) {
+            Ok(vectors) => {
+                let rows = pending
+                    .iter()
+                    .zip(vectors)
+                    .map(|(chunk, vector)| (chunk.chunk_id, chunk.title.clone(), vector))
+                    .collect::<Vec<_>>();
+                let ms = started.elapsed().as_secs_f64() * 1_000.0 / rows.len().max(1) as f64;
+                if let Err(error) = self
+                    .store
+                    .save_vectors(&key, &rows)
+                    .and_then(|()| self.store.record_estimate("passage", ms, rows.len()))
+                {
+                    self.report_error(format!("{error:#}"));
+                }
+                if let Ok(mut shared) = self.error.lock() {
+                    *shared = None;
+                }
+            }
+            Err(error) => {
+                self.report_error(format!("meaning: {error:#}"));
+                self.embed_rest_until = Some(std::time::Instant::now() + EMBED_BACKOFF);
+            }
+        }
+        self.publish();
+        true
     }
 
     fn report_error(&self, error: String) {
@@ -321,11 +411,36 @@ pub(crate) fn run_steps(store: Store, steps: usize) -> Store {
         error: Arc::new(Mutex::new(None)),
         notify: Box::new(|| {}),
         open: None,
+        embedder: None,
+        embed_rest_until: None,
     };
     for _ in 0..steps {
         match worker.store.next_doc(now()).unwrap() {
             Some(job) => worker.step(job),
             None => break,
+        }
+    }
+    worker.store
+}
+
+/// Embeds up to `batches` batches on this thread, for tests.
+#[cfg(test)]
+pub(crate) fn run_embed(store: Store, embedder: Arc<dyn Embedder>, batches: usize) -> Store {
+    let (_commands, receiver) = mpsc::channel();
+    let mut worker = Worker {
+        store,
+        commands: receiver,
+        paused: Arc::new(AtomicBool::new(false)),
+        status: Arc::new(Mutex::new(IndexStatus::default())),
+        error: Arc::new(Mutex::new(None)),
+        notify: Box::new(|| {}),
+        open: None,
+        embedder: Some(embedder),
+        embed_rest_until: None,
+    };
+    for _ in 0..batches {
+        if !worker.embed_step() {
+            break;
         }
     }
     worker.store

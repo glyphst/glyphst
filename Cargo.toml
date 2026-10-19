@@ -47,6 +47,8 @@ egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 futures = "0.3"
 gilrs = "0.11"
 httpdate = "1"
+# Search vectors stored as float16 (already in the tree); MIT OR Apache-2.0.
+half = "2"
 image = "0.25"
 i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
 i18n-embed-fl = "0.10"

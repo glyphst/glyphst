@@ -397,6 +397,12 @@ fn library(
                 {
                     caption.push_str(&format!(" · {left}"));
                 }
+                if status.meaning && status.embedded < status.chunks {
+                    caption.push_str(&format!(
+                        " · meaning {} / {}",
+                        status.embedded, status.chunks
+                    ));
+                }
                 caption
             }
             None => "starts with the library".to_string(),
@@ -445,6 +451,9 @@ fn library(
                     format!("paused · {} kept", megabytes(*done, *total))
                 }
                 MeaningCard::Failed { title, .. } => title.clone(),
+                MeaningCard::Starting => "starting the engine".to_string(),
+                MeaningCard::EngineFailed { log } => format!("the engine did not start · {log}"),
+                MeaningCard::OnCpu => "on · on the CPU (no GPU it can use)".to_string(),
                 MeaningCard::Ready => "on · EmbeddingGemma 2 on this computer".to_string(),
             };
             group.row("search by meaning", Some(&*caption), |ui| {
@@ -471,8 +480,10 @@ fn library(
                         button("discard", false, MeaningAction::Discard);
                         button("resume", true, MeaningAction::Download);
                     }
-                    MeaningCard::Failed { .. } => button("retry", true, MeaningAction::Download),
-                    MeaningCard::Ready => {}
+                    MeaningCard::Failed { .. } | MeaningCard::EngineFailed { .. } => {
+                        button("retry", true, MeaningAction::Download);
+                    }
+                    MeaningCard::Starting | MeaningCard::OnCpu | MeaningCard::Ready => {}
                 }
             });
         }
