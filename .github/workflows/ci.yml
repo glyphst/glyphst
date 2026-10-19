@@ -106,7 +106,7 @@ jobs:
         run: cargo check --workspace --all-targets --all-features --locked
 
       - name: Test headless crates
-        run: cargo test --locked -p glyphst-core -p glyphst-library -p glyphst-pdf -p glyphst-settings -p glyphst-ai
+        run: cargo test --locked -p glyphst-core -p glyphst-library -p glyphst-pdf -p glyphst-settings -p glyphst-ai -p glyphst-search -p glyphst-embed
 
   audit:
     runs-on: ubuntu-latest

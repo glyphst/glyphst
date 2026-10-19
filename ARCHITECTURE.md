@@ -10,6 +10,8 @@
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `metadata` | Recognising library items: identifiers in a document's first pages, lookups in arXiv, Crossref, OpenAlex and Open Library, duplicate detection, merging into an item |
 | `vault` | The Markdown vault: one Obsidian-compatible note per library item; the frontmatter keys and `glyphst:` blocks Glyphst owns, merged without touching the user's text |
+| `search` | The library's text search: an SQLite index (FTS5 words, trigrams for Chinese, Japanese and Korean, float16 vectors) of every item's pages in chunks with their anchors; the thread that reads and embeds documents in resumable steps; keyword and meaning search mixed by z-scores (or RRF); the `Embedder` trait; the evaluation set and its scores |
+| `embed` | Search by meaning's engine: pinned llama.cpp `llama-server` builds and EmbeddingGemma 2, downloaded resumably and checked by SHA-256; the server run on loopback with its key in the environment; the `Embedder` over it |
 | `zotero-import` | Reading a Zotero library for import from a copy of `zotero.sqlite` (with its write-ahead log): items, creators, tags, collections, attachments, notes as Markdown and PDF annotations in user space; read only |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
 | `agent-host` | External agents (Claude Code, Codex, Pi, ACP agents): their drivers, working folders with git checkpoints, and the MCP server that serves them the Reader's tools |
@@ -431,6 +433,16 @@ The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
 `library.redb` itself always stays in the data folder, out of a folder
 that sync tools write to.
+
+The search index is `search-v1/search.sqlite` in the data folder (SQLite,
+WAL), apart from `library.redb`: it can be rebuilt from the library, but
+reading and embedding take hours, so it is not in the cache. Its schema is
+`PRAGMA user_version`; a file of another version is renamed aside
+(`search.sqlite.v<k>`) and a new index is built, never migrated. Only the
+index's thread writes it; searches and the agents' tools read through their
+own read-only connections. Search by meaning's engine and model live in
+`meaning-search/` in the data folder (`engines/llama.cpp-b<N>/`,
+`models/`, partial downloads beside their targets with a JSON sidecar).
 
 When redb reports a file from an older file format
 (`UpgradeRequired`), the library and the translation cache rename it aside as

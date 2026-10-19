@@ -72,6 +72,16 @@ and the abandoned Files app in M5). It has:
   - the agents' library tools, including metadata lookups, merges and
     their own blocks in vault notes. Frames 04d-04m, 06d, 03b and
     07-library.
+- **Library search (2026-10-19):** every item's text is indexed (SQLite
+  FTS5; trigrams for Chinese, Japanese and Korean) in resumable steps, and
+  the library tab's field searches it, grouped by item with page passages
+  (04n). Search by meaning is offered with its size, downloaded resumably
+  (04o): llama.cpp's own `llama-server` build and EmbeddingGemma 2, run on
+  loopback, mixed with keywords by z-scores. The assistant searches the
+  library and cites `glyphst://` passages; asking with no document open
+  asks the library (05 · ask the library). On the Meteor Lake Arc the
+  model embeds about 5.5 passages a second (3.3 on the CPU); on the
+  labelled set meaning lifts paraphrase queries from R@1 0.38 to 1.00.
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
@@ -138,14 +148,21 @@ Known gaps:
   from the library tab yet. The AI pass, the lookups, the import and
   merging are checked by tests on fakes and by screenshots; a real Zotero
   library and real providers are not yet checked by hand.
+- Library search: the agents' `search_library` uses keywords only (no
+  meaning pass). Pages with almost no text are marked for OCR or image
+  embedding but not searched. The engine has run by hand only on this
+  Linux machine: macOS (Metal) and Windows (Vulkan) are untried, as is
+  indexing a real library (its size and hours). The labelled set is too
+  small to choose between z-scores and RRF; a set from a real library
+  should decide.
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates: the
-library's M2, local hybrid search over every item's text with
-EmbeddingGemma 2 (a spike of llama.cpp against `ort` first); then, from
-the gaps above, restoring translation
+library's M3, syncing the library folder over WebDAV or S3; the reranker
+(Qwen3-Reranker through the same server) and the agents' meaning search;
+then, from the gaps above, restoring translation
 sessions from the cache, and a dense page's
 first load (MuPDF's interpretation
 dominates; only a faster content-stream reader would cut it).
