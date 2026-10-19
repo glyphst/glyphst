@@ -23,6 +23,8 @@ const NEAREST: usize = 200;
 const MEANING_GATE: f32 = 2.0;
 /// The floor of the spread meaning scores are measured against.
 const MIN_SPREAD: f32 = 0.02;
+/// Passages the reranker rereads, from the strong items, best first.
+pub const RERANK_TOP: usize = 30;
 /// Pages shown per item.
 pub const PAGES_PER_ITEM: usize = 3;
 /// Snippet markers around matched words.
@@ -75,6 +77,8 @@ pub struct PageHit {
     /// How unusual its closeness in meaning is (standard deviations above
     /// the collection's mean), when the meaning pass ran.
     pub meaning: Option<f32>,
+    /// The reranker's score, when it reread this passage.
+    pub rerank: Option<f32>,
     pub score: f32,
 }
 
@@ -121,6 +125,9 @@ pub struct SearchResults {
     pub weaker: usize,
     /// The words searched for.
     pub words: Vec<String>,
+    /// The meaning pass ran, and the reranker reread the best passages.
+    pub meaning: bool,
+    pub reranked: bool,
 }
 
 /// A query's parts: words for the word index, runs of CJK characters for
@@ -378,6 +385,7 @@ impl Store {
                 coverage,
                 rank: candidate.rank,
                 meaning: z,
+                rerank: None,
                 score,
             };
             for item_id in owners.get(&candidate.doc_id).into_iter().flatten() {
@@ -467,7 +475,65 @@ impl Store {
             items,
             weaker,
             words: query.words.iter().chain(&query.cjk).cloned().collect(),
+            meaning: spread.is_some(),
+            reranked: false,
         })
+    }
+
+    /// `search_with`, then the reranker rereads the best `RERANK_TOP`
+    /// passages of the strong items: they are ordered by what it scores,
+    /// and so are the items, by their best. Weaker matches stay folded.
+    pub fn search_reranked(
+        &self,
+        request: &SearchRequest,
+        meaning: Option<Meaning<'_>>,
+        reranker: &dyn crate::embed::Reranker,
+    ) -> Result<SearchResults> {
+        let mut results = self.search_with(request, meaning)?;
+        let strong = results.items.len() - results.weaker;
+        let chosen = results.items[..strong]
+            .iter()
+            .flat_map(|item| item.pages.iter().map(|hit| hit.chunk_id))
+            .take(RERANK_TOP)
+            .collect::<Vec<_>>();
+        if chosen.is_empty() {
+            return Ok(results);
+        }
+        let texts = self
+            .chunks_by_id(&chosen)?
+            .into_iter()
+            .map(|chunk| (chunk.chunk_id, chunk.text))
+            .collect::<HashMap<_, _>>();
+        let order = chosen
+            .iter()
+            .filter(|id| texts.contains_key(id))
+            .copied()
+            .collect::<Vec<_>>();
+        let passages = order
+            .iter()
+            .map(|id| texts[id].as_str())
+            .collect::<Vec<_>>();
+        let scores = reranker.rerank(&request.text, &passages)?;
+        let reranked = order.into_iter().zip(scores).collect::<HashMap<_, _>>();
+        for item in &mut results.items[..strong] {
+            for hit in &mut item.pages {
+                hit.rerank = reranked.get(&hit.chunk_id).copied();
+            }
+            item.pages.sort_by(|a, b| {
+                b.rerank
+                    .unwrap_or(f32::MIN)
+                    .total_cmp(&a.rerank.unwrap_or(f32::MIN))
+            });
+        }
+        let best = |item: &ItemHit| {
+            item.pages
+                .iter()
+                .filter_map(|hit| hit.rerank)
+                .fold(f32::MIN, f32::max)
+        };
+        results.items[..strong].sort_by(|a, b| best(b).total_cmp(&best(a)));
+        results.reranked = true;
+        Ok(results)
     }
 
     fn collect(

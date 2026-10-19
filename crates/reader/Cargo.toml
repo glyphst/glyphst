@@ -71,3 +71,4 @@ wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
 [dev-dependencies]
 glyphst-library = { path = "../library", features = ["test-support"] }
 glyphst-pdf = { path = "../pdf", features = ["test-support"] }
+glyphst-search = { path = "../search", features = ["test-support"] }

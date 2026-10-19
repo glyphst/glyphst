@@ -3,11 +3,11 @@
 //! keeps and made unit length again.
 
 use anyhow::{Result, anyhow};
-use glyphst_search::embed::{Embedder, document_prompt, query_prompt, truncate};
+use glyphst_search::embed::{Embedder, Reranker, document_prompt, query_prompt, truncate};
 
 use crate::{
     manifest::{DIMENSIONS, MODEL_KEY},
-    server::{Server, ServerConfig, ServerError},
+    server::{Mode, Server, ServerConfig, ServerError},
 };
 
 /// Passages sent at once.
@@ -73,5 +73,37 @@ impl Embedder for LlamaEmbedder {
         self.vectors(vec![query_prompt(query)])?
             .pop()
             .ok_or_else(|| anyhow!("the engine gave no vector"))
+    }
+}
+
+/// A cross-encoder through llama.cpp's server (`--rerank`): rereads the
+/// best passages against the query.
+pub struct LlamaReranker {
+    server: Server,
+}
+
+impl LlamaReranker {
+    pub fn start(config: &ServerConfig) -> Result<Self, ServerError> {
+        Ok(Self {
+            server: Server::start_as(config, Mode::Rerank)?,
+        })
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.server.is_alive()
+    }
+
+    pub fn log_tail(&self) -> String {
+        self.server.log_tail()
+    }
+}
+
+impl Reranker for LlamaReranker {
+    fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
+        let mut scores = Vec::with_capacity(passages.len());
+        for batch in passages.chunks(BATCH) {
+            scores.extend(self.server.client().rerank(query, batch)?);
+        }
+        Ok(scores)
     }
 }

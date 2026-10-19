@@ -56,6 +56,13 @@ impl std::fmt::Display for ServerError {
 
 impl std::error::Error for ServerError {}
 
+/// What a server is started for: one model each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Embed,
+    Rerank,
+}
+
 /// A running server, stopped when dropped.
 pub struct Server {
     child: Mutex<Child>,
@@ -68,6 +75,10 @@ pub struct Server {
 
 impl Server {
     pub fn start(config: &ServerConfig) -> Result<Self, ServerError> {
+        Self::start_as(config, Mode::Embed)
+    }
+
+    pub fn start_as(config: &ServerConfig, mode: Mode) -> Result<Self, ServerError> {
         if let Some(pid_file) = &config.pid_file {
             stop_leftover(pid_file);
         }
@@ -83,7 +94,10 @@ impl Server {
         command
             .arg("-m")
             .arg(&config.model)
-            .args(["--embeddings", "--pooling", "mean"])
+            .args(match mode {
+                Mode::Embed => &["--embeddings", "--pooling", "mean"][..],
+                Mode::Rerank => &["--rerank"][..],
+            })
             // The model's 8K context per passage, not the server's default.
             .args(["-c", "8192", "-ub", "2048", "-b", "2048"])
             .args(["--host", "127.0.0.1", "--port", &port.to_string()])
@@ -382,6 +396,33 @@ impl Client {
         Ok(data.into_iter().map(|(_, vector)| vector).collect())
     }
 
+    /// One score per document, in order (the server answers by index);
+    /// refuses NaN and infinity.
+    pub fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let reply = self.post(
+            "/v1/rerank",
+            &json!({"query": query, "documents": documents, "top_n": documents.len()}),
+        )?;
+        let mut scores = vec![f32::NAN; documents.len()];
+        for result in reply["results"]
+            .as_array()
+            .ok_or_else(|| anyhow!("the engine gave no scores"))?
+        {
+            let index = result["index"].as_u64().unwrap_or(u64::MAX) as usize;
+            let score = result["relevance_score"].as_f64().unwrap_or(f64::NAN) as f32;
+            if let Some(slot) = scores.get_mut(index) {
+                *slot = score;
+            }
+        }
+        if scores.iter().any(|score| !score.is_finite()) {
+            bail!("the engine gave a broken or missing score");
+        }
+        Ok(scores)
+    }
+
     /// How many tokens `text` is.
     pub fn count_tokens(&self, text: &str) -> Result<usize> {
         let reply = self.post("/tokenize", &json!({"content": text}))?;
@@ -411,6 +452,29 @@ mod tests {
             }
         });
         address
+    }
+
+    #[test]
+    fn rerank_scores_come_back_by_index_and_broken_ones_are_refused() {
+        let base = fake(
+            json!({"results": [
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": -2.5}
+            ]}),
+            200,
+        );
+        let client = Client::new(base, "key".to_string());
+        assert_eq!(client.rerank("q", &["a", "b"]).unwrap(), vec![-2.5, 0.9]);
+        // One missing: refused, not taken as zero.
+        let short = fake(
+            json!({"results": [{"index": 0, "relevance_score": 1.0}]}),
+            200,
+        );
+        assert!(
+            Client::new(short, "key".to_string())
+                .rerank("q", &["a", "b"])
+                .is_err()
+        );
     }
 
     #[test]

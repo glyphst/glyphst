@@ -16,7 +16,9 @@ use anyhow::Result;
 use glyphst_library::LibraryStore;
 use glyphst_search::{
     IndexStatus, Indexer, ItemText, LibraryFile, SearchRequest, SearchResults, Snapshot, Store,
-    embed::Embedder, search::Meaning, vectors::VectorIndex,
+    embed::{Embedder, Reranker},
+    search::Meaning,
+    vectors::VectorIndex,
 };
 
 /// Items added within this long are read first.
@@ -27,19 +29,96 @@ const TYPING_PAUSE: Duration = Duration::from_millis(120);
 /// index grows.
 const RELOAD_EVERY: Duration = Duration::from_secs(10);
 
+/// A search's passes, in the order they answer: each replaces the one
+/// before and is never replaced by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pass {
+    /// On every keystroke.
+    Keyword,
+    /// Once typing stops: with meaning.
+    Meaning,
+    /// After the meaning pass: the best passages reread.
+    Rerank,
+}
+
 enum Query {
     Search {
         asked: u64,
         request: SearchRequest,
-        meaning: bool,
+        pass: Pass,
     },
     Embedder(Option<Arc<dyn Embedder>>),
+    Reranker(Option<Arc<dyn Reranker>>),
 }
 
 struct Answer {
     asked: u64,
-    meaning: bool,
+    pass: Pass,
     result: Result<SearchResults, String>,
+}
+
+/// What the query thread searches with.
+#[derive(Default)]
+struct Models {
+    embedder: Option<Arc<dyn Embedder>>,
+    reranker: Option<Arc<dyn Reranker>>,
+    vectors: Option<(VectorIndex, Instant)>,
+}
+
+impl Models {
+    /// `request` as far as `pass` goes, with what runs: a pass whose model
+    /// does not run (or fails) falls back to the one before.
+    fn answer(
+        &mut self,
+        store: &Store,
+        request: &SearchRequest,
+        pass: Pass,
+    ) -> Result<SearchResults> {
+        let mut query = None;
+        if pass >= Pass::Meaning
+            && let Some(embedder) = &self.embedder
+        {
+            // The vectors, loaded again as the index grows.
+            let stale = self
+                .vectors
+                .as_ref()
+                .is_none_or(|(_, loaded)| loaded.elapsed() > RELOAD_EVERY);
+            if stale {
+                match &mut self.vectors {
+                    Some((index, loaded)) => {
+                        let _ = index.refresh(store);
+                        *loaded = Instant::now();
+                    }
+                    None => {
+                        self.vectors = VectorIndex::load(store, embedder.model_key())
+                            .ok()
+                            .map(|index| (index, Instant::now()));
+                    }
+                }
+            }
+            match embedder.embed_query(&request.text) {
+                Ok(vector) => query = Some(vector),
+                Err(error) => log::warn!("library search: the query's meaning: {error:#}"),
+            }
+        }
+        let vectors = &self.vectors;
+        let meaning = || match (vectors, &query) {
+            (Some((index, _)), Some(vector)) => Some(Meaning {
+                index,
+                query: vector,
+            }),
+            _ => None,
+        };
+        if pass >= Pass::Rerank
+            && let Some(reranker) = &self.reranker
+        {
+            match store.search_reranked(request, meaning(), reranker.as_ref()) {
+                Ok(results) => return Ok(results),
+                Err(error) => log::warn!("library search: reranking: {error:#}"),
+            }
+        }
+        store.search_with(request, meaning())
+    }
 }
 
 pub struct SearchService {
@@ -55,12 +134,13 @@ pub struct SearchService {
     followed: Option<u64>,
     /// A reader for finding passages from the UI (one row by its key).
     locator: Option<Store>,
-    /// Search by meaning: the model, when it runs; when the last search
-    /// changed; whether its meaning pass went out, and came back.
+    /// Search by meaning and the reranker, when they run; when the last
+    /// search changed; how far its passes went out, and came back.
     meaning: bool,
+    rerank: bool,
     changed_at: Instant,
-    meaning_sent: bool,
-    meaning_answered: bool,
+    sent: Pass,
+    shown: Pass,
 }
 
 impl SearchService {
@@ -83,24 +163,24 @@ impl SearchService {
             .name("search-query".to_string())
             .spawn(move || {
                 let mut store = None;
-                let mut embedder: Option<Arc<dyn Embedder>> = None;
-                let mut vectors: Option<(VectorIndex, Instant)> = None;
+                let mut models = Models::default();
                 while let Ok(first) = receiver.recv() {
-                    // The model as it now is, and only the newest search.
+                    // The models as they now are, and only the newest search.
                     let mut search = None;
                     for query in std::iter::once(first).chain(receiver.try_iter()) {
                         match query {
                             Query::Embedder(next) => {
-                                embedder = next;
-                                vectors = None;
+                                models.embedder = next;
+                                models.vectors = None;
                             }
+                            Query::Reranker(next) => models.reranker = next,
                             Query::Search { .. } => search = Some(query),
                         }
                     }
                     let Some(Query::Search {
                         asked,
                         request,
-                        meaning,
+                        pass,
                     }) = search
                     else {
                         continue;
@@ -108,54 +188,16 @@ impl SearchService {
                     if store.is_none() {
                         store = Store::open_reader(&path).ok();
                     }
-                    let Some(store) = &store else {
-                        let _ = answer.send(Answer {
-                            asked,
-                            meaning,
-                            result: Err("the search index is not ready".to_string()),
-                        });
-                        continue;
+                    let result = match &store {
+                        Some(store) => models
+                            .answer(store, &request, pass)
+                            .map_err(|error| format!("{error:#}")),
+                        None => Err("the search index is not ready".to_string()),
                     };
-                    let mut result = Err(String::new());
-                    if meaning && let Some(embedder) = &embedder {
-                        // The vectors, loaded again as the index grows.
-                        let stale = vectors
-                            .as_ref()
-                            .is_none_or(|(_, loaded)| loaded.elapsed() > RELOAD_EVERY);
-                        if stale {
-                            match &mut vectors {
-                                Some((index, loaded)) => {
-                                    let _ = index.refresh(store);
-                                    *loaded = Instant::now();
-                                }
-                                None => {
-                                    vectors = VectorIndex::load(store, embedder.model_key())
-                                        .ok()
-                                        .map(|index| (index, Instant::now()));
-                                }
-                            }
-                        }
-                        if let (Some((index, _)), Ok(vector)) =
-                            (&vectors, embedder.embed_query(&request.text))
-                        {
-                            result = store
-                                .search_with(
-                                    &request,
-                                    Some(Meaning {
-                                        index,
-                                        query: &vector,
-                                    }),
-                                )
-                                .map_err(|error| format!("{error:#}"));
-                        }
-                    }
-                    if result.is_err() {
-                        result = store.search(&request).map_err(|error| format!("{error:#}"));
-                    }
                     if answer
                         .send(Answer {
                             asked,
-                            meaning,
+                            pass,
                             result,
                         })
                         .is_err()
@@ -177,9 +219,10 @@ impl SearchService {
             followed: None,
             locator: None,
             meaning: false,
+            rerank: false,
             changed_at: Instant::now(),
-            meaning_sent: false,
-            meaning_answered: false,
+            sent: Pass::Keyword,
+            shown: Pass::Keyword,
         })
     }
 
@@ -190,8 +233,30 @@ impl SearchService {
         self.indexer.set_embedder(embedder.clone());
         let _ = self.queries.send(Query::Embedder(embedder));
         // The last search again, now with its meaning pass.
-        self.meaning_sent = false;
-        self.meaning_answered = false;
+        self.sent = Pass::Keyword;
+        self.shown = Pass::Keyword;
+    }
+
+    /// Rereads the best passages of each search with `reranker`, or stops.
+    pub fn set_reranker(&mut self, reranker: Option<Arc<dyn Reranker>>) {
+        self.rerank = reranker.is_some();
+        let _ = self.queries.send(Query::Reranker(reranker));
+        self.sent = self.sent.min(Pass::Meaning);
+        self.shown = self.shown.min(Pass::Meaning);
+        if !self.meaning {
+            self.sent = Pass::Keyword;
+        }
+    }
+
+    /// The last pass a search gets with what runs now.
+    fn last_pass(&self) -> Pass {
+        if self.rerank {
+            Pass::Rerank
+        } else if self.meaning {
+            Pass::Meaning
+        } else {
+            Pass::Keyword
+        }
     }
 
     /// Hands the index the library as it is, when it changed.
@@ -217,49 +282,74 @@ impl SearchService {
         self.asked += 1;
         self.request = Some(request.clone());
         self.changed_at = Instant::now();
-        self.meaning_sent = false;
-        self.meaning_answered = false;
+        self.sent = Pass::Keyword;
+        self.shown = Pass::Keyword;
         let _ = self.queries.send(Query::Search {
             asked: self.asked,
             request,
-            meaning: false,
+            pass: Pass::Keyword,
         });
     }
 
-    /// Takes the answers that came, and sends the meaning pass once typing
-    /// stopped.
+    /// Takes the answers that came; sends the meaning pass once typing
+    /// stopped, and the rerank pass once that answered.
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(answer) = self.answers.try_recv() {
-            // A keyword answer never replaces its meaning pass.
-            if answer.asked != self.asked || (!answer.meaning && self.meaning_answered) {
+            // A pass never replaces a later one.
+            if answer.asked != self.asked
+                || (answer.pass < self.shown && self.answered == self.asked)
+            {
                 continue;
             }
             self.answered = answer.asked;
-            self.meaning_answered |= answer.meaning;
+            self.shown = answer.pass;
             match answer.result {
                 Ok(results) => self.results = Some(results),
                 Err(error) => log::warn!("library search: {error}"),
             }
         }
-        if self.meaning
-            && !self.meaning_sent
-            && let Some(request) = &self.request
-        {
-            let waited = self.changed_at.elapsed();
-            if waited >= TYPING_PAUSE {
-                self.meaning_sent = true;
-                let _ = self.queries.send(Query::Search {
-                    asked: self.asked,
-                    request: SearchRequest {
-                        typing: false,
-                        ..request.clone()
-                    },
-                    meaning: true,
-                });
-            } else {
-                ctx.request_repaint_after(TYPING_PAUSE - waited);
-            }
+        let last = self.last_pass();
+        let Some(request) = &self.request else {
+            return;
+        };
+        if self.sent >= last {
+            return;
         }
+        let next = match self.sent {
+            // Once typing stops: meaning, or straight to the reranker.
+            Pass::Keyword => {
+                let waited = self.changed_at.elapsed();
+                if waited < TYPING_PAUSE {
+                    ctx.request_repaint_after(TYPING_PAUSE - waited);
+                    return;
+                }
+                if self.meaning {
+                    Pass::Meaning
+                } else {
+                    Pass::Rerank
+                }
+            }
+            // The reranker once the meaning pass is shown.
+            Pass::Meaning if self.shown >= Pass::Meaning && self.answered == self.asked => {
+                Pass::Rerank
+            }
+            _ => return,
+        };
+        self.sent = next;
+        let _ = self.queries.send(Query::Search {
+            asked: self.asked,
+            request: SearchRequest {
+                typing: false,
+                ..request.clone()
+            },
+            pass: next,
+        });
+    }
+
+    /// The pass the shown results come from.
+    #[cfg(test)]
+    pub fn shown_pass(&self) -> Pass {
+        self.shown
     }
 
     /// The answer to the last search, or the one before while it comes.
@@ -294,6 +384,17 @@ impl SearchService {
             self.locator = Store::open_reader(&self.path).ok();
         }
         self.locator.as_ref()?.chunk(chunk).ok().flatten()
+    }
+
+    /// The searches and the passages opened from them, kept to measure
+    /// search by (`--eval-search`).
+    pub fn opened_path(&self) -> PathBuf {
+        self.path.with_file_name("opened.jsonl")
+    }
+
+    /// Forgets them.
+    pub fn forget_opened(&self) {
+        let _ = std::fs::remove_file(self.opened_path());
     }
 
     /// The index's file.
@@ -363,6 +464,92 @@ mod tests {
 
     use super::*;
 
+    /// Three papers, one item each, indexed into `dir`.
+    fn papers(dir: &Path, texts: &[&str]) -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        for (index, text) in texts.iter().enumerate() {
+            let path = dir.join(format!("{index}.pdf"));
+            std::fs::write(&path, text_pages_pdf(&[&[text]])).unwrap();
+            let id = index as u64 + 1;
+            snapshot.files.push(LibraryFile {
+                item_id: id,
+                attachment_id: id,
+                size: std::fs::metadata(&path).unwrap().len(),
+                path,
+                sha256: [index as u8 + 1; 32],
+                priority: 0,
+            });
+            snapshot.items.push(ItemText {
+                item_id: id,
+                title: format!("paper {id}"),
+                ..ItemText::default()
+            });
+        }
+        snapshot
+    }
+
+    fn poll_until(service: &mut SearchService, ctx: &egui::Context, pass: Pass) {
+        let started = Instant::now();
+        while service.shown_pass() < pass || service.is_stale() {
+            service.poll(ctx);
+            assert!(
+                started.elapsed().as_secs() < 30,
+                "stuck at {:?}",
+                service.shown_pass()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_search_answers_by_keyword_then_meaning_then_reranked() {
+        use glyphst_search::embed::{FakeEmbedder, FakeReranker};
+        let dir = std::env::temp_dir().join(format!("glyphst-passes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut service = SearchService::start(&dir.join("search.sqlite"), &ctx).unwrap();
+        service.indexer.reconcile(papers(
+            &dir,
+            &[
+                "attention models attention models",
+                "recurrent models of attention",
+                "bread",
+            ],
+        ));
+        service.set_embedder(Some(Arc::new(FakeEmbedder)));
+        let started = Instant::now();
+        while service.status().embedded < 3 {
+            assert!(started.elapsed().as_secs() < 30, "{:?}", service.status());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let request = |text: &str| SearchRequest {
+            text: text.to_string(),
+            ..SearchRequest::default()
+        };
+        service.search(request("attention models"));
+        poll_until(&mut service, &ctx, Pass::Meaning);
+        let results = service.results().unwrap();
+        assert!(results.meaning && !results.reranked);
+        // Only meaning runs: the search stops there.
+        service.poll(&ctx);
+        assert_eq!(service.shown_pass(), Pass::Meaning);
+
+        // The reranker joins: the search is reread.
+        service.set_reranker(Some(Arc::new(FakeReranker)));
+        poll_until(&mut service, &ctx, Pass::Rerank);
+        assert!(service.results().unwrap().reranked);
+
+        // A new search starts over at keywords, and goes all the way.
+        service.search(request("recurrent"));
+        poll_until(&mut service, &ctx, Pass::Rerank);
+        let results = service.results().unwrap();
+        assert!(results.reranked && results.meaning);
+        assert_eq!(results.items[0].item_id, 2);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The real engine end to end, by hand: GLYPHST_EMBED_SERVER,
     /// GLYPHST_EMBED_MODEL (and GLYPHST_EMBED_LIBS on NixOS), then
     /// `cargo test -p glyphst-reader real_meaning -- --ignored`.
@@ -426,7 +613,7 @@ mod tests {
         let started = Instant::now();
         loop {
             service.poll(&ctx);
-            if service.meaning_answered {
+            if service.shown_pass() == Pass::Meaning {
                 break;
             }
             assert!(started.elapsed().as_secs() < 60);

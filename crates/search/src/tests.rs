@@ -556,3 +556,49 @@ fn the_labelled_set_finds_exact_words_by_keyword() {
     assert!(scores.at1 >= 0.85, "keyword floor: {scores}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn the_reranker_reorders_the_strong_items_by_their_best_passage() {
+    use crate::embed::Reranker;
+
+    /// Prefers whatever mentions "recurrent".
+    struct Prefers;
+    impl Reranker for Prefers {
+        fn rerank(&self, _query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
+            Ok(passages
+                .iter()
+                .map(|text| if text.contains("recurrent") { 5.0 } else { 1.0 })
+                .collect())
+        }
+    }
+    let dir = folder("rerank");
+    let texts = [
+        "sequence models sequence models sequence models with attention",
+        "sequence models built from recurrent networks",
+        "a recipe for bread",
+    ];
+    let mut snapshot = Snapshot::default();
+    for (index, text) in texts.iter().enumerate() {
+        let path = dir.join(format!("{index}.pdf"));
+        std::fs::write(&path, text_pages_pdf(&[&[text]])).unwrap();
+        let id = index as u64 + 1;
+        snapshot.files.push(file(id, path, index as u8 + 1));
+        snapshot.items.push(item(id, &format!("paper {id}")));
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    store.reconcile(&snapshot, 0).unwrap();
+    let store = run_steps(store, 20);
+    let request = SearchRequest {
+        text: "sequence models".to_string(),
+        ..SearchRequest::default()
+    };
+    let plain = store.search(&request).unwrap();
+    assert_eq!(plain.items[0].item_id, 1, "{plain:#?}");
+    assert!(!plain.reranked);
+    let reranked = store.search_reranked(&request, None, &Prefers).unwrap();
+    assert!(reranked.reranked);
+    assert_eq!(reranked.items[0].item_id, 2, "{reranked:#?}");
+    assert_eq!(reranked.items[0].pages[0].rerank, Some(5.0));
+    assert_eq!(reranked.items.len(), plain.items.len());
+    let _ = std::fs::remove_dir_all(dir);
+}

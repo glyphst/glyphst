@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::manifest::{Engine, MODEL};
+use crate::manifest::{Asset, Engine};
 
 /// The folder engines and models live in.
 pub fn root() -> PathBuf {
@@ -33,13 +33,13 @@ pub fn engine_exe(root: &Path, engine: &Engine) -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
-pub fn model_path(root: &Path) -> PathBuf {
-    root.join("models").join(MODEL.name)
+pub fn model_path(root: &Path, model: &Asset) -> PathBuf {
+    root.join("models").join(model.name)
 }
 
-/// The model, once downloaded whole.
-pub fn model_ready(root: &Path) -> bool {
-    fs::metadata(model_path(root)).is_ok_and(|metadata| metadata.len() == MODEL.size)
+/// A model, once downloaded whole.
+pub fn model_ready(root: &Path, model: &Asset) -> bool {
+    fs::metadata(model_path(root, model)).is_ok_and(|metadata| metadata.len() == model.size)
 }
 
 /// Unpacks the downloaded `archive` into the engine's folder, then deletes
@@ -90,7 +90,6 @@ pub fn remove_old_engines(root: &Path, engine: &Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Asset;
 
     #[test]
     fn an_archive_unpacks_into_place_and_a_bad_one_leaves_nothing() {

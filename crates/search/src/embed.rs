@@ -16,6 +16,12 @@ pub trait Embedder: Send + Sync {
     fn embed_query(&self, query: &str) -> Result<Vec<f32>>;
 }
 
+/// Rereads passages against a query (a cross-encoder): one score each,
+/// higher better.
+pub trait Reranker: Send + Sync {
+    fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>>;
+}
+
 /// EmbeddingGemma's prompt for a passage.
 pub fn document_prompt(title: &str, text: &str) -> String {
     let title = title.trim();
@@ -81,6 +87,29 @@ impl Embedder for FakeEmbedder {
 
     fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
         Ok(Self::vector(query))
+    }
+}
+
+/// Scores passages by how many of the query's words they hold, in any
+/// form that shares its first five letters: no model, for tests and
+/// screens.
+#[cfg(any(test, feature = "test-support"))]
+pub struct FakeReranker;
+
+#[cfg(any(test, feature = "test-support"))]
+impl Reranker for FakeReranker {
+    fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
+        let stems = |text: &str| {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| word.len() > 2)
+                .map(|word| word.to_lowercase().chars().take(5).collect::<String>())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let query = stems(query);
+        Ok(passages
+            .iter()
+            .map(|passage| stems(passage).intersection(&query).count() as f32)
+            .collect())
     }
 }
 

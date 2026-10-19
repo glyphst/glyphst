@@ -465,6 +465,9 @@ pub struct ReaderApp {
     meaning_engine: String,
     /// Its engine, once downloaded.
     meaning_runtime: crate::meaning::MeaningRuntime,
+    /// The reranker's model (on the same engine) and its engine.
+    rerank: glyphst_embed::setup::Setup,
+    rerank_runtime: crate::meaning::RerankRuntime,
 }
 
 impl ReaderApp {
@@ -579,6 +582,14 @@ impl ReaderApp {
             glyphst_embed::setup::Setup::showing(glyphst_embed::setup::SetupState::Offer {
                 kept: 0,
                 total: glyphst_embed::manifest::MODEL.size + 31_000_000,
+            })
+        };
+        let rerank = if persist {
+            crate::meaning::rerank_setup(Some(prefs.library.llama_server.as_str()))
+        } else {
+            glyphst_embed::setup::Setup::showing(glyphst_embed::setup::SetupState::Offer {
+                kept: 0,
+                total: glyphst_embed::manifest::RERANKER.size,
             })
         };
         let mut app = Self {
@@ -715,6 +726,8 @@ impl ReaderApp {
             library_search: None,
             meaning_engine: prefs_engine,
             meaning_runtime: Default::default(),
+            rerank,
+            rerank_runtime: Default::default(),
             meaning,
         };
         app.rebuild_keymap();
@@ -788,8 +801,13 @@ impl ReaderApp {
                 && let Some(path) = crate::library_demo::search_index(&app.library)
             {
                 match crate::library_search::SearchService::start(&path, &cc.egui_ctx) {
-                    Ok(service) => {
+                    Ok(mut service) => {
                         service.set_paused(true);
+                        if state == "search" {
+                            service.set_reranker(Some(std::sync::Arc::new(
+                                crate::library_demo::DemoReranker,
+                            )));
+                        }
                         app.search_index.set(Some(path));
                         app.library_search = Some(service);
                     }
@@ -1683,6 +1701,22 @@ impl ReaderApp {
             MeaningCard::Ready | MeaningCard::OnCpu => None,
             MeaningCard::Offer { kept: 0, .. } if self.prefs.library.meaning_offer_hidden => None,
             card => Some(card),
+        }
+    }
+
+    /// Does what the reranker's row asked: downloading it turns it on.
+    fn rerank_action(&mut self, action: crate::meaning::MeaningAction, ctx: &egui::Context) {
+        use crate::meaning::MeaningAction;
+        match action {
+            MeaningAction::Download if self.rerank.is_ready() => self.rerank_runtime.retry(),
+            MeaningAction::Download => {
+                self.prefs.library.rerank = true;
+                let ctx = ctx.clone();
+                self.rerank.start(move || ctx.request_repaint());
+            }
+            MeaningAction::Pause => self.rerank.pause(),
+            MeaningAction::Discard => self.rerank.discard(),
+            MeaningAction::NotNow | MeaningAction::Settings => {}
         }
     }
 
@@ -3894,6 +3928,10 @@ impl ReaderApp {
                     crate::meaning::card(&self.meaning.state()),
                     &self.meaning_runtime.status(),
                 )),
+                rerank: Some(crate::meaning::with_engine(
+                    crate::meaning::card(&self.rerank.state()),
+                    &self.rerank_runtime.status(),
+                )),
                 index: self.library_search.as_ref().map(|search| {
                     (
                         search.status(),
@@ -3932,13 +3970,29 @@ impl ReaderApp {
                     }
                     continue;
                 }
-                if let LibraryAction::Meaning(action) = action {
-                    self.meaning_action(action, ctx);
-                    continue;
+                match action {
+                    LibraryAction::Meaning(action) => {
+                        self.meaning_action(action, ctx);
+                        continue;
+                    }
+                    LibraryAction::Rerank(action) => {
+                        self.rerank_action(action, ctx);
+                        continue;
+                    }
+                    LibraryAction::ForgetOpened => {
+                        if let Some(search) = &self.library_search {
+                            search.forget_opened();
+                        }
+                        continue;
+                    }
+                    _ => {}
                 }
                 self.settings_window.open = false;
                 match action {
-                    LibraryAction::Reindex | LibraryAction::Meaning(_) => {}
+                    LibraryAction::Reindex
+                    | LibraryAction::Meaning(_)
+                    | LibraryAction::Rerank(_)
+                    | LibraryAction::ForgetOpened => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5291,9 +5345,25 @@ impl eframe::App for ReaderApp {
         {
             self.meaning_engine = self.prefs.library.llama_server.clone();
             self.meaning = crate::meaning::setup(Some(self.meaning_engine.as_str()));
+            if !self.rerank.is_running() {
+                self.rerank = crate::meaning::rerank_setup(Some(self.meaning_engine.as_str()));
+            }
         }
-        self.meaning_runtime
-            .poll(&self.meaning, self.library_search.as_mut(), &ctx);
+        // The engines start once their models are downloaded (the
+        // reranker only when on) and the search takes them.
+        if let Some(search) = &mut self.library_search {
+            if let Some(change) = self.meaning_runtime.poll(self.meaning.paths(), &ctx) {
+                search.set_embedder(change.map(|embedder| {
+                    embedder as std::sync::Arc<dyn glyphst_search::embed::Embedder>
+                }));
+            }
+            let wanted = self.rerank.paths().filter(|_| self.prefs.library.rerank);
+            if let Some(change) = self.rerank_runtime.poll(wanted, &ctx) {
+                search.set_reranker(change.map(|reranker| {
+                    reranker as std::sync::Arc<dyn glyphst_search::embed::Reranker>
+                }));
+            }
+        }
         if let Some(search) = &mut self.library_search {
             if self.persist {
                 search.set_paused(self.prefs.library.index_paused);

@@ -450,7 +450,11 @@ impl LibraryTab {
                         .iter()
                         .map(|item| item.pages.len() + item.more_pages)
                         .sum::<usize>();
-                    format!("{} items · {passages} passages", results.items.len())
+                    let mut line = format!("{} items · {passages} passages", results.items.len());
+                    if results.reranked {
+                        line.push_str(" · reranked");
+                    }
+                    line
                 })
                 .unwrap_or_default();
         }

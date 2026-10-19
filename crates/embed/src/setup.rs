@@ -1,5 +1,6 @@
-//! Setting meaning search up: the engine (unless one is given), then the
-//! model, under one progress bar. Network failures are retried after 5 s,
+//! Setting meaning search up: the engine (unless one is given or already
+//! there), then a model (EmbeddingGemma, or the reranker), under one
+//! progress bar. Network failures are retried after 5 s,
 //! 30 s and 2 min before the setup stops and says so; what came is kept,
 //! so a later run (or the next launch) goes on from there. Nothing starts
 //! until asked.
@@ -17,7 +18,7 @@ use std::{
 use crate::{
     download::{self, DownloadError, Progress},
     install,
-    manifest::{self, Engine, MODEL},
+    manifest::{self, Asset, Engine, MODEL},
 };
 
 const RETRIES: [u64; 3] = [5, 30, 120];
@@ -104,6 +105,7 @@ struct Plan {
     root: PathBuf,
     /// None when the user names their own server, or none is built here.
     engine: Option<Engine>,
+    model: Asset,
 }
 
 impl Plan {
@@ -119,7 +121,7 @@ impl Plan {
             .as_ref()
             .filter(|_| self.engine_needed())
             .map_or(0, |engine| engine.archive.size);
-        engine + MODEL.size
+        engine + self.model.size
     }
 
     /// Bytes on disk already: installed parts whole, partial ones as far as
@@ -133,10 +135,11 @@ impl Plan {
             .unwrap_or(0),
             _ => 0,
         };
-        let model = if install::model_ready(&self.root) {
-            MODEL.size
+        let model = if install::model_ready(&self.root, &self.model) {
+            self.model.size
         } else {
-            download::resumable(&install::model_path(&self.root), &MODEL).unwrap_or(0)
+            download::resumable(&install::model_path(&self.root, &self.model), &self.model)
+                .unwrap_or(0)
         };
         engine + model
     }
@@ -152,14 +155,25 @@ pub struct Setup {
 }
 
 impl Setup {
-    /// What `root` holds now; `custom_engine` replaces the download.
+    /// Meaning search's: what `root` holds now; `custom_engine` replaces
+    /// the download.
     pub fn new(root: PathBuf, custom_engine: Option<PathBuf>) -> Self {
+        Self::for_model(root, custom_engine, MODEL)
+    }
+
+    /// Another model on the same engine (the reranker): the engine is
+    /// fetched only when it is not there yet.
+    pub fn for_model(root: PathBuf, custom_engine: Option<PathBuf>, model: Asset) -> Self {
         let engine = if custom_engine.is_some() {
             None
         } else {
             manifest::engine()
         };
-        let plan = Plan { root, engine };
+        let plan = Plan {
+            root,
+            engine,
+            model,
+        };
         let state = Self::state_on_disk(&plan, custom_engine.as_deref());
         Self {
             plan,
@@ -177,6 +191,7 @@ impl Setup {
             plan: Plan {
                 root: std::env::temp_dir().join("glyphst-meaning-demo"),
                 engine: None,
+                model: MODEL,
             },
             custom_engine: None,
             state: Arc::new(Mutex::new(state)),
@@ -198,7 +213,7 @@ impl Setup {
                 .engine
                 .as_ref()
                 .is_some_and(|engine| install::engine_exe(&plan.root, engine).is_some());
-        if engine_ok && install::model_ready(&plan.root) {
+        if engine_ok && install::model_ready(&plan.root, &plan.model) {
             SetupState::Ready
         } else {
             SetupState::Offer {
@@ -228,7 +243,7 @@ impl Setup {
             Some(exe) => exe.clone(),
             None => install::engine_exe(&self.plan.root, self.plan.engine.as_ref()?)?,
         };
-        Some((exe, install::model_path(&self.plan.root)))
+        Some((exe, install::model_path(&self.plan.root, &self.plan.model)))
     }
 
     /// Downloads (or resumes) on a thread; `notify` is called as it goes.
@@ -271,7 +286,7 @@ impl Setup {
         if let Some(engine) = &self.plan.engine {
             download::discard(&install::engine_archive(&self.plan.root, engine));
         }
-        download::discard(&install::model_path(&self.plan.root));
+        download::discard(&install::model_path(&self.plan.root, &self.plan.model));
         let state = Self::state_on_disk(&self.plan, self.custom_engine.as_deref());
         self.set(state);
     }
@@ -332,9 +347,17 @@ fn run(plan: &Plan, state: &Mutex<SetupState>, cancel: &AtomicBool, notify: &dyn
         base = engine.archive.size;
     }
     // The model.
-    if !install::model_ready(&plan.root) {
-        let target = install::model_path(&plan.root);
-        if let Err(stop) = with_retries(&MODEL, &target, Phase::Model, base, total, cancel, &set) {
+    if !install::model_ready(&plan.root, &plan.model) {
+        let target = install::model_path(&plan.root, &plan.model);
+        if let Err(stop) = with_retries(
+            &plan.model,
+            &target,
+            Phase::Model,
+            base,
+            total,
+            cancel,
+            &set,
+        ) {
             set(stop);
             return;
         }
@@ -424,13 +447,47 @@ mod tests {
         assert_eq!(setup.paths(), None);
 
         // A model on disk: ready.
-        let model = install::model_path(&root);
+        let model = install::model_path(&root, &MODEL);
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         let file = std::fs::File::create(&model).unwrap();
         file.set_len(MODEL.size).unwrap();
         let setup = Setup::new(root.clone(), Some(exe.clone()));
         assert!(setup.is_ready());
-        assert_eq!(setup.paths(), Some((exe, model)));
+        assert_eq!(setup.paths(), Some((exe.clone(), model)));
+
+        // The reranker on the same engine: only its own model to fetch.
+        let reranker = Setup::for_model(root.clone(), Some(exe), manifest::RERANKER);
+        assert_eq!(
+            reranker.state(),
+            SetupState::Offer {
+                kept: 0,
+                total: manifest::RERANKER.size
+            }
+        );
+
+        // Meaning search downloaded the engine: the reranker shares it.
+        if let Some(engine) = manifest::engine() {
+            let before = Setup::for_model(root.clone(), None, manifest::RERANKER);
+            assert_eq!(
+                before.state(),
+                SetupState::Offer {
+                    kept: 0,
+                    total: engine.archive.size + manifest::RERANKER.size
+                }
+            );
+            let exe = install::engine_dir(&root, &engine).join(engine.exe);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, b"").unwrap();
+            let after = Setup::for_model(root.clone(), None, manifest::RERANKER);
+            assert_eq!(
+                after.state(),
+                SetupState::Offer {
+                    kept: 0,
+                    total: manifest::RERANKER.size
+                }
+            );
+            assert!(Setup::new(root.clone(), None).is_ready());
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -217,6 +217,8 @@ pub struct LibraryFacts {
     pub index: Option<(glyphst_search::IndexStatus, u64)>,
     /// Search by meaning's download and state.
     pub meaning: Option<crate::meaning::MeaningCard>,
+    /// The reranker's.
+    pub rerank: Option<crate::meaning::MeaningCard>,
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -243,6 +245,83 @@ pub enum LibraryAction {
     /// Read the library's text again from the start.
     Reindex,
     Meaning(crate::meaning::MeaningAction),
+    Rerank(crate::meaning::MeaningAction),
+    /// Forget the searches and the passages opened from them.
+    ForgetOpened,
+}
+
+/// The caption of a downloaded model's row (search by meaning, the
+/// reranker), as its card says.
+fn model_caption(card: &crate::meaning::MeaningCard, model: &str) -> String {
+    use crate::meaning::{MeaningCard, megabytes, speed};
+    match card {
+        MeaningCard::Offer { kept, total } if *kept > 0 => {
+            format!("off · {} downloaded", megabytes(*kept, *total))
+        }
+        MeaningCard::Offer { total, .. } => format!(
+            "off · {model} · {} MB, downloaded once",
+            (*total as f64 / 1_000_000.0).round()
+        ),
+        MeaningCard::Downloading {
+            what,
+            done,
+            total,
+            rate,
+            seconds_left,
+        } => format!(
+            "downloading the {what} · {} · {}",
+            megabytes(*done, *total),
+            speed(*rate, *seconds_left)
+        ),
+        MeaningCard::Retrying { seconds, .. } => {
+            format!("network lost · trying again in {seconds} s")
+        }
+        MeaningCard::Paused { done, total } => {
+            format!("paused · {} kept", megabytes(*done, *total))
+        }
+        MeaningCard::Failed { title, .. } => title.clone(),
+        MeaningCard::Starting => "starting the engine".to_string(),
+        MeaningCard::EngineFailed { log } => format!("the engine did not start · {log}"),
+        MeaningCard::OnCpu => "on · on the CPU (no GPU it can use)".to_string(),
+        MeaningCard::Ready => format!("on · {model} on this computer"),
+    }
+}
+
+/// The buttons of a downloaded model's row.
+fn model_buttons(
+    ui: &mut egui::Ui,
+    card: &crate::meaning::MeaningCard,
+    mut act: impl FnMut(crate::meaning::MeaningAction),
+) {
+    use crate::meaning::{MeaningAction, MeaningCard};
+    let mut button = |label: &str, accent: bool, action: MeaningAction| {
+        let button = if accent {
+            Button::bracket(label)
+        } else {
+            Button::bracket_muted(label)
+        };
+        if ui.add(button).clicked() {
+            act(action);
+        }
+    };
+    match card {
+        MeaningCard::Offer { kept, .. } => button(
+            if *kept > 0 { "resume" } else { "download…" },
+            true,
+            MeaningAction::Download,
+        ),
+        MeaningCard::Downloading { .. } | MeaningCard::Retrying { .. } => {
+            button("pause", false, MeaningAction::Pause);
+        }
+        MeaningCard::Paused { .. } => {
+            button("discard", false, MeaningAction::Discard);
+            button("resume", true, MeaningAction::Download);
+        }
+        MeaningCard::Failed { .. } | MeaningCard::EngineFailed { .. } => {
+            button("retry", true, MeaningAction::Download);
+        }
+        MeaningCard::Starting | MeaningCard::OnCpu | MeaningCard::Ready => {}
+    }
 }
 
 /// The Library page (frame 07 · library).
@@ -424,66 +503,34 @@ fn library(
             }
         });
         if let Some(card) = &facts.meaning {
-            use crate::meaning::{MeaningAction, MeaningCard, megabytes, speed};
-            let caption = match card {
-                MeaningCard::Offer { kept, total } if *kept > 0 => {
-                    format!("off · {} downloaded", megabytes(*kept, *total))
-                }
-                MeaningCard::Offer { total, .. } => format!(
-                    "off · EmbeddingGemma 2 · {} MB, downloaded once",
-                    (*total as f64 / 1_000_000.0).round()
-                ),
-                MeaningCard::Downloading {
-                    what,
-                    done,
-                    total,
-                    rate,
-                    seconds_left,
-                } => format!(
-                    "downloading the {what} · {} · {}",
-                    megabytes(*done, *total),
-                    speed(*rate, *seconds_left)
-                ),
-                MeaningCard::Retrying { seconds, .. } => {
-                    format!("network lost · trying again in {seconds} s")
-                }
-                MeaningCard::Paused { done, total } => {
-                    format!("paused · {} kept", megabytes(*done, *total))
-                }
-                MeaningCard::Failed { title, .. } => title.clone(),
-                MeaningCard::Starting => "starting the engine".to_string(),
-                MeaningCard::EngineFailed { log } => format!("the engine did not start · {log}"),
-                MeaningCard::OnCpu => "on · on the CPU (no GPU it can use)".to_string(),
-                MeaningCard::Ready => "on · EmbeddingGemma 2 on this computer".to_string(),
-            };
+            let caption = model_caption(card, "EmbeddingGemma 2");
             group.row("search by meaning", Some(&*caption), |ui| {
-                let mut button = |label: &str, accent: bool, action: MeaningAction| {
-                    let button = if accent {
-                        Button::bracket(label)
-                    } else {
-                        Button::bracket_muted(label)
-                    };
-                    if ui.add(button).clicked() {
-                        actions.push(LibraryAction::Meaning(action));
-                    }
-                };
-                match card {
-                    MeaningCard::Offer { kept, .. } => button(
-                        if *kept > 0 { "resume" } else { "download…" },
-                        true,
-                        MeaningAction::Download,
-                    ),
-                    MeaningCard::Downloading { .. } | MeaningCard::Retrying { .. } => {
-                        button("pause", false, MeaningAction::Pause);
-                    }
-                    MeaningCard::Paused { .. } => {
-                        button("discard", false, MeaningAction::Discard);
-                        button("resume", true, MeaningAction::Download);
-                    }
-                    MeaningCard::Failed { .. } | MeaningCard::EngineFailed { .. } => {
-                        button("retry", true, MeaningAction::Download);
-                    }
-                    MeaningCard::Starting | MeaningCard::OnCpu | MeaningCard::Ready => {}
+                model_buttons(ui, card, |action| {
+                    actions.push(LibraryAction::Meaning(action));
+                });
+            });
+        }
+        if let Some(card) = &facts.rerank {
+            use crate::meaning::MeaningCard;
+            let downloaded = matches!(
+                card,
+                MeaningCard::Starting
+                    | MeaningCard::EngineFailed { .. }
+                    | MeaningCard::OnCpu
+                    | MeaningCard::Ready
+            );
+            let caption = if downloaded && !library.rerank {
+                "off · downloaded".to_string()
+            } else {
+                model_caption(card, "Qwen3 Reranker 0.6B")
+            };
+            group.row("rerank the best matches", Some(&*caption), |ui| {
+                if downloaded {
+                    ui.add(Switch(&mut library.rerank));
+                } else {
+                    model_buttons(ui, card, |action| {
+                        actions.push(LibraryAction::Rerank(action));
+                    });
                 }
             });
         }
@@ -494,6 +541,16 @@ fn library(
                 TextField::new(&mut library.llama_server, "the downloaded one")
                     .width(320.0)
                     .show(ui);
+            },
+        );
+        group.row(
+            "learn from what I open",
+            Some("to measure search · on this computer only"),
+            |ui| {
+                if ui.add(Button::bracket_muted("forget")).clicked() {
+                    actions.push(LibraryAction::ForgetOpened);
+                }
+                ui.add(Switch(&mut library.learn_from_opened));
             },
         );
     });

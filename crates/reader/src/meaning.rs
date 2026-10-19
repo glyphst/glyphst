@@ -6,11 +6,10 @@
 use std::sync::{Arc, mpsc::Receiver};
 
 use glyphst_embed::{
-    llama::LlamaEmbedder,
-    server::ServerConfig,
+    llama::{LlamaEmbedder, LlamaReranker},
+    server::{ServerConfig, ServerError},
     setup::{Phase, Setup, SetupState},
 };
-use glyphst_search::embed::Embedder;
 
 /// What the card says.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,21 +163,65 @@ pub enum EngineStatus {
     Failed(String),
 }
 
-enum Engine {
+/// A model served by its own `llama-server`: the embedder or the reranker.
+pub trait Served: Send + Sync + Sized + 'static {
+    const NAME: &'static str;
+    fn start(config: &ServerConfig) -> Result<Self, ServerError>;
+    fn is_alive(&self) -> bool;
+    fn log_tail(&self) -> String;
+    /// Whether it found a GPU (else it runs on the CPU, more slowly).
+    fn on_gpu(&self) -> bool {
+        true
+    }
+}
+
+impl Served for LlamaEmbedder {
+    const NAME: &'static str = "meaning";
+    fn start(config: &ServerConfig) -> Result<Self, ServerError> {
+        LlamaEmbedder::start(config)
+    }
+    fn is_alive(&self) -> bool {
+        LlamaEmbedder::is_alive(self)
+    }
+    fn log_tail(&self) -> String {
+        LlamaEmbedder::log_tail(self)
+    }
+    fn on_gpu(&self) -> bool {
+        LlamaEmbedder::on_gpu(self)
+    }
+}
+
+impl Served for LlamaReranker {
+    const NAME: &'static str = "rerank";
+    fn start(config: &ServerConfig) -> Result<Self, ServerError> {
+        LlamaReranker::start(config)
+    }
+    fn is_alive(&self) -> bool {
+        LlamaReranker::is_alive(self)
+    }
+    fn log_tail(&self) -> String {
+        LlamaReranker::log_tail(self)
+    }
+}
+
+enum Engine<T> {
     Off,
-    Starting(Receiver<Result<Arc<LlamaEmbedder>, String>>),
-    Running(Arc<LlamaEmbedder>),
+    Starting(Receiver<Result<Arc<T>, String>>),
+    Running(Arc<T>),
     Failed(String),
 }
 
-/// The engine once the setup is ready: started on a thread (loading the
-/// model takes a moment), handed to the search, watched, and stopped with
-/// the app.
-pub struct MeaningRuntime {
-    engine: Engine,
+/// A model's engine once its setup is ready: started on a thread (loading
+/// the model takes a moment), watched, and stopped when dropped or no
+/// longer wanted.
+pub struct Runtime<T> {
+    engine: Engine<T>,
 }
 
-impl Default for MeaningRuntime {
+pub type MeaningRuntime = Runtime<LlamaEmbedder>;
+pub type RerankRuntime = Runtime<LlamaReranker>;
+
+impl<T> Default for Runtime<T> {
     fn default() -> Self {
         Self {
             engine: Engine::Off,
@@ -186,13 +229,13 @@ impl Default for MeaningRuntime {
     }
 }
 
-impl MeaningRuntime {
+impl<T: Served> Runtime<T> {
     pub fn status(&self) -> EngineStatus {
         match &self.engine {
             Engine::Off => EngineStatus::Off,
             Engine::Starting(_) => EngineStatus::Starting,
-            Engine::Running(embedder) => EngineStatus::Running {
-                on_gpu: embedder.on_gpu(),
+            Engine::Running(served) => EngineStatus::Running {
+                on_gpu: served.on_gpu(),
             },
             Engine::Failed(log) => EngineStatus::Failed(log.clone()),
         }
@@ -205,34 +248,36 @@ impl MeaningRuntime {
         }
     }
 
-    /// Starts the engine when the setup is ready and a search wants it, and
-    /// hands it over once it runs.
+    /// Starts the engine for `paths` (the server and the model, once
+    /// ready; None stops it). Returns the model when it starts, or `None`
+    /// inside when it stops, for the search to take.
+    #[must_use]
     pub fn poll(
         &mut self,
-        setup: &Setup,
-        search: Option<&mut crate::library_search::SearchService>,
+        paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
         ctx: &egui::Context,
-    ) {
-        let Some(search) = search else {
-            return;
+    ) -> Option<Option<Arc<T>>> {
+        let Some((exe, model)) = paths else {
+            let was_running = matches!(self.engine, Engine::Running(_));
+            self.engine = Engine::Off;
+            return was_running.then_some(None);
         };
         match &self.engine {
             Engine::Off => {
-                let Some((exe, model)) = setup.paths() else {
-                    return;
-                };
                 let config = ServerConfig {
                     exe,
                     model,
                     library_dirs: glyphst_embed::server::vulkan_dirs(),
-                    pid_file: Some(glyphst_embed::install::root().join("server.pid")),
+                    pid_file: Some(
+                        glyphst_embed::install::root().join(format!("{}-server.pid", T::NAME)),
+                    ),
                 };
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let ctx = ctx.clone();
                 let started = std::thread::Builder::new()
-                    .name("meaning-engine".to_string())
+                    .name(format!("{}-engine", T::NAME))
                     .spawn(move || {
-                        let result = LlamaEmbedder::start(&config)
+                        let result = T::start(&config)
                             .map(Arc::new)
                             .map_err(|error| error.to_string());
                         let _ = sender.send(result);
@@ -242,31 +287,37 @@ impl MeaningRuntime {
                     Ok(_) => Engine::Starting(receiver),
                     Err(error) => Engine::Failed(error.to_string()),
                 };
+                None
             }
             Engine::Starting(receiver) => match receiver.try_recv() {
-                Ok(Ok(embedder)) => {
-                    log::info!("search by meaning runs on {:?}", embedder.devices());
-                    search.set_embedder(Some(embedder.clone() as Arc<dyn Embedder>));
-                    self.engine = Engine::Running(embedder);
+                Ok(Ok(served)) => {
+                    log::info!("{} engine runs (on a GPU: {})", T::NAME, served.on_gpu());
+                    self.engine = Engine::Running(served.clone());
+                    Some(Some(served))
                 }
-                Ok(Err(error)) => self.engine = Engine::Failed(error),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Ok(Err(error)) => {
+                    self.engine = Engine::Failed(error);
+                    None
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.engine = Engine::Failed("the engine's starter stopped".to_string());
+                    None
                 }
             },
-            Engine::Running(embedder) => {
-                if !embedder.is_alive() {
-                    let log = embedder.log_tail();
-                    search.set_embedder(None);
-                    self.engine = Engine::Failed(if log.is_empty() {
-                        "the engine stopped".to_string()
-                    } else {
-                        log
-                    });
+            Engine::Running(served) => {
+                if served.is_alive() {
+                    return None;
                 }
+                let log = served.log_tail();
+                self.engine = Engine::Failed(if log.is_empty() {
+                    "the engine stopped".to_string()
+                } else {
+                    log
+                });
+                Some(None)
             }
-            Engine::Failed(_) => {}
+            Engine::Failed(_) => None,
         }
     }
 }
@@ -302,6 +353,19 @@ pub fn setup(custom_engine: Option<&str>) -> Setup {
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from);
     Setup::new(glyphst_embed::install::root(), custom)
+}
+
+/// The reranker's setup: its model on the same engine.
+pub fn rerank_setup(custom_engine: Option<&str>) -> Setup {
+    let custom = custom_engine
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
+    Setup::for_model(
+        glyphst_embed::install::root(),
+        custom,
+        glyphst_embed::manifest::RERANKER,
+    )
 }
 
 #[cfg(test)]

@@ -115,6 +115,11 @@ pub struct LibraryPrefs {
     /// The search results stop offering search by meaning (Settings still
     /// does).
     pub meaning_offer_hidden: bool,
+    /// The reranker rereads each search's best passages (once downloaded).
+    pub rerank: bool,
+    /// Searches and the passages opened from them are kept on this
+    /// computer, to measure search by.
+    pub learn_from_opened: bool,
 }
 
 impl LibraryPrefs {
@@ -143,6 +148,8 @@ impl Default for LibraryPrefs {
             index_paused: false,
             llama_server: String::new(),
             meaning_offer_hidden: false,
+            rerank: false,
+            learn_from_opened: true,
             ai_create_tags: true,
             suggest_collections: true,
             vault: None,

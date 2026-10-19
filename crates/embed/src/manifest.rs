@@ -31,6 +31,15 @@ pub const MODEL: Asset = Asset {
     size: 309_855_456,
 };
 
+/// The reranker: a cross-encoder that rereads the best passages against
+/// the query, run by the same engine.
+pub const RERANKER: Asset = Asset {
+    name: "qwen3-reranker-0.6b-q8_0.gguf",
+    url: "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/a02f48bb4f057028298c21fa033da2b30d7742d5/qwen3-reranker-0.6b-q8_0.gguf",
+    sha256: "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+    size: 639_153_184,
+};
+
 /// What the vectors are, for the index: a new model, revision, size or
 /// prompt makes new vectors.
 pub const MODEL_KEY: &str = "ggml-org/embeddinggemma-2-GGUF@bfcd2987#embeddinggemma-2-Q8_0/256/1";
@@ -99,6 +108,8 @@ mod tests {
         assert!(!MODEL.name.contains("F16") && !MODEL.url.contains("F16"));
         assert_eq!(MODEL.sha256.len(), 64);
         assert!(MODEL.url.ends_with(MODEL.name));
+        assert_eq!(RERANKER.sha256.len(), 64);
+        assert!(RERANKER.url.ends_with(RERANKER.name));
         if let Some(engine) = engine() {
             assert_eq!(engine.archive.sha256.len(), 64);
             assert!(engine.archive.url.ends_with(engine.archive.name));
