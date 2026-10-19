@@ -418,7 +418,14 @@ to them:
   fields the user locked, and ids in other managers (`zotero:1/KEY`).
 - `library_jobs_v1`: the metadata and AI queue, resumed after a restart.
 - `library_vault_notes_v1`: each item's note in the Markdown vault and
-  the hashes of the blocks Glyphst wrote.
+  the hashes of the blocks Glyphst (and agents) wrote.
+- `library_tag_colors_v1`: a tag's colour, one of the highlight colours.
+- `library_item_relations_v1`: under the lower id of each pair, the items
+  related to it and those the user kept apart from it as not duplicates.
+- `library_item_merges_v1`: items merged into another. Their ids are never
+  given out again, and `resolve_item_id` takes an old id to the kept
+  item. A merge writes the catalog, the AI rows and the vault rows in one
+  transaction.
 
 The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
