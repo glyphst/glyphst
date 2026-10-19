@@ -179,15 +179,22 @@ const PAPERS: &[Paper] = &[
 ];
 
 /// A memory library with the demo items. Their files are tiny PDFs in the
-/// temporary folder.
-pub fn library() -> LibraryStore {
+/// temporary folder; the first is `document` when one is given (a run's
+/// document, so its sidebar shows the item).
+pub fn library(document: Option<&std::path::Path>) -> LibraryStore {
     let mut library = LibraryStore::memory();
     let folder = std::env::temp_dir().join(format!("glyphst-library-demo-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&folder);
     let run = library.next_enrichment_run();
     for (index, paper) in PAPERS.iter().enumerate() {
-        let path: PathBuf = folder.join(format!("{index:02}.pdf"));
-        let _ = std::fs::write(&path, format!("%PDF-1.4\n% {}\n", paper.title));
+        let path: PathBuf = match document.filter(|_| index == 0) {
+            Some(document) => document.to_path_buf(),
+            None => {
+                let path = folder.join(format!("{index:02}.pdf"));
+                let _ = std::fs::write(&path, format!("%PDF-1.4\n% {}\n", paper.title));
+                path
+            }
+        };
         let Ok(LibraryImportOutcome::Added(id)) =
             library.link_item(&path, LibraryItemMetadata::for_path(&path), None)
         else {
@@ -292,7 +299,7 @@ mod tests {
 
     #[test]
     fn the_demo_has_collections_tags_and_suggestions() {
-        let library = library();
+        let library = library(None);
         assert_eq!(library.library_items().len(), PAPERS.len());
         let id = first_item(&library).unwrap();
         assert!(library.item_needs_review(id));

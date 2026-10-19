@@ -65,6 +65,8 @@ pub enum LibraryTabAction {
     CancelImport,
     /// Ask about running the AI pass over the items that have none.
     Backfill,
+    /// Show the item in the library tab.
+    ShowInLibrary(DocumentId),
     /// Keep, or reject, everything the AI suggested for these items.
     AcceptAll(Vec<DocumentId>),
     RejectAll(Vec<DocumentId>),
@@ -671,11 +673,9 @@ impl LibraryTab {
         rect: Rect,
         id: DocumentId,
     ) -> Option<LibraryTabAction> {
-        let library = context.library;
-        let item = library.library_item(id)?.clone();
+        context.library.library_item(id)?;
         ui.painter().rect_filled(rect, 0, tokens.surface);
         pane::vline(ui, rect.left() + 0.5, rect.y_range());
-        let mut action = None;
         let header = pane::Header::new("item")
             .action(pane::Action::new("x", "close"))
             .show(ui);
@@ -683,6 +683,26 @@ impl LibraryTab {
             self.selected = None;
             return None;
         }
+        let card = Rect::from_min_max(pos2(rect.left(), rect.top() + 32.0), rect.max);
+        self.item_card(ui, context, card, id, true, 16.0)
+    }
+
+    /// An item's card in `rect`: its body, scrolling, and its actions at the
+    /// foot (`open` among them when `with_open`). The sidebar's item tab
+    /// shows it too (frame 03b).
+    pub fn item_card(
+        &mut self,
+        ui: &mut Ui,
+        context: &mut TabContext<'_>,
+        rect: Rect,
+        id: DocumentId,
+        with_open: bool,
+        margin: f32,
+    ) -> Option<LibraryTabAction> {
+        let tokens = Tokens::get(ui.ctx());
+        let library = context.library;
+        let item = library.library_item(id)?.clone();
+        let mut action = None;
         let path = library
             .primary_attachment(id)
             .map(|attachment| attachment.path.clone());
@@ -700,27 +720,24 @@ impl LibraryTab {
             self.note = Some((id, text));
         }
         let actions_height = 36.0;
-        let body = Rect::from_min_max(
-            pos2(rect.left(), rect.top() + 32.0),
-            pos2(rect.right(), rect.bottom() - actions_height),
-        );
+        let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - actions_height));
         let mut body_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(body)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         egui::ScrollArea::vertical()
-            .id_salt("library-item")
+            .id_salt(("library-item", with_open))
             .auto_shrink(false)
             .show(&mut body_ui, |ui| {
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .inner_margin(egui::Margin::symmetric(margin as i8, 14))
                     .show(ui, |ui| {
-                        ui.set_width(body.width() - 32.0);
+                        ui.set_width(body.width() - 2.0 * margin);
                         ui.spacing_mut().item_spacing.y = 4.0;
                         if let Some(chosen) = self.item_body(
                             ui,
-                            tokens,
+                            &tokens,
                             context,
                             &item,
                             path.as_deref(),
@@ -735,20 +752,23 @@ impl LibraryTab {
         pane::hline(ui, foot.x_range(), foot.top() + 0.5);
         let mut foot_ui = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(foot.shrink2(vec2(12.0, 0.0)))
+                .max_rect(foot.shrink2(vec2(margin.min(12.0), 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         foot_ui.spacing_mut().item_spacing.x = 4.0;
         if let Some(path) = &path {
-            if foot_ui.add(Button::bracket("open")).clicked() {
+            if with_open && foot_ui.add(Button::bracket("open")).clicked() {
                 action = Some(LibraryTabAction::Open(path.clone()));
+            }
+            if !with_open && foot_ui.add(Button::bracket("library")).clicked() {
+                action = Some(LibraryTabAction::ShowInLibrary(id));
             }
             if let Some(note) = &note_path
                 && foot_ui.add(Button::bracket_muted("open note")).clicked()
             {
                 action = Some(LibraryTabAction::OpenNote(note.clone()));
             }
-            if foot_ui.add(Button::bracket_muted("ask")).clicked() {
+            if with_open && foot_ui.add(Button::bracket_muted("ask")).clicked() {
                 action = Some(LibraryTabAction::Ask(path.clone()));
             }
         }

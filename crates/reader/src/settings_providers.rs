@@ -377,6 +377,19 @@ impl ProviderPages {
                     Some("Same as the assistant"),
                 );
             });
+            group.row(
+                "Library",
+                Some("Summaries, tags and filing of library items; a small model is enough."),
+                |ui| {
+                    model_picker(
+                        ui,
+                        "library-model",
+                        &mut draft.ai.library_model,
+                        &choices,
+                        Some("Same as chat titles"),
+                    );
+                },
+            );
             if choices.is_empty() {
                 group.note("Turn a provider on and give it a model to choose one.");
             }

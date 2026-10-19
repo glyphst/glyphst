@@ -434,6 +434,8 @@ pub struct ReaderApp {
     library_jobs_settings: Option<std::sync::Arc<glyphst_settings::Settings>>,
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
+    /// The sidebar's item card (its note, read once per item).
+    sidebar_card: crate::library_tab::LibraryTab,
     /// The library's dialog showing (frames 04h, 04k, 06d).
     library_dialog: Option<crate::library_dialogs::Dialog>,
     /// The library's files moving to the folder chosen.
@@ -671,14 +673,18 @@ impl ReaderApp {
             library_jobs: crate::library_jobs::LibraryJobs::new(&cc.egui_ctx),
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
+            sidebar_card: Default::default(),
             library_dialog: None,
             folder_move: None,
             work_adds: Vec::new(),
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
-            app.library = crate::library_demo::library();
-            app.open_library();
+            app.library = crate::library_demo::library(launch.files.first().map(PathBuf::as_path));
+            // With a document the run shows it (its sidebar's item tab).
+            if launch.files.is_empty() {
+                app.open_library();
+            }
             if let Some(Page::Library(tab)) = app.pages.last_mut() {
                 match state.as_str() {
                     "item" => {
@@ -1415,6 +1421,17 @@ impl ReaderApp {
             }
             Action::OpenDialog => {
                 self.pickers.open_documents(ctx);
+                Ok(())
+            }
+            Action::ShowInLibrary(id) => {
+                self.open_library();
+                if let Some(Page::Library(tab)) = self
+                    .page_focused
+                    .and_then(|index| self.pages.get_mut(index))
+                {
+                    tab.view = crate::library_tab::View::All;
+                    tab.selected = Some(id);
+                }
                 Ok(())
             }
             Action::CancelImport => {
@@ -3483,6 +3500,26 @@ impl ReaderApp {
             let effects = self.effect_defs();
             let errors = self.effect_errors();
             let background_seed = self.background_seed();
+            let library_facts = crate::settings_window::LibraryFacts {
+                folder: self.library.files_root().map(std::path::Path::to_path_buf),
+                folder_chosen: self.library.files_root_chosen(),
+                unenriched: self
+                    .library
+                    .library_items()
+                    .iter()
+                    .filter(|item| {
+                        item.trashed_at.is_none() && self.library.item_enrichment(item.id).is_none()
+                    })
+                    .count(),
+                model: self
+                    .user_settings
+                    .get()
+                    .and_then(|settings| settings.ai.resolved_library())
+                    .map(|model| model.model),
+                zotero: dirs::home_dir()
+                    .map(|home| home.join("Zotero").join("zotero.sqlite"))
+                    .filter(|path| path.is_file()),
+            };
             self.settings_window.show(
                 ctx,
                 SettingsContext {
@@ -3496,6 +3533,7 @@ impl ReaderApp {
                     system_theme: self.system_theme,
                     blur_supported: self.window_blur.support().known(),
                     background_seed,
+                    library: library_facts,
                 },
             );
             if std::mem::take(&mut self.settings_window.open_shortcuts) {
@@ -3504,6 +3542,27 @@ impl ReaderApp {
             let actions = std::mem::take(&mut self.settings_window.effects_actions);
             for action in actions {
                 self.effects_action(action, ctx);
+            }
+            for action in std::mem::take(&mut self.settings_window.library_actions) {
+                use crate::settings_window::LibraryAction;
+                self.settings_window.open = false;
+                match action {
+                    LibraryAction::ChooseFolder => {
+                        self.library_dialog = Some(self.choose_folder_dialog());
+                    }
+                    LibraryAction::Enrich => match self.backfill_dialog() {
+                        Some(dialog) => self.library_dialog = Some(dialog),
+                        None => self
+                            .notices
+                            .push("Choose a library model in Settings › AI first.".to_string()),
+                    },
+                    LibraryAction::ImportZotero => {
+                        self.library_tab_action(
+                            crate::library_tab::LibraryTabAction::ImportZotero,
+                            ctx,
+                        );
+                    }
+                }
             }
         }
         if let Some(path) = self.pickers.take_image() {

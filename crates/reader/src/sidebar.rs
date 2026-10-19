@@ -33,6 +33,8 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SidebarTab {
+    /// The document's library card (drawn by the app, not here).
+    Item,
     #[default]
     Outline,
     Pages,
@@ -45,7 +47,8 @@ pub enum SidebarTab {
 }
 
 impl SidebarTab {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Item,
         Self::Outline,
         Self::Pages,
         Self::Bookmarks,
@@ -57,6 +60,7 @@ impl SidebarTab {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Item => "Item",
             Self::Outline => "Outline",
             Self::Pages => "Pages",
             Self::Bookmarks => "Bookmarks",
@@ -69,6 +73,7 @@ impl SidebarTab {
 
     pub fn icon(self) -> &'static str {
         match self {
+            Self::Item => "library-big",
             Self::Outline => "list",
             Self::Pages => "layout-grid",
             Self::Bookmarks => "bookmark",
@@ -301,7 +306,7 @@ pub fn show(
             find::search_panel(&mut tab.find, ui, now);
         }
         SidebarTab::Translation => translation_panel(ui, tab, info, &mut actions),
-        SidebarTab::Effects => {}
+        SidebarTab::Effects | SidebarTab::Item => {}
     }
     actions
 }
@@ -842,7 +847,7 @@ pub fn count(tab: &DocumentTab, which: SidebarTab) -> Option<usize> {
         SidebarTab::Bookmarks => Some(tab.annotations.bookmarks.len()),
         SidebarTab::Notes => Some(tab.annotations.items.len()),
         SidebarTab::Search => (!tab.find.query.is_empty()).then_some(tab.find.matches.len()),
-        SidebarTab::Translation | SidebarTab::Effects => None,
+        SidebarTab::Translation | SidebarTab::Effects | SidebarTab::Item => None,
     }
 }
 

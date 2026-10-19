@@ -831,6 +831,8 @@ impl ReaderApp {
                 },
             );
             book_changed = changes.book;
+        } else if self.prefs.sidebar == SidebarTab::Item {
+            self.sidebar_item(&mut body, content, active, &ctx);
         } else {
             requests.extend(sidebar::show(
                 &mut body,
@@ -853,6 +855,62 @@ impl ReaderApp {
             self.apply_sidebar(request, &mut actions, &ctx);
         }
         self.pending_actions.extend(actions);
+    }
+
+    /// The sidebar's item tab (frame 03b): the document's library card, or
+    /// an offer to add it.
+    fn sidebar_item(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize, ctx: &egui::Context) {
+        let path = self.tabs[active].path.clone();
+        let Some(id) = self
+            .library
+            .library_item_for_path(&path)
+            .map(|item| item.id)
+        else {
+            let tokens = Tokens::get(ctx);
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("not in the library")
+                    .font(crate::theme::mono(12.0))
+                    .color(tokens.text_2),
+            );
+            ui.add_space(6.0);
+            if ui
+                .add(glyphst_ui::button::Button::bracket("add to library"))
+                .clicked()
+            {
+                self.library_tab_action(
+                    crate::library_tab::LibraryTabAction::AddOpened(vec![path]),
+                    ctx,
+                );
+            }
+            return;
+        };
+        let docs = crate::home::documents(&self.library, &self.prefs.page_counts);
+        let vault = self
+            .prefs
+            .library
+            .vault_root(self.library.files_root(), self.library.files_root_chosen());
+        let card = Rect::from_min_max(
+            pos2(rect.left() - 12.0, rect.top()),
+            pos2(rect.right() + 12.0, rect.bottom() + 8.0),
+        );
+        let action = self.sidebar_card.item_card(
+            ui,
+            &mut crate::library_tab::TabContext {
+                library: &self.library,
+                covers: &mut self.covers,
+                docs: &docs,
+                vault: vault.as_deref(),
+                import: None,
+            },
+            card,
+            id,
+            false,
+            12.0,
+        );
+        if let Some(action) = action {
+            self.library_tab_action(action, ctx);
+        }
     }
 
     /// The assistant docked at the right.

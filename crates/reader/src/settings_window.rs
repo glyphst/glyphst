@@ -33,6 +33,7 @@ pub enum Section {
     Appearance,
     Reading,
     Presenting,
+    Library,
     Effects,
     Translation,
     Ocr,
@@ -43,7 +44,12 @@ pub enum Section {
 const GROUPS: [(&str, &[Section]); 3] = [
     (
         "general",
-        &[Section::Appearance, Section::Reading, Section::Presenting],
+        &[
+            Section::Appearance,
+            Section::Reading,
+            Section::Presenting,
+            Section::Library,
+        ],
     ),
     ("look", &[Section::Effects]),
     (
@@ -56,10 +62,11 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const HEADER_HEIGHT: f32 = 40.0;
 
 impl Section {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Appearance,
         Self::Reading,
         Self::Presenting,
+        Self::Library,
         Self::Effects,
         Self::Translation,
         Self::Ocr,
@@ -81,6 +88,7 @@ impl Section {
             Self::Appearance => "palette",
             Self::Reading => "book-open",
             Self::Presenting => "presentation",
+            Self::Library => "library-big",
             Self::Effects => "wand-sparkles",
             Self::Translation => "languages",
             Self::Ocr => "scan-text",
@@ -93,6 +101,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Reading => "Reading",
             Self::Presenting => "Presenting",
+            Self::Library => "Library",
             Self::Effects => "Effects",
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
@@ -114,6 +123,10 @@ impl Section {
                 "present presentation slides full screen fullscreen timer clock talk length \
                  countdown ring tools right click draw pen eraser laser page number"
             }
+            Self::Library => {
+                "library folder vault notes obsidian import zotero metadata lookup crossref \
+                 arxiv openalex doi isbn enrich summary tags collections"
+            }
             Self::Effects => "transition folder shader",
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
@@ -127,6 +140,10 @@ impl Section {
             Self::Appearance => "How Glyphst looks. Changes apply to every window immediately.",
             Self::Reading => "What opens at start, and what shows while you read.",
             Self::Presenting => "Full screen, the pointer, ink and the timer while you present.",
+            Self::Library => {
+                "Where your papers and books live, how they come in, and what the AI does \
+                 with them."
+            }
             Self::Effects => {
                 "Book switches, page turns and your own effects. The background and \
                  the page tint are in Appearance."
@@ -154,6 +171,8 @@ pub struct SettingsWindow {
     providers: ProviderPages,
     /// What the Effects page asked for, for the app to do.
     pub effects_actions: Vec<crate::effects_page::Action>,
+    /// What Settings › Library asked the app to do.
+    pub library_actions: Vec<LibraryAction>,
     /// The Keyboard shortcuts row was clicked: the app opens their tab.
     pub open_shortcuts: bool,
     /// A group of the page to scroll to once drawn (scripted runs).
@@ -182,6 +201,185 @@ pub struct SettingsContext<'a> {
     pub blur_supported: Option<bool>,
     /// The background's own colour, for a scheme generated from it.
     pub background_seed: Option<[u8; 3]>,
+    /// Facts about the library for its page.
+    pub library: LibraryFacts,
+}
+
+/// What Settings › Library shows about the library.
+#[derive(Clone, Debug, Default)]
+pub struct LibraryFacts {
+    pub folder: Option<std::path::PathBuf>,
+    pub folder_chosen: bool,
+    pub unenriched: usize,
+    pub model: Option<String>,
+    pub zotero: Option<std::path::PathBuf>,
+}
+
+/// `path` from the home folder, cut at the front to `chars`.
+fn short_path(path: &std::path::Path, chars: usize) -> String {
+    let shown = match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    };
+    let count = shown.chars().count();
+    if count <= chars {
+        shown
+    } else {
+        let tail = shown.chars().skip(count - chars + 1).collect::<String>();
+        format!("…{tail}")
+    }
+}
+
+/// What Settings › Library asks the app to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryAction {
+    ChooseFolder,
+    Enrich,
+    ImportZotero,
+}
+
+/// The Library page (frame 07 · library).
+fn library(
+    ui: &mut egui::Ui,
+    prefs: &mut Prefs,
+    facts: &LibraryFacts,
+    actions: &mut Vec<LibraryAction>,
+) {
+    use crate::prefs::{AddOnOpen, ImportMode};
+    let library = &mut prefs.library;
+    ui_settings::group(ui, "folder", |group| {
+        let folder = facts
+            .folder
+            .as_ref()
+            .map(|folder| short_path(folder, 40))
+            .unwrap_or_else(|| "in memory".to_string());
+        let caption = if facts.folder_chosen {
+            "files/ and notes/ live here · the database stays in the app's data folder"
+        } else {
+            "the app's data folder · choose a folder you can see and sync"
+        };
+        group.row("library folder", Some(caption), |ui| {
+            // The row lays out from the right.
+            if ui.add(Button::bracket_muted("move…")).clicked() {
+                actions.push(LibraryAction::ChooseFolder);
+            }
+            ui.label(RichText::new(folder).font(theme::mono(12.0)));
+        });
+        let mut vault = library.vault.clone().unwrap_or_default();
+        group.row(
+            "notes vault",
+            Some("empty: notes/ in the library folder · or point it at an obsidian vault"),
+            |ui| {
+                if TextField::new(&mut vault, "notes/ in the library folder")
+                    .width(320.0)
+                    .show(ui)
+                    .changed()
+                {
+                    library.vault = Some(vault.clone()).filter(|vault| !vault.trim().is_empty());
+                }
+            },
+        );
+    });
+    ui.add_space(10.0);
+    ui_settings::group(ui, "adding", |group| {
+        group.row(
+            "when a file is opened",
+            Some("added in place, so its history and highlights stay with the file"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut library.add_on_open,
+                    &[
+                        (AddOnOpen::Off, "don't add"),
+                        (AddOnOpen::InPlace, "add in place"),
+                    ],
+                );
+            },
+        );
+        group.row("imports and drops", None, |ui| {
+            glyphst_ui::segmented::labels(
+                ui,
+                &mut library.import_mode,
+                &[
+                    (ImportMode::Copy, "copy in"),
+                    (ImportMode::Link, "link in place"),
+                ],
+            );
+        });
+        group.row(
+            "look up metadata online",
+            Some("arxiv · crossref · openalex · open library"),
+            |ui| {
+                ui.add(Switch(&mut library.look_up_online));
+            },
+        );
+        group.row(
+            "contact email",
+            Some("optional · sent to crossref only, for its polite pool"),
+            |ui| {
+                TextField::new(&mut library.contact_email, "you@example.org")
+                    .width(320.0)
+                    .show(ui);
+            },
+        );
+    });
+    ui.add_space(10.0);
+    ui_settings::group(ui, "ai", |group| {
+        group.row(
+            "enrich new items",
+            Some("a summary, tags and a collection for each item added"),
+            |ui| {
+                ui.add(Switch(&mut library.enrich_new));
+            },
+        );
+        group.row(
+            "ai may create tags",
+            Some("up to 2 per item · otherwise only tags you already use"),
+            |ui| {
+                ui.add(Switch(&mut library.ai_create_tags));
+            },
+        );
+        group.row(
+            "new collections",
+            Some("the ai only proposes them; your tree changes when you create one"),
+            |ui| {
+                ui.add(Switch(&mut library.suggest_collections));
+            },
+        );
+        let model = facts
+            .model
+            .clone()
+            .unwrap_or_else(|| "none · choose one in ai & agents".to_string());
+        group.row(
+            "library model",
+            Some(&*format!("{model} · set in ai & agents")),
+            |ui| {
+                if facts.unenriched > 0
+                    && ui
+                        .add(Button::bracket(&format!(
+                            "enrich {} items…",
+                            facts.unenriched
+                        )))
+                        .clicked()
+                {
+                    actions.push(LibraryAction::Enrich);
+                }
+            },
+        );
+    });
+    ui.add_space(10.0);
+    ui_settings::group(ui, "import", |group| {
+        let caption = facts
+            .zotero
+            .as_ref()
+            .map(|path| format!("{} found", path.display()))
+            .unwrap_or_else(|| "no zotero data folder found".to_string());
+        group.row("zotero", Some(&*caption), |ui| {
+            if ui.add(Button::bracket("import from zotero…")).clicked() {
+                actions.push(LibraryAction::ImportZotero);
+            }
+        });
+    });
 }
 
 impl SettingsWindow {
@@ -448,6 +646,9 @@ impl SettingsWindow {
                     }
                     Section::Reading => reading(ui, app.prefs),
                     Section::Presenting => presenting(ui, app.prefs),
+                    Section::Library => {
+                        library(ui, app.prefs, &app.library, &mut self.library_actions)
+                    }
                     Section::Effects => {
                         // The previews are animated.
                         ui.ctx().request_repaint();
@@ -1068,6 +1269,7 @@ mod tests {
                         system_theme: Some(ThemeKind::Dark),
                         blur_supported: Some(false),
                         background_seed: None,
+                        library: LibraryFacts::default(),
                     },
                 );
             });
