@@ -29,6 +29,17 @@ pub const PAGES_PER_ITEM: usize = 3;
 const OPEN: char = '\u{1}';
 const CLOSE: char = '\u{2}';
 
+/// How keyword and meaning scores are mixed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fusion {
+    /// Each pass's scores against the collection (z), plus word coverage:
+    /// DigUp's, and the default.
+    #[default]
+    ZScore,
+    /// Reciprocal rank fusion: 1/(60 + rank) from each pass.
+    Rrf,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SearchRequest {
     pub text: String,
@@ -37,6 +48,7 @@ pub struct SearchRequest {
     /// The last word is still being typed: match it as a prefix.
     pub typing: bool,
     pub limit: usize,
+    pub fusion: Fusion,
 }
 
 /// A passage that matched.
@@ -292,6 +304,34 @@ impl Store {
                 candidates.push(chunk.into_candidate(&query));
             }
         }
+        // Ranks for reciprocal rank fusion: keyword order as fetched (by
+        // FTS5's rank), meaning order by closeness.
+        let keyword_rank = candidates
+            .iter()
+            .filter(|candidate| candidate.rank > 0.0)
+            .enumerate()
+            .map(|(rank, candidate)| (candidate.chunk_id, rank))
+            .collect::<HashMap<_, _>>();
+        let meaning_rank = meaning
+            .as_ref()
+            .map(|meaning| {
+                let mut scored = candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        Some((
+                            candidate.chunk_id,
+                            meaning.index.score(candidate.chunk_id, meaning.query)?,
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                scored
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, (chunk_id, _))| (chunk_id, rank))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         // Codes and numbers ("1706.03762") are found by their words.
         let lookup = !query.words.is_empty()
             && query
@@ -308,9 +348,21 @@ impl Store {
                 let cosine = meaning.index.score(candidate.chunk_id, meaning.query)?;
                 Some((cosine - spread.mean) / spread.std.max(MIN_SPREAD))
             });
-            let score = words_weight * coverage.powf(1.5)
-                + 0.05 * candidate.rank.max(0.0).ln_1p()
-                + meaning_weight * z.unwrap_or(0.0).max(0.0);
+            let score = match request.fusion {
+                Fusion::ZScore => {
+                    words_weight * coverage.powf(1.5)
+                        + 0.05 * candidate.rank.max(0.0).ln_1p()
+                        + meaning_weight * z.unwrap_or(0.0).max(0.0)
+                }
+                Fusion::Rrf => {
+                    let reciprocal = |rank: Option<&usize>| {
+                        rank.map_or(0.0, |rank| 1.0 / (60.0 + *rank as f32 + 1.0))
+                    };
+                    // Scaled to the same range as the z mix.
+                    60.0 * (reciprocal(keyword_rank.get(&candidate.chunk_id))
+                        + reciprocal(meaning_rank.get(&candidate.chunk_id)))
+                }
+            };
             let (snippet, highlights) = marked(&candidate.snippet);
             let hit = PageHit {
                 chunk_id: candidate.chunk_id,

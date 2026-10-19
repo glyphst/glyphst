@@ -404,6 +404,7 @@ impl LibraryTab {
                 items: Some(scoped.query(library).iter().map(|id| id.0).collect()),
                 typing: !self.filter.ends_with(char::is_whitespace),
                 limit: 200,
+                ..Default::default()
             });
             kicker = format!("{kicker} / search");
             heading = words.clone();

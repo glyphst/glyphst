@@ -1,0 +1,34 @@
+{
+  "documents": {
+    "attention.pdf": ["We propose the Transformer, a network architecture based solely on attention mechanisms.", "Multi-head attention lets the model attend to information from different representation subspaces."],
+    "mamba.pdf": ["Selective state space models give linear-time sequence modeling.", "Unlike attention, the cost grows linearly with the length of the input sequence."],
+    "bert.pdf": ["BERT pre-trains deep bidirectional representations from unlabeled text.", "Masked language modeling hides some tokens and predicts them from context."],
+    "diffusion.pdf": ["Denoising diffusion probabilistic models generate images by reversing a noising process.", "Sample quality on CIFAR10 reaches an FID score of 3.17."],
+    "resnet.pdf": ["Deep residual learning eases the training of very deep convolutional networks.", "Shortcut connections add the input of a block to its output."],
+    "rag.pdf": ["Retrieval-augmented generation combines a retriever with a sequence-to-sequence generator.", "The generator conditions on passages fetched from a Wikipedia index."],
+    "adam.pdf": ["Adam is an algorithm for first-order gradient-based optimization of stochastic objectives.", "It keeps running averages of the gradient and its square to adapt learning rates."],
+    "dropout.pdf": ["Dropout randomly drops units during training to prevent co-adaptation.", "It is a simple way to reduce overfitting in large neural networks."],
+    "word2vec.pdf": ["We learn continuous vector representations of words from very large corpora.", "Skip-gram predicts the surrounding words given the current word."],
+    "gan.pdf": ["Generative adversarial networks train a generator against a discriminator.", "The discriminator learns to tell real samples from generated ones."],
+    "sicp.pdf": ["Programs must be written for people to read, and only incidentally for machines to execute.", "Procedures are abstractions that let us name and reuse computations."],
+    "ddia.pdf": ["Replication keeps a copy of the same data on several machines connected by a network.", "Partitioning splits a large dataset into smaller subsets across nodes."]
+  },
+  "queries": [
+    {"q": "multi-head attention", "expect": ["attention.pdf@2"], "tag": "words"},
+    {"q": "masked language modeling", "expect": ["bert.pdf@2"], "tag": "words"},
+    {"q": "FID score CIFAR10", "expect": ["diffusion.pdf@2"], "tag": "words"},
+    {"q": "shortcut connections", "expect": ["resnet.pdf@2"], "tag": "words"},
+    {"q": "skip-gram", "expect": ["word2vec.pdf@2"], "tag": "words"},
+    {"q": "discriminator", "expect": ["gan.pdf"], "tag": "words"},
+    {"q": "replication", "expect": ["ddia.pdf@1"], "tag": "words"},
+    {"q": "3.17", "expect": ["diffusion.pdf@2"], "tag": "words"},
+    {"q": "making sequence models cheaper for very long inputs", "expect": ["mamba.pdf"], "tag": "meaning"},
+    {"q": "stopping a big network from memorising its training data", "expect": ["dropout.pdf"], "tag": "meaning"},
+    {"q": "an optimizer that adjusts the step size for each parameter", "expect": ["adam.pdf"], "tag": "meaning"},
+    {"q": "looking things up in an encyclopedia before answering", "expect": ["rag.pdf"], "tag": "meaning"},
+    {"q": "two networks competing to make realistic pictures", "expect": ["gan.pdf"], "tag": "meaning"},
+    {"q": "code should be easy for humans to understand", "expect": ["sicp.pdf@1"], "tag": "meaning"},
+    {"q": "spreading a database over many servers", "expect": ["ddia.pdf"], "tag": "meaning"},
+    {"q": "embedding words as numbers", "expect": ["word2vec.pdf@1"], "tag": "meaning"}
+  ]
+}

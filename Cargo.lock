@@ -2959,6 +2959,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glyphst-core",
+ "glyphst-pdf",
  "glyphst-search",
  "log",
  "rand 0.10.3",
@@ -3150,6 +3151,8 @@ dependencies = [
  "log",
  "mupdf",
  "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

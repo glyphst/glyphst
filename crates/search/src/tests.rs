@@ -503,3 +503,56 @@ fn meaning_finds_passages_without_the_words_and_mixes_with_them() {
     assert_eq!(store.drop_other_vectors("other/1").unwrap(), texts.len());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The labelled set (`tests/fixtures/eval.json`) indexed: its documents
+/// as PDFs, one item each.
+fn eval_corpus(name: &str) -> (Store, crate::eval::EvalSet, PathBuf) {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        documents: std::collections::BTreeMap<String, Vec<String>>,
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval.json");
+    let fixture: Fixture = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let set = crate::eval::EvalSet::load(&path).unwrap();
+    let dir = folder(name);
+    let mut snapshot = Snapshot::default();
+    for (index, (file_name, pages)) in fixture.documents.iter().enumerate() {
+        let path = dir.join(file_name);
+        let pages = pages
+            .iter()
+            .map(|page| vec![page.as_str()])
+            .collect::<Vec<_>>();
+        let refs = pages.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        std::fs::write(&path, text_pages_pdf(&refs)).unwrap();
+        let id = index as u64 + 1;
+        snapshot.files.push(file(id, path, index as u8 + 1));
+        snapshot
+            .items
+            .push(item(id, file_name.trim_end_matches(".pdf")));
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    store.reconcile(&snapshot, 0).unwrap();
+    (run_steps(store, 50), set, dir)
+}
+
+#[test]
+fn the_labelled_set_finds_exact_words_by_keyword() {
+    let (store, set, dir) = eval_corpus("eval-words");
+    let ranks = set
+        .queries
+        .iter()
+        .filter(|query| query.tag == "words")
+        .map(|query| {
+            let results = store
+                .search(&SearchRequest {
+                    text: query.q.clone(),
+                    ..SearchRequest::default()
+                })
+                .unwrap();
+            crate::eval::rank(&results, query)
+        })
+        .collect::<Vec<_>>();
+    let scores = crate::eval::Scores::of(&ranks);
+    assert!(scores.at1 >= 0.85, "keyword floor: {scores}");
+    let _ = std::fs::remove_dir_all(dir);
+}
