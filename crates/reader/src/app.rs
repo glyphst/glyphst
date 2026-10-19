@@ -1075,6 +1075,7 @@ impl ReaderApp {
                         covers: &mut self.covers,
                         docs: &docs,
                         vault: vault.as_deref(),
+                        import: self.importer.progress(),
                     },
                 );
                 if let Some(action) = action {
@@ -1162,6 +1163,16 @@ impl ReaderApp {
                 self.pickers.open_documents(ctx);
                 Ok(())
             }
+            Action::CancelImport => {
+                if self.importer.is_running() {
+                    self.importer.cancel();
+                } else {
+                    self.importer.dismiss();
+                }
+                Ok(())
+            }
+            Action::AcceptAll(ids) => self.review_all(&ids, true),
+            Action::RejectAll(ids) => self.review_all(&ids, false),
             Action::AddByIdentifier | Action::ImportZotero => {
                 self.notices.push("Not in this build yet.".to_string());
                 Ok(())
@@ -1170,6 +1181,31 @@ impl ReaderApp {
         if let Err(error) = result {
             self.notices.push(format!("{error:#}"));
         }
+    }
+
+    /// Keeps (or rejects) every unreviewed AI change of these items.
+    fn review_all(
+        &mut self,
+        ids: &[glyphst_library::DocumentId],
+        keep: bool,
+    ) -> anyhow::Result<()> {
+        for id in ids {
+            let targets = self
+                .library
+                .ai_assignments(*id)
+                .iter()
+                .filter(|assignment| assignment.state.needs_review())
+                .map(|assignment| assignment.target.clone())
+                .collect::<Vec<_>>();
+            for target in targets {
+                if keep {
+                    self.library.accept_assignment(*id, &target)?;
+                } else {
+                    self.library.reject_assignment(*id, &target)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Focuses the pane showing tab `id`, without a transition.

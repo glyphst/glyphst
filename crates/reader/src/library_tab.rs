@@ -61,6 +61,11 @@ pub enum LibraryTabAction {
     AddByIdentifier,
     ImportZotero,
     OpenDialog,
+    /// Stop the import under way, or hide the last one's tally.
+    CancelImport,
+    /// Keep, or reject, everything the AI suggested for these items.
+    AcceptAll(Vec<DocumentId>),
+    RejectAll(Vec<DocumentId>),
 }
 
 /// What the tab needs from the app this frame.
@@ -71,6 +76,8 @@ pub struct TabContext<'a> {
     pub docs: &'a [Doc],
     /// The vault, when there is one.
     pub vault: Option<&'a Path>,
+    /// The import under way, or the last one's tally.
+    pub import: Option<&'a crate::import::ImportProgress>,
 }
 
 #[derive(Default)]
@@ -434,8 +441,16 @@ impl LibraryTab {
         }
         ui.add_space(14.0);
 
+        if let Some(progress) = context.import
+            && import_strip(ui, tokens, progress, width)
+        {
+            action = Some(LibraryTabAction::CancelImport);
+        }
         if library.library_items().is_empty() {
             return self.empty(ui, tokens, context, width).or(action);
+        }
+        if self.view == View::NeedsReview {
+            return review_list(ui, tokens, library, &ids, width).or(action);
         }
 
         // The table.
@@ -1020,6 +1035,220 @@ impl LibraryTab {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
+
+/// The import strip over the table (frame 04g): `adding 12 / 40`, a meter,
+/// what was skipped, and `[ cancel ]` (or `[ dismiss ]` once done).
+/// Returns whether its button was clicked.
+fn import_strip(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    progress: &crate::import::ImportProgress,
+    width: f32,
+) -> bool {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, tokens.ctl_radius(), tokens.surface);
+    ui.painter().rect_stroke(
+        rect,
+        tokens.ctl_radius(),
+        Stroke::new(1.0, tokens.rule_strong),
+        egui::StrokeKind::Inside,
+    );
+    let y = rect.center().y;
+    let total = progress.total.max(progress.processed);
+    let count = if progress.finished {
+        format!("added {}", progress.added.len())
+    } else {
+        format!("adding {} / {total}", progress.processed)
+    };
+    let mut x = rect.left() + 12.0;
+    let count_rect = text::line(
+        ui,
+        pos2(x, y),
+        Align2::LEFT_CENTER,
+        &count,
+        theme::mono(12.0),
+        tokens.text,
+        200.0,
+    );
+    x = count_rect.right() + 14.0;
+    if !progress.finished && total > 0 {
+        Meter::new(progress.processed as f32 / total as f32)
+            .bar()
+            .width(140.0)
+            .paint(ui, Rect::from_min_size(pos2(x, y - 7.0), vec2(140.0, 14.0)));
+        x += 154.0;
+    }
+    let mut detail = Vec::new();
+    if !progress.duplicates.is_empty() {
+        detail.push(format!("{} duplicates", progress.duplicates.len()));
+    }
+    if !progress.failed.is_empty() {
+        detail.push(format!("{} failed", progress.failed.len()));
+    }
+    detail.push(format!("from {}", progress.source));
+    text::line(
+        ui,
+        pos2(x, y),
+        Align2::LEFT_CENTER,
+        detail.join(" · "),
+        theme::mono(11.0),
+        tokens.muted,
+        (rect.right() - x - 120.0).max(0.0),
+    );
+    let label = if progress.finished {
+        "dismiss"
+    } else {
+        "cancel"
+    };
+    let button = Rect::from_min_max(pos2(rect.right() - 110.0, rect.top()), rect.max);
+    let mut button_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(button.shrink2(vec2(12.0, 0.0)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let clicked = button_ui.add(Button::bracket_muted(label)).clicked();
+    ui.add_space(14.0);
+    clicked
+}
+
+/// The AI's suggestions, item by item (frame 04i), with accept and reject
+/// for each and for all.
+fn review_list(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    library: &LibraryStore,
+    ids: &[DocumentId],
+    width: f32,
+) -> Option<LibraryTabAction> {
+    let mut action = None;
+    if ids.is_empty() {
+        empty_line(ui, "nothing to review · the ai's changes are all looked at");
+        return None;
+    }
+    let (bar, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
+    let mut bar_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(bar)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    bar_ui.spacing_mut().item_spacing.x = 8.0;
+    if bar_ui.add(Button::bracket_muted("× reject all")).clicked() {
+        action = Some(LibraryTabAction::RejectAll(ids.to_vec()));
+    }
+    if bar_ui.add(Button::bracket("✓ accept all")).clicked() {
+        action = Some(LibraryTabAction::AcceptAll(ids.to_vec()));
+    }
+    ui.add_space(6.0);
+    egui::ScrollArea::vertical()
+        .id_salt("library-review")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            for id in ids {
+                let Some(item) = library.library_item(*id) else {
+                    continue;
+                };
+                let pending = library
+                    .ai_assignments(*id)
+                    .iter()
+                    .filter(|assignment| assignment.state.needs_review())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(&item.title)
+                            .font(theme::regular(14.0))
+                            .color(tokens.text),
+                    );
+                    let mut meta = Vec::new();
+                    if let Some(year) = item.year {
+                        meta.push(year.to_string());
+                    }
+                    let authors = authors_short(item);
+                    if !authors.is_empty() {
+                        meta.push(authors);
+                    }
+                    if let Some(enrichment) = library.item_enrichment(*id) {
+                        meta.push(short_model(&enrichment.model).to_string());
+                    }
+                    ui.label(
+                        egui::RichText::new(meta.join(" · "))
+                            .font(theme::mono(11.0))
+                            .color(tokens.faint),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(path) = library.primary_attachment(*id).map(|a| a.path.clone())
+                            && ui.add(Button::bracket_muted("open")).clicked()
+                        {
+                            action = Some(LibraryTabAction::Open(path));
+                        }
+                        let label = format!("✓ accept {}", pending.len());
+                        if ui.add(Button::bracket(&label)).clicked() {
+                            action = Some(LibraryTabAction::AcceptAll(vec![*id]));
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                for (kind, targets) in [
+                    (
+                        "tags",
+                        pending
+                            .iter()
+                            .filter(|a| matches!(a.target, AssignmentTarget::Tag(_)))
+                            .collect::<Vec<_>>(),
+                    ),
+                    (
+                        "collection",
+                        pending
+                            .iter()
+                            .filter(|a| !matches!(a.target, AssignmentTarget::Tag(_)))
+                            .collect::<Vec<_>>(),
+                    ),
+                ] {
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        let (label, _) = ui.allocate_exact_size(vec2(90.0, 19.0), Sense::hover());
+                        ui.painter().text(
+                            label.left_center(),
+                            Align2::LEFT_CENTER,
+                            kind,
+                            theme::mono(11.0),
+                            tokens.muted,
+                        );
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        for assignment in targets {
+                            let name = match &assignment.target {
+                                AssignmentTarget::NewCollection(_) => {
+                                    format!("new: {}", assignment.label.to_lowercase())
+                                }
+                                _ => assignment.label.to_lowercase(),
+                            };
+                            let (accept, reject) = ai_chip(ui, tokens, &name);
+                            if accept {
+                                action =
+                                    Some(LibraryTabAction::Accept(*id, assignment.target.clone()));
+                            }
+                            if reject {
+                                action =
+                                    Some(LibraryTabAction::Reject(*id, assignment.target.clone()));
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                ui.add_space(8.0);
+                let bottom = ui.cursor().top();
+                ui.painter()
+                    .hline(ui.max_rect().x_range(), bottom - 0.5, tokens.hairline());
+            }
+        });
+    action
+}
 
 /// The items under each smart view.
 fn smart_counts(library: &LibraryStore) -> HashMap<View, usize> {
