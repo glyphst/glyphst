@@ -22,7 +22,7 @@ use glyphst_library::{
     LibraryCreatorRole, LibraryItem, LibraryItemKind, LibraryJob, LibraryJobKind, LibraryJobState,
     LibraryStore, MetadataSource, current_timestamp,
 };
-use glyphst_metadata::{MetadataClient, MetadataEndpoints, Recognized, WorkMetadata};
+use glyphst_metadata::{MetadataClient, Recognized, WorkMetadata};
 use sha2::{Digest as _, Sha256};
 
 use crate::prefs::LibraryPrefs;
@@ -40,8 +40,8 @@ pub(crate) enum Work {
     Metadata {
         job: LibraryJob,
         path: PathBuf,
-        look_up: bool,
-        mailto: Option<String>,
+        /// The shared client, when looking up online is on.
+        client: Option<Arc<MetadataClient>>,
     },
     Enrich(Box<EnrichWork>),
 }
@@ -86,6 +86,7 @@ pub struct LibraryJobs {
     /// until settings change.
     paused: Option<String>,
     started: bool,
+    lookups: crate::lookups::Lookups,
 }
 
 impl LibraryJobs {
@@ -101,7 +102,13 @@ impl LibraryJobs {
             running_enrich: Vec::new(),
             paused: None,
             started: false,
+            lookups: crate::lookups::Lookups::default(),
         }
+    }
+
+    /// The metadata client the jobs use, shared with the agents.
+    pub fn lookups(&self) -> &crate::lookups::Lookups {
+        &self.lookups
     }
 
     /// Jobs being worked on now.
@@ -215,6 +222,10 @@ impl LibraryJobs {
         prefs: &LibraryPrefs,
         model: Option<ResolvedAiConfig>,
     ) {
+        self.lookups.update(
+            prefs.look_up_online,
+            Some(prefs.contact_email.trim().to_string()).filter(|address| !address.is_empty()),
+        );
         let free = METADATA_WORKERS.saturating_sub(self.running_metadata);
         if free > 0 {
             for job in library.take_library_jobs(LibraryJobKind::Metadata, free) {
@@ -228,9 +239,7 @@ impl LibraryJobs {
                 let work = Work::Metadata {
                     job,
                     path,
-                    look_up: prefs.look_up_online,
-                    mailto: Some(prefs.contact_email.trim().to_string())
-                        .filter(|address| !address.is_empty()),
+                    client: self.lookups.client(),
                 };
                 if self.metadata.send(work).is_ok() {
                     self.running_metadata += 1;
@@ -357,13 +366,8 @@ fn spawn_workers(
 /// Does one job on a worker thread.
 fn run(work: Work) -> Outcome {
     match work {
-        Work::Metadata {
-            job,
-            path,
-            look_up,
-            mailto,
-        } => {
-            let result = recognize(&path, look_up, mailto)
+        Work::Metadata { job, path, client } => {
+            let result = recognize(&path, client.as_deref())
                 .map(Box::new)
                 .map_err(|error| format!("{error:#}"));
             Outcome::Metadata { job, result }
@@ -411,18 +415,14 @@ fn run(work: Work) -> Outcome {
 
 fn recognize(
     path: &std::path::Path,
-    look_up: bool,
-    mailto: Option<String>,
+    client: Option<&MetadataClient>,
 ) -> anyhow::Result<Recognized> {
     let probe = glyphst_pdf::probe_document(path, PROBE_PAGES)?;
-    let client = look_up
-        .then(|| MetadataClient::new(MetadataEndpoints::default(), mailto))
-        .transpose()?;
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
-    glyphst_metadata::recognize(client.as_ref(), &probe.page_text, &probe.info, &stem)
+    glyphst_metadata::recognize(client, &probe.page_text, &probe.info, &stem)
 }
 
 /// The hash an enrichment's input is remembered by.

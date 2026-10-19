@@ -424,6 +424,12 @@ pub fn merge(existing: &str, snapshot: &NoteSnapshot, previous: &Written) -> Mer
             }
         }
     }
+    // Blocks it does not own (an agent's) keep their hashes.
+    for (name, hash) in &previous.blocks {
+        if !blocks.iter().any(|(written, _)| written == name) {
+            blocks.push((name.clone(), *hash));
+        }
+    }
     Merged {
         text: format!("{header}{body}"),
         written: Written {
@@ -434,6 +440,48 @@ pub fn merge(existing: &str, snapshot: &NoteSnapshot, previous: &Written) -> Mer
         user_tags,
         edited_blocks,
     }
+}
+
+/// The hash Glyphst keeps of a block's contents, to tell later edits.
+pub fn block_hash(content: &str) -> [u8; 32] {
+    sha(content.trim_matches('\n'))
+}
+
+/// The contents of block `name` in `note`.
+pub fn block_text(note: &str, name: &str) -> Option<String> {
+    let (_, body) = split(note);
+    find_block(body, name).map(|(_, content)| content)
+}
+
+/// `note` with block `name` holding `content`, put before `## Notes` when
+/// it is new; `None` takes the block out.
+pub fn replace_block(note: &str, name: &str, content: Option<&str>) -> String {
+    let (_, body) = split(note);
+    let header = &note[..note.len() - body.len()];
+    let mut body = body.to_string();
+    match (find_block(&body, name), content) {
+        (Some((range, _)), Some(content)) => body.replace_range(range, &block(name, content)),
+        (Some((range, _)), None) => {
+            // With its line and the blank line before it.
+            let end = if body[range.end..].starts_with('\n') {
+                range.end + 1
+            } else {
+                range.end
+            };
+            let start = if body[..range.start].ends_with("\n\n") {
+                range.start - 1
+            } else {
+                range.start
+            };
+            body.replace_range(start..end, "");
+        }
+        (None, Some(content)) => {
+            let at = body.find("\n## Notes").unwrap_or(body.len());
+            body.insert_str(at, &format!("\n{}\n", block(name, content)));
+        }
+        (None, None) => {}
+    }
+    format!("{header}{body}")
 }
 
 /// The note's id (`glyphst_id`), to find a note the user renamed.
@@ -573,5 +621,48 @@ mod tests {
         caught_up.tags = vec!["transformers".to_string(), "reviewed".to_string()];
         let next = merge(&merged.text, &caught_up, &merged.written);
         assert_eq!(next.user_tags, None);
+    }
+
+    #[test]
+    fn an_agent_block_goes_before_the_notes_and_survives_a_rewrite() {
+        let first = render(&snapshot());
+        let with_block = replace_block(
+            &first.text,
+            "agent-claude",
+            Some("Cites [[devlin2018bert]]."),
+        );
+        let notes = with_block.find("## Notes").unwrap();
+        let block_at = with_block
+            .find("<!-- glyphst:agent-claude begin -->")
+            .unwrap();
+        assert!(block_at < notes);
+        assert_eq!(
+            block_text(&with_block, "agent-claude").as_deref(),
+            Some("Cites [[devlin2018bert]].")
+        );
+        let replaced = replace_block(&with_block, "agent-claude", Some("Updated."));
+        assert_eq!(
+            block_text(&replaced, "agent-claude").as_deref(),
+            Some("Updated.")
+        );
+        assert_eq!(replaced.matches("glyphst:agent-claude begin").count(), 1);
+
+        // The sync keeps the block and the hash an agent recorded.
+        let mut written = first.written.clone();
+        written
+            .blocks
+            .push(("agent-claude".to_string(), block_hash("Updated.")));
+        let merged = merge(&replaced, &snapshot(), &written);
+        assert!(merged.text.contains("Updated."));
+        assert!(
+            merged
+                .written
+                .blocks
+                .contains(&("agent-claude".to_string(), block_hash("Updated.")))
+        );
+
+        let removed = replace_block(&replaced, "agent-claude", None);
+        assert_eq!(block_text(&removed, "agent-claude"), None);
+        assert_eq!(removed, first.text, "taken out, the note is as before");
     }
 }

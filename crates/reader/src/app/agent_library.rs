@@ -47,6 +47,32 @@ impl ReaderApp {
                 item(self).and_then(|id| set_collections(&mut self.library, id, arguments))
             }
             "add_library_item" => add_item(&mut self.library, arguments),
+            "merge_library_items" => merge(&mut self.library, arguments),
+            "set_related_items" => {
+                item(self).and_then(|id| set_related(&mut self.library, id, arguments))
+            }
+            "update_vault_note_block" => item(self).and_then(|id| {
+                if self.vault_sync.in_flight(id) {
+                    return Err("Glyphst is writing that note now; try again in a moment".into());
+                }
+                let path = note_path(&self.library, vault.as_deref(), id)
+                    .ok_or("the item has no note in the vault yet")?;
+                let edit = crate::vault_blocks::agent_write(
+                    &mut self.library,
+                    id,
+                    &path,
+                    arguments["block"].as_str().unwrap_or_default(),
+                    arguments["content"].as_str().unwrap_or_default(),
+                )?;
+                Ok(UiOutput {
+                    text: match &edit.after {
+                        Some(_) => format!("Wrote the {} block in {}.", edit.name, path.display()),
+                        None => format!("Took the {} block out.", edit.name),
+                    },
+                    vault: vec![edit],
+                    ..UiOutput::default()
+                })
+            }),
             "enrich_library_items" => {
                 let model = self
                     .user_settings
@@ -62,7 +88,10 @@ impl ReaderApp {
     /// The item a call names with `library_id`, else the document's.
     pub(super) fn agent_item_id(&self, arguments: &Value) -> Result<DocumentId, String> {
         let id = match arguments["library_id"].as_str().filter(|id| !id.is_empty()) {
-            Some(id) => super::agent::parse_library_id(id)?,
+            // A merged item's id finds the item it went into.
+            Some(id) => self
+                .library
+                .resolve_item_id(super::agent::parse_library_id(id)?),
             None => {
                 let index = self.agent_tab(arguments)?;
                 return self
@@ -197,17 +226,45 @@ pub fn item_details(library: &LibraryStore, vault: Option<&Path>, id: DocumentId
             lines.push(format!("- {point}"));
         }
     }
-    match library.primary_attachment(id) {
-        Some(attachment) => lines.push(format!(
-            "File: {}{}",
-            attachment.path.display(),
-            if attachment.path.is_file() {
-                ""
-            } else {
-                " (missing)"
-            }
-        )),
-        None => lines.push("File: none".to_string()),
+    let files = library
+        .library_attachments()
+        .iter()
+        .filter(|attachment| attachment.item_id == id)
+        .map(|attachment| {
+            format!(
+                "{}{}",
+                attachment.path.display(),
+                if attachment.path.is_file() {
+                    ""
+                } else {
+                    " (missing)"
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    match files.as_slice() {
+        [] => lines.push("File: none".to_string()),
+        [file] => lines.push(format!("File: {file}")),
+        files => lines.push(format!("Files: {}", files.join(", "))),
+    }
+    let related = library
+        .related_items(id)
+        .into_iter()
+        .filter_map(|other| library.library_item(other))
+        .map(super::agent::describe_item)
+        .collect::<Vec<_>>();
+    if !related.is_empty() {
+        lines.push(format!("Related: {}", related.join("; ")));
+    }
+    if let Some(other) = library
+        .metadata_record(id)
+        .and_then(|record| record.possible_duplicate_of)
+        .and_then(|other| library.library_item(other))
+    {
+        lines.push(format!(
+            "Possibly the same work as: {} (merge_library_items can merge them)",
+            super::agent::describe_item(other)
+        ));
     }
     if let Some(note) = note_path(library, vault, id) {
         lines.push(format!("Note: {}", note.display()));
@@ -430,6 +487,7 @@ pub fn update_item(library: &mut LibraryStore, id: DocumentId, arguments: &Value
             format!("Updated \"{title}\"; those fields stay as set.")
         },
         edits,
+        ..UiOutput::default()
     })
 }
 
@@ -447,6 +505,7 @@ pub fn set_tags(library: &mut LibraryStore, id: DocumentId, arguments: &Value) -
             _ => format!("Tagged it {}.", tags.join(", ")),
         },
         edits,
+        ..UiOutput::default()
     })
 }
 
@@ -478,6 +537,7 @@ pub fn set_collections(library: &mut LibraryStore, id: DocumentId, arguments: &V
             ),
         },
         edits,
+        ..UiOutput::default()
     })
 }
 
@@ -515,6 +575,50 @@ pub fn add_item(library: &mut LibraryStore, arguments: &Value) -> UiReply {
         "Added it as lib_{}; its details are being looked up.",
         id.0
     )))
+}
+
+/// `merge_library_items`.
+pub fn merge(library: &mut LibraryStore, arguments: &Value) -> UiReply {
+    let id = |key: &str| {
+        let id = super::agent::parse_library_id(arguments[key].as_str().unwrap_or_default())?;
+        let id = library.resolve_item_id(id);
+        library
+            .library_item(id)
+            .map(|item| (item.id, item.title.clone()))
+            .ok_or_else(|| format!("lib_{} is not in the library", id.0))
+    };
+    let (keep, title) = id("keep")?;
+    let (absorb, absorbed) = id("absorb")?;
+    let (result, edits) = library.record_edits(|library| library.merge_library_items(keep, absorb));
+    result.map_err(|error| format!("could not merge them: {error:#}"))?;
+    Ok(UiOutput {
+        text: format!(
+            "Merged \"{absorbed}\" (lib_{}) into \"{title}\" (lib_{}); its files, tags, collections and links are lib_{}'s now.",
+            absorb.0, keep.0, keep.0
+        ),
+        edits,
+        ..UiOutput::default()
+    })
+}
+
+/// `set_related_items`.
+pub fn set_related(library: &mut LibraryStore, id: DocumentId, arguments: &Value) -> UiReply {
+    let related = string_list(arguments, "related")
+        .iter()
+        .map(|other| {
+            super::agent::parse_library_id(other).map(|other| library.resolve_item_id(other))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (result, edits) = library.record_edits(|library| library.set_related_items(id, &related));
+    result.map_err(|error| format!("could not save: {error:#}"))?;
+    Ok(UiOutput {
+        text: match related.len() {
+            0 => "It has no related items now.".to_string(),
+            count => format!("Linked it to {count} related items."),
+        },
+        edits,
+        ..UiOutput::default()
+    })
 }
 
 /// `enrich_library_items`, with the library model `model`.
@@ -751,6 +855,40 @@ mod tests {
         assert_eq!(output.text, "Filed it in Machine learning/NLP, Reading.");
         assert_eq!(output.edits.len(), 1);
         assert_eq!(library.collections_for_item(bert).len(), 2);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn agents_relate_and_merge_items_and_the_merged_id_still_answers() {
+        let (mut library, folder, attention, bert) = library("merge");
+        let output = set_related(
+            &mut library,
+            attention,
+            &json!({"related": [format!("lib_{}", bert.0)]}),
+        )
+        .unwrap();
+        assert_eq!(output.text, "Linked it to 1 related items.");
+        assert_eq!(output.edits.len(), 1);
+        assert_eq!(library.related_items(bert), vec![attention]);
+        assert!(item_details(&library, None, attention).contains("Related: "));
+        library.revert_edit(&output.edits[0]).unwrap();
+        assert!(library.related_items(attention).is_empty());
+
+        assert!(
+            merge(&mut library, &json!({"keep": "lib_1", "absorb": "lib_1"})).is_err(),
+            "not into itself"
+        );
+        let output = merge(
+            &mut library,
+            &json!({"keep": format!("lib_{}", attention.0), "absorb": format!("lib_{}", bert.0)}),
+        )
+        .unwrap();
+        assert_eq!(output.edits.len(), 1);
+        assert!(library.library_item(bert).is_none());
+        assert_eq!(library.resolve_item_id(bert), attention);
+        assert!(item_details(&library, None, attention).contains("Files: "));
+        library.revert_edit(&output.edits[0]).unwrap();
+        assert!(library.library_item(bert).is_some());
         let _ = std::fs::remove_dir_all(folder);
     }
 

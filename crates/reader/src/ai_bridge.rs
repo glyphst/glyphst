@@ -34,13 +34,15 @@ pub struct UiCall {
 pub struct UiOutput {
     pub text: String,
     pub edits: Vec<LibraryEdit>,
+    /// Blocks it wrote in vault notes.
+    pub vault: Vec<crate::vault_blocks::VaultBlockEdit>,
 }
 
 impl From<String> for UiOutput {
     fn from(text: String) -> Self {
         Self {
             text,
-            edits: Vec::new(),
+            ..Self::default()
         }
     }
 }
@@ -530,6 +532,60 @@ static SPECS: &[Spec] = &[
             )
         },
     },
+    Spec {
+        name: "merge_library_items",
+        description: "Merge a duplicate into the item it duplicates: `keep` takes the other's files, tags, collections, related items and empty fields, and the other goes. get_library_item names likely duplicates. The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "keep": {"type": "string", "description": "The library id that stays (lib_12)"},
+                "absorb": {"type": "string", "description": "The library id merged into it"}
+            })
+        },
+        required: &["keep", "absorb"],
+        document: false,
+        describe: |arguments| {
+            format!(
+                "Merged {} into {}",
+                text_of(arguments, "absorb"),
+                text_of(arguments, "keep")
+            )
+        },
+    },
+    Spec {
+        name: "set_related_items",
+        description: "Replace the items related to a library item (library ids; the link goes both ways). The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_id": library_id_property(),
+                "related": {"type": "array", "items": {"type": "string"}}
+            })
+        },
+        required: &["related"],
+        document: true,
+        describe: |arguments| {
+            format!(
+                "Linked it to {} related items",
+                string_list(arguments, "related").len()
+            )
+        },
+    },
+    Spec {
+        name: "update_vault_note_block",
+        description: "Write your own block in a library item's vault note, such as agent-claude: Markdown placed before the user's notes, between glyphst markers. Only agent- blocks; empty content takes yours out. Refused when the user edited the block. The user can undo it.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "library_id": library_id_property(),
+                "block": {"type": "string", "description": "agent- and a short name, such as agent-claude"},
+                "content": {"type": "string", "description": "Markdown; empty removes the block"}
+            })
+        },
+        required: &["block", "content"],
+        document: true,
+        describe: |arguments| format!("Wrote the {} block", text_of(arguments, "block")),
+    },
 ];
 
 fn library_id_property() -> Value {
@@ -574,6 +630,9 @@ mod tests {
             ("set_item_collections", ToolEffect::Mutate),
             ("add_library_item", ToolEffect::Mutate),
             ("enrich_library_items", ToolEffect::Mutate),
+            ("merge_library_items", ToolEffect::Mutate),
+            ("set_related_items", ToolEffect::Mutate),
+            ("update_vault_note_block", ToolEffect::Mutate),
         ] {
             let tool = registry
                 .get(name)

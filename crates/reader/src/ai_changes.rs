@@ -7,7 +7,7 @@ use glyphst_agent_host::scratch::{FileChanges, Scratch};
 use glyphst_ai::tools::{ToolContext, ToolOrigin};
 use glyphst_library::{LibraryEdit, LibraryStore, is_edit_conflict};
 
-use crate::theme::Tokens;
+use crate::{theme::Tokens, vault_blocks::VaultBlockEdit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeState {
@@ -37,6 +37,8 @@ pub enum ChangeTarget {
         scratch: Scratch,
         changes: FileChanges,
     },
+    /// A block an agent wrote in a vault note.
+    VaultBlock(VaultBlockEdit),
 }
 
 impl Change {
@@ -47,6 +49,7 @@ impl Change {
                 [file] => format!("Changed {file}"),
                 files => format!("Changed {} files: {}", files.len(), files.join(", ")),
             },
+            ChangeTarget::VaultBlock(edit) => edit.describe(),
         };
         match &self.origin {
             ToolOrigin::Builtin => what,
@@ -77,6 +80,13 @@ impl ChangeLog {
     pub fn record(&mut self, context: &ToolContext, edits: Vec<LibraryEdit>) {
         for edit in edits {
             self.push(context, ChangeTarget::Library(edit));
+        }
+    }
+
+    /// Records the blocks a call wrote in vault notes.
+    pub fn record_vault(&mut self, context: &ToolContext, edits: Vec<VaultBlockEdit>) {
+        for edit in edits {
+            self.push(context, ChangeTarget::VaultBlock(edit));
         }
     }
 
@@ -170,6 +180,28 @@ impl ChangeLog {
                     }
                     Err(error) => Err(error),
                 }
+            }
+            (ChangeTarget::VaultBlock(edit), state) => {
+                let (expected, target) = match state {
+                    ChangeState::Reverted => (&edit.after, &edit.before),
+                    ChangeState::Applied => (&edit.before, &edit.after),
+                };
+                // Refused when the block changed since: say so as for the
+                // others.
+                return match crate::vault_blocks::write_block(
+                    library,
+                    edit.item,
+                    &edit.path,
+                    &edit.name,
+                    expected.as_deref(),
+                    target.as_deref(),
+                ) {
+                    Ok(()) => {
+                        change.state = state;
+                        Ok(())
+                    }
+                    Err(error) => Err(format!("“{}”: {error}", change.label())),
+                };
             }
         };
         match result {

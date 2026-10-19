@@ -179,6 +179,11 @@ impl VaultSync {
     }
 
     /// Whether notes are being written (screenshots wait).
+    /// Whether the worker is writing item `id`'s note now.
+    pub fn in_flight(&self, id: DocumentId) -> bool {
+        self.in_flight.contains(&id)
+    }
+
     pub fn busy(&self) -> bool {
         !self.in_flight.is_empty()
     }

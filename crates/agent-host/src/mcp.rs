@@ -278,7 +278,7 @@ fn tool_list(tools: &ToolRegistry) -> Vec<Value> {
                     "readOnlyHint": effect == ToolEffect::Read,
                     "destructiveHint": effect == ToolEffect::Mutate,
                     "idempotentHint": effect == ToolEffect::Read,
-                    "openWorldHint": false,
+                    "openWorldHint": tools.open_world(&definition.name),
                 },
             })
         })

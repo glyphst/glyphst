@@ -730,6 +730,37 @@ pub fn describe_step(name: &str, arguments: &str) -> Step {
             StepKind::Change,
         ),
         "enrich_library_items" => step("Queuing", "Queued", "the AI pass".into(), StepKind::Change),
+        "merge_library_items" => step(
+            "Merging",
+            "Merged",
+            "two library items".into(),
+            StepKind::Change,
+        ),
+        "set_related_items" => step(
+            "Linking",
+            "Linked",
+            "related items".into(),
+            StepKind::Change,
+        ),
+        "update_vault_note_block" => step(
+            "Writing",
+            "Wrote",
+            format!(
+                "the {} block",
+                arguments["block"].as_str().unwrap_or("agent")
+            ),
+            StepKind::Change,
+        ),
+        "lookup_metadata" => step(
+            "Looking up",
+            "Looked up",
+            arguments["identifier"]
+                .as_str()
+                .or(arguments["title"].as_str())
+                .unwrap_or("a work")
+                .to_string(),
+            StepKind::Search,
+        ),
         // External agents' steps are already titles; the Reader's own tools
         // among them ("read document") count as theirs.
         other if other.contains(' ') => {

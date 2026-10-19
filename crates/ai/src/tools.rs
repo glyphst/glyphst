@@ -53,6 +53,11 @@ pub trait Tool: Send + Sync + 'static {
     fn describe(&self, _arguments: &Value) -> Option<String> {
         None
     }
+
+    /// Whether it reaches outside the app (the network), for MCP's hints.
+    fn open_world(&self) -> bool {
+        false
+    }
 }
 
 /// The tools of a run, in the order they are offered.
@@ -97,6 +102,10 @@ impl ToolRegistry {
     pub fn effect(&self, name: &str) -> ToolEffect {
         self.get(name)
             .map_or(ToolEffect::Mutate, |tool| tool.effect())
+    }
+
+    pub fn open_world(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|tool| tool.open_world())
     }
 
     pub fn execute(&self, call: &AgentToolCall, cx: &ToolContext) -> AgentToolResult {

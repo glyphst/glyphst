@@ -31,6 +31,7 @@ impl ReaderApp {
     pub(crate) fn agent_tools(&self) -> ToolRegistry {
         let mut registry = ToolRegistry::new();
         self.agent_documents.register(&mut registry);
+        self.library_jobs.lookups().register(&mut registry);
         self.agent_bridge.register(&mut registry);
         registry
     }
@@ -182,11 +183,15 @@ impl ReaderApp {
     pub(crate) fn serve_agent_calls(&mut self, ctx: &egui::Context) {
         while let Ok(call) = self.agent_calls.try_recv() {
             let reply = self.agent_call(&call, ctx);
-            if let Ok(output) = &reply
-                && !output.edits.is_empty()
-            {
-                self.agent_changes
-                    .record(&call.context, output.edits.clone());
+            if let Ok(output) = &reply {
+                if !output.edits.is_empty() {
+                    self.agent_changes
+                        .record(&call.context, output.edits.clone());
+                }
+                if !output.vault.is_empty() {
+                    self.agent_changes
+                        .record_vault(&call.context, output.vault.clone());
+                }
             }
             let _ = call.reply.send(reply);
         }
@@ -260,6 +265,12 @@ impl ReaderApp {
                                 self.pending_actions.push(ViewAction::GoToPage(page));
                             }
                         }
+                    }
+                    Some(crate::ai_changes::ChangeTarget::VaultBlock(edit)) => {
+                        ctx.open_url(egui::OpenUrl::new_tab(format!(
+                            "file://{}",
+                            edit.path.display()
+                        )));
                     }
                     Some(crate::ai_changes::ChangeTarget::Files { scratch, .. }) => {
                         ctx.open_url(egui::OpenUrl::new_tab(format!(
@@ -694,6 +705,7 @@ impl ReaderApp {
         Ok(UiOutput {
             text: format!("Added {id} on page {}: \"{quoted}\".", page + 1),
             edits,
+            ..UiOutput::default()
         })
     }
 
@@ -758,6 +770,7 @@ impl ReaderApp {
         Ok(UiOutput {
             text: format!("Added bookmark b{id} on page {}.", page + 1),
             edits,
+            ..UiOutput::default()
         })
     }
 
@@ -795,6 +808,7 @@ impl ReaderApp {
         Ok(UiOutput {
             text: format!("Updated \"{title}\"."),
             edits,
+            ..UiOutput::default()
         })
     }
 
@@ -808,7 +822,11 @@ impl ReaderApp {
         match result {
             Ok(true) => {
                 self.reload_annotations(index);
-                Ok(UiOutput { text: done, edits })
+                Ok(UiOutput {
+                    text: done,
+                    edits,
+                    ..UiOutput::default()
+                })
             }
             Ok(false) => Err("no annotation has that id; call list_annotations".into()),
             Err(error) => Err(format!("{error:#}")),
