@@ -4,5 +4,7 @@
 
 pub mod download;
 pub mod install;
+pub mod llama;
 pub mod manifest;
+pub mod server;
 pub mod setup;

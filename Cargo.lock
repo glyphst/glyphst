@@ -2961,6 +2961,7 @@ dependencies = [
  "glyphst-core",
  "glyphst-search",
  "log",
+ "rand 0.10.3",
  "reqwest",
  "serde",
  "serde_json",

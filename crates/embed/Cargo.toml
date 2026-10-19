@@ -11,6 +11,7 @@ anyhow.workspace = true
 glyphst-core = { path = "../core" }
 glyphst-search = { path = "../search" }
 log.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

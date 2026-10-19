@@ -3,6 +3,7 @@
 //! the thread that builds it, and the search over it.
 
 pub mod chunk;
+pub mod embed;
 pub mod extract;
 pub mod index;
 pub mod indexer;
