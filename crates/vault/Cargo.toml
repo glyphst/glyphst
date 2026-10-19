@@ -1,0 +1,12 @@
+[package]
+name = "glyphst-vault"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+sha2.workspace = true
+unicode-normalization.workspace = true

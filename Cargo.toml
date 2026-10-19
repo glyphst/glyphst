@@ -16,6 +16,7 @@ members = [
     "crates/settings",
     "crates/translation",
     "crates/ui",
+    "crates/vault",
 ]
 resolver = "3"
 
