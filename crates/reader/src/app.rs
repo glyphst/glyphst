@@ -3724,6 +3724,12 @@ impl ReaderApp {
                 zotero: dirs::home_dir()
                     .map(|home| home.join("Zotero").join("zotero.sqlite"))
                     .filter(|path| path.is_file()),
+                index: self.library_search.as_ref().map(|search| {
+                    (
+                        search.status(),
+                        glyphst_search::Store::size_on_disk(search.path()),
+                    )
+                }),
             };
             self.settings_window.show(
                 ctx,
@@ -3750,8 +3756,15 @@ impl ReaderApp {
             }
             for action in std::mem::take(&mut self.settings_window.library_actions) {
                 use crate::settings_window::LibraryAction;
+                if action == LibraryAction::Reindex {
+                    if let Some(search) = &self.library_search {
+                        search.reindex();
+                    }
+                    continue;
+                }
                 self.settings_window.open = false;
                 match action {
+                    LibraryAction::Reindex => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5095,6 +5108,9 @@ impl eframe::App for ReaderApp {
             }
         }
         if let Some(search) = &mut self.library_search {
+            if self.persist {
+                search.set_paused(self.prefs.library.index_paused);
+            }
             search.follow(&self.library);
             search.poll();
         }

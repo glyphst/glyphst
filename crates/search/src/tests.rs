@@ -344,3 +344,28 @@ fn an_epub_is_read_in_its_default_layout_with_sections() {
     assert!(hit.coverage >= 1.0);
     assert!(!hit.quote.is_empty(), "an anchor to find it in any layout");
 }
+
+#[test]
+fn reading_speed_is_learned_and_gives_the_time_left() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(
+        store.status().unwrap().seconds_left(),
+        None,
+        "nothing measured yet"
+    );
+    store.record_estimate("page", 100.0, 30).unwrap();
+    store.record_estimate("page", 200.0, 30).unwrap();
+    let mean = store.status().unwrap().ms_per_page.unwrap();
+    assert!((mean - 150.0).abs() < 1.0, "{mean}");
+    let status = IndexStatus {
+        docs: 3,
+        done: 1,
+        pages: 100,
+        pages_done: 40,
+        unopened: 1,
+        ms_per_page: Some(100.0),
+        ..IndexStatus::default()
+    };
+    // 60 pages left, and the unopened document about 50 more.
+    assert_eq!(status.seconds_left(), Some(11));
+}

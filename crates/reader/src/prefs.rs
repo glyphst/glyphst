@@ -107,6 +107,8 @@ pub struct LibraryPrefs {
     pub vault: Option<String>,
     /// The library tab asked where the library should live (frame 04k).
     pub folder_asked: bool,
+    /// Reading the library's text for search waits until resumed.
+    pub index_paused: bool,
 }
 
 impl LibraryPrefs {
@@ -132,6 +134,7 @@ impl Default for LibraryPrefs {
             look_up_online: true,
             contact_email: String::new(),
             enrich_new: true,
+            index_paused: false,
             ai_create_tags: true,
             suggest_collections: true,
             vault: None,

@@ -62,7 +62,7 @@ pub struct DocJob {
 }
 
 /// How far the index is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct IndexStatus {
     pub docs: usize,
     pub done: usize,
@@ -70,11 +70,26 @@ pub struct IndexStatus {
     pub pages: usize,
     pub pages_done: usize,
     pub chunks: usize,
+    /// Documents waiting that were never opened (their pages unknown).
+    pub unopened: usize,
+    /// How long a page takes to read on this machine, once measured.
+    pub ms_per_page: Option<f64>,
 }
 
 impl IndexStatus {
     pub fn waiting(&self) -> usize {
         self.docs - self.done - self.failed
+    }
+
+    /// About how long reading the rest takes: the pages known, and for
+    /// documents not opened yet, the average document's.
+    pub fn seconds_left(&self) -> Option<u64> {
+        let ms = self.ms_per_page?;
+        let opened_pages = self.pages.max(1) as f64;
+        let opened_docs = self.docs.saturating_sub(self.unopened).max(1) as f64;
+        let remaining = self.pages.saturating_sub(self.pages_done) as f64
+            + self.unopened as f64 * opened_pages / opened_docs;
+        Some((remaining * ms / 1_000.0).round() as u64)
     }
 }
 
@@ -302,7 +317,9 @@ impl Store {
                     COALESCE(SUM(state = 'failed' AND retry_at IS NULL), 0),
                     COALESCE(SUM(page_count), 0),
                     COALESCE(SUM(pages_done), 0),
-                    (SELECT COUNT(*) FROM chunks)
+                    (SELECT COUNT(*) FROM chunks),
+                    COALESCE(SUM(page_count = 0 AND state != 'failed'), 0),
+                    (SELECT ms_per_unit FROM estimates WHERE kind = 'page')
              FROM docs",
             [],
             |row| {
@@ -313,9 +330,40 @@ impl Store {
                     pages: row.get::<_, i64>(3)? as usize,
                     pages_done: row.get::<_, i64>(4)? as usize,
                     chunks: row.get::<_, i64>(5)? as usize,
+                    unopened: row.get::<_, i64>(6)? as usize,
+                    ms_per_page: row.get(7)?,
                 })
             },
         )?)
+    }
+
+    /// Learns how long a unit of work takes here: a running mean over the
+    /// last hundred or so measurements.
+    pub fn record_estimate(&self, kind: &str, ms_per_unit: f64, units: usize) -> Result<()> {
+        if units == 0 || !ms_per_unit.is_finite() {
+            return Ok(());
+        }
+        let old: Option<(f64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT ms_per_unit, samples FROM estimates WHERE kind = ?1",
+                [kind],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (mean, samples) = match old {
+            Some((mean, samples)) => {
+                let samples = (samples + units as i64).min(100);
+                let weight = units as f64 / samples as f64;
+                (mean + (ms_per_unit - mean) * weight, samples)
+            }
+            None => (ms_per_unit, units as i64),
+        };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO estimates (kind, ms_per_unit, samples) VALUES (?1, ?2, ?3)",
+            params![kind, mean, samples],
+        )?;
+        Ok(())
     }
 
     /// The document with this content, if the index has it.

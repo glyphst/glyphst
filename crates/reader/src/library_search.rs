@@ -19,6 +19,7 @@ const NEW_ITEM_SECONDS: u64 = 24 * 3_600;
 
 pub struct SearchService {
     indexer: Indexer,
+    path: PathBuf,
     queries: Sender<(u64, SearchRequest)>,
     answers: Receiver<(u64, Result<SearchResults, String>)>,
     /// The last search asked, and the answer to it once it came.
@@ -42,6 +43,7 @@ impl SearchService {
         let indexer = Indexer::start(path.to_path_buf(), move || notify.request_repaint())?;
         let (queries, receiver) = mpsc::channel::<(u64, SearchRequest)>();
         let (answer, answers) = mpsc::channel();
+        let index_path = path.to_path_buf();
         let path = path.to_path_buf();
         let ctx = ctx.clone();
         std::thread::Builder::new()
@@ -68,6 +70,7 @@ impl SearchService {
             })?;
         Ok(Self {
             indexer,
+            path: index_path,
             queries,
             answers,
             asked: 0,
@@ -133,6 +136,29 @@ impl SearchService {
     pub fn set_paused(&self, paused: bool) {
         self.indexer.set_paused(paused);
     }
+
+    pub fn is_paused(&self) -> bool {
+        self.indexer.is_paused()
+    }
+
+    pub fn reindex(&self) {
+        self.indexer.reindex();
+    }
+
+    /// The index's file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// `about 12 min left`, from the index's learned speed.
+pub fn time_left(status: &IndexStatus) -> Option<String> {
+    let seconds = status.seconds_left()?;
+    Some(match seconds {
+        0..60 => "under a minute left".to_string(),
+        60..3_600 => format!("about {} min left", seconds.div_ceil(60)),
+        _ => format!("about {:.1} h left", seconds as f64 / 3_600.0),
+    })
 }
 
 /// The library's items and files, as the index follows them.

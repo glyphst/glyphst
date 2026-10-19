@@ -213,6 +213,8 @@ pub struct LibraryFacts {
     pub unenriched: usize,
     pub model: Option<String>,
     pub zotero: Option<std::path::PathBuf>,
+    /// The search index, when it runs: how far, and its size on disk.
+    pub index: Option<(glyphst_search::IndexStatus, u64)>,
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -236,6 +238,8 @@ pub enum LibraryAction {
     ChooseFolder,
     Enrich,
     ImportZotero,
+    /// Read the library's text again from the start.
+    Reindex,
 }
 
 /// The Library page (frame 07 · library).
@@ -244,6 +248,7 @@ fn library(
     prefs: &mut Prefs,
     facts: &LibraryFacts,
     actions: &mut Vec<LibraryAction>,
+    scroll_to: &mut Option<String>,
 ) {
     use crate::prefs::{AddOnOpen, ImportMode};
     let library = &mut prefs.library;
@@ -356,16 +361,59 @@ fn library(
             |ui| {
                 if facts.unenriched > 0
                     && ui
-                        .add(Button::bracket(&format!(
-                            "enrich {} items…",
-                            facts.unenriched
-                        )))
+                        .add(Button::bracket(&if facts.unenriched == 1 {
+                            "enrich 1 item…".to_string()
+                        } else {
+                            format!("enrich {} items…", facts.unenriched)
+                        }))
                         .clicked()
                 {
                     actions.push(LibraryAction::Enrich);
                 }
             },
         );
+    });
+    ui.add_space(10.0);
+    if scroll_to.as_deref() == Some("search") {
+        let at = egui::Rect::from_min_size(ui.cursor().min, vec2(1.0, 1.0));
+        ui.scroll_to_rect(at, Some(egui::Align::Min));
+        *scroll_to = None;
+    }
+    ui_settings::group(ui, "search", |group| {
+        let caption = match &facts.index {
+            Some((status, bytes)) => {
+                let mut caption = format!(
+                    "{} / {} read · {} passages · {}",
+                    status.done,
+                    status.docs,
+                    status.chunks,
+                    crate::sidebar::format_size(*bytes)
+                );
+                if status.waiting() > 0
+                    && let Some(left) = crate::library_search::time_left(status)
+                {
+                    caption.push_str(&format!(" · {left}"));
+                }
+                caption
+            }
+            None => "starts with the library".to_string(),
+        };
+        group.row("text index", Some(&*caption), |ui| {
+            // The row lays out from the right.
+            if facts.index.is_some() {
+                if ui.add(Button::bracket_muted("read again")).clicked() {
+                    actions.push(LibraryAction::Reindex);
+                }
+                let label = if library.index_paused {
+                    "resume"
+                } else {
+                    "pause"
+                };
+                if ui.add(Button::bracket(label)).clicked() {
+                    library.index_paused = !library.index_paused;
+                }
+            }
+        });
     });
     ui.add_space(10.0);
     ui_settings::group(ui, "import", |group| {
@@ -646,9 +694,13 @@ impl SettingsWindow {
                     }
                     Section::Reading => reading(ui, app.prefs),
                     Section::Presenting => presenting(ui, app.prefs),
-                    Section::Library => {
-                        library(ui, app.prefs, &app.library, &mut self.library_actions)
-                    }
+                    Section::Library => library(
+                        ui,
+                        app.prefs,
+                        &app.library,
+                        &mut self.library_actions,
+                        &mut self.scroll_to,
+                    ),
                     Section::Effects => {
                         // The previews are animated.
                         ui.ctx().request_repaint();

@@ -137,6 +137,35 @@ impl ReaderApp {
                     .priority(1),
             );
         }
+        // Reading the library's text for search.
+        if let Some(search) = &self.library_search {
+            let status = search.status();
+            let waiting = status.waiting();
+            if waiting > 0 {
+                let text = if search.is_paused() {
+                    format!("text index paused · {waiting} to read")
+                } else {
+                    let cells = 8;
+                    let filled = (status.done * cells / status.docs.max(1)).min(cells);
+                    format!(
+                        "reading text {}{} {} / {}",
+                        "━".repeat(filled),
+                        "─".repeat(cells - filled),
+                        status.done,
+                        status.docs
+                    )
+                };
+                segments.insert(
+                    1,
+                    Segment::label("index", Side::Left, Some("file-search"), text)
+                        .tooltip(match crate::library_search::time_left(&status) {
+                            Some(left) => format!("reading the library's text · {left}"),
+                            None => "reading the library's text · settings › library".to_string(),
+                        })
+                        .priority(1),
+                );
+            }
+        }
         if let Some((text, finished, tip)) = import {
             segments.insert(
                 1,
@@ -146,6 +175,10 @@ impl ReaderApp {
             );
         }
         for (id, response) in status::bar(ui, segments) {
+            if id == "index" && response.clicked() {
+                self.settings_window
+                    .show_section(crate::settings_window::Section::Library);
+            }
             if id == "import" && response.clicked() {
                 if self.importer.is_running() {
                     self.importer.cancel();

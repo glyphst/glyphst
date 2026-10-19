@@ -303,6 +303,7 @@ if [[ ${tier} == screens ]]; then
         "07-reading @ --settings reading"
         "07-presenting @ --settings presenting"
         "07-library @ --settings library"
+        "07-library-search @ --settings library:search --library-demo search"
         "07-effects @ --settings effects"
         "07-translation @ --settings translation"
         "07-ai @ --settings ai"

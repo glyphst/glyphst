@@ -245,6 +245,7 @@ impl Worker {
         };
         let page_count = open.reader.page_count;
         let end = (job.pages_done + STEP_PAGES).min(page_count);
+        let started = std::time::Instant::now();
         let mut offset = job.glyphs_done;
         let mut pages = Vec::new();
         for page in job.pages_done..end {
@@ -257,6 +258,8 @@ impl Worker {
             pages.push((page, chunks));
         }
         open.next_page = end;
+        let read = end - job.pages_done;
+        let ms = started.elapsed().as_secs_f64() * 1_000.0 / read.max(1) as f64;
         let format = format_name(open.reader.format);
         self.store.save_step(
             &Step {
@@ -269,6 +272,7 @@ impl Worker {
             },
             now(),
         )?;
+        self.store.record_estimate("page", ms, read)?;
         if end >= page_count {
             self.open = None;
         }
