@@ -8,6 +8,7 @@
 | `ui` | The glyph design system on egui: tokens, type, icons and one component per component of `design/main.pen` |
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
+| `metadata` | Recognising library items: identifiers in a document's first pages, lookups in arXiv, Crossref, OpenAlex and Open Library, duplicate detection, merging into an item |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
 | `agent-host` | External agents (Claude Code, Codex, Pi, ACP agents): their drivers, working folders with git checkpoints, and the MCP server that serves them the Reader's tools |
 | Translation crates | Translation domain, PDF production, service orchestration |

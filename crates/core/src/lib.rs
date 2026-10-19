@@ -1,8 +1,25 @@
 use std::ops::Range;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 pub mod paths;
+
+/// How long a `Retry-After` header asks to wait: seconds or an HTTP date,
+/// at most 15 minutes.
+pub fn retry_after_duration(value: &str) -> Option<Duration> {
+    const MAX_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    Some(
+        deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+            .min(MAX_RETRY_AFTER),
+    )
+}
 
 /// Lowercase hexadecimal encoding, as digest identifiers are stored.
 pub fn lower_hex(bytes: impl AsRef<[u8]>) -> String {

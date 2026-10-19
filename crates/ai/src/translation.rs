@@ -1,5 +1,5 @@
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use reqwest::StatusCode;
@@ -820,19 +820,7 @@ fn http_status_error(
     }
 }
 
-pub fn retry_after_duration(value: &str) -> Option<Duration> {
-    const MAX_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
-    }
-    let deadline = httpdate::parse_http_date(value).ok()?;
-    Some(
-        deadline
-            .duration_since(SystemTime::now())
-            .unwrap_or_default()
-            .min(MAX_RETRY_AFTER),
-    )
-}
+pub use glyphst_core::retry_after_duration;
 
 fn request_error(provider: &str, error: reqwest::Error) -> AiTranslationError {
     let timeout = error.is_timeout();

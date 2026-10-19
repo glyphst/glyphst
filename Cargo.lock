@@ -2928,6 +2928,7 @@ name = "glyphst-core"
 version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
+ "httpdate",
  "serde",
 ]
 
@@ -2980,6 +2981,22 @@ dependencies = [
  "quick-xml 0.42.0",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "glyphst-metadata"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "glyphst-library",
+ "regex",
+ "reqwest",
+ "roxmltree 0.21.1",
+ "serde",
+ "serde_json",
+ "tiny_http",
+ "unicode-normalization",
 ]
 
 [[package]]

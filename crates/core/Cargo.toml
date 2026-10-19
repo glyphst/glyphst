@@ -8,4 +8,5 @@ workspace = true
 
 [dependencies]
 dirs.workspace = true
+httpdate.workspace = true
 serde.workspace = true
