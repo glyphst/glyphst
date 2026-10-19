@@ -67,6 +67,57 @@ pub enum Colours {
     Custom,
 }
 
+/// Whether opening a document adds it to the library.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AddOnOpen {
+    Off,
+    /// Added where it is: its history and highlights stay with its path.
+    #[default]
+    InPlace,
+}
+
+/// How dropped and imported files come in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportMode {
+    /// Copied into the library folder.
+    #[default]
+    Copy,
+    /// Left where they are.
+    Link,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibraryPrefs {
+    pub add_on_open: AddOnOpen,
+    pub import_mode: ImportMode,
+    /// Look metadata up in arXiv, Crossref, OpenAlex and Open Library.
+    pub look_up_online: bool,
+    /// Sent to Crossref (its polite pool) when set; nothing else is.
+    pub contact_email: String,
+    /// The library model summarises, tags and files each item added.
+    pub enrich_new: bool,
+    /// The AI may make up to two new tags an item; otherwise it only uses
+    /// tags the library has.
+    pub ai_create_tags: bool,
+    /// The AI may propose new collections (never makes them itself).
+    pub suggest_collections: bool,
+}
+
+impl Default for LibraryPrefs {
+    fn default() -> Self {
+        Self {
+            add_on_open: AddOnOpen::default(),
+            import_mode: ImportMode::default(),
+            look_up_online: true,
+            contact_email: String::new(),
+            enrich_new: true,
+            ai_create_tags: true,
+            suggest_collections: true,
+        }
+    }
+}
+
 /// The colour a wallpaper's scheme is built on, found once per image.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WallpaperSeed {
@@ -147,6 +198,9 @@ pub struct Prefs {
     /// Page counts of documents opened before, by path, for home's
     /// progress.
     pub page_counts: BTreeMap<String, usize>,
+    /// How documents come into the library and what the AI does with them
+    /// (Settings › Library).
+    pub library: LibraryPrefs,
     /// While translated pages show, the original shows under the pointer.
     pub original_on_hover: bool,
     /// Opening a PDF starts translating it.
@@ -217,6 +271,7 @@ impl Default for Prefs {
             assistant_width: crate::shell::ASSISTANT_WIDTH,
             target_language: None,
             page_counts: BTreeMap::new(),
+            library: LibraryPrefs::default(),
             original_on_hover: true,
             translate_as_read: false,
             shortcuts: Overrides::new(),

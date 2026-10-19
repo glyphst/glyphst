@@ -66,7 +66,31 @@ impl ReaderApp {
         }
         let bytes = self.library_size.map_or(0, |(_, bytes)| bytes);
         let highlights = self.library.highlight_count();
-        let segments = vec![
+        // Frame 04g: an import under way, or the last one's tally.
+        let import = self.importer.progress().map(|progress| {
+            let mut text = if progress.finished {
+                format!("added {}", progress.added.len())
+            } else {
+                format!(
+                    "adding {} / {}",
+                    progress.processed,
+                    progress.total.max(progress.processed)
+                )
+            };
+            if !progress.duplicates.is_empty() {
+                text.push_str(&format!(" · {} duplicates", progress.duplicates.len()));
+            }
+            if !progress.failed.is_empty() {
+                text.push_str(&format!(" · {} failed", progress.failed.len()));
+            }
+            let tip = if progress.finished {
+                "dismiss"
+            } else {
+                "cancel the import (files added stay)"
+            };
+            (text, progress.finished, tip)
+        });
+        let mut segments = vec![
             Segment::label(
                 "library",
                 Side::Left,
@@ -97,7 +121,23 @@ impl ReaderApp {
                 .static_text()
                 .priority(1),
         ];
-        status::bar(ui, segments);
+        if let Some((text, finished, tip)) = import {
+            segments.insert(
+                1,
+                Segment::label("import", Side::Left, Some("download"), text)
+                    .accent(!finished)
+                    .tooltip(tip),
+            );
+        }
+        for (id, response) in status::bar(ui, segments) {
+            if id == "import" && response.clicked() {
+                if self.importer.is_running() {
+                    self.importer.cancel();
+                } else {
+                    self.importer.dismiss();
+                }
+            }
+        }
     }
 
     fn document_status(&mut self, ui: &mut egui::Ui, active: usize) {

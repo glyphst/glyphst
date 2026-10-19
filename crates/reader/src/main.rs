@@ -44,6 +44,7 @@ mod generation;
 mod gpu;
 mod harness;
 mod home;
+mod import;
 mod keymap_page;
 mod keys;
 mod launcher;

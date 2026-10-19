@@ -423,6 +423,8 @@ pub struct ReaderApp {
     page_return: Option<u64>,
     /// First-page covers for home and the launcher.
     covers: crate::covers::Covers,
+    /// Files coming into the library (dropped, or added as they open).
+    importer: crate::import::Importer,
 }
 
 impl ReaderApp {
@@ -650,6 +652,7 @@ impl ReaderApp {
             gallery: launch.gallery.then(Default::default),
             page_return: None,
             covers: crate::covers::Covers::new(&cc.egui_ctx),
+            importer: crate::import::Importer::default(),
         };
         app.rebuild_keymap();
         if let Some(query) = launch.palette {
@@ -775,6 +778,20 @@ impl ReaderApp {
                 self.tabs.push(tab);
                 if self.persist {
                     let _ = self.library.mark_library_item_opened(path);
+                    // Settings › Library › when a file is opened.
+                    if self.prefs.library.add_on_open == crate::prefs::AddOnOpen::InPlace
+                        && crate::import::is_library_document(path)
+                        && self.library.library_item_for_path(path).is_none()
+                    {
+                        self.importer.start(
+                            &self.library,
+                            vec![path.to_path_buf()],
+                            crate::prefs::ImportMode::Link,
+                            None,
+                            true,
+                            ctx,
+                        );
+                    }
                 }
                 self.activate(Some(self.tabs.len() - 1));
                 let tab = &self.tabs[self.tabs.len() - 1];
@@ -4345,11 +4362,47 @@ impl eframe::App for ReaderApp {
                 .dropped_files
                 .iter()
                 .map(|file| file.path().to_path_buf())
-                .filter(|path| is_document(path))
                 .collect()
         });
-        for path in dropped {
+        // On the library, everything dropped comes in; elsewhere documents
+        // open and folders come in.
+        let on_library = self.active.is_none()
+            && self
+                .page_focused
+                .is_some_and(|index| matches!(self.pages.get(index), Some(Page::Library(_))));
+        let (imports, opens): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .filter(|path| path.is_dir() || is_document(path))
+            .partition(|path| on_library || path.is_dir());
+        if !imports.is_empty() && self.persist {
+            self.importer.start(
+                &self.library,
+                imports,
+                self.prefs.library.import_mode,
+                None,
+                false,
+                &ctx,
+            );
+        }
+        for path in opens {
             self.open(&path, &ctx, None);
+        }
+        if self.persist {
+            self.importer.poll(&mut self.library);
+            // New items get their metadata looked up (and then the AI pass).
+            let added = self.importer.take_added();
+            if !added.is_empty()
+                && let Err(error) = self.library.enqueue_library_jobs(
+                    &added,
+                    glyphst_library::LibraryJobKind::Metadata,
+                    glyphst_library::LibraryJobOrigin::OnAdd,
+                    false,
+                )
+            {
+                self.notices.push(format!(
+                    "Could not queue the new items' metadata: {error:#}"
+                ));
+            }
         }
         // Pictures dropped while the assistant is open go with its next
         // message.
