@@ -11,7 +11,7 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 3] = ["all", "item", "review"];
+pub const STATES: [&str; 6] = ["all", "item", "review", "backfill", "folder", "identifier"];
 
 struct Paper {
     title: &'static str,

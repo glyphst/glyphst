@@ -52,13 +52,22 @@ impl LibraryStore {
     /// Copies every managed file (and the assistant's pictures) into
     /// `new_root`, checks each copy, points the library there, and only
     /// then deletes the old copies. Interrupted, the library stays where it
-    /// was; run again, files already copied are kept.
+    /// was; run again, files already copied are kept. The Reader runs the
+    /// copying on a worker: [`Self::plan_files_move`],
+    /// [`copy_planned_files`], then [`Self::commit_files_move`].
     pub fn move_files_root(
         &mut self,
         new_root: &Path,
         cancelled: &AtomicBool,
-        mut progress: impl FnMut(usize, usize),
+        progress: impl FnMut(usize, usize),
     ) -> Result<FilesMove> {
+        let plan = self.plan_files_move(new_root)?;
+        copy_planned_files(&plan, cancelled, progress)?;
+        self.commit_files_move(&plan)
+    }
+
+    /// What moving the files to `new_root` copies.
+    pub fn plan_files_move(&self, new_root: &Path) -> Result<FilesMovePlan> {
         let Some(old_root) = self.managed_library_root.clone() else {
             return Err(anyhow!("this library keeps no files"));
         };
@@ -66,70 +75,97 @@ impl LibraryStore {
         if !new_root.is_absolute() {
             return Err(anyhow!("the library folder needs an absolute path"));
         }
-        if new_root == old_root {
-            return Ok(FilesMove::default());
-        }
-        if new_root.starts_with(&old_root) || old_root.starts_with(&new_root) {
+        if new_root != old_root
+            && (new_root.starts_with(&old_root) || old_root.starts_with(&new_root))
+        {
             return Err(anyhow!(
                 "the new library folder cannot be inside the old one or hold it"
             ));
         }
-        ensure_managed_library_directories(&new_root)?;
-
-        let managed = self
+        let mut copies = Vec::new();
+        for attachment in self
             .library
             .library_attachments
             .iter()
             .filter(|attachment| !attachment.is_linked())
-            .cloned()
-            .collect::<Vec<_>>();
-        let pictures = fs::read_dir(old_root.join("ai-images"))
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.is_file())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let total = managed.len() + pictures.len();
-        let mut moved = FilesMove::default();
-        let mut moves = Vec::new();
-        for (index, attachment) in managed.iter().enumerate() {
-            if cancelled.load(AtomicOrdering::Acquire) {
-                return Err(anyhow!("moving the library was cancelled"));
-            }
+        {
             let relative = attachment.path.strip_prefix(&old_root).with_context(|| {
                 format!(
                     "{} is outside the library folder",
                     attachment.path.display()
                 )
             })?;
-            let target = new_root.join(relative);
-            if !attachment.path.exists() && target.exists() {
-                // Copied by an earlier, interrupted move.
-            } else {
-                copy_checked(&attachment.path, &target, Some(attachment.content_sha256))?;
-            }
-            moved.files += 1;
-            moved.bytes += attachment.file_size;
-            moves.push((attachment.path.clone(), target));
-            progress(index + 1, total);
+            copies.push(PlannedCopy {
+                from: attachment.path.clone(),
+                to: new_root.join(relative),
+                sha256: Some(attachment.content_sha256),
+                size: attachment.file_size,
+            });
         }
-        for (index, picture) in pictures.iter().enumerate() {
-            if let Some(name) = picture.file_name() {
-                copy_checked(picture, &new_root.join("ai-images").join(name), None)?;
+        if let Ok(entries) = fs::read_dir(old_root.join("ai-images")) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if let (true, Some(name)) = (path.is_file(), path.file_name()) {
+                    copies.push(PlannedCopy {
+                        to: new_root.join("ai-images").join(name),
+                        from: path,
+                        sha256: None,
+                        size: 0,
+                    });
+                }
             }
-            progress(managed.len() + index + 1, total);
         }
+        Ok(FilesMovePlan {
+            old_root,
+            new_root,
+            copies,
+        })
+    }
+
+    /// Points the library at the copies `plan` made, records the folder,
+    /// and deletes the old copies. Refuses when files were added since the
+    /// plan (run the move again).
+    pub fn commit_files_move(&mut self, plan: &FilesMovePlan) -> Result<FilesMove> {
+        if plan.new_root == plan.old_root {
+            return Ok(FilesMove::default());
+        }
+        if self.managed_library_root.as_deref() != Some(plan.old_root.as_path()) {
+            return Err(anyhow!("the library moved while its files were copied"));
+        }
+        let planned = plan
+            .copies
+            .iter()
+            .map(|copy| copy.from.as_path())
+            .collect::<HashSet<_>>();
+        if self.library.library_attachments.iter().any(|attachment| {
+            !attachment.is_linked() && !planned.contains(attachment.path.as_path())
+        }) {
+            return Err(anyhow!(
+                "files were added while the library moved; move it again"
+            ));
+        }
+        let moves = plan
+            .copies
+            .iter()
+            .filter(|copy| copy.sha256.is_some())
+            .map(|copy| (copy.from.clone(), copy.to.clone()))
+            .collect::<Vec<_>>();
+        let moved = FilesMove {
+            files: moves.len(),
+            bytes: plan
+                .copies
+                .iter()
+                .filter(|copy| copy.sha256.is_some())
+                .map(|copy| copy.size)
+                .sum(),
+        };
 
         // Point everything that names a file by its path at the copy.
         let previous = self.library.clone();
         for attachment in &mut self.library.library_attachments {
             if !attachment.is_linked()
-                && let Ok(relative) = attachment.path.strip_prefix(&old_root)
+                && let Ok(relative) = attachment.path.strip_prefix(&plan.old_root)
             {
-                attachment.path = new_root.join(relative);
+                attachment.path = plan.new_root.join(relative);
             }
         }
         for (old, new) in &moves {
@@ -137,14 +173,14 @@ impl LibraryStore {
         }
         self.library.sanitize();
         let was_chosen = self.files_root_chosen;
-        self.managed_library_root = Some(new_root.clone());
+        self.managed_library_root = Some(plan.new_root.clone());
         self.files_root_chosen = true;
         let written = self
             .write_relinked_library()
-            .and_then(|()| self.write_files_root(&new_root));
+            .and_then(|()| self.write_files_root(&plan.new_root));
         if let Err(error) = written {
             self.library = previous;
-            self.managed_library_root = Some(old_root);
+            self.managed_library_root = Some(plan.old_root.clone());
             self.files_root_chosen = was_chosen;
             return Err(error);
         }
@@ -158,14 +194,13 @@ impl LibraryStore {
             .clear();
         self.catalog_revision = self.catalog_revision.wrapping_add(1);
 
-        for (old, _) in &moves {
-            let _ = fs::remove_file(old);
-            if let Some(directory) = old.parent() {
+        for copy in &plan.copies {
+            let _ = fs::remove_file(&copy.from);
+            if copy.sha256.is_some()
+                && let Some(directory) = copy.from.parent()
+            {
                 let _ = fs::remove_dir(directory);
             }
-        }
-        for picture in &pictures {
-            let _ = fs::remove_file(picture);
         }
         Ok(moved)
     }
@@ -201,6 +236,63 @@ impl LibraryStore {
             })
             .collect()
     }
+}
+
+/// The files a move copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilesMovePlan {
+    old_root: PathBuf,
+    new_root: PathBuf,
+    copies: Vec<PlannedCopy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlannedCopy {
+    from: PathBuf,
+    to: PathBuf,
+    /// A managed file's hash, checked on the copy; `None` for a picture.
+    sha256: Option<[u8; 32]>,
+    size: u64,
+}
+
+impl FilesMovePlan {
+    pub fn new_root(&self) -> &Path {
+        &self.new_root
+    }
+
+    pub fn files(&self) -> usize {
+        self.copies.len()
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.copies.iter().map(|copy| copy.size).sum()
+    }
+}
+
+/// Makes the plan's copies (on a worker thread). A copy an earlier,
+/// interrupted run made is kept.
+pub fn copy_planned_files(
+    plan: &FilesMovePlan,
+    cancelled: &AtomicBool,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<()> {
+    if plan.new_root == plan.old_root {
+        return Ok(());
+    }
+    ensure_managed_library_directories(&plan.new_root)?;
+    let total = plan.copies.len();
+    for (index, copy) in plan.copies.iter().enumerate() {
+        if cancelled.load(AtomicOrdering::Acquire) {
+            return Err(anyhow!("moving the library was cancelled"));
+        }
+        if !copy.from.exists() && copy.to.exists() {
+            // Copied by an earlier run.
+        } else {
+            copy_checked(&copy.from, &copy.to, copy.sha256)?;
+        }
+        progress(index + 1, total);
+    }
+    Ok(())
 }
 
 /// Copies `source` to `target` through a temporary file and checks the

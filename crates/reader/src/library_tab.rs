@@ -63,6 +63,8 @@ pub enum LibraryTabAction {
     OpenDialog,
     /// Stop the import under way, or hide the last one's tally.
     CancelImport,
+    /// Ask about running the AI pass over the items that have none.
+    Backfill,
     /// Keep, or reject, everything the AI suggested for these items.
     AcceptAll(Vec<DocumentId>),
     RejectAll(Vec<DocumentId>),
@@ -368,6 +370,19 @@ impl LibraryTab {
             .clicked()
         {
             action = Some(LibraryTabAction::ImportZotero);
+        }
+        let unenriched = library
+            .library_items()
+            .iter()
+            .filter(|item| item.trashed_at.is_none() && library.item_enrichment(item.id).is_none())
+            .count();
+        if unenriched > 0
+            && buttons
+                .add(Button::bracket_muted(&format!("◆ enrich {unenriched}")))
+                .on_hover_text("summarise, tag and file the items without an ai pass")
+                .clicked()
+        {
+            action = Some(LibraryTabAction::Backfill);
         }
         let add = buttons.add(Button::bracket("+ add"));
         egui::Popup::menu(&add).show(|ui| {

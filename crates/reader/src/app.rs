@@ -434,6 +434,12 @@ pub struct ReaderApp {
     library_jobs_settings: Option<std::sync::Arc<glyphst_settings::Settings>>,
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
+    /// The library's dialog showing (frames 04h, 04k, 06d).
+    library_dialog: Option<crate::library_dialogs::Dialog>,
+    /// The library's files moving to the folder chosen.
+    folder_move: Option<crate::library_dialogs::FolderMove>,
+    /// Works added by identifier, their PDFs downloading.
+    work_adds: Vec<crate::library_dialogs::WorkAdd>,
 }
 
 impl ReaderApp {
@@ -665,6 +671,9 @@ impl ReaderApp {
             library_jobs: crate::library_jobs::LibraryJobs::new(&cc.egui_ctx),
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
+            library_dialog: None,
+            folder_move: None,
+            work_adds: Vec::new(),
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
@@ -686,6 +695,18 @@ impl ReaderApp {
                     _ => {}
                 }
             }
+            app.library_dialog = match state.as_str() {
+                "backfill" => app.backfill_dialog(),
+                "folder" => Some(crate::library_dialogs::Dialog::ChooseFolder {
+                    path: "~/Documents/Glyphst".to_string(),
+                    files: 128,
+                    bytes: 2_400_000_000,
+                    linked: 9,
+                    error: None,
+                }),
+                "identifier" => Some(crate::library_dialogs::Dialog::add_by_identifier(None)),
+                _ => None,
+            };
         }
         if let Some(query) = launch.palette {
             app.palette.toggle();
@@ -1023,9 +1044,242 @@ impl ReaderApp {
         }
     }
 
-    /// The library tab.
+    /// The library tab. The first time, it asks where the library should
+    /// live (frame 04k).
     pub(crate) fn open_library(&mut self) {
         self.open_page(Page::Library(Box::default()));
+        if self.persist
+            && !self.prefs.library.folder_asked
+            && !self.library.files_root_chosen()
+            && self.library.files_root().is_some()
+            && self.library_dialog.is_none()
+        {
+            self.library_dialog = Some(self.choose_folder_dialog());
+        }
+    }
+
+    /// Frame 04k with what a move would take.
+    fn choose_folder_dialog(&self) -> crate::library_dialogs::Dialog {
+        let attachments = self.library.library_attachments();
+        let managed = attachments.iter().filter(|a| !a.is_linked());
+        crate::library_dialogs::Dialog::ChooseFolder {
+            path: "~/Documents/Glyphst".to_string(),
+            files: managed.clone().count(),
+            bytes: managed.map(|attachment| attachment.file_size).sum(),
+            linked: attachments.iter().filter(|a| a.is_linked()).count(),
+            error: None,
+        }
+    }
+
+    /// Frame 04h: the items without an AI pass and what it would take.
+    fn backfill_dialog(&self) -> Option<crate::library_dialogs::Dialog> {
+        let settings = self.user_settings.get()?;
+        let model = settings.ai.resolved_library()?;
+        let items = self
+            .library
+            .library_items()
+            .iter()
+            .filter(|item| {
+                item.trashed_at.is_none() && self.library.item_enrichment(item.id).is_none()
+            })
+            .collect::<Vec<_>>();
+        let tags = self
+            .library
+            .library_tags()
+            .iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        let (mut tokens_in, mut tokens_out) = (0, 0);
+        for item in &items {
+            let input = glyphst_ai::enrichment::EnrichInput {
+                item: glyphst_ai::enrichment::ItemFacts {
+                    title: item.title.clone(),
+                    ..Default::default()
+                },
+                // Without an abstract the model reads the first pages.
+                excerpt: if item.abstract_text.is_empty() {
+                    "x".repeat(glyphst_ai::enrichment::EXCERPT_CHARS)
+                } else {
+                    item.abstract_text.clone()
+                },
+                tags: tags.clone(),
+                ..Default::default()
+            };
+            let (input_tokens, output_tokens) = glyphst_ai::enrichment::estimate_tokens(&input);
+            tokens_in += input_tokens;
+            tokens_out += output_tokens;
+        }
+        Some(crate::library_dialogs::Dialog::Backfill {
+            items: items.iter().map(|item| item.id).collect(),
+            model: model.model,
+            tokens_in,
+            tokens_out,
+            create_tags: self.prefs.library.ai_create_tags,
+            suggest_collections: self.prefs.library.suggest_collections,
+        })
+    }
+
+    /// Shows the library's dialog, follows a move and adds works found by
+    /// identifier.
+    fn library_dialogs(&mut self, ctx: &egui::Context) {
+        use crate::library_dialogs::{Dialog, DialogAction, MoveEvent};
+        if let Some(moving) = &self.folder_move {
+            let plan = moving.plan.clone();
+            for event in moving.events() {
+                match event {
+                    MoveEvent::Copied(done, total) => {
+                        self.library_dialog = Some(Dialog::Moving { done, total });
+                    }
+                    MoveEvent::Done(result) => {
+                        let outcome = result
+                            .map_err(anyhow::Error::msg)
+                            .and_then(|()| self.library.commit_files_move(&plan));
+                        match outcome {
+                            Ok(moved) => self.notices.push(format!(
+                                "The library is in {} ({} files).",
+                                plan.new_root().display(),
+                                moved.files
+                            )),
+                            Err(error) => self
+                                .notices
+                                .push(format!("The library stayed where it was: {error:#}")),
+                        }
+                        self.prefs.library.folder_asked = true;
+                        self.library_dialog = None;
+                    }
+                }
+            }
+            if self.library_dialog.is_none() {
+                self.folder_move = None;
+            }
+        }
+        let mut finished = Vec::new();
+        for (index, add) in self.work_adds.iter().enumerate() {
+            if let Some(ready) = add.take() {
+                finished.push((index, ready));
+            }
+        }
+        for (index, (work, prepared)) in finished.into_iter().rev() {
+            self.work_adds.remove(index);
+            if let Err(error) = self.add_work(*work, prepared) {
+                self.notices.push(format!("Could not add it: {error:#}"));
+            }
+        }
+        let Some(dialog) = &mut self.library_dialog else {
+            return;
+        };
+        let (action, close) = dialog.show(ctx, &self.library);
+        // What the backfill dialog's options were set to stays.
+        if let Dialog::Backfill {
+            create_tags,
+            suggest_collections,
+            ..
+        } = dialog
+        {
+            self.prefs.library.ai_create_tags = *create_tags;
+            self.prefs.library.suggest_collections = *suggest_collections;
+        }
+        if close {
+            self.library_dialog = None;
+        }
+        let result = match action {
+            None => Ok(()),
+            Some(DialogAction::Enrich(items)) => self
+                .library
+                .enqueue_library_jobs(
+                    &items,
+                    glyphst_library::LibraryJobKind::Enrich,
+                    glyphst_library::LibraryJobOrigin::Backfill,
+                    false,
+                )
+                .map(|_| ()),
+            Some(DialogAction::LaterFolder) => {
+                self.prefs.library.folder_asked = true;
+                Ok(())
+            }
+            Some(DialogAction::UseFolder(path)) => match self.library.plan_files_move(&path) {
+                Ok(plan) => {
+                    self.library_dialog = Some(Dialog::Moving {
+                        done: 0,
+                        total: plan.files(),
+                    });
+                    self.folder_move = Some(crate::library_dialogs::FolderMove::start(plan, ctx));
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Some(Dialog::ChooseFolder { error: shown, .. }) =
+                        &mut self.library_dialog
+                    {
+                        *shown = Some(format!("{error:#}"));
+                    }
+                    Ok(())
+                }
+            },
+            Some(DialogAction::StopMove) => {
+                if let Some(moving) = &self.folder_move {
+                    moving.stop();
+                }
+                Ok(())
+            }
+            Some(DialogAction::AddWork(work)) => {
+                self.work_adds.push(crate::library_dialogs::WorkAdd::start(
+                    *work,
+                    self.library.files_root().map(std::path::Path::to_path_buf),
+                    ctx,
+                ));
+                Ok(())
+            }
+        };
+        if let Err(error) = result {
+            self.notices.push(format!("{error:#}"));
+        }
+    }
+
+    /// Adds a work found by its identifier: with its PDF when one was
+    /// downloaded, else without a file; its metadata from the catalogue.
+    fn add_work(
+        &mut self,
+        work: glyphst_metadata::WorkMetadata,
+        prepared: Result<Option<glyphst_library::PreparedManagedImport>, String>,
+    ) -> anyhow::Result<()> {
+        let prepared = prepared.unwrap_or_else(|error| {
+            self.notices.push(format!(
+                "The PDF could not be downloaded ({error}); added without it."
+            ));
+            None
+        });
+        let metadata = glyphst_library::LibraryItemMetadata {
+            title: work.title.clone(),
+            ..Default::default()
+        };
+        let id = match prepared {
+            Some(prepared) => {
+                match self
+                    .library
+                    .finalize_managed_import(prepared, metadata, None)?
+                {
+                    glyphst_library::LibraryImportOutcome::Added(id)
+                    | glyphst_library::LibraryImportOutcome::Duplicate(id)
+                    | glyphst_library::LibraryImportOutcome::DuplicateInTrash(id) => id,
+                }
+            }
+            None => self.library.add_metadata_item(metadata, None)?,
+        };
+        let recognized = glyphst_metadata::Recognized {
+            work: Some(work),
+            ..Default::default()
+        };
+        crate::library_jobs::apply_metadata(&mut self.library, id, &recognized);
+        if self.prefs.library.enrich_new {
+            self.library.enqueue_library_jobs(
+                &[id],
+                glyphst_library::LibraryJobKind::Enrich,
+                glyphst_library::LibraryJobOrigin::Manual,
+                false,
+            )?;
+        }
+        self.notices.push("Added to the library.".to_string());
+        Ok(())
     }
 
     /// Closes page tab `index`; when it was shown, the document shown
@@ -1173,7 +1427,23 @@ impl ReaderApp {
             }
             Action::AcceptAll(ids) => self.review_all(&ids, true),
             Action::RejectAll(ids) => self.review_all(&ids, false),
-            Action::AddByIdentifier | Action::ImportZotero => {
+            Action::AddByIdentifier => {
+                let mailto = Some(self.prefs.library.contact_email.trim().to_string())
+                    .filter(|address| !address.is_empty());
+                self.library_dialog =
+                    Some(crate::library_dialogs::Dialog::add_by_identifier(mailto));
+                Ok(())
+            }
+            Action::Backfill => {
+                match self.backfill_dialog() {
+                    Some(dialog) => self.library_dialog = Some(dialog),
+                    None => self
+                        .notices
+                        .push("Choose a library model in Settings › AI first.".to_string()),
+                }
+                Ok(())
+            }
+            Action::ImportZotero => {
                 self.notices.push("Not in this build yet.".to_string());
                 Ok(())
             }
@@ -4780,6 +5050,7 @@ impl eframe::App for ReaderApp {
             self.chrome.tab_drag = None;
         }
         self.overlays(&ctx);
+        self.library_dialogs(&ctx);
         self.switcher_overlay(&ctx);
         if presenting && let Some(active) = self.active {
             self.present_overlay(&ctx, active, now);

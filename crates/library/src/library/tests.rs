@@ -3611,3 +3611,26 @@ fn a_moved_linked_file_is_found_again() {
     assert!(store.find_moved_linked_files().is_empty());
     let _ = fs::remove_dir_all(folder);
 }
+
+#[test]
+fn an_item_without_a_file_survives_reopening() {
+    let database_path = temp_library_path("metadata-item");
+    let id = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        store
+            .add_metadata_item(
+                LibraryItemMetadata {
+                    title: "A Paper With No PDF".to_string(),
+                    ..LibraryItemMetadata::default()
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.library_item(id).unwrap().title, "A Paper With No PDF");
+    assert!(store.primary_attachment(id).is_none());
+    drop(store);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}

@@ -1638,6 +1638,57 @@ impl LibraryStore {
         })
     }
 
+    /// Adds an item with no file (a work found by its identifier with no
+    /// open PDF).
+    pub fn add_metadata_item(
+        &mut self,
+        metadata: LibraryItemMetadata,
+        parent_id: Option<LibraryCollectionId>,
+    ) -> Result<DocumentId> {
+        if parent_id.is_some_and(|id| self.library_collection(id).is_none()) {
+            return Err(anyhow!("target folder does not exist"));
+        }
+        self.persist_catalog_change(|library| {
+            let id = DocumentId(library.next_library_item_id.max(1));
+            library.next_library_item_id = id.0.saturating_add(1);
+            let now = current_timestamp();
+            library.library_items.push(LibraryItem {
+                id,
+                kind: metadata.kind,
+                title: metadata.title,
+                creators: metadata.creators,
+                year: metadata.year,
+                publication: metadata.publication,
+                publisher: metadata.publisher,
+                abstract_text: metadata.abstract_text,
+                subject: metadata.subject,
+                language: metadata.language,
+                identifiers: metadata.identifiers,
+                embedded_keywords: metadata.embedded_keywords,
+                favorite: false,
+                status: ReadingStatus::ToRead,
+                work_note: String::new(),
+                created: now,
+                updated: now,
+                trashed_at: None,
+            });
+            library.library_item_locations.push(LibraryItemLocation {
+                item_id: id,
+                parent_id,
+                trash_origin: None,
+            });
+            if let Some(collection_id) = parent_id {
+                library
+                    .library_item_collections
+                    .push(LibraryItemCollection {
+                        item_id: id,
+                        collection_id,
+                    });
+            }
+            Ok(id)
+        })
+    }
+
     /// Adds a file where it is, without copying it in. History, highlights
     /// and notes stay keyed to its path. Hashes the file on this thread; use
     /// [`prepare_linked_import`] on a worker for large files.

@@ -105,6 +105,8 @@ pub struct LibraryPrefs {
     /// The vault's folder when it is not the library folder's `notes/`
     /// (an existing Obsidian vault, say).
     pub vault: Option<String>,
+    /// The library tab asked where the library should live (frame 04k).
+    pub folder_asked: bool,
 }
 
 impl LibraryPrefs {
@@ -133,6 +135,7 @@ impl Default for LibraryPrefs {
             ai_create_tags: true,
             suggest_collections: true,
             vault: None,
+            folder_asked: false,
         }
     }
 }
