@@ -56,6 +56,18 @@ and the abandoned Files app in M5). It has:
   the sidebar outline follows the section being read (scrolling it away
   pauses following; the locate button resumes it), its entries collapse
   and their parents stick at the top, and the thumbnails follow the page.
+- **Library (2026-10-19):** papers and books are managed as in Zotero:
+  - collections an item can share and linked files, in a folder the user
+    chooses;
+  - metadata from the DOI, arXiv id or ISBN on the first pages (arXiv,
+    Crossref, OpenAlex, Open Library), and duplicates found;
+  - the library model's pass (summary, key points, tags, a collection),
+    run on new items and asked before the backfill, with every AI tag
+    reviewable;
+  - a Markdown vault Obsidian can open, with tag edits flowing back;
+  - adding by identifier and importing from Zotero (notes, PDF
+    highlights);
+  - the agents' library tools. Frames 04d-04k, 06d, 03b and 07-library.
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
@@ -116,12 +128,21 @@ Known gaps:
   user's checks that a key set in the Reader is found again after a
   restart, and of a ChatGPT Subscription sign-in, are pending. Editing an
   effect file while the Reader runs (the reload) is also checked by hand.
+- Library: the Zotero import leaves out tag colours and related items
+  (no tables for them yet), EPUB annotations and rotated pages'
+  highlights. Duplicates are found but not merged. Agents have no
+  `lookup_metadata` or vault-block tool. The AI pass, the lookups and the
+  import are checked by tests on fakes and by screenshots; a real Zotero
+  library and real providers are not yet checked by hand.
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
 
-**Next step:** the user picks the next milestone. Candidates from the gaps
-above: restoring translation sessions from the cache, and a dense page's
+**Next step:** the user picks the next milestone. Candidates: the
+library's M2, local hybrid search over every item's text with
+EmbeddingGemma 2 (a spike of llama.cpp against `ort` first); then, from
+the gaps above, restoring translation
+sessions from the cache, and a dense page's
 first load (MuPDF's interpretation
 dominates; only a faster content-stream reader would cut it).
 

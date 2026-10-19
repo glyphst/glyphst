@@ -422,7 +422,7 @@ impl Command {
             Self::NewTab => "New tab",
             Self::ReadingActivity => "Reading activity",
             Self::Library => "Library",
-            Self::LibraryImport => "Import a folder into the library",
+            Self::LibraryImport => "Add documents to the library…",
             Self::LibraryAddByIdentifier => "Add to the library by DOI, arXiv id or ISBN",
             Self::LibraryEnrichAll => "Run the AI pass over the library",
             Self::LibraryReviewAi => "Review the AI's tags and collections",

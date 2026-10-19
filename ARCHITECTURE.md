@@ -402,6 +402,29 @@ heatmap and the reading activity tab bucket them into local days
 persists. First-page covers are rendered by MuPDF on a worker thread and
 kept as JPEGs in the cache directory's `covers/` (`reader/src/covers.rs`).
 
+The catalog's additions are new tables beside the old ones, never changes
+to them:
+- `library_item_collections_v1`: an item can be in several collections.
+  The first is mirrored to the location's `parent_id`, and an empty table
+  is filled from `parent_id`.
+- `library_linked_attachments_v1`: files kept where the user has them,
+  with their device and inode so a moved file is found again.
+- `library_ai_assignments_v1`: per item, the tags and collections the AI
+  pass (or an import) gave or proposed, and whether the user kept or
+  rejected them. A rejected one is never proposed again.
+- `library_enrichments_v1`: the library model's pass, with its summary,
+  key points and the hash of its input.
+- `library_metadata_records_v1`: where an item's metadata came from, the
+  fields the user locked, and ids in other managers (`zotero:1/KEY`).
+- `library_jobs_v1`: the metadata and AI queue, resumed after a restart.
+- `library_vault_notes_v1`: each item's note in the Markdown vault and
+  the hashes of the blocks Glyphst wrote.
+
+The folder the user chose for the files is the `library_files_root` key of
+`ui_state_v1`; until one is chosen the files stay in the data folder.
+`library.redb` itself always stays in the data folder, out of a folder
+that sync tools write to.
+
 When redb reports a file from an older file format
 (`UpgradeRequired`), the library and the translation cache rename it aside as
 `<name>.redb<version>-format` (never deleting it) and start a fresh database.
