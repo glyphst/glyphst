@@ -1,0 +1,20 @@
+[package]
+name = "glyphst-embed"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-core = { path = "../core" }
+glyphst-search = { path = "../search" }
+log.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tiny_http.workspace = true

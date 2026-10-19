@@ -4,6 +4,7 @@ members = [
     "crates/ai",
     "crates/core",
     "crates/effects",
+    "crates/embed",
     "crates/library",
     "crates/markdown",
     "crates/mermaid-render",

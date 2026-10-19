@@ -2954,6 +2954,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-embed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "glyphst-search",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+]
+
+[[package]]
 name = "glyphst-library"
 version = "0.1.0"
 dependencies = [
