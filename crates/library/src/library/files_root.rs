@@ -43,6 +43,12 @@ impl LibraryStore {
         self.managed_library_root.as_deref()
     }
 
+    /// Whether the user chose the files folder (else it is the default one
+    /// in the app's data folder).
+    pub fn files_root_chosen(&self) -> bool {
+        self.files_root_chosen
+    }
+
     /// Copies every managed file (and the assistant's pictures) into
     /// `new_root`, checks each copy, points the library there, and only
     /// then deletes the old copies. Interrupted, the library stays where it
@@ -130,13 +136,16 @@ impl LibraryStore {
             migrate_document_path_in_library(&mut self.library, old, new);
         }
         self.library.sanitize();
+        let was_chosen = self.files_root_chosen;
         self.managed_library_root = Some(new_root.clone());
+        self.files_root_chosen = true;
         let written = self
             .write_relinked_library()
             .and_then(|()| self.write_files_root(&new_root));
         if let Err(error) = written {
             self.library = previous;
             self.managed_library_root = Some(old_root);
+            self.files_root_chosen = was_chosen;
             return Err(error);
         }
         for (old, new) in &moves {

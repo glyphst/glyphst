@@ -38,6 +38,7 @@ glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
 glyphst-settings = { path = "../settings", features = ["keychain"] }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
+glyphst-vault = { path = "../vault" }
 image.workspace = true
 log.workspace = true
 mupdf.workspace = true

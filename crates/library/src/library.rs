@@ -1970,6 +1970,8 @@ pub struct LibraryStore {
     next_job_id: u64,
     /// Each item's note in the vault (`vault_notes.rs`).
     vault_notes: HashMap<DocumentId, VaultNoteRecord>,
+    /// The files are in a folder the user chose (`files_root.rs`).
+    files_root_chosen: bool,
 }
 
 pub struct HistoryEntryPersistenceSnapshot {

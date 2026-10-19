@@ -102,6 +102,24 @@ pub struct LibraryPrefs {
     pub ai_create_tags: bool,
     /// The AI may propose new collections (never makes them itself).
     pub suggest_collections: bool,
+    /// The vault's folder when it is not the library folder's `notes/`
+    /// (an existing Obsidian vault, say).
+    pub vault: Option<String>,
+}
+
+impl LibraryPrefs {
+    /// The vault in use: the folder set here, else `notes/` in the library
+    /// folder once the user chose one; none until then.
+    pub fn vault_root(
+        &self,
+        files_root: Option<&std::path::Path>,
+        chosen: bool,
+    ) -> Option<std::path::PathBuf> {
+        match &self.vault {
+            Some(vault) if !vault.trim().is_empty() => Some(std::path::PathBuf::from(vault.trim())),
+            _ => files_root.filter(|_| chosen).map(|root| root.join("notes")),
+        }
+    }
 }
 
 impl Default for LibraryPrefs {
@@ -114,6 +132,7 @@ impl Default for LibraryPrefs {
             enrich_new: true,
             ai_create_tags: true,
             suggest_collections: true,
+            vault: None,
         }
     }
 }

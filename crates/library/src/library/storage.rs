@@ -42,6 +42,7 @@ impl LibraryStore {
             jobs: Vec::new(),
             next_job_id: 1,
             vault_notes: HashMap::new(),
+            files_root_chosen: false,
         }
     }
 
@@ -85,8 +86,9 @@ impl LibraryStore {
         restrict_library_file(&path)?;
         ensure_current_tables(&database)?;
         // The folder the user chose for the files, when they did.
-        let managed_library_root =
-            super::files_root::read_files_root(&database)?.unwrap_or(managed_library_root);
+        let chosen_root = super::files_root::read_files_root(&database)?;
+        let files_root_chosen = chosen_root.is_some();
+        let managed_library_root = chosen_root.unwrap_or(managed_library_root);
         ensure_managed_library_directories(&managed_library_root)?;
         let library = load_current_library(&database, &managed_library_root)?;
         let ai_catalog = super::ai_catalog::load_ai_catalog(&database)?;
@@ -115,6 +117,7 @@ impl LibraryStore {
             jobs,
             next_job_id,
             vault_notes,
+            files_root_chosen,
         };
         store.sanitize_ai_catalog();
         store.prune_library_jobs();

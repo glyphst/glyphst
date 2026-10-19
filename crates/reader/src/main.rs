@@ -73,6 +73,7 @@ mod text_overlay;
 mod transition;
 mod translation;
 mod user_settings;
+mod vault_sync;
 mod wallpaper;
 mod window_blur;
 

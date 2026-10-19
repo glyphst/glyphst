@@ -806,6 +806,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        files_root_chosen: false,
     };
     assert!(
         unavailable
@@ -1690,6 +1691,7 @@ fn history_save_fails_when_database_is_unavailable() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        files_root_chosen: false,
     };
     store.record_history(document_path, position(1));
 
@@ -1729,6 +1731,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        files_root_chosen: false,
     };
 
     let language_error = store

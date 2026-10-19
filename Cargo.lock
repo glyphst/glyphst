@@ -3088,6 +3088,7 @@ dependencies = [
  "glyphst-settings",
  "glyphst-translation",
  "glyphst-ui",
+ "glyphst-vault",
  "image",
  "log",
  "mupdf",

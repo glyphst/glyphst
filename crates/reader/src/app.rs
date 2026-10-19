@@ -430,6 +430,8 @@ pub struct ReaderApp {
     /// The settings the library jobs last ran with; a change lets a paused
     /// AI pass try again.
     library_jobs_settings: Option<std::sync::Arc<glyphst_settings::Settings>>,
+    /// Item notes in the Markdown vault.
+    vault_sync: crate::vault_sync::VaultSync,
 }
 
 impl ReaderApp {
@@ -660,6 +662,7 @@ impl ReaderApp {
             importer: crate::import::Importer::default(),
             library_jobs: crate::library_jobs::LibraryJobs::new(&cc.egui_ctx),
             library_jobs_settings: None,
+            vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
         };
         app.rebuild_keymap();
         if let Some(query) = launch.palette {
@@ -4427,6 +4430,13 @@ impl eframe::App for ReaderApp {
             {
                 self.notices.push(notice);
             }
+            let vault = self
+                .prefs
+                .library
+                .vault_root(self.library.files_root(), self.library.files_root_chosen());
+            for notice in self.vault_sync.poll(&mut self.library, vault) {
+                self.notices.push(notice);
+            }
         }
         // Pictures dropped while the assistant is open go with its next
         // message.
@@ -4686,7 +4696,7 @@ impl eframe::App for ReaderApp {
         self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();
         self.covers.poll(&ctx);
-        let covers_ready = !self.covers.pending();
+        let covers_ready = !self.covers.pending() && !self.vault_sync.busy();
         self.run_harness(&ctx, pages_drawn && wallpaper_ready && covers_ready, now);
         if self
             .transition

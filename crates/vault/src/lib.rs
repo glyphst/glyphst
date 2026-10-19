@@ -39,7 +39,7 @@ pub const OWNED_KEYS: [&str; 16] = [
 pub const ITEMS_FOLDER: &str = "items";
 
 /// What a note says about its item.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NoteSnapshot {
     pub id: u64,
     pub title: String,
@@ -64,7 +64,7 @@ pub struct NoteSnapshot {
     pub seed_notes: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Summary {
     pub tldr: String,
     pub key_points: Vec<String>,
