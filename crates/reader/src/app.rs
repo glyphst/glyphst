@@ -425,6 +425,11 @@ pub struct ReaderApp {
     covers: crate::covers::Covers,
     /// Files coming into the library (dropped, or added as they open).
     importer: crate::import::Importer,
+    /// Metadata lookups and the library model's pass, in the background.
+    library_jobs: crate::library_jobs::LibraryJobs,
+    /// The settings the library jobs last ran with; a change lets a paused
+    /// AI pass try again.
+    library_jobs_settings: Option<std::sync::Arc<glyphst_settings::Settings>>,
 }
 
 impl ReaderApp {
@@ -653,6 +658,8 @@ impl ReaderApp {
             page_return: None,
             covers: crate::covers::Covers::new(&cc.egui_ctx),
             importer: crate::import::Importer::default(),
+            library_jobs: crate::library_jobs::LibraryJobs::new(&cc.egui_ctx),
+            library_jobs_settings: None,
         };
         app.rebuild_keymap();
         if let Some(query) = launch.palette {
@@ -4402,6 +4409,23 @@ impl eframe::App for ReaderApp {
                 self.notices.push(format!(
                     "Could not queue the new items' metadata: {error:#}"
                 ));
+            }
+            let settings = self.user_settings.get().cloned();
+            if settings.as_ref().map(std::sync::Arc::as_ptr)
+                != self
+                    .library_jobs_settings
+                    .as_ref()
+                    .map(std::sync::Arc::as_ptr)
+            {
+                self.library_jobs.resume();
+                self.library_jobs_settings = settings.clone();
+            }
+            let model = settings.and_then(|settings| settings.ai.resolved_library());
+            for notice in self
+                .library_jobs
+                .poll(&mut self.library, &self.prefs.library, model)
+            {
+                self.notices.push(notice);
             }
         }
         // Pictures dropped while the assistant is open go with its next

@@ -31,6 +31,7 @@ glyphst-core = { path = "../core" }
 glyphst-effects = { path = "../effects" }
 glyphst-library = { path = "../library" }
 glyphst-markdown = { path = "../markdown" }
+glyphst-metadata = { path = "../metadata" }
 glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-gpu = { path = "../pdf-gpu" }
 glyphst-pdf-translation-service = { path = "../pdf-translation-service" }
@@ -45,6 +46,7 @@ regex.workspace = true
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tiny_http.workspace = true
 wgpu.workspace = true
 

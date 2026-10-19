@@ -121,6 +121,22 @@ impl ReaderApp {
                 .static_text()
                 .priority(1),
         ];
+        // The library's background work (metadata, the AI pass).
+        let queued = self.library.library_jobs().len();
+        if queued > 0 || self.library_jobs.running() > 0 {
+            let text = if self.library_jobs.is_paused() {
+                format!("✦ paused · {queued} queued")
+            } else {
+                format!("✦ working · {queued} queued")
+            };
+            segments.insert(
+                1,
+                Segment::label("jobs", Side::Left, Some("sparkles"), text)
+                    .accent(!self.library_jobs.is_paused())
+                    .static_text()
+                    .priority(1),
+            );
+        }
         if let Some((text, finished, tip)) = import {
             segments.insert(
                 1,

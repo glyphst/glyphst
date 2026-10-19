@@ -48,6 +48,7 @@ mod import;
 mod keymap_page;
 mod keys;
 mod launcher;
+mod library_jobs;
 mod library_view;
 mod overview;
 mod pad;
