@@ -134,6 +134,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("file-down", include_bytes!("../assets/icons/file-down.svg")),
     ("file-plus", include_bytes!("../assets/icons/file-plus.svg")),
     (
+        "file-question",
+        include_bytes!("../assets/icons/file-question.svg"),
+    ),
+    (
         "file-search",
         include_bytes!("../assets/icons/file-search.svg"),
     ),
@@ -166,6 +170,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "image-down",
         include_bytes!("../assets/icons/image-down.svg"),
     ),
+    ("inbox", include_bytes!("../assets/icons/inbox.svg")),
     ("info", include_bytes!("../assets/icons/info.svg")),
     ("keyboard", include_bytes!("../assets/icons/keyboard.svg")),
     ("languages", include_bytes!("../assets/icons/languages.svg")),
@@ -174,6 +179,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/layout-grid.svg"),
     ),
     ("library", include_bytes!("../assets/icons/library.svg")),
+    (
+        "library-big",
+        include_bytes!("../assets/icons/library-big.svg"),
+    ),
     ("list", include_bytes!("../assets/icons/list.svg")),
     ("list-todo", include_bytes!("../assets/icons/list-todo.svg")),
     ("list-tree", include_bytes!("../assets/icons/list-tree.svg")),
@@ -269,6 +278,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ),
     ("sun", include_bytes!("../assets/icons/sun.svg")),
     ("sun-moon", include_bytes!("../assets/icons/sun-moon.svg")),
+    ("tag", include_bytes!("../assets/icons/tag.svg")),
     ("terminal", include_bytes!("../assets/icons/terminal.svg")),
     (
         "text-cursor",

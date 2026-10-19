@@ -6,14 +6,14 @@
 
 use crate::{
     activity_view::ActivityView, keymap_page::KeymapPage, launcher::Launcher,
-    library_view::LibraryView,
+    library_tab::LibraryTab,
 };
 
 pub enum Page {
     Keymap(KeymapPage),
     NewTab(Launcher),
     Activity(ActivityView),
-    Library(LibraryView),
+    Library(Box<LibraryTab>),
 }
 
 impl Page {

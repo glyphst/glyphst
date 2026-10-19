@@ -15,8 +15,8 @@ use glyphst_core::{
 use glyphst_effects::EffectDef;
 use glyphst_library::{ActivityKind, DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
+use glyphst_ui::Tip;
 use glyphst_ui::craft::docking::Zone;
-use glyphst_ui::{Tip, layout};
 
 use crate::{
     activity_view::{ActivityAction, ActivityView},
@@ -38,7 +38,6 @@ use crate::{
     keymap_page::KeymapPage,
     keys::{self, Keymap, KeymapPreset},
     launcher::{Launcher, LauncherAction, LauncherContext},
-    library_view::{LibraryAction, LibraryView, Mode as LibraryMode, TabContext as LibraryTab},
     overview::Overview,
     pad::{
         GamepadInput, Pads,
@@ -165,6 +164,9 @@ pub struct Launch {
     pub shortcuts: bool,
     /// Shows frame 01 of the design (every component) instead of home.
     pub gallery: bool,
+    /// Scripted runs: the library tab over a canned library (`all`,
+    /// `item` with a paper chosen, `review`).
+    pub library_demo: Option<String>,
     /// Scripted runs: commands run once the documents are open.
     pub commands: Vec<Command>,
     /// Scripted runs: a region drawn on a page (from 1) at startup.
@@ -665,6 +667,26 @@ impl ReaderApp {
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
         };
         app.rebuild_keymap();
+        if let Some(state) = &launch.library_demo {
+            app.library = crate::library_demo::library();
+            app.open_library();
+            if let Some(Page::Library(tab)) = app.pages.last_mut() {
+                match state.as_str() {
+                    "item" => {
+                        let id = crate::library_demo::first_item(&app.library);
+                        tab.view = id
+                            .and_then(|id| {
+                                app.library.collections_for_item(id).first().map(|c| c.id)
+                            })
+                            .map(crate::library_tab::View::Collection)
+                            .unwrap_or_default();
+                        tab.selected = id;
+                    }
+                    "review" => tab.view = crate::library_tab::View::NeedsReview,
+                    _ => {}
+                }
+            }
+        }
         if let Some(query) = launch.palette {
             app.palette.toggle();
             app.palette.query = query;
@@ -1003,7 +1025,7 @@ impl ReaderApp {
 
     /// The library tab.
     pub(crate) fn open_library(&mut self) {
-        self.open_page(Page::Library(LibraryView::new("library-tab")));
+        self.open_page(Page::Library(Box::default()));
     }
 
     /// Closes page tab `index`; when it was shown, the document shown
@@ -1040,29 +1062,23 @@ impl ReaderApp {
                     self.open(&path, ctx, None);
                 }
             }
-            Page::Library(view) => {
+            Page::Library(tab) => {
                 let docs = docs();
-                let open_key = self.keymap.label(Command::OpenWithDialog);
-                let tokens = Tokens::get(ctx);
-                ui.painter().rect_filled(ui.max_rect(), 0, tokens.bg);
-                let action = layout::column(ui, layout::MAX_COLUMN, |ui, width| {
-                    ui.add_space(28.0);
-                    view.ui(
-                        ui,
-                        &docs,
-                        width,
-                        LibraryMode::Tab,
-                        Some(LibraryTab {
-                            picking: self.pickers.is_showing(),
-                            open_key: open_key.as_deref(),
-                        }),
-                    )
-                })
-                .0;
-                match action {
-                    Some(LibraryAction::Open(path)) => self.open(&path, ctx, None),
-                    Some(LibraryAction::OpenDialog) => self.pickers.open_documents(ctx),
-                    Some(LibraryAction::Tab) | None => {}
+                let vault = self
+                    .prefs
+                    .library
+                    .vault_root(self.library.files_root(), self.library.files_root_chosen());
+                let action = tab.ui(
+                    ui,
+                    crate::library_tab::TabContext {
+                        library: &self.library,
+                        covers: &mut self.covers,
+                        docs: &docs,
+                        vault: vault.as_deref(),
+                    },
+                );
+                if let Some(action) = action {
+                    self.library_tab_action(action, ctx);
                 }
             }
             Page::NewTab(launcher) => {
@@ -1092,6 +1108,67 @@ impl ReaderApp {
                     None => {}
                 }
             }
+        }
+    }
+
+    /// Does what the library tab asked.
+    fn library_tab_action(
+        &mut self,
+        action: crate::library_tab::LibraryTabAction,
+        ctx: &egui::Context,
+    ) {
+        use crate::library_tab::LibraryTabAction as Action;
+        let result = match action {
+            Action::Open(path) => {
+                self.open(&path, ctx, None);
+                Ok(())
+            }
+            Action::Ask(path) => {
+                self.open(&path, ctx, None);
+                if !self.assistant.open {
+                    self.toggle_assistant();
+                }
+                Ok(())
+            }
+            Action::Enrich(id) => self
+                .library
+                .enqueue_library_jobs(
+                    &[id],
+                    glyphst_library::LibraryJobKind::Enrich,
+                    glyphst_library::LibraryJobOrigin::Manual,
+                    true,
+                )
+                .map(|_| ()),
+            Action::Accept(id, target) => self.library.accept_assignment(id, &target),
+            Action::Reject(id, target) => self.library.reject_assignment(id, &target),
+            Action::OpenNote(path) => {
+                ctx.open_url(egui::OpenUrl::new_tab(format!("file://{}", path.display())));
+                Ok(())
+            }
+            Action::AddOpened(paths) => {
+                if self.persist {
+                    self.importer.start(
+                        &self.library,
+                        paths,
+                        crate::prefs::ImportMode::Link,
+                        None,
+                        false,
+                        ctx,
+                    );
+                }
+                Ok(())
+            }
+            Action::OpenDialog => {
+                self.pickers.open_documents(ctx);
+                Ok(())
+            }
+            Action::AddByIdentifier | Action::ImportZotero => {
+                self.notices.push("Not in this build yet.".to_string());
+                Ok(())
+            }
+        };
+        if let Err(error) = result {
+            self.notices.push(format!("{error:#}"));
         }
     }
 
