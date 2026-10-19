@@ -1538,7 +1538,7 @@ impl LibraryStore {
             .collect()
     }
 
-    fn persist_catalog_change<T>(
+    pub(super) fn persist_catalog_change<T>(
         &mut self,
         change: impl FnOnce(&mut Library) -> Result<T>,
     ) -> Result<T> {
@@ -1556,6 +1556,8 @@ impl LibraryStore {
             return Err(error);
         }
         self.catalog_revision = self.catalog_revision.wrapping_add(1);
+        self.sanitize_ai_catalog();
+        self.prune_library_jobs();
         Ok(result)
     }
 
@@ -1925,7 +1927,85 @@ impl LibraryStore {
         Ok(tag_id)
     }
 
+    /// Sets an item's tags as the user: taking off one the AI added rejects
+    /// it, so it is not proposed again.
     pub fn set_item_tags(&mut self, id: DocumentId, tag_ids: &[LibraryTagId]) -> Result<()> {
+        let before = self.item_tag_ids(id);
+        self.replace_item_tags(id, tag_ids)?;
+        let after = self.item_tag_ids(id);
+        self.note_manual_tag_change(id, &before, &after);
+        Ok(())
+    }
+
+    pub(super) fn item_tag_ids(&self, id: DocumentId) -> Vec<LibraryTagId> {
+        self.library
+            .library_item_tags
+            .iter()
+            .filter(|relation| relation.item_id == id)
+            .map(|relation| relation.tag_id)
+            .collect()
+    }
+
+    pub(super) fn item_tag_names(&self, id: DocumentId) -> Vec<String> {
+        let mut names = self
+            .tags_for_item(id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        names.sort_by_key(|name| name.to_lowercase());
+        names
+    }
+
+    pub(super) fn item_collection_paths(&self, id: DocumentId) -> Vec<Vec<String>> {
+        item_collection_ids(&self.library, id)
+            .into_iter()
+            .map(|collection_id| collection_path_names_in(&self.library, collection_id))
+            .collect()
+    }
+
+    fn record_tags_edit(&mut self, id: DocumentId, before: Vec<String>) {
+        let after = self.item_tag_names(id);
+        if before == after {
+            return;
+        }
+        let title = self
+            .library_item(id)
+            .map(|item| item.title.clone())
+            .unwrap_or_default();
+        if let Some(recorder) = &mut self.edit_recorder {
+            recorder.push(LibraryEdit::tags(id, title, before, after));
+        }
+    }
+
+    fn record_collections_edit(&mut self, id: DocumentId, before: Vec<Vec<String>>) {
+        let after = self.item_collection_paths(id);
+        if before == after {
+            return;
+        }
+        let title = self
+            .library_item(id)
+            .map(|item| item.title.clone())
+            .unwrap_or_default();
+        if let Some(recorder) = &mut self.edit_recorder {
+            recorder.push(LibraryEdit::collections(id, title, before, after));
+        }
+    }
+
+    pub(super) fn replace_item_tags(
+        &mut self,
+        id: DocumentId,
+        tag_ids: &[LibraryTagId],
+    ) -> Result<()> {
+        let recording = self.edit_recorder.is_some();
+        let before = recording.then(|| self.item_tag_names(id));
+        self.persist_raw_item_tags(id, tag_ids)?;
+        if let Some(before) = before {
+            self.record_tags_edit(id, before);
+        }
+        Ok(())
+    }
+
+    fn persist_raw_item_tags(&mut self, id: DocumentId, tag_ids: &[LibraryTagId]) -> Result<()> {
         let tag_ids = tag_ids.iter().copied().collect::<HashSet<_>>();
         self.persist_catalog_change(|library| {
             if !library.library_items.iter().any(|item| item.id == id) {
@@ -2292,10 +2372,39 @@ impl LibraryStore {
             return Err(anyhow!("folder does not exist"));
         }
         let collection_ids = collection_ids.to_vec();
+        let before = self.item_collection_paths(id);
         self.persist_catalog_change(|library| {
             replace_item_collections(library, id, collection_ids);
             Ok(())
-        })
+        })?;
+        self.record_collections_edit(id, before);
+        Ok(())
+    }
+
+    /// Puts an item in the collections at these paths, creating the ones
+    /// that do not exist.
+    pub fn set_item_collection_paths(
+        &mut self,
+        id: DocumentId,
+        paths: &[Vec<String>],
+    ) -> Result<()> {
+        let mut collection_ids = Vec::new();
+        for path in paths {
+            if let Some(collection_id) = self.ensure_library_collection_path(None, path)? {
+                collection_ids.push(collection_id);
+            }
+        }
+        self.set_item_collections(id, &collection_ids)
+    }
+
+    /// Sets an item's tags by name, creating the ones that do not exist.
+    pub fn set_item_tag_names(&mut self, id: DocumentId, names: &[String]) -> Result<()> {
+        let tag_ids = names
+            .iter()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| self.ensure_library_tag(name))
+            .collect::<Result<Vec<_>>>()?;
+        self.set_item_tags(id, &tag_ids)
     }
 
     pub fn disjoint_library_nodes(&self, nodes: &[LibraryNodeId]) -> Vec<LibraryNodeId> {

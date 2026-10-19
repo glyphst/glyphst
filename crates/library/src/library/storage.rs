@@ -38,6 +38,10 @@ impl LibraryStore {
             edit_recorder: None,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
             catalog_revision: 0,
+            ai_catalog: Default::default(),
+            jobs: Vec::new(),
+            next_job_id: 1,
+            vault_notes: HashMap::new(),
         }
     }
 
@@ -82,8 +86,17 @@ impl LibraryStore {
         ensure_current_tables(&database)?;
         ensure_managed_library_directories(&managed_library_root)?;
         let library = load_current_library(&database, &managed_library_root)?;
+        let ai_catalog = super::ai_catalog::load_ai_catalog(&database)?;
+        let jobs = super::jobs::load_library_jobs(&database)?;
+        let next_job_id = jobs
+            .iter()
+            .map(|job| job.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let vault_notes = super::vault_notes::load_vault_notes(&database)?;
 
-        let store = Self {
+        let mut store = Self {
             library,
             database: Some(Arc::new(database)),
             managed_library_root: Some(managed_library_root),
@@ -95,7 +108,13 @@ impl LibraryStore {
             edit_recorder: None,
             history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
             catalog_revision: 0,
+            ai_catalog,
+            jobs,
+            next_job_id,
+            vault_notes,
         };
+        store.sanitize_ai_catalog();
+        store.prune_library_jobs();
         if let Err(error) = store.prune_ai_session_rows() {
             eprintln!("failed to prune expired AI sessions: {error:#}");
         }

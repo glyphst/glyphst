@@ -802,6 +802,10 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
+        ai_catalog: Default::default(),
+        jobs: Vec::new(),
+        next_job_id: 1,
+        vault_notes: HashMap::new(),
     };
     assert!(
         unavailable
@@ -1682,6 +1686,10 @@ fn history_save_fails_when_database_is_unavailable() {
         edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
+        ai_catalog: Default::default(),
+        jobs: Vec::new(),
+        next_job_id: 1,
+        vault_notes: HashMap::new(),
     };
     store.record_history(document_path, position(1));
 
@@ -1717,6 +1725,10 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         edit_recorder: None,
         history_entry_revisions: Arc::new(Mutex::new(HashMap::new())),
         catalog_revision: 0,
+        ai_catalog: Default::default(),
+        jobs: Vec::new(),
+        next_job_id: 1,
+        vault_notes: HashMap::new(),
     };
 
     let language_error = store
@@ -3070,4 +3082,435 @@ fn collections_filter_items_with_their_subcollections_and_moves_replace_them() {
     for path in paths {
         let _ = fs::remove_file(path);
     }
+}
+
+fn linked_test_item(store: &mut LibraryStore, path: &Path) -> DocumentId {
+    fs::write(path, format!("%PDF-1.4\n{}", path.display())).unwrap();
+    let LibraryImportOutcome::Added(id) = store
+        .link_item(path, LibraryItemMetadata::for_path(path), None)
+        .unwrap()
+    else {
+        panic!("expected {} to be linked", path.display());
+    };
+    id
+}
+
+#[test]
+fn enrichment_applies_known_tags_and_collections_and_only_proposes_new_collections() {
+    let database_path = temp_library_path("enrichment-apply");
+    let document_path = database_path.with_extension("paper.pdf");
+    let item_id = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let item_id = linked_test_item(&mut store, &document_path);
+        store.ensure_library_tag("Transformers").unwrap();
+        let ml = store
+            .create_library_collection(None, "Machine learning")
+            .unwrap();
+        store.create_library_collection(Some(ml), "LLMs").unwrap();
+        let run = store.next_enrichment_run();
+        let applied = store
+            .apply_enrichment(
+                item_id,
+                EnrichmentApply {
+                    run,
+                    tags: vec![
+                        "transformers".to_string(),
+                        "attention".to_string(),
+                        "Attention".to_string(),
+                    ],
+                    create_tags: false,
+                    collections: vec![
+                        vec!["Machine learning".to_string(), "LLMs".to_string()],
+                        vec!["Nowhere".to_string()],
+                    ],
+                    suggested_collection: Some(vec![
+                        "Machine learning".to_string(),
+                        "NLP".to_string(),
+                    ]),
+                    metadata: None,
+                    enrichment: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(applied.tags_applied, vec!["transformers".to_string()]);
+        assert_eq!(
+            applied.collections_applied,
+            vec!["Machine learning / LLMs".to_string()]
+        );
+        assert_eq!(
+            applied.suggested,
+            vec!["Machine learning / NLP".to_string()]
+        );
+        assert!(store.item_needs_review(item_id));
+        item_id
+    };
+
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    let names = |store: &LibraryStore| store.item_tag_names(item_id);
+    assert_eq!(names(&store), vec!["Transformers".to_string()]);
+    assert_eq!(
+        store.item_collection_paths(item_id),
+        vec![vec!["Machine learning".to_string(), "LLMs".to_string()]]
+    );
+    let assignments = store.ai_assignments(item_id).to_vec();
+    assert_eq!(assignments.len(), 3, "{assignments:#?}");
+
+    // Taking an AI tag off by hand rejects it; the next run leaves it out.
+    store.set_item_tags(item_id, &[]).unwrap();
+    let tag = assignments
+        .iter()
+        .find(|assignment| matches!(assignment.target, AssignmentTarget::Tag(_)))
+        .unwrap();
+    assert_eq!(
+        store
+            .ai_assignments(item_id)
+            .iter()
+            .find(|assignment| assignment.target == tag.target)
+            .unwrap()
+            .state,
+        AssignmentState::Rejected
+    );
+    let run = store.next_enrichment_run();
+    let again = store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                tags: vec!["Transformers".to_string()],
+                create_tags: true,
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert!(again.tags_applied.is_empty());
+    assert!(names(&store).is_empty());
+
+    // Accepting the proposed collection creates it and files the item.
+    let proposed =
+        AssignmentTarget::NewCollection(vec!["Machine learning".to_string(), "NLP".to_string()]);
+    store.accept_assignment(item_id, &proposed).unwrap();
+    assert_eq!(store.item_collection_paths(item_id).len(), 2);
+    let collection = store
+        .ai_assignments(item_id)
+        .iter()
+        .find(|assignment| assignment.label == "Machine learning / NLP")
+        .unwrap();
+    assert_eq!(collection.state, AssignmentState::Accepted);
+    assert!(matches!(collection.target, AssignmentTarget::Collection(_)));
+
+    // Rejecting the applied collection takes the item out of it.
+    let applied_collection = store
+        .ai_assignments(item_id)
+        .iter()
+        .find(|assignment| assignment.label == "Machine learning / LLMs")
+        .unwrap()
+        .target
+        .clone();
+    store
+        .reject_assignment(item_id, &applied_collection)
+        .unwrap();
+    assert_eq!(
+        store.item_collection_paths(item_id),
+        vec![vec!["Machine learning".to_string(), "NLP".to_string()]]
+    );
+    assert!(!store.item_needs_review(item_id));
+
+    drop(store);
+    let _ = fs::remove_file(document_path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn enrichment_fills_guessed_and_empty_fields_but_never_locked_ones() {
+    let mut store = LibraryStore::memory();
+    let path = temp_library_path("enrichment-metadata").with_extension("pdf");
+    let item_id = linked_test_item(&mut store, &path);
+    let mut proposed = store.library_item(item_id).unwrap().clone();
+    proposed.title = "Attention Is All You Need".to_string();
+    proposed.year = Some(2017);
+    proposed.creators = vec![LibraryCreator {
+        name: "Ashish Vaswani".to_string(),
+        role: LibraryCreatorRole::Author,
+    }];
+    proposed.kind = LibraryItemKind::Paper;
+    let run = store.next_enrichment_run();
+    let applied = store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                metadata: Some(proposed.clone()),
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        applied.fields_filled,
+        vec![
+            MetadataField::Title,
+            MetadataField::Creators,
+            MetadataField::Year
+        ]
+    );
+    assert_eq!(
+        store.library_item(item_id).unwrap().title,
+        "Attention Is All You Need"
+    );
+    assert_eq!(
+        store.metadata_record(item_id).unwrap().source,
+        MetadataSource::Llm
+    );
+
+    // The user corrects the year; a later run leaves it.
+    let mut edited = store.library_item(item_id).unwrap().clone();
+    edited.year = Some(2018);
+    store.edit_library_item_metadata(edited).unwrap();
+    assert_eq!(
+        store.metadata_record(item_id).unwrap().locked_fields,
+        vec![MetadataField::Year]
+    );
+    proposed.title = "Something else".to_string();
+    proposed.year = Some(1999);
+    let run = store.next_enrichment_run();
+    let applied = store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                metadata: Some(proposed),
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert!(applied.fields_filled.is_empty(), "{applied:?}");
+    let item = store.library_item(item_id).unwrap();
+    assert_eq!(item.year, Some(2018));
+    assert_eq!(item.title, "Attention Is All You Need");
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn undoing_an_enrichment_run_rejects_what_it_added() {
+    let mut store = LibraryStore::memory();
+    let path = temp_library_path("enrichment-undo").with_extension("pdf");
+    let item_id = linked_test_item(&mut store, &path);
+    store.create_library_collection(None, "Reading").unwrap();
+    let run = store.next_enrichment_run();
+    store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                tags: vec!["rust".to_string(), "databases".to_string()],
+                create_tags: true,
+                collections: vec![vec!["Reading".to_string()]],
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(store.item_tag_names(item_id).len(), 2);
+    assert_eq!(store.undo_enrichment_run(item_id, run).unwrap(), 3);
+    assert!(store.item_tag_names(item_id).is_empty());
+    assert!(store.item_collection_paths(item_id).is_empty());
+    assert!(
+        store
+            .ai_assignments(item_id)
+            .iter()
+            .all(|assignment| assignment.state == AssignmentState::Rejected)
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn library_jobs_survive_a_restart_and_follow_their_items() {
+    let database_path = temp_library_path("library-jobs");
+    let first = database_path.with_extension("first.pdf");
+    let second = database_path.with_extension("second.pdf");
+    let (first_id, second_id) = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let first_id = linked_test_item(&mut store, &first);
+        let second_id = linked_test_item(&mut store, &second);
+        let added = store
+            .enqueue_library_jobs(
+                &[first_id, second_id],
+                LibraryJobKind::Enrich,
+                LibraryJobOrigin::OnAdd,
+                false,
+            )
+            .unwrap();
+        assert_eq!(added.len(), 2);
+        assert!(
+            store
+                .enqueue_library_jobs(
+                    &[first_id],
+                    LibraryJobKind::Enrich,
+                    LibraryJobOrigin::Manual,
+                    true
+                )
+                .unwrap()
+                .is_empty(),
+            "an item has one waiting job of a kind"
+        );
+        let taken = store.take_library_jobs(LibraryJobKind::Enrich, 1);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].item_id, first_id);
+        assert_eq!(taken[0].attempts, 1);
+        assert!(
+            store
+                .take_library_jobs(LibraryJobKind::Metadata, 4)
+                .is_empty()
+        );
+        (first_id, second_id)
+    };
+
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert!(
+        store
+            .library_jobs()
+            .iter()
+            .all(|job| job.state == LibraryJobState::Queued),
+        "a job running at shutdown is queued again"
+    );
+    let taken = store.take_library_jobs(LibraryJobKind::Enrich, 4);
+    assert_eq!(taken.len(), 2);
+    let first_job = taken.iter().find(|job| job.item_id == first_id).unwrap();
+    store
+        .finish_library_job(
+            first_job.id,
+            Some(LibraryJobState::Waiting {
+                until: current_timestamp() + 600,
+            }),
+        )
+        .unwrap();
+    assert!(
+        store
+            .take_library_jobs(LibraryJobKind::Enrich, 4)
+            .is_empty()
+    );
+    store.trash_library_items(&[second_id]).unwrap();
+    assert_eq!(store.library_jobs().len(), 1, "a trashed item's job goes");
+    store.finish_library_job(first_job.id, None).unwrap();
+    assert!(store.library_jobs().is_empty());
+
+    drop(store);
+    for path in [first, second] {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn vault_notes_and_enrichments_persist_per_item() {
+    let database_path = temp_library_path("vault-notes");
+    let path = database_path.with_extension("note.pdf");
+    let note = VaultNoteRecord {
+        relative_path: "items/vaswani2017attention.md".to_string(),
+        written_tags: vec!["transformers".to_string()],
+        frontmatter_sha256: [7; 32],
+        blocks: vec![("summary".to_string(), [9; 32])],
+        modified: 12,
+        written_at: 13,
+    };
+    let enrichment = ItemEnrichment {
+        prompt_version: 1,
+        model: "haiku".to_string(),
+        input_sha256: [1; 32],
+        status: EnrichmentStatus::Done,
+        attempts: 1,
+        finished_at: 5,
+        input_tokens: 900,
+        output_tokens: 300,
+        tldr: "A sequence model built from attention.".to_string(),
+        key_points: vec!["multi-head attention".to_string()],
+        suggested_tags: vec!["attention".to_string()],
+        suggested_collection: None,
+        kind: Some(LibraryItemKind::Paper),
+        language: Some("en".to_string()),
+        confidence: Some(0.9),
+    };
+    let item_id = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let item_id = linked_test_item(&mut store, &path);
+        store.set_vault_note(item_id, Some(note.clone())).unwrap();
+        store
+            .set_item_enrichment(item_id, enrichment.clone())
+            .unwrap();
+        item_id
+    };
+    let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.vault_note(item_id), Some(&note));
+    assert_eq!(store.item_enrichment(item_id), Some(&enrichment));
+    store.set_vault_note(item_id, None).unwrap();
+    store.trash_library_items(&[item_id]).unwrap();
+    store.permanently_delete_library_items(&[item_id]).unwrap();
+    assert!(store.item_enrichment(item_id).is_none());
+    drop(store);
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert!(store.vault_note(item_id).is_none());
+    assert!(store.item_enrichment(item_id).is_none());
+
+    drop(store);
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(&database_path);
+    let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
+}
+
+#[test]
+fn recorded_tag_collection_and_metadata_edits_revert_and_detect_conflicts() {
+    let mut store = LibraryStore::memory();
+    let path = temp_library_path("catalog-edits").with_extension("pdf");
+    let item_id = linked_test_item(&mut store, &path);
+
+    let (_, edits) = store.record_edits(|store| {
+        store
+            .set_item_tag_names(item_id, &["llms".to_string(), "rag".to_string()])
+            .unwrap();
+        store
+            .set_item_collection_paths(item_id, &[vec!["ML".to_string(), "LLMs".to_string()]])
+            .unwrap();
+        let mut item = store.library_item(item_id).unwrap().clone();
+        item.title = "Retrieval-Augmented Generation".to_string();
+        store.update_library_item_metadata(item).unwrap();
+    });
+    assert_eq!(edits.len(), 3, "{edits:#?}");
+    let before_title = LibraryItemMetadata::for_path(&path).title;
+    assert_eq!(
+        edits[0].describe(),
+        format!("Tagged “{before_title}” #llms #rag")
+    );
+    assert_eq!(
+        edits[2].describe(),
+        "Changed the details of “Retrieval-Augmented Generation”"
+    );
+    assert_eq!(edits[0].item_id(), Some(item_id));
+
+    for edit in edits.iter().rev() {
+        store.revert_edit(edit).unwrap();
+    }
+    assert!(store.item_tag_names(item_id).is_empty());
+    assert!(store.item_collection_paths(item_id).is_empty());
+    assert_eq!(
+        store.library_item(item_id).unwrap().title,
+        LibraryItemMetadata::for_path(&path).title
+    );
+    for edit in &edits {
+        store.reapply_edit(edit).unwrap();
+    }
+    assert_eq!(store.item_tag_names(item_id), vec!["llms", "rag"]);
+
+    // The user changes the tags: the agent's edit no longer matches.
+    store
+        .set_item_tag_names(item_id, &["mine".to_string()])
+        .unwrap();
+    let error = store.revert_edit(&edits[0]).unwrap_err();
+    assert!(is_edit_conflict(&error), "{error:#}");
+
+    let serialized = serde_json::to_string(&edits).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<LibraryEdit>>(&serialized).unwrap(),
+        edits
+    );
+    let _ = fs::remove_file(path);
 }

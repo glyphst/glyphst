@@ -129,6 +129,9 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(LIBRARY_LINKED_ATTACHMENTS_V1_TABLE)?;
     }
+    super::ai_catalog::ensure_ai_catalog_tables(&write_txn)?;
+    super::jobs::ensure_jobs_table(&write_txn)?;
+    super::vault_notes::ensure_vault_notes_table(&write_txn)?;
     write_txn.commit()?;
     Ok(())
 }

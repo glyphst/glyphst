@@ -1963,6 +1963,13 @@ pub struct LibraryStore {
     edit_recorder: Option<Vec<LibraryEdit>>,
     history_entry_revisions: Arc<Mutex<HashMap<PathBuf, u64>>>,
     catalog_revision: u64,
+    /// What the AI and lookups did to catalog items (`ai_catalog.rs`).
+    ai_catalog: ai_catalog::AiCatalogState,
+    /// The background queue (`jobs.rs`).
+    jobs: Vec<LibraryJob>,
+    next_job_id: u64,
+    /// Each item's note in the vault (`vault_notes.rs`).
+    vault_notes: HashMap<DocumentId, VaultNoteRecord>,
 }
 
 pub struct HistoryEntryPersistenceSnapshot {
@@ -2084,22 +2091,32 @@ pub use activity::{ActivityEvent, ActivityKind};
 mod reading;
 pub use reading::ReadingSession;
 mod agent_edits;
+mod ai_catalog;
 mod ai_sessions;
 mod annotations;
 mod bookmarks;
 mod catalog;
 mod edits;
 mod history;
+mod jobs;
 mod model;
 mod preferences;
 mod reader_session;
 mod sidebar;
 mod storage;
 mod storage_helpers;
+mod vault_notes;
 
 pub use agent_edits::{LibraryEdit, is_edit_conflict};
+pub use ai_catalog::{
+    AiAssignment, AssignmentOrigin, AssignmentState, AssignmentTarget, EnrichmentApplied,
+    EnrichmentApply, EnrichmentStatus, ItemEnrichment, MetadataField, MetadataRecord,
+    MetadataSource,
+};
 pub use catalog::*;
+pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState};
 use storage_helpers::require_storage_version;
+pub use vault_notes::VaultNoteRecord;
 
 pub fn normalize_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| {

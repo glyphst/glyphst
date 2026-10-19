@@ -15,6 +15,25 @@ enum EditKind {
         before: Box<LibraryItem>,
         after: Box<LibraryItem>,
     },
+    /// An item's tags, by name.
+    Tags {
+        item: DocumentId,
+        title: String,
+        before: Vec<String>,
+        after: Vec<String>,
+    },
+    /// An item's collections, by path.
+    Collections {
+        item: DocumentId,
+        title: String,
+        before: Vec<Vec<String>>,
+        after: Vec<Vec<String>>,
+    },
+    /// An item's metadata fields.
+    Metadata {
+        before: Box<LibraryItem>,
+        after: Box<LibraryItem>,
+    },
 }
 
 impl LibraryEdit {
@@ -29,11 +48,55 @@ impl LibraryEdit {
         })
     }
 
+    pub(super) fn tags(
+        item: DocumentId,
+        title: String,
+        before: Vec<String>,
+        after: Vec<String>,
+    ) -> Self {
+        Self(EditKind::Tags {
+            item,
+            title,
+            before,
+            after,
+        })
+    }
+
+    pub(super) fn collections(
+        item: DocumentId,
+        title: String,
+        before: Vec<Vec<String>>,
+        after: Vec<Vec<String>>,
+    ) -> Self {
+        Self(EditKind::Collections {
+            item,
+            title,
+            before,
+            after,
+        })
+    }
+
+    pub(super) fn metadata(before: LibraryItem, after: LibraryItem) -> Self {
+        Self(EditKind::Metadata {
+            before: Box::new(before),
+            after: Box::new(after),
+        })
+    }
+
     /// The document the edit belongs to, for annotations and bookmarks.
     pub fn path(&self) -> Option<&Path> {
         match &self.0 {
             EditKind::Document(edit) => Some(edit.path()),
-            EditKind::Item { .. } => None,
+            _ => None,
+        }
+    }
+
+    /// The library item the edit belongs to, for catalog edits.
+    pub fn item_id(&self) -> Option<DocumentId> {
+        match &self.0 {
+            EditKind::Document(_) => None,
+            EditKind::Item { after, .. } | EditKind::Metadata { after, .. } => Some(after.id),
+            EditKind::Tags { item, .. } | EditKind::Collections { item, .. } => Some(*item),
         }
     }
 
@@ -115,8 +178,45 @@ impl LibraryEdit {
                     format!("Changed “{}”", after.title)
                 }
             }
+            EditKind::Tags { title, after, .. } => {
+                if after.is_empty() {
+                    format!("Removed the tags of “{title}”")
+                } else {
+                    let tags = after
+                        .iter()
+                        .map(|tag| format!("#{tag}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("Tagged “{title}” {tags}")
+                }
+            }
+            EditKind::Collections { title, after, .. } => {
+                if after.is_empty() {
+                    format!("Took “{title}” out of its collections")
+                } else {
+                    let paths = after
+                        .iter()
+                        .map(|path| path.join(" / "))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("Filed “{title}” in {paths}")
+                }
+            }
+            EditKind::Metadata { after, .. } => format!("Changed the details of “{}”", after.title),
         }
     }
+}
+
+fn same_names(left: &[String], right: &[String]) -> bool {
+    let normalize = |names: &[String]| {
+        let mut names = names
+            .iter()
+            .map(|name| name.to_lowercase())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    normalize(left) == normalize(right)
 }
 
 /// Whether an error says the data changed since the edit, so it can no
@@ -187,6 +287,60 @@ impl LibraryStore {
                 let (status, note, favorite) =
                     (target.status, target.work_note.clone(), target.favorite);
                 self.persist_item_fields(expected.id, status, note, favorite)
+            }
+            EditKind::Tags {
+                item,
+                before,
+                after,
+                ..
+            } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after, before),
+                    DocumentEditDirection::Redo => (before, after),
+                };
+                if !same_names(&self.item_tag_names(*item), expected) {
+                    return Err(DocumentEditConflict("library item tags").into());
+                }
+                let tag_ids = target
+                    .iter()
+                    .map(|name| self.ensure_library_tag(name))
+                    .collect::<Result<Vec<_>>>()?;
+                self.replace_item_tags(*item, &tag_ids)
+            }
+            EditKind::Collections {
+                item,
+                before,
+                after,
+                ..
+            } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after, before),
+                    DocumentEditDirection::Redo => (before, after),
+                };
+                if &self.item_collection_paths(*item) != expected {
+                    return Err(DocumentEditConflict("library item collections").into());
+                }
+                self.set_item_collection_paths(*item, target)
+            }
+            EditKind::Metadata { before, after } => {
+                let (expected, target) = match direction {
+                    DocumentEditDirection::Undo => (after, before),
+                    DocumentEditDirection::Redo => (before, after),
+                };
+                let current = self
+                    .library_item(expected.id)
+                    .ok_or_else(|| anyhow!("library item {} does not exist", expected.id.0))?;
+                if MetadataField::ALL
+                    .into_iter()
+                    .any(|field| field.differs(current, expected))
+                {
+                    return Err(DocumentEditConflict("library item details").into());
+                }
+                let mut item = current.clone();
+                for field in MetadataField::ALL {
+                    field.copy(target, &mut item);
+                }
+                self.update_library_item_metadata(item)
             }
         }
     }
