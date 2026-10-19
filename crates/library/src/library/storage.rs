@@ -59,6 +59,12 @@ impl LibraryStore {
         }
     }
 
+    /// A library in `path` with its files under `root`, apart from the
+    /// user's (for the screenshots' demos).
+    pub fn open_apart(path: PathBuf, root: PathBuf) -> Result<Self> {
+        Self::open_current_with_root(path, root)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn open_for_test(path: PathBuf) -> Result<Self> {

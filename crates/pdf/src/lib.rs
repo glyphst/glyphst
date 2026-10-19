@@ -13,6 +13,6 @@ pub use cover::{Cover, render_cover};
 pub use document::{
     DocumentAuthenticationError, DocumentPassword, DocumentSnapshot, GlyphstDocument, PdfDocument,
 };
-pub use probe::{DocumentProbe, probe_document};
+pub use probe::{DocumentProbe, PageBox, page_boxes, probe_document};
 pub use reload::{ReloadCoordinator, ReloadDisposition};
 pub use render::{DocumentRenderSession, RetainedDisplayList};

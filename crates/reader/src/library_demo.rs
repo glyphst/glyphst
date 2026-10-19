@@ -11,7 +11,25 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 6] = ["all", "item", "review", "backfill", "folder", "identifier"];
+pub const STATES: [&str; 8] = [
+    "all",
+    "item",
+    "review",
+    "backfill",
+    "folder",
+    "identifier",
+    "zotero",
+    "zotero-done",
+];
+
+/// A sample Zotero data folder for frame 04j.
+pub fn zotero_folder() -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("glyphst-zotero-demo-{}", std::process::id()));
+    if let Err(error) = glyphst_zotero_import::sample::write(&folder) {
+        eprintln!("failed to write the sample Zotero library: {error:#}");
+    }
+    folder
+}
 
 struct Paper {
     title: &'static str,

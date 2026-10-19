@@ -275,6 +275,8 @@ if [[ ${tier} == screens ]]; then
         "04i-library-review --library-demo review"
         "04h-library-backfill --ai-fake --library-demo backfill"
         "04k-library-folder --library-demo folder"
+        "04j-zotero --library-demo zotero"
+        "04j-zotero-done --library-demo zotero-done"
         "06d-add-identifier --library-demo identifier"
         "04e-home-narrow --window 960x900"
         "05-empty @ --assistant-demo empty"

@@ -3634,3 +3634,153 @@ fn an_item_without_a_file_survives_reopening() {
     let _ = fs::remove_file(&database_path);
     let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
 }
+
+#[test]
+fn an_import_batch_brings_items_files_tags_collections_and_trash_in_one_write() {
+    let database_path = temp_library_path("bulk-import");
+    let managed_root = database_path.with_extension("managed-library");
+    let copied = database_path.with_extension("copied.pdf");
+    let linked = database_path.with_extension("linked.pdf");
+    let again = database_path.with_extension("again.pdf");
+    fs::write(&copied, b"%PDF-1.4\ncopied").unwrap();
+    fs::write(&linked, b"%PDF-1.4\nlinked").unwrap();
+    fs::write(&again, b"%PDF-1.4\nlinked").unwrap();
+    let record = |key: &str| MetadataRecord {
+        source: MetadataSource::Zotero,
+        external_ids: vec![format!("zotero:1/{key}")],
+        ..MetadataRecord::default()
+    };
+
+    let (paper, book, note_only) = {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let root = store.managed_library_root().unwrap().to_path_buf();
+        let cancel = AtomicBool::new(false);
+        let outcomes = store
+            .import_entries(
+                vec![
+                    ImportEntry {
+                        file: Some(ImportFile::Managed(
+                            prepare_managed_import(&root, &copied, &cancel).unwrap(),
+                        )),
+                        metadata: LibraryItemMetadata {
+                            title: "Attention Is All You Need".to_string(),
+                            ..LibraryItemMetadata::default()
+                        },
+                        note: "Compare with **RoPE**.".to_string(),
+                        tags: vec!["transformers".to_string()],
+                        source_tags: vec!["Computer Science".to_string()],
+                        collections: vec![
+                            vec!["Machine learning".to_string(), "LLMs".to_string()],
+                            vec!["Reading".to_string()],
+                        ],
+                        record: record("PAPER001"),
+                        trashed: false,
+                    },
+                    ImportEntry {
+                        file: Some(ImportFile::Linked(
+                            prepare_linked_import(&linked, &cancel).unwrap(),
+                        )),
+                        metadata: LibraryItemMetadata {
+                            kind: LibraryItemKind::Book,
+                            title: "A Trashed Book".to_string(),
+                            ..LibraryItemMetadata::default()
+                        },
+                        collections: vec![vec!["Reading".to_string()]],
+                        record: record("BOOK0001"),
+                        trashed: true,
+                        ..ImportEntry::default()
+                    },
+                    ImportEntry {
+                        metadata: LibraryItemMetadata {
+                            title: "No file".to_string(),
+                            ..LibraryItemMetadata::default()
+                        },
+                        tags: vec!["Transformers".to_string()],
+                        record: record("NOFILE01"),
+                        ..ImportEntry::default()
+                    },
+                ],
+                "zotero",
+            )
+            .unwrap();
+        let [
+            ImportEntryOutcome::Added(paper),
+            ImportEntryOutcome::Added(book),
+            ImportEntryOutcome::Added(note_only),
+        ] = outcomes[..]
+        else {
+            panic!("expected three items added, got {outcomes:?}");
+        };
+
+        // The same content again is the item already there.
+        let outcomes = store
+            .import_entries(
+                vec![ImportEntry {
+                    file: Some(ImportFile::Linked(
+                        prepare_linked_import(&again, &cancel).unwrap(),
+                    )),
+                    record: record("DUPLICAT"),
+                    ..ImportEntry::default()
+                }],
+                "zotero",
+            )
+            .unwrap();
+        assert_eq!(outcomes, vec![ImportEntryOutcome::Duplicate(book)]);
+        (paper, book, note_only)
+    };
+
+    let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+    assert_eq!(store.library_items().len(), 3);
+    let attachment = store.primary_attachment(paper).unwrap();
+    assert!(!attachment.is_linked());
+    assert!(attachment.path.starts_with(&managed_root));
+    assert!(attachment.path.is_file());
+    assert!(store.primary_attachment(book).unwrap().is_linked());
+    assert!(store.primary_attachment(note_only).is_none());
+    assert_eq!(
+        store.library_item(paper).unwrap().work_note,
+        "Compare with **RoPE**."
+    );
+    assert_eq!(
+        store.item_collection_paths(paper),
+        vec![
+            vec!["Machine learning".to_string(), "LLMs".to_string()],
+            vec!["Reading".to_string()]
+        ]
+    );
+    assert_eq!(
+        store.library_collections().len(),
+        3,
+        "a collection named twice is made once"
+    );
+    assert_eq!(
+        store.item_tag_names(paper),
+        vec!["Computer Science".to_string(), "transformers".to_string()]
+    );
+    assert_eq!(
+        store.item_tag_names(note_only),
+        vec!["transformers".to_string()],
+        "tags are shared by their folded name"
+    );
+    let marks = store.ai_assignments(paper);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].label, "Computer Science");
+    assert_eq!(
+        marks[0].origin,
+        AssignmentOrigin::Import {
+            source: "zotero".to_string()
+        }
+    );
+    assert!(!store.item_needs_review(paper), "imported tags are kept");
+    assert!(store.library_item(book).unwrap().trashed_at.is_some());
+    assert_eq!(
+        store.item_with_external_id("zotero:1/PAPER001"),
+        Some(paper)
+    );
+    assert_eq!(store.item_with_external_id("zotero:1/DUPLICAT"), Some(book));
+
+    for path in [copied, linked, again, database_path] {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_dir_all(managed_root);
+}

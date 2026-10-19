@@ -3,7 +3,7 @@
 //! first pages, where a paper prints its DOI or arXiv id and a book its
 //! ISBN. Runs on a worker thread.
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context as _, Result};
 use mupdf::{MetadataName, TextPageFlags};
@@ -73,6 +73,68 @@ pub fn probe_document(path: &Path, pages: usize) -> Result<DocumentProbe> {
     })
 }
 
+/// A page's crop box in PDF user space (origin at the bottom left) and its
+/// rotation, for placing what other tools saved in user space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    /// `/Rotate`, in degrees.
+    pub rotate: i32,
+}
+
+/// The boxes of `pages` (from 0) of the PDF at `path`; pages that cannot be
+/// read are left out.
+pub fn page_boxes(path: &Path, pages: &[usize]) -> Result<HashMap<usize, PageBox>> {
+    let document = GlyphstDocument::open(path)?;
+    let mut boxes = HashMap::new();
+    for &index in pages {
+        if boxes.contains_key(&index) {
+            continue;
+        }
+        let Ok(page) = document.inner().load_page(index as i32) else {
+            continue;
+        };
+        let Ok(page) = mupdf::pdf::PdfPage::try_from(page) else {
+            continue;
+        };
+        let object = page.object();
+        let rect = ["CropBox", "MediaBox"].into_iter().find_map(|key| {
+            let array = object.get_dict_inheritable(key).ok()??;
+            let at = |i: i32| {
+                array
+                    .get_array(i)
+                    .ok()?
+                    .and_then(|value| value.as_float().ok())
+            };
+            Some([at(0)?, at(1)?, at(2)?, at(3)?])
+        });
+        let Some([ax, ay, bx, by]) = rect else {
+            continue;
+        };
+        let rotate = object
+            .get_dict_inheritable("Rotate")
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_int().ok())
+            .unwrap_or(0)
+            .rem_euclid(360);
+        boxes.insert(
+            index,
+            PageBox {
+                x0: ax.min(bx),
+                y0: ay.min(by),
+                x1: ax.max(bx),
+                y1: ay.max(by),
+                rotate,
+            },
+        );
+    }
+    Ok(boxes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +155,44 @@ mod tests {
             probe.page_text[0].contains("arXiv:1706.03762v7"),
             "{:?}",
             probe.page_text
+        );
+    }
+
+    #[test]
+    fn a_page_box_comes_from_the_crop_box_else_the_media_box() {
+        let dir = std::env::temp_dir();
+        let plain = dir.join(format!("glyphst-box-{}.pdf", std::process::id()));
+        let cropped = dir.join(format!("glyphst-box-crop-{}.pdf", std::process::id()));
+        std::fs::write(&plain, crate::test_pdf::pdf_with("", "<< >>", "", &[])).unwrap();
+        std::fs::write(
+            &cropped,
+            crate::test_pdf::pdf_with("", "<< >>", "/CropBox [10 20 190 90] /Rotate 90", &[]),
+        )
+        .unwrap();
+        let plain_box = page_boxes(&plain, &[0, 0, 7]).unwrap();
+        let cropped_box = page_boxes(&cropped, &[0]).unwrap();
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&cropped);
+        assert_eq!(
+            plain_box.get(&0),
+            Some(&PageBox {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 200.0,
+                y1: 100.0,
+                rotate: 0
+            })
+        );
+        assert_eq!(plain_box.len(), 1, "a page past the end is left out");
+        assert_eq!(
+            cropped_box.get(&0),
+            Some(&PageBox {
+                x0: 10.0,
+                y0: 20.0,
+                x1: 190.0,
+                y1: 90.0,
+                rotate: 90
+            })
         );
     }
 

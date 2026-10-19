@@ -17,6 +17,7 @@ members = [
     "crates/translation",
     "crates/ui",
     "crates/vault",
+    "crates/zotero-import",
 ]
 resolver = "3"
 
@@ -59,6 +60,8 @@ redb = "4"
 regex = "1"
 # arXiv's Atom answers in metadata lookups (already in the tree); MIT OR Apache-2.0.
 roxmltree = "0.21"
+# Reading a copy of Zotero's database for import, SQLite built in; MIT.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # Folding titles for duplicate detection (already in the tree); MIT OR Apache-2.0.
 unicode-normalization = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "blocking", "multipart", "query", "form"] }

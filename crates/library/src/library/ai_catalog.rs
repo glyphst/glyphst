@@ -834,6 +834,41 @@ impl LibraryStore {
         }
     }
 
+    /// Records where an imported item came from, and the tags its source
+    /// added by itself (kept, marked as the import's). The caller writes
+    /// the rows.
+    pub(super) fn note_imported(
+        &mut self,
+        id: DocumentId,
+        record: MetadataRecord,
+        tags: &[(LibraryTagId, String)],
+        source: &str,
+    ) {
+        self.ai_catalog.metadata.insert(id, record);
+        if tags.is_empty() {
+            return;
+        }
+        let now = current_timestamp();
+        let entries = self.ai_catalog.assignments.entry(id).or_default();
+        for (tag_id, label) in tags {
+            if entries
+                .iter()
+                .any(|assignment| assignment.target == AssignmentTarget::Tag(*tag_id))
+            {
+                continue;
+            }
+            entries.push(AiAssignment {
+                target: AssignmentTarget::Tag(*tag_id),
+                label: label.clone(),
+                origin: AssignmentOrigin::Import {
+                    source: source.to_string(),
+                },
+                state: AssignmentState::Accepted,
+                at: now,
+            });
+        }
+    }
+
     pub(super) fn sanitize_ai_catalog(&mut self) {
         let changed = self.ai_catalog.sanitize(&self.library);
         if !changed.is_empty()
@@ -862,7 +897,7 @@ impl LibraryStore {
         parent
     }
 
-    fn write_ai_rows(&self, ids: &[DocumentId]) -> Result<()> {
+    pub(super) fn write_ai_rows(&self, ids: &[DocumentId]) -> Result<()> {
         let Some(database) = &self.database else {
             return Ok(());
         };

@@ -79,6 +79,7 @@ mod user_settings;
 mod vault_sync;
 mod wallpaper;
 mod window_blur;
+mod zotero_import;
 
 use std::path::PathBuf;
 

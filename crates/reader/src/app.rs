@@ -442,6 +442,8 @@ pub struct ReaderApp {
     folder_move: Option<crate::library_dialogs::FolderMove>,
     /// Works added by identifier, their PDFs downloading.
     work_adds: Vec<crate::library_dialogs::WorkAdd>,
+    /// Importing from Zotero (frame 04j).
+    zotero: Option<Box<crate::zotero_import::ZoteroImport>>,
 }
 
 impl ReaderApp {
@@ -677,6 +679,7 @@ impl ReaderApp {
             library_dialog: None,
             folder_move: None,
             work_adds: Vec::new(),
+            zotero: None,
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
@@ -702,7 +705,7 @@ impl ReaderApp {
                 }
             }
             app.library_dialog = match state.as_str() {
-                "backfill" => app.backfill_dialog(),
+                "backfill" => app.backfill_dialog(None),
                 "folder" => Some(crate::library_dialogs::Dialog::ChooseFolder {
                     path: "~/Documents/Glyphst".to_string(),
                     files: 128,
@@ -713,6 +716,29 @@ impl ReaderApp {
                 "identifier" => Some(crate::library_dialogs::Dialog::add_by_identifier(None)),
                 _ => None,
             };
+            if state.starts_with("zotero") {
+                let mut zotero = crate::zotero_import::ZoteroImport::with_data_dir(
+                    crate::library_demo::zotero_folder(),
+                    &cc.egui_ctx,
+                );
+                if state == "zotero-done" {
+                    // Into an empty library on disk (highlights need one),
+                    // so all of it is new.
+                    let folder = std::env::temp_dir()
+                        .join(format!("glyphst-zotero-target-{}", std::process::id()));
+                    let _ = std::fs::remove_dir_all(&folder);
+                    app.library = glyphst_library::LibraryStore::open_apart(
+                        folder.join("library.redb"),
+                        folder.join("files"),
+                    )
+                    .unwrap_or_else(|error| {
+                        eprintln!("failed to open the demo library: {error:#}");
+                        glyphst_library::LibraryStore::memory()
+                    });
+                    zotero.import_now(&app.library, &cc.egui_ctx);
+                }
+                app.zotero = Some(Box::new(zotero));
+            }
         }
         if let Some(query) = launch.palette {
             app.palette.toggle();
@@ -1077,8 +1103,12 @@ impl ReaderApp {
         }
     }
 
-    /// Frame 04h: the items without an AI pass and what it would take.
-    fn backfill_dialog(&self) -> Option<crate::library_dialogs::Dialog> {
+    /// Frame 04h: the items without an AI pass (of `only`, when given) and
+    /// what it would take.
+    fn backfill_dialog(
+        &self,
+        only: Option<&[glyphst_library::DocumentId]>,
+    ) -> Option<crate::library_dialogs::Dialog> {
         let settings = self.user_settings.get()?;
         let model = settings.ai.resolved_library()?;
         let items = self
@@ -1086,7 +1116,9 @@ impl ReaderApp {
             .library_items()
             .iter()
             .filter(|item| {
-                item.trashed_at.is_none() && self.library.item_enrichment(item.id).is_none()
+                item.trashed_at.is_none()
+                    && self.library.item_enrichment(item.id).is_none()
+                    && only.is_none_or(|only| only.contains(&item.id))
             })
             .collect::<Vec<_>>();
         let tags = self
@@ -1171,6 +1203,10 @@ impl ReaderApp {
                 self.notices.push(format!("Could not add it: {error:#}"));
             }
         }
+        if self.zotero.is_some() {
+            self.zotero_dialog(ctx);
+            return;
+        }
         let Some(dialog) = &mut self.library_dialog else {
             return;
         };
@@ -1238,6 +1274,48 @@ impl ReaderApp {
         };
         if let Err(error) = result {
             self.notices.push(format!("{error:#}"));
+        }
+    }
+
+    /// Frame 04j, and what it asks when it closes.
+    fn zotero_dialog(&mut self, ctx: &egui::Context) {
+        use crate::zotero_import::ZoteroAction;
+        let Some(zotero) = &mut self.zotero else {
+            return;
+        };
+        let vault = self
+            .prefs
+            .library
+            .vault_root(self.library.files_root(), self.library.files_root_chosen());
+        let (action, close) = zotero.show(ctx, &mut self.library, vault.as_deref());
+        if close {
+            self.zotero = None;
+        }
+        match action {
+            None => {}
+            Some(ZoteroAction::OpenLibrary) => self.open_library(),
+            Some(ZoteroAction::Enrich(items)) => match self.backfill_dialog(Some(&items)) {
+                Some(dialog) => self.library_dialog = Some(dialog),
+                None => self
+                    .notices
+                    .push("Choose a library model in Settings › AI first.".to_string()),
+            },
+            Some(ZoteroAction::SaveReport(text)) => {
+                let folder = vault
+                    .clone()
+                    .or_else(|| self.library.files_root().map(std::path::Path::to_path_buf));
+                let saved = folder.map(|folder| {
+                    let path = folder.join("zotero import.md");
+                    std::fs::create_dir_all(&folder)
+                        .and_then(|()| std::fs::write(&path, &text))
+                        .map(|()| path)
+                });
+                self.notices.push(match saved {
+                    Some(Ok(path)) => format!("The report is in {}.", path.display()),
+                    Some(Err(error)) => format!("Could not save the report: {error}"),
+                    None => "There is no library folder to save the report in.".to_string(),
+                });
+            }
         }
     }
 
@@ -1452,7 +1530,7 @@ impl ReaderApp {
                 Ok(())
             }
             Action::Backfill => {
-                match self.backfill_dialog() {
+                match self.backfill_dialog(None) {
                     Some(dialog) => self.library_dialog = Some(dialog),
                     None => self
                         .notices
@@ -1461,7 +1539,9 @@ impl ReaderApp {
                 Ok(())
             }
             Action::ImportZotero => {
-                self.notices.push("Not in this build yet.".to_string());
+                if self.zotero.is_none() {
+                    self.zotero = Some(Box::new(crate::zotero_import::ZoteroImport::new(ctx)));
+                }
                 Ok(())
             }
         };
@@ -3550,7 +3630,7 @@ impl ReaderApp {
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
-                    LibraryAction::Enrich => match self.backfill_dialog() {
+                    LibraryAction::Enrich => match self.backfill_dialog(None) {
                         Some(dialog) => self.library_dialog = Some(dialog),
                         None => self
                             .notices
@@ -5139,7 +5219,9 @@ impl eframe::App for ReaderApp {
         self.pending_keys_chip(&ctx, lift);
         let wallpaper_ready = self.wallpaper_loading.is_none();
         self.covers.poll(&ctx);
-        let covers_ready = !self.covers.pending() && !self.vault_sync.busy();
+        let covers_ready = !self.covers.pending()
+            && !self.vault_sync.busy()
+            && !self.zotero.as_ref().is_some_and(|zotero| zotero.busy());
         self.run_harness(&ctx, pages_drawn && wallpaper_ready && covers_ready, now);
         if self
             .transition

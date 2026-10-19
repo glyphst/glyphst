@@ -502,7 +502,7 @@ fn short_count(count: u64) -> String {
     }
 }
 
-fn head(ui: &mut Ui, tokens: &Tokens, icon: &str, title: &str) {
+pub(crate) fn head(ui: &mut Ui, tokens: &Tokens, icon: &str, title: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     icons::paint(
         ui,
@@ -539,7 +539,19 @@ fn para(ui: &mut Ui, tokens: &Tokens, line: &str) {
 }
 
 fn facts(ui: &mut Ui, tokens: &Tokens, rows: &[(&str, String, Option<egui::Color32>)]) {
+    facts_keyed(ui, tokens, 90.0, rows);
+}
+
+/// Key and value rows between hairlines, the keys `key_width` wide.
+pub(crate) fn facts_keyed(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    key_width: f32,
+    rows: &[(&str, String, Option<egui::Color32>)],
+) {
     let width = ui.available_width();
+    let spacing = ui.spacing().item_spacing.y;
+    let value_x = key_width + 12.0;
     let (top, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
     ui.painter()
         .hline(top.x_range(), top.top(), tokens.hairline());
@@ -552,24 +564,29 @@ fn facts(ui: &mut Ui, tokens: &Tokens, rows: &[(&str, String, Option<egui::Color
             *key,
             theme::mono(11.0),
             tokens.faint,
-            90.0,
+            key_width,
         );
         text::row(
             ui,
-            pos2(rect.left() + 102.0, rect.center().y),
+            pos2(rect.left() + value_x, rect.center().y),
             value,
             theme::mono(12.0),
             color.unwrap_or(tokens.text_2),
-            width - 102.0,
+            width - value_x,
         );
     }
+    ui.spacing_mut().item_spacing.y = spacing;
     let (bottom, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
     ui.painter()
         .hline(bottom.x_range(), bottom.top(), tokens.hairline());
-    ui.spacing_mut().item_spacing.y = 12.0;
 }
 
-fn foot(ui: &mut Ui, tokens: &Tokens, hint: Option<&str>, buttons: impl FnOnce(&mut Ui)) {
+pub(crate) fn foot(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    hint: Option<&str>,
+    buttons: impl FnOnce(&mut Ui),
+) {
     ui.horizontal(|ui| {
         if let Some(hint) = hint {
             ui.label(

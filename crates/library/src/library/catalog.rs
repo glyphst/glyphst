@@ -5,6 +5,9 @@ use super::storage_helpers::{
 };
 use super::*;
 
+mod bulk_import;
+pub use bulk_import::{ImportEntry, ImportEntryOutcome, ImportFile};
+
 pub(super) const LIBRARY_ITEMS_V1_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("library_items_v1");
 pub(super) const LIBRARY_ATTACHMENTS_V2_TABLE: TableDefinition<u64, &[u8]> =

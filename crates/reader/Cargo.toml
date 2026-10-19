@@ -39,6 +39,7 @@ glyphst-settings = { path = "../settings", features = ["keychain"] }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
 glyphst-vault = { path = "../vault" }
+glyphst-zotero-import = { path = "../zotero-import" }
 image.workspace = true
 log.workspace = true
 mupdf.workspace = true
