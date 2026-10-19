@@ -56,6 +56,7 @@ mod library_tab;
 mod library_view;
 mod links;
 mod lookups;
+mod meaning;
 mod overview;
 mod pad;
 mod pad_keys;

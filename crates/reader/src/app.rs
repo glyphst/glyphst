@@ -458,6 +458,11 @@ pub struct ReaderApp {
     /// The library's text search (frame 04n); started when the app keeps
     /// its data, or by a demo.
     library_search: Option<crate::library_search::SearchService>,
+    /// Search by meaning's engine and model, downloaded when asked
+    /// (frame 04o).
+    meaning: glyphst_embed::setup::Setup,
+    /// The `llama-server` path `meaning` was made with.
+    meaning_engine: String,
 }
 
 impl ReaderApp {
@@ -564,6 +569,16 @@ impl ReaderApp {
             ChatGptSubscription::start(user_settings.store(), move || ctx.request_repaint())
         };
         let (agent_bridge, agent_calls) = crate::ai_bridge::UiBridge::new(&cc.egui_ctx);
+        let prefs_engine = prefs.library.llama_server.clone();
+        let meaning = if persist {
+            crate::meaning::setup(Some(prefs.library.llama_server.as_str()))
+        } else {
+            // Screens show a state, never the user's downloads.
+            glyphst_embed::setup::Setup::showing(glyphst_embed::setup::SetupState::Offer {
+                kept: 0,
+                total: glyphst_embed::manifest::MODEL.size + 31_000_000,
+            })
+        };
         let mut app = Self {
             prefs,
             theme_applied: None,
@@ -696,6 +711,8 @@ impl ReaderApp {
             work_adds: Vec::new(),
             zotero: None,
             library_search: None,
+            meaning_engine: prefs_engine,
+            meaning,
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
@@ -718,7 +735,7 @@ impl ReaderApp {
                         tab.selected = id;
                     }
                     "review" => tab.view = crate::library_tab::View::NeedsReview,
-                    "search" => {
+                    search if search.starts_with("search") => {
                         tab.filter = "multi-head attention".to_string();
                         tab.selected = crate::library_demo::first_item(&app.library);
                     }
@@ -740,7 +757,31 @@ impl ReaderApp {
                 }
             }
             // The search reads the demo's index, partly read and paused.
-            if state == "search"
+            // Search by meaning's card: hidden in plain search (04n), and
+            // as offered, downloading or stopped (04o).
+            use glyphst_embed::setup::{Phase, SetupError, SetupState};
+            app.prefs.library.meaning_offer_hidden = state == "search";
+            let (done, total) = (142_000_000, 341_000_000);
+            match state.as_str() {
+                "search-downloading" => {
+                    app.meaning = glyphst_embed::setup::Setup::showing(SetupState::Running {
+                        phase: Phase::Model,
+                        done,
+                        total,
+                        rate: 4_100_000.0,
+                        retry_in: None,
+                    });
+                }
+                "search-failed" => {
+                    app.meaning = glyphst_embed::setup::Setup::showing(SetupState::Failed {
+                        error: SetupError::Network("connection reset".to_string()),
+                        done,
+                        total,
+                    });
+                }
+                _ => {}
+            }
+            if state.starts_with("search")
                 && let Some(path) = crate::library_demo::search_index(&app.library)
             {
                 match crate::library_search::SearchService::start(&path, &cc.egui_ctx) {
@@ -1417,6 +1458,7 @@ impl ReaderApp {
 
     /// Draws page tab `index` and does what it asks.
     fn show_page(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
+        let meaning = self.meaning_card();
         let docs = || crate::home::documents(&self.library, &self.prefs.page_counts);
         match &mut self.pages[index] {
             Page::Keymap(page) => {
@@ -1445,6 +1487,7 @@ impl ReaderApp {
                         vault: vault.as_deref(),
                         import: self.importer.progress(),
                         search: self.library_search.as_mut(),
+                        meaning,
                     },
                 );
                 if let Some(action) = action {
@@ -1578,6 +1621,10 @@ impl ReaderApp {
                 }
                 Ok(())
             }
+            Action::Meaning(action) => {
+                self.meaning_action(action, ctx);
+                Ok(())
+            }
             Action::AskLibrary(words) => {
                 // A new conversation about the library, the question ready
                 // to edit (frame 05 · ask the library).
@@ -1618,6 +1665,41 @@ impl ReaderApp {
         };
         if let Err(error) = result {
             self.notices.push(format!("{error:#}"));
+        }
+    }
+
+    /// Search by meaning's card for the search results: hidden once
+    /// declined (unless a download is under way) and once it is on.
+    fn meaning_card(&self) -> Option<crate::meaning::MeaningCard> {
+        use crate::meaning::MeaningCard;
+        let card = crate::meaning::card(&self.meaning.state());
+        match card {
+            MeaningCard::Ready => None,
+            MeaningCard::Offer { kept: 0, .. } if self.prefs.library.meaning_offer_hidden => None,
+            card => Some(card),
+        }
+    }
+
+    /// Does what search by meaning's card or row asked.
+    pub(crate) fn meaning_action(
+        &mut self,
+        action: crate::meaning::MeaningAction,
+        ctx: &egui::Context,
+    ) {
+        use crate::meaning::MeaningAction;
+        match action {
+            MeaningAction::Download => {
+                let ctx = ctx.clone();
+                self.meaning.start(move || ctx.request_repaint());
+            }
+            MeaningAction::Pause => self.meaning.pause(),
+            MeaningAction::Discard => self.meaning.discard(),
+            MeaningAction::NotNow => self.prefs.library.meaning_offer_hidden = true,
+            MeaningAction::Settings => {
+                self.settings_window
+                    .show_section(crate::settings_window::Section::Library);
+                self.settings_window.scroll_to = Some("search".to_string());
+            }
         }
     }
 
@@ -3800,6 +3882,7 @@ impl ReaderApp {
                 zotero: dirs::home_dir()
                     .map(|home| home.join("Zotero").join("zotero.sqlite"))
                     .filter(|path| path.is_file()),
+                meaning: Some(crate::meaning::card(&self.meaning.state())),
                 index: self.library_search.as_ref().map(|search| {
                     (
                         search.status(),
@@ -3838,9 +3921,13 @@ impl ReaderApp {
                     }
                     continue;
                 }
+                if let LibraryAction::Meaning(action) = action {
+                    self.meaning_action(action, ctx);
+                    continue;
+                }
                 self.settings_window.open = false;
                 match action {
-                    LibraryAction::Reindex => {}
+                    LibraryAction::Reindex | LibraryAction::Meaning(_) => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5185,6 +5272,14 @@ impl eframe::App for ReaderApp {
                     }
                 }
             }
+        }
+        // Naming another llama-server makes a new setup (not mid-download).
+        if self.persist
+            && self.prefs.library.llama_server != self.meaning_engine
+            && !self.meaning.is_running()
+        {
+            self.meaning_engine = self.prefs.library.llama_server.clone();
+            self.meaning = crate::meaning::setup(Some(self.meaning_engine.as_str()));
         }
         if let Some(search) = &mut self.library_search {
             if self.persist {

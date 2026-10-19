@@ -4,10 +4,13 @@
 
 use egui::{Align2, Rect, Sense, Ui, pos2, vec2};
 use glyphst_search::{ItemHit, PageHit};
-use glyphst_ui::text;
+use glyphst_ui::{button::Button, text};
 
 use super::{LibraryTab, LibraryTabAction, TabContext, authors_short, empty_line};
-use crate::theme::{self, Tokens};
+use crate::{
+    meaning::{MeaningAction, MeaningCard},
+    theme::{self, Tokens},
+};
 
 const ITEM_ROW: f32 = 26.0;
 const PAGE_ROW: f32 = 22.0;
@@ -22,11 +25,18 @@ impl LibraryTab {
         width: f32,
     ) -> Option<LibraryTabAction> {
         let library = context.library;
+        let mut action = None;
+        if let Some(card) = &context.meaning {
+            if let Some(chosen) = meaning_card(ui, tokens, card, width) {
+                action = Some(LibraryTabAction::Meaning(chosen));
+            }
+            ui.add_space(12.0);
+        }
         let service = context.search.as_deref()?;
         let Some(results) = service.results() else {
             ui.add_space(16.0);
             empty_line(ui, "searching…");
-            return None;
+            return action;
         };
         if results.items.is_empty() {
             ui.add_space(16.0);
@@ -38,10 +48,9 @@ impl LibraryTab {
                     "no good matches"
                 },
             );
-            return None;
+            return action;
         }
         let strong = results.items.len() - results.weaker;
-        let mut action = None;
         egui::ScrollArea::vertical()
             .id_salt("library-search")
             .auto_shrink(false)
@@ -222,6 +231,148 @@ impl LibraryTab {
         }
         action
     }
+}
+
+/// Search by meaning's card (frame 04o): what it is and its size, then
+/// its download as it goes, and what went wrong.
+fn meaning_card(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    card: &MeaningCard,
+    width: f32,
+) -> Option<MeaningAction> {
+    use crate::meaning::{megabytes, speed};
+    let mut action = None;
+    let failed = matches!(card, MeaningCard::Failed { .. });
+    let (title, color) = match card {
+        MeaningCard::Offer { .. } => ("◇ search by meaning".to_string(), tokens.text),
+        MeaningCard::Downloading { what, .. } => (format!("◇ downloading · {what}"), tokens.text),
+        MeaningCard::Retrying { seconds, .. } => (
+            format!("◇ network lost · again in {seconds} s"),
+            tokens.text_2,
+        ),
+        MeaningCard::Paused { .. } => ("◇ paused".to_string(), tokens.text_2),
+        MeaningCard::Failed { title, .. } => (format!("◇ {title}"), tokens.err),
+        MeaningCard::Ready => ("◆ search by meaning is on".to_string(), tokens.accent_text),
+    };
+    egui::Frame::new()
+        .fill(tokens.surface)
+        .stroke(egui::Stroke::new(
+            1.0,
+            if failed { tokens.err } else { tokens.rule },
+        ))
+        .corner_radius(tokens.ctl_radius())
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(width - 24.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&title)
+                        .font(theme::mono(12.0))
+                        .color(color),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let mut button = |label: &str, accent: bool, chosen: MeaningAction| {
+                        let button = if accent {
+                            Button::bracket(label)
+                        } else {
+                            Button::bracket_muted(label)
+                        };
+                        if ui.add(button).clicked() {
+                            action = Some(chosen);
+                        }
+                    };
+                    match card {
+                        MeaningCard::Offer { kept, .. } => {
+                            let label = if *kept > 0 { "resume" } else { "download" };
+                            button(label, true, MeaningAction::Download);
+                            button("not now", false, MeaningAction::NotNow);
+                        }
+                        MeaningCard::Downloading { .. } | MeaningCard::Retrying { .. } => {
+                            button("pause", false, MeaningAction::Pause);
+                        }
+                        MeaningCard::Paused { .. } => {
+                            button("resume", true, MeaningAction::Download);
+                            button("discard", false, MeaningAction::Discard);
+                        }
+                        MeaningCard::Failed { again, .. } => {
+                            let label = if *again { "download again" } else { "retry" };
+                            button(label, true, MeaningAction::Download);
+                        }
+                        MeaningCard::Ready => button("settings", false, MeaningAction::Settings),
+                    }
+                });
+            });
+            let body = match card {
+                MeaningCard::Offer { total, .. } => {
+                    let model = glyphst_embed::manifest::MODEL.size;
+                    let mb = |bytes: u64| (bytes as f64 / 1_000_000.0).round() as u64;
+                    let size = if *total > model {
+                        format!(
+                            "a {} MB model and a {} MB engine (llama.cpp)",
+                            mb(model),
+                            mb(*total - model)
+                        )
+                    } else {
+                        format!("a {} MB model", mb(model))
+                    };
+                    Some(format!(
+                        "Also find passages that say it in other words. EmbeddingGemma 2 runs on this computer: {size}, downloaded once."
+                    ))
+                }
+                MeaningCard::Failed { detail, .. } if !detail.is_empty() => Some(detail.clone()),
+                _ => None,
+            };
+            if let Some(body) = body {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(body)
+                            .font(theme::regular(12.0))
+                            .color(tokens.text_2),
+                    )
+                    .wrap(),
+                );
+            }
+            let progress = match card {
+                MeaningCard::Downloading { done, total, .. }
+                | MeaningCard::Retrying { done, total, .. }
+                | MeaningCard::Paused { done, total }
+                | MeaningCard::Failed { done, total, .. }
+                    if *total > 0 && *done > 0 =>
+                {
+                    Some((*done, *total))
+                }
+                _ => None,
+            };
+            if let Some((done, total)) = progress {
+                let kept = !matches!(card, MeaningCard::Downloading { .. });
+                let label = format!("{}{}", megabytes(done, total), if kept { " kept" } else { "" });
+                let (rect, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+                glyphst_ui::meter::Meter::new(done as f32 / total as f32)
+                    .bar()
+                    .width(rect.width() - 150.0)
+                    .label(&label)
+                    .paint(ui, rect);
+            }
+            if let MeaningCard::Downloading {
+                rate, seconds_left, ..
+            } = card
+            {
+                text::row(
+                    ui,
+                    ui.cursor().min + vec2(0.0, 6.0),
+                    format!("{} · keeps going if you quit", speed(*rate, *seconds_left)),
+                    theme::mono(10.0),
+                    tokens.faint,
+                    ui.available_width(),
+                );
+                ui.add_space(12.0);
+            }
+        });
+    action
 }
 
 /// `p 4 · the passage, its words marked · § section`.

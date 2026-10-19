@@ -5,3 +5,4 @@
 pub mod download;
 pub mod install;
 pub mod manifest;
+pub mod setup;

@@ -166,6 +166,23 @@ impl ReaderApp {
                 );
             }
         }
+        // Search by meaning's download.
+        if let crate::meaning::MeaningCard::Downloading { done, total, .. }
+        | crate::meaning::MeaningCard::Retrying { done, total, .. } =
+            crate::meaning::card(&self.meaning.state())
+        {
+            segments.insert(
+                1,
+                Segment::label(
+                    "meaning",
+                    Side::Left,
+                    Some("download"),
+                    format!("◇ downloading {}", crate::meaning::megabytes(done, total)),
+                )
+                .accent(true)
+                .tooltip("search by meaning · settings › library"),
+            );
+        }
         if let Some((text, finished, tip)) = import {
             segments.insert(
                 1,
@@ -175,6 +192,11 @@ impl ReaderApp {
             );
         }
         for (id, response) in status::bar(ui, segments) {
+            if id == "meaning" && response.clicked() {
+                self.settings_window
+                    .show_section(crate::settings_window::Section::Library);
+                self.settings_window.scroll_to = Some("search".to_string());
+            }
             if id == "index" && response.clicked() {
                 self.settings_window
                     .show_section(crate::settings_window::Section::Library);

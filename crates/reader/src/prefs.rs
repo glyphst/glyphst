@@ -109,6 +109,12 @@ pub struct LibraryPrefs {
     pub folder_asked: bool,
     /// Reading the library's text for search waits until resumed.
     pub index_paused: bool,
+    /// The user's own `llama-server` for search by meaning; empty: the
+    /// one downloaded with the model.
+    pub llama_server: String,
+    /// The search results stop offering search by meaning (Settings still
+    /// does).
+    pub meaning_offer_hidden: bool,
 }
 
 impl LibraryPrefs {
@@ -135,6 +141,8 @@ impl Default for LibraryPrefs {
             contact_email: String::new(),
             enrich_new: true,
             index_paused: false,
+            llama_server: String::new(),
+            meaning_offer_hidden: false,
             ai_create_tags: true,
             suggest_collections: true,
             vault: None,

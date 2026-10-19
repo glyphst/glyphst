@@ -903,6 +903,7 @@ impl ReaderApp {
                 vault: vault.as_deref(),
                 import: None,
                 search: None,
+                meaning: None,
             },
             card,
             id,

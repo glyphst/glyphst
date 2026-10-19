@@ -215,6 +215,8 @@ pub struct LibraryFacts {
     pub zotero: Option<std::path::PathBuf>,
     /// The search index, when it runs: how far, and its size on disk.
     pub index: Option<(glyphst_search::IndexStatus, u64)>,
+    /// Search by meaning's download and state.
+    pub meaning: Option<crate::meaning::MeaningCard>,
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -240,6 +242,7 @@ pub enum LibraryAction {
     ImportZotero,
     /// Read the library's text again from the start.
     Reindex,
+    Meaning(crate::meaning::MeaningAction),
 }
 
 /// The Library page (frame 07 · library).
@@ -414,6 +417,74 @@ fn library(
                 }
             }
         });
+        if let Some(card) = &facts.meaning {
+            use crate::meaning::{MeaningAction, MeaningCard, megabytes, speed};
+            let caption = match card {
+                MeaningCard::Offer { kept, total } if *kept > 0 => {
+                    format!("off · {} downloaded", megabytes(*kept, *total))
+                }
+                MeaningCard::Offer { total, .. } => format!(
+                    "off · EmbeddingGemma 2 · {} MB, downloaded once",
+                    (*total as f64 / 1_000_000.0).round()
+                ),
+                MeaningCard::Downloading {
+                    what,
+                    done,
+                    total,
+                    rate,
+                    seconds_left,
+                } => format!(
+                    "downloading the {what} · {} · {}",
+                    megabytes(*done, *total),
+                    speed(*rate, *seconds_left)
+                ),
+                MeaningCard::Retrying { seconds, .. } => {
+                    format!("network lost · trying again in {seconds} s")
+                }
+                MeaningCard::Paused { done, total } => {
+                    format!("paused · {} kept", megabytes(*done, *total))
+                }
+                MeaningCard::Failed { title, .. } => title.clone(),
+                MeaningCard::Ready => "on · EmbeddingGemma 2 on this computer".to_string(),
+            };
+            group.row("search by meaning", Some(&*caption), |ui| {
+                let mut button = |label: &str, accent: bool, action: MeaningAction| {
+                    let button = if accent {
+                        Button::bracket(label)
+                    } else {
+                        Button::bracket_muted(label)
+                    };
+                    if ui.add(button).clicked() {
+                        actions.push(LibraryAction::Meaning(action));
+                    }
+                };
+                match card {
+                    MeaningCard::Offer { kept, .. } => button(
+                        if *kept > 0 { "resume" } else { "download…" },
+                        true,
+                        MeaningAction::Download,
+                    ),
+                    MeaningCard::Downloading { .. } | MeaningCard::Retrying { .. } => {
+                        button("pause", false, MeaningAction::Pause);
+                    }
+                    MeaningCard::Paused { .. } => {
+                        button("discard", false, MeaningAction::Discard);
+                        button("resume", true, MeaningAction::Download);
+                    }
+                    MeaningCard::Failed { .. } => button("retry", true, MeaningAction::Download),
+                    MeaningCard::Ready => {}
+                }
+            });
+        }
+        group.row(
+            "llama-server",
+            Some("empty: the one downloaded with the model · or a path to your own"),
+            |ui| {
+                TextField::new(&mut library.llama_server, "the downloaded one")
+                    .width(320.0)
+                    .show(ui);
+            },
+        );
     });
     ui.add_space(10.0);
     ui_settings::group(ui, "import", |group| {

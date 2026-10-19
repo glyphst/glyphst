@@ -11,12 +11,15 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 11] = [
+pub const STATES: [&str; 14] = [
     "all",
     "item",
     "duplicate",
     "merged",
     "search",
+    "search-meaning",
+    "search-downloading",
+    "search-failed",
     "review",
     "backfill",
     "folder",

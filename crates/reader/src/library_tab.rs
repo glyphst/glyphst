@@ -91,6 +91,8 @@ pub enum LibraryTabAction {
     },
     /// Ask the assistant about the library, starting from a search.
     AskLibrary(String),
+    /// Search by meaning's card: download, pause, …
+    Meaning(crate::meaning::MeaningAction),
 }
 
 /// What the tab needs from the app this frame.
@@ -105,6 +107,9 @@ pub struct TabContext<'a> {
     pub import: Option<&'a crate::import::ImportProgress>,
     /// The library's text search, when the index runs.
     pub search: Option<&'a mut crate::library_search::SearchService>,
+    /// Search by meaning's card over the results, when it has something to
+    /// say (frame 04o).
+    pub meaning: Option<crate::meaning::MeaningCard>,
 }
 
 #[derive(Default)]
