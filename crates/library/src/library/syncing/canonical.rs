@@ -197,10 +197,15 @@ pub fn canonical(snapshot: &SyncSnapshot) -> BTreeMap<RecordKey, Fields> {
     }
     for row in &snapshot.item_collections {
         if let Some(collection) = names.collection(row.collection_id) {
-            memberships
-                .entry(row.item_id)
-                .or_default()
-                .insert(format!("collections/{collection}"), json!(true));
+            let fields = memberships.entry(row.item_id).or_default();
+            fields.insert(format!("collections/{collection}"), json!(true));
+            // The same collection made on another machine too: in it there.
+            for alias in snapshot
+                .ids
+                .aliases(SyncKind::Collection, row.collection_id.0)
+            {
+                fields.insert(format!("collections/{alias}"), json!(true));
+            }
         }
     }
     let locations = snapshot

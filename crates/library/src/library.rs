@@ -2144,8 +2144,8 @@ pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, Libra
 pub use knowledge::{PageRecord, PageTopic, RelatedSuggestion};
 use storage_helpers::require_storage_version;
 pub use syncing::{
-    Export as SyncExport, SyncIds, SyncKind, SyncReader, SyncSnapshot, canonical as sync_records,
-    kinds as sync_kinds,
+    ApplyReport as SyncApplyReport, Export as SyncExport, SyncIds, SyncKind, SyncReader,
+    SyncSnapshot, canonical as sync_records, kinds as sync_kinds,
 };
 pub use vault_notes::VaultNoteRecord;
 

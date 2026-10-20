@@ -521,7 +521,7 @@ impl StoredLinkedAttachmentV1 {
     }
 }
 
-fn linked_storage_key(id: LibraryAttachmentId) -> String {
+pub(super) fn linked_storage_key(id: LibraryAttachmentId) -> String {
     format!("linked-{}", id.0)
 }
 
@@ -662,15 +662,15 @@ fn validate_managed_relative_path(path: &Path, storage_key: &str) -> Result<()> 
     Ok(())
 }
 
-fn clean_text(value: &str) -> String {
+pub(super) fn clean_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn normalize_tag_name(value: &str) -> String {
+pub(super) fn normalize_tag_name(value: &str) -> String {
     clean_text(value).to_lowercase()
 }
 
-fn normalize_collection_name(value: &str) -> String {
+pub(super) fn normalize_collection_name(value: &str) -> String {
     clean_text(value).to_lowercase()
 }
 
@@ -742,7 +742,7 @@ fn document_format_for_path(path: &Path) -> Result<DocumentFormat> {
         .ok_or_else(|| anyhow!("unsupported library attachment: {}", path.display()))
 }
 
-fn modified_seconds(metadata: &fs::Metadata) -> u64 {
+pub(super) fn modified_seconds(metadata: &fs::Metadata) -> u64 {
     metadata
         .modified()
         .ok()

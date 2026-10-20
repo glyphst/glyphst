@@ -4,6 +4,7 @@
 //! what this machine last exported or took from others, field by field
 //! (`registers`), from which the next export is the difference.
 
+mod apply;
 mod canonical;
 mod ids;
 mod registers;
@@ -13,6 +14,7 @@ use std::sync::atomic::AtomicU64;
 
 use glyphst_sync::{Clock, DeviceId, Hlc, Watermarks};
 
+pub use apply::ApplyReport;
 pub use canonical::{SyncSnapshot, canonical, kinds};
 pub(super) use ids::{SYNC_IDS_V1_TABLE, SYNC_STATE_V1_TABLE};
 pub use ids::{SyncIds, SyncKind};

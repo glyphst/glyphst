@@ -67,6 +67,9 @@ pub struct SyncIds {
     /// Enrichment runs taken from other machines: the local run → the
     /// run as the journal names it (`<device>:<run>`).
     runs: HashMap<u64, String>,
+    /// Other machines' uids for a record this machine has under its own
+    /// (a collection both made with the same name, a file both added).
+    aliases: HashMap<(SyncKind, u64), Vec<Uuid>>,
 }
 
 impl SyncIds {
@@ -92,7 +95,35 @@ impl SyncIds {
             .unwrap_or_else(|| format!("{device}:{run}"))
     }
 
-    fn insert(&mut self, kind: SyncKind, local: u64, uid: Uuid) {
+    /// The local run for another machine's, if it was taken before.
+    pub(super) fn run_for(&self, token: &str) -> Option<u64> {
+        self.runs
+            .iter()
+            .find(|(_, known)| known.as_str() == token)
+            .map(|(run, _)| *run)
+    }
+
+    pub(super) fn insert_run(&mut self, run: u64, token: String) {
+        self.runs.insert(run, token);
+    }
+
+    /// Other machines' uids for this record.
+    pub fn aliases(&self, kind: SyncKind, local: u64) -> &[Uuid] {
+        self.aliases
+            .get(&(kind, local))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn insert_alias(&mut self, kind: SyncKind, uid: Uuid, local: u64) {
+        self.by_uid.insert((kind, uid), local);
+        let aliases = self.aliases.entry((kind, local)).or_default();
+        if !aliases.contains(&uid) {
+            aliases.push(uid);
+        }
+    }
+
+    pub(super) fn insert(&mut self, kind: SyncKind, local: u64, uid: Uuid) {
         self.by_local.insert((kind, local), uid);
         self.by_uid.insert((kind, uid), local);
         let highest = self.highest.entry(kind).or_default();
@@ -100,8 +131,38 @@ impl SyncIds {
     }
 }
 
-fn row_key(kind: SyncKind, local: u64) -> String {
+pub(super) fn row_key(kind: SyncKind, local: u64) -> String {
     format!("{}/{local}", kind.name())
+}
+
+/// The rows a set of new uids, aliases and runs are kept in.
+#[derive(Debug, Default)]
+pub(super) struct IdRows(pub(super) Vec<(String, Vec<u8>)>);
+
+impl IdRows {
+    pub(super) fn uid(&mut self, kind: SyncKind, local: u64, uid: Uuid) {
+        self.0.push((row_key(kind, local), uid.as_bytes().to_vec()));
+    }
+
+    pub(super) fn alias(&mut self, kind: SyncKind, uid: Uuid, local: u64) {
+        self.0.push((
+            format!("{}@{uid}", kind.name()),
+            local.to_le_bytes().to_vec(),
+        ));
+    }
+
+    pub(super) fn run(&mut self, run: u64, token: &str) {
+        self.0
+            .push((format!("run/{run}"), token.as_bytes().to_vec()));
+    }
+
+    pub(super) fn write_in(&self, write_txn: &redb::WriteTransaction) -> Result<()> {
+        let mut table = write_txn.open_table(SYNC_IDS_V1_TABLE)?;
+        for (key, value) in &self.0 {
+            table.insert(key.as_str(), value.as_slice())?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn load_sync_ids(database: &Database) -> Result<SyncIds> {
@@ -117,6 +178,16 @@ pub(super) fn load_sync_ids(database: &Database) -> Result<SyncIds> {
         {
             ids.runs
                 .insert(run, String::from_utf8_lossy(value.value()).into_owned());
+            continue;
+        }
+        if let Some((kind, uid)) = key.value().split_once('@')
+            && let (Some(kind), Ok(uid), Ok(local)) = (
+                SyncKind::from_name(kind),
+                Uuid::parse_str(uid),
+                <[u8; 8]>::try_from(value.value()).map(u64::from_le_bytes),
+            )
+        {
+            ids.insert_alias(kind, uid, local);
             continue;
         }
         let parsed = key.value().split_once('/').and_then(|(kind, local)| {

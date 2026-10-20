@@ -459,3 +459,323 @@ fn ai_results_name_tags_collections_and_runs_without_local_numbers() {
     assert_eq!(metadata["external_ids"], json!(["zotero:1/ABCD"]));
     fs::remove_dir_all(dir).unwrap();
 }
+
+// Two machines exchanging changes through a journal folder.
+
+struct Machine {
+    store: LibraryStore,
+}
+
+impl Machine {
+    fn open(dir: &Path, name: &str) -> Self {
+        Self {
+            store: LibraryStore::open_for_test(dir.join(format!("{name}.redb"))).unwrap(),
+        }
+    }
+
+    /// Exports and writes the segments, as the app does before applying.
+    fn flush(&mut self, journal: &glyphst_sync::Journal) -> usize {
+        self.store.export_now().unwrap();
+        let outbox = self.store.sync_outbox().unwrap();
+        for (seq, bytes) in &outbox {
+            journal
+                .write_segment(self.store.sync_device(), *seq, bytes)
+                .unwrap();
+            let digest = glyphst_sync::Journal::digest_of(bytes).unwrap();
+            self.store.sync_segment_written(*seq, digest).unwrap();
+        }
+        outbox.len()
+    }
+
+    fn pull(&mut self, journal: &glyphst_sync::Journal) -> SyncApplyReportAlias {
+        let batches = journal
+            .pending(
+                self.store.sync_device(),
+                self.store.sync_watermarks(),
+                usize::MAX,
+            )
+            .unwrap();
+        self.store.apply_sync(&batches).unwrap()
+    }
+
+    fn item(&self, title: &str) -> Option<&LibraryItem> {
+        self.store
+            .library_items()
+            .iter()
+            .find(|item| item.title == title)
+    }
+}
+
+type SyncApplyReportAlias = apply::ApplyReport;
+
+/// Rounds of export and apply until neither machine has anything new.
+fn settle(machines: &mut [&mut Machine], journal: &glyphst_sync::Journal) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for _ in 0..6 {
+        let mut written = 0;
+        for machine in machines.iter_mut() {
+            written += machine.flush(journal);
+        }
+        for machine in machines.iter_mut() {
+            conflicts.extend(machine.pull(journal).conflicts);
+        }
+        if written == 0 {
+            for machine in machines.iter_mut() {
+                assert!(
+                    changed(&mut machine.store).is_empty(),
+                    "applied changes echo"
+                );
+            }
+            return conflicts;
+        }
+    }
+    panic!("the machines never settled");
+}
+
+fn records(machine: &mut Machine) -> BTreeMap<RecordKey, glyphst_sync::Fields> {
+    canonical(&machine.store.sync_snapshot().unwrap())
+}
+
+fn pair(dir: &Path) -> (Machine, Machine, glyphst_sync::Journal) {
+    (
+        Machine::open(dir, "a"),
+        Machine::open(dir, "b"),
+        glyphst_sync::Journal::in_library(&dir.join("shared")),
+    )
+}
+
+fn retitle(machine: &mut Machine, title: &str, to: &str) {
+    let mut item = machine.item(title).unwrap().clone();
+    item.title = to.to_string();
+    machine.store.update_library_item(item).unwrap();
+}
+
+#[test]
+fn two_machines_converge_on_concurrent_edits() {
+    let dir = folder("converge");
+    let (mut a, mut b, journal) = pair(&dir);
+    let paper = file(&dir, "paper");
+    let id = link(&mut a.store, &paper);
+    a.store.set_item_tag_names(id, &["ml".to_string()]).unwrap();
+    a.store
+        .add_highlight(&paper, HighlightColor::Pink, vec![rect()], "words", "mine")
+        .unwrap();
+    settle(&mut [&mut a, &mut b], &journal);
+    let on_b = b.item("paper").expect("the item reached b").id;
+    assert_eq!(b.store.highlights_for(&paper).len(), 1);
+    assert_eq!(b.store.highlights_for(&paper)[0].note, "mine");
+
+    // Each edits a different field, and both the title: the later wins.
+    a.store.set_library_item_favorite(id, true).unwrap();
+    retitle(&mut a, "paper", "from a");
+    b.store
+        .set_item_tag_names(on_b, &["ml".to_string(), "nlp".to_string()])
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    retitle(&mut b, "paper", "from b");
+    settle(&mut [&mut a, &mut b], &journal);
+
+    assert_eq!(records(&mut a), records(&mut b));
+    let item = a.item("from b").expect("b's title won");
+    assert!(item.favorite);
+    let mut tags = a
+        .store
+        .tags_for_item(item.id)
+        .into_iter()
+        .map(|tag| tag.normalized_name.clone())
+        .collect::<Vec<_>>();
+    tags.sort();
+    assert_eq!(tags, vec!["ml".to_string(), "nlp".to_string()]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_removal_wins_over_an_edit_and_says_what_it_leaves() {
+    let dir = folder("removal");
+    let (mut a, mut b, journal) = pair(&dir);
+    let paper = file(&dir, "paper");
+    let id = link(&mut a.store, &paper);
+    settle(&mut [&mut a, &mut b], &journal);
+
+    a.store.trash_library_items(&[id]).unwrap();
+    a.store.permanently_delete_library_items(&[id]).unwrap();
+    retitle(&mut b, "paper", "edited meanwhile");
+    b.store
+        .add_highlight(&paper, HighlightColor::Yellow, vec![rect()], "late", "")
+        .unwrap();
+    let conflicts = settle(&mut [&mut a, &mut b], &journal);
+
+    assert!(a.store.library_items().is_empty());
+    assert!(b.store.library_items().is_empty());
+    // The highlight stays on b's file, as when an item is removed there,
+    // but is no longer the library's: a never gets it.
+    assert_eq!(b.store.highlights_for(&paper).len(), 1);
+    assert!(a.store.highlights_for(&paper).is_empty());
+    assert!(
+        conflicts
+            .iter()
+            .any(|conflict| conflict.contains("deleted on another machine")),
+        "{conflicts:?}"
+    );
+    assert_eq!(records(&mut a), records(&mut b));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_same_file_added_on_both_becomes_one_item() {
+    let dir = folder("same-file");
+    let (mut a, mut b, journal) = pair(&dir);
+    let paper = file(&dir, "paper");
+    link(&mut a.store, &paper);
+    link(&mut b.store, &paper);
+    settle(&mut [&mut a, &mut b], &journal);
+
+    assert_eq!(a.store.library_items().len(), 1);
+    assert_eq!(b.store.library_items().len(), 1);
+    let uid = |machine: &mut Machine| {
+        let id = machine.store.library_items()[0].id;
+        machine.store.sync_ids().unwrap().uid(SyncKind::Item, id.0)
+    };
+    assert_eq!(uid(&mut a), uid(&mut b));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_collection_made_on_both_is_one_collection() {
+    let dir = folder("collections");
+    let (mut a, mut b, journal) = pair(&dir);
+    let first = file(&dir, "first");
+    let second = file(&dir, "second");
+    let one = link(&mut a.store, &first);
+    let two = link(&mut b.store, &second);
+    let on_a = a.store.create_library_collection(None, "Reading").unwrap();
+    a.store.add_items_to_collection(&[one], on_a).unwrap();
+    let on_b = b.store.create_library_collection(None, "reading").unwrap();
+    b.store.add_items_to_collection(&[two], on_b).unwrap();
+    settle(&mut [&mut a, &mut b], &journal);
+
+    for machine in [&a, &b] {
+        let collections = machine.store.library_collections();
+        assert_eq!(collections.len(), 1, "{collections:?}");
+        let members = machine
+            .store
+            .library_item_collections()
+            .iter()
+            .filter(|row| row.collection_id == collections[0].id)
+            .count();
+        assert_eq!(members, 2);
+    }
+
+    // Taken out on one, it is out on both.
+    let on_a = a.store.library_collections()[0].id;
+    a.store.remove_items_from_collection(&[one], on_a).unwrap();
+    settle(&mut [&mut a, &mut b], &journal);
+    for machine in [&a, &b] {
+        assert_eq!(machine.store.library_item_collections().len(), 1);
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_highlight_waits_for_its_item() {
+    let dir = folder("parked");
+    let (mut a, mut b, journal) = pair(&dir);
+    let paper = file(&dir, "paper");
+    link(&mut a.store, &paper);
+    a.store
+        .add_highlight(&paper, HighlightColor::Blue, vec![rect()], "early", "")
+        .unwrap();
+    a.flush(&journal);
+    let batches = journal
+        .pending(b.store.sync_device(), &Default::default(), usize::MAX)
+        .unwrap();
+    // Only the highlight first.
+    let mut highlight_only = batches.clone();
+    for batch in &mut highlight_only {
+        batch
+            .changes
+            .retain(|change| change.kind == kinds::HIGHLIGHT);
+    }
+    let report = b.store.apply_sync(&highlight_only).unwrap();
+    assert_eq!(report.parked, 1);
+    assert!(b.store.highlights_for(&paper).is_empty());
+    assert!(
+        changed(&mut b.store).is_empty(),
+        "a waiting record is no removal"
+    );
+
+    let report = b.store.apply_sync(&batches).unwrap();
+    assert_eq!(report.parked, 0);
+    assert_eq!(b.store.highlights_for(&paper).len(), 1);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn views_assignments_and_topics_are_remapped_to_local_numbers() {
+    let dir = folder("remap");
+    let (mut a, mut b, journal) = pair(&dir);
+    // b numbers its tags and collections differently.
+    let scratch = link(&mut b.store, &file(&dir, "scratch"));
+    b.store
+        .set_item_tag_names(scratch, &["zeta".to_string()])
+        .unwrap();
+    b.store.create_library_collection(None, "Other").unwrap();
+
+    let id = link(&mut a.store, &file(&dir, "paper"));
+    let run = a.store.next_enrichment_run();
+    a.store
+        .apply_enrichment(
+            id,
+            EnrichmentApply {
+                run,
+                tags: vec!["ml".to_string()],
+                create_tags: true,
+                collections: Vec::new(),
+                suggested_collection: None,
+                metadata: None,
+                enrichment: None,
+            },
+        )
+        .unwrap();
+    let ml = tag_id(&a.store, "ml");
+    let papers = a.store.create_library_collection(None, "Papers").unwrap();
+    a.store
+        .save_library_view(
+            "ML",
+            LibraryFilter {
+                tag_ids: vec![ml],
+                collection_id: Some(papers),
+                ..LibraryFilter::default()
+            },
+            LibrarySort::default(),
+            LibraryViewMode::default(),
+        )
+        .unwrap();
+    a.store.dismiss_topic(&format!("tag:{}", ml.0)).unwrap();
+    settle(&mut [&mut a, &mut b], &journal);
+
+    let b_ml = tag_id(&b.store, "ml");
+    assert_ne!(b_ml, ml, "b numbers its tags itself");
+    assert!(b.store.topic_dismissed(&format!("tag:{}", b_ml.0)));
+    let view = &b.store.library_saved_views()[0];
+    assert_eq!(view.filter.tag_ids, vec![b_ml]);
+    let b_papers = b
+        .store
+        .library_collections()
+        .iter()
+        .find(|collection| collection.name == "Papers")
+        .unwrap()
+        .id;
+    assert_eq!(view.filter.collection_id, Some(b_papers));
+    let on_b = b.item("paper").unwrap().id;
+    let assignment = &b.store.ai_assignments(on_b)[0];
+    assert_eq!(assignment.target, AssignmentTarget::Tag(b_ml));
+    let AssignmentOrigin::Enrichment { run: b_run } = assignment.origin else {
+        panic!("{assignment:?}");
+    };
+    // Undoing that run on b undoes what a's run did there.
+    assert_eq!(b.store.undo_enrichment_run(on_b, b_run).unwrap(), 1);
+    settle(&mut [&mut a, &mut b], &journal);
+    assert!(a.store.tags_for_item(id).is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}

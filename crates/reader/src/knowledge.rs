@@ -156,13 +156,12 @@ pub fn suggest_topics(
         if items.len() < TOPIC_MIN_ITEMS || written.contains(&PageTopic::Items(items.clone())) {
             continue;
         }
+        // In order, as a dismissal taken from another machine is kept.
+        let mut ids = items.iter().map(|id| id.0).collect::<Vec<_>>();
+        ids.sort_unstable();
         let key = format!(
             "items:{}",
-            items
-                .iter()
-                .map(|id| id.0.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
+            ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
         );
         if library.topic_dismissed(&key) {
             continue;

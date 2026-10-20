@@ -27,6 +27,10 @@ pub(super) struct StoredRecordV1 {
     /// machine and still waiting (its file has not arrived) is not.
     #[serde(default)]
     pub(super) materialized: bool,
+    /// Another machine's record for one this machine has under its own
+    /// uid: never materialized, never a removal.
+    #[serde(default)]
+    pub(super) aliased: bool,
     pub(super) fields: BTreeMap<String, Register>,
 }
 
@@ -141,7 +145,10 @@ fn diff(
     let mut removed = registers
         .iter()
         .filter(|(key, stored)| {
-            stored.materialized && !is_deleted(stored) && !records.contains_key(*key)
+            stored.materialized
+                && !stored.aliased
+                && !is_deleted(stored)
+                && !records.contains_key(*key)
         })
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();

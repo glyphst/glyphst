@@ -17,7 +17,7 @@ pub(super) const LIBRARY_RELATED_SUGGESTIONS_V1_TABLE: TableDefinition<u64, &[u8
 /// Suggested page topics the user dismissed, by key, with when.
 pub(super) const LIBRARY_PAGE_TOPICS_V1_TABLE: TableDefinition<&str, u64> =
     TableDefinition::new("library_page_topics_v1");
-const KNOWLEDGE_STORAGE_VERSION: u8 = 1;
+pub(super) const KNOWLEDGE_STORAGE_VERSION: u8 = 1;
 
 /// What a page was written about.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,15 +68,15 @@ pub struct RelatedSuggestion {
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredPageV1 {
-    version: u8,
-    page: PageRecord,
+pub(super) struct StoredPageV1 {
+    pub(super) version: u8,
+    pub(super) page: PageRecord,
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredSuggestionsV1 {
-    version: u8,
-    suggestions: Vec<RelatedSuggestion>,
+pub(super) struct StoredSuggestionsV1 {
+    pub(super) version: u8,
+    pub(super) suggestions: Vec<RelatedSuggestion>,
 }
 
 #[derive(Clone, Debug, Default)]
