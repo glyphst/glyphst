@@ -88,6 +88,15 @@ and the abandoned Files app in M5). It has:
   reranker too. Opened passages are kept (locally, forgettable) as a
   labelled set, and `glyphst-reader --eval-search` measures every run
   on the user's own index.
+- **Knowledge layer (2026-10-20):** concept pages written on request
+  (from suggested topics: groups of papers close in meaning, tags, or
+  the user's own) by the main model with the library's search, every
+  claim citing a passage it read and checked before anything is
+  written; read in the Reader (04p, 04q, cost first in 04s), edited in
+  Obsidian, kept or undone. Related items are suggested from meaning
+  and reviewed with ✓ / ×; backlinks from every note in the vault, the
+  user's included; `[ask]` continues an item's conversation; citations
+  clicked in other apps open the passage in the running Reader.
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
@@ -162,14 +171,20 @@ Known gaps:
   known-item queries (R@1 0.70 against keywords' 0.90, partly word-salad
   queries); z-scores against RRF and the meaning weight wait for the
   user's opened log (`--eval-search`).
+- Knowledge layer: pages have been written only by the fake model in
+  tests; a real model's citations, the page prompt and the cost estimate
+  are untried. Topic groups come from mean vectors (long books blur) with
+  thresholds untuned on a real library. The glyphst:// handler is Linux
+  only, untried by hand, and a forwarded link may not raise the window
+  under Wayland. A page has no in-app editor (by choice).
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
 
 **Next step:** the user picks the next milestone. Candidates: the
-library's M3, syncing the library folder over WebDAV or S3; scanned
-pages (EmbeddingGemma 2's vision part, or OCR); M4's knowledge layer;
-then, from the gaps above, restoring translation
+library's M3, syncing the library folder (sync-tool friendly per-item
+records first, then WebDAV or S3); scanned pages (EmbeddingGemma 2's
+vision part, or OCR); then, from the gaps above, restoring translation
 sessions from the cache, and a dense page's
 first load (MuPDF's interpretation
 dominates; only a faster content-stream reader would cut it).

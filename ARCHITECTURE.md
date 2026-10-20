@@ -9,7 +9,7 @@
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `metadata` | Recognising library items: identifiers in a document's first pages, lookups in arXiv, Crossref, OpenAlex and Open Library, duplicate detection, merging into an item |
-| `vault` | The Markdown vault: one Obsidian-compatible note per library item; the frontmatter keys and `glyphst:` blocks Glyphst owns, merged without touching the user's text |
+| `vault` | The Markdown vault: one Obsidian-compatible note per library item, and concept pages in `concepts/`; the frontmatter keys and `glyphst:` blocks Glyphst owns, merged without touching the user's text; `[[wikilinks]]` as Obsidian reads them, and an index of every note's links for backlinks |
 | `search` | The library's text search: an SQLite index (FTS5 words, trigrams for Chinese, Japanese and Korean, float16 vectors) of every item's pages in chunks with their anchors; the thread that reads and embeds documents in resumable steps; keyword and meaning search mixed by z-scores (or RRF), and reread by a reranker; the `Embedder` and `Reranker` traits; the evaluation set, its scores and the comparison of every run |
 | `embed` | Search by meaning's engine: pinned llama.cpp `llama-server` builds, EmbeddingGemma 2 and the bge-reranker-v2-m3 reranker, downloaded resumably and checked by SHA-256 (the engine once, for both); each model's server run on loopback with its key in the environment, ending with the app; the `Embedder` and `Reranker` over them |
 | `zotero-import` | Reading a Zotero library for import from a copy of `zotero.sqlite` (with its write-ahead log): items, creators, tags, collections, attachments, notes as Markdown and PDF annotations in user space; read only |
@@ -430,6 +430,15 @@ to them:
   given out again, and `resolve_item_id` takes an old id to the kept
   item. A merge writes the catalog, the AI rows and the vault rows in one
   transaction.
+- `library_pages_v1`, `library_related_suggestions_v1` and
+  `library_page_topics_v1` (`knowledge.rs`): the concept pages Glyphst
+  wrote (path, topic, sources, the hashes of what it wrote, the text before
+  the last write for undo, whether the user kept it yet), related items
+  suggested from meaning search with what the user did with them (a
+  rejected pair is never suggested again), and dismissed page topics.
+  They are written a row at a time, outside the catalog's revision.
+  `AiSession` remembers the item a conversation is about, so `[ask]`
+  continues it.
 
 The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
@@ -449,6 +458,25 @@ own read-only connections. Search by meaning's engine and model live in
 `search-v1/opened.jsonl` keeps the searches and the passages opened from
 them while "learn from what I open" is on, in the evaluation set's form;
 `glyphst-reader --eval-search` measures the index against it.
+
+The knowledge layer: the search's query thread works out items close in
+meaning (each item's mean passage vector; pairs that stand out, z >= 2.5;
+groups of mutual neighbours as topics) every 30 s while search by meaning
+runs, and the app suggests them as related items (`reader/src/knowledge.rs`,
+no model calls). A concept page is written on demand after its cost is
+shown: the main model researches the topic with the library's search tools
+on its own thread (`reader/src/page_writer.rs`), and its page is checked
+before it is written (a citation stays only when its passage exists and
+belongs to the item it names; a `[[link]]` only when the note exists).
+Pages go into `concepts/` through the vault's merge and wait for the user
+to keep or undo them. The vault thread indexes every note's links after
+writing notes, for backlinks.
+
+`glyphst://` links from other apps reach the running Reader: a process
+started with one forwards it over a local socket
+(`$XDG_RUNTIME_DIR/glyphst-reader.sock`, `reader/src/instance.rs`) and
+exits. `glyphst-reader-url.desktop` registers the scheme on Linux (also
+from Settings › Library).
 
 A search answers in passes on the service's query thread: keywords on each
 keystroke, meaning 120 ms after typing stops, then the reranker's pass when
