@@ -16,6 +16,7 @@ members = [
     "crates/reader",
     "crates/search",
     "crates/settings",
+    "crates/sync",
     "crates/translation",
     "crates/ui",
     "crates/vault",
