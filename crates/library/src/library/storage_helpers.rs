@@ -133,6 +133,7 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
     super::jobs::ensure_jobs_table(&write_txn)?;
     super::item_links::ensure_item_link_tables(&write_txn)?;
     super::vault_notes::ensure_vault_notes_table(&write_txn)?;
+    super::knowledge::ensure_knowledge_tables(&write_txn)?;
     write_txn.commit()?;
     Ok(())
 }

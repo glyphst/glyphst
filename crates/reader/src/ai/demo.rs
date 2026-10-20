@@ -178,6 +178,7 @@ impl Assistant {
             .into_iter()
             .enumerate()
             .map(|(index, (title, ago, messages, agent))| AiSession {
+                item: None,
                 id: index as u64 + 1,
                 title: title.into(),
                 messages: vec![super::session_message_stub(); messages],

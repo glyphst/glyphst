@@ -117,7 +117,16 @@ impl Library {
                 .then_with(|| left.id.cmp(&right.id))
         });
         self.ai_sessions.dedup_by(|left, right| left.id == right.id);
-        self.ai_sessions.truncate(MAX_AI_SESSIONS);
+        // Over the limit, the oldest conversations go, those about an item
+        // last: they are what `[ask]` on the item continues.
+        while self.ai_sessions.len() > MAX_AI_SESSIONS {
+            let oldest = self
+                .ai_sessions
+                .iter()
+                .rposition(|session| session.item.is_none())
+                .unwrap_or(self.ai_sessions.len() - 1);
+            self.ai_sessions.remove(oldest);
+        }
 
         self.document_preferences.retain_mut(|preferences| {
             preferences.path = normalize_path(&preferences.path);

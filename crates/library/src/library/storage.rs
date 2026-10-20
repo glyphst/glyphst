@@ -42,6 +42,7 @@ impl LibraryStore {
             jobs: Vec::new(),
             next_job_id: 1,
             vault_notes: HashMap::new(),
+            knowledge: Default::default(),
             files_root_chosen: false,
         }
     }
@@ -106,6 +107,7 @@ impl LibraryStore {
             .unwrap_or(0)
             .saturating_add(1);
         let vault_notes = super::vault_notes::load_vault_notes(&database)?;
+        let knowledge = super::knowledge::load_knowledge(&database)?;
 
         let mut store = Self {
             library,
@@ -123,6 +125,7 @@ impl LibraryStore {
             jobs,
             next_job_id,
             vault_notes,
+            knowledge,
             files_root_chosen,
         };
         store.sanitize_ai_catalog();

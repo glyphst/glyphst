@@ -6,6 +6,15 @@ impl LibraryStore {
         self.library.ai_sessions.clone()
     }
 
+    /// The latest conversation about item `id`, to continue it.
+    pub fn latest_item_session(&self, id: DocumentId) -> Option<&AiSession> {
+        self.library
+            .ai_sessions
+            .iter()
+            .filter(|session| session.item == Some(id))
+            .max_by_key(|session| session.updated)
+    }
+
     pub fn next_ai_session_id(&mut self) -> u64 {
         let id = self.library.next_ai_session_id.max(1);
         self.library.next_ai_session_id = id + 1;

@@ -1128,6 +1128,7 @@ impl Assistant {
             .map(|(message, view)| session_message(message, view, library))
             .collect();
         let session = AiSession {
+            item: None,
             id: self.session_id,
             title,
             messages,

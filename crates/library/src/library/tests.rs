@@ -306,6 +306,7 @@ fn persists_history_bookmarks_and_highlights() {
         ai_session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: ai_session_id,
                 title: "Explain section".to_string(),
                 messages: vec![
@@ -806,6 +807,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        knowledge: Default::default(),
         files_root_chosen: false,
     };
     assert!(
@@ -917,6 +919,7 @@ fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Referenced context".to_string(),
                 messages: vec![AiSessionMessage {
@@ -982,6 +985,7 @@ fn round_trips_v3_occurrences_with_duplicate_references() {
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Duplicate mentions".to_string(),
                 messages: vec![AiSessionMessage {
@@ -1041,6 +1045,7 @@ fn round_trips_v6_selected_page_snapshots() {
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Selected pages".to_string(),
                 messages: vec![AiSessionMessage {
@@ -1106,6 +1111,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
         session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Image trace".to_string(),
                 messages: vec![
@@ -1195,6 +1201,7 @@ fn v6_round_trips_managed_images_agent_trace_and_queue() {
         let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Image trace".to_string(),
                 messages: vec![AiSessionMessage {
@@ -1257,6 +1264,7 @@ fn round_trips_v3_region_occurrence_geometry() {
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "Region geometry".to_string(),
                 messages: vec![AiSessionMessage {
@@ -1691,6 +1699,7 @@ fn history_save_fails_when_database_is_unavailable() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        knowledge: Default::default(),
         files_root_chosen: false,
     };
     store.record_history(document_path, position(1));
@@ -1731,6 +1740,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         jobs: Vec::new(),
         next_job_id: 1,
         vault_notes: HashMap::new(),
+        knowledge: Default::default(),
         files_root_chosen: false,
     };
 
@@ -2198,6 +2208,7 @@ fn persists_non_utf8_paths_for_all_path_records() {
         let session_id = store.next_ai_session_id();
         store
             .save_ai_session(AiSession {
+                item: None,
                 id: session_id,
                 title: "session".to_string(),
                 messages: vec![AiSessionMessage {
@@ -2873,6 +2884,7 @@ fn ai_session_chips_and_times_round_trip_and_chats_can_be_deleted() {
             let id = store.next_ai_session_id();
             store
                 .save_ai_session(AiSession {
+                    item: None,
                     id,
                     title: title.to_string(),
                     messages: vec![message.clone()],

@@ -177,6 +177,8 @@ struct StoredAiSessionV6 {
     summary: Option<AiSessionSummary>,
     #[serde(default)]
     agent: Option<AiSessionAgent>,
+    #[serde(default)]
+    item: Option<DocumentId>,
 }
 
 impl From<&AiSession> for StoredAiSessionV6 {
@@ -199,6 +201,7 @@ impl From<&AiSession> for StoredAiSessionV6 {
             updated: session.updated,
             summary: session.summary.clone(),
             agent: session.agent.clone(),
+            item: session.item,
         }
     }
 }
@@ -223,6 +226,7 @@ impl StoredAiSessionV6 {
             updated: self.updated,
             summary: self.summary,
             agent: self.agent,
+            item: self.item,
         })
     }
 }
@@ -1602,6 +1606,8 @@ pub struct AiSession {
     pub summary: Option<AiSessionSummary>,
     /// `None` for the built-in assistant.
     pub agent: Option<AiSessionAgent>,
+    /// The library item it is about: `[ask]` on the item continues it.
+    pub item: Option<DocumentId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1976,6 +1982,9 @@ pub struct LibraryStore {
     next_job_id: u64,
     /// Each item's note in the vault (`vault_notes.rs`).
     vault_notes: HashMap<DocumentId, VaultNoteRecord>,
+    /// Concept pages, related suggestions, dismissed topics
+    /// (`knowledge.rs`).
+    knowledge: knowledge::KnowledgeState,
     /// The files are in a folder the user chose (`files_root.rs`).
     files_root_chosen: bool,
 }
@@ -2109,6 +2118,7 @@ mod files_root;
 mod history;
 mod item_links;
 mod jobs;
+mod knowledge;
 mod merge;
 mod model;
 mod preferences;
@@ -2128,6 +2138,7 @@ pub use catalog::*;
 pub use files_root::{FilesMove, FilesMovePlan, copy_planned_files};
 pub use item_links::{LibraryItemMerge, LibraryItemPair, LibraryTagColor};
 pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState};
+pub use knowledge::{PageRecord, PageTopic, RelatedSuggestion};
 use storage_helpers::require_storage_version;
 pub use vault_notes::VaultNoteRecord;
 
