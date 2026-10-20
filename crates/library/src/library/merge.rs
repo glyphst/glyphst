@@ -392,6 +392,7 @@ impl LibraryStore {
                 .managed_library_root
                 .as_deref()
                 .ok_or_else(|| anyhow!("managed library storage is unavailable"))?;
+            self.synced_write();
             let write_txn = database.begin_write()?;
             storage::write_catalog_tables(&write_txn, &self.library, root)?;
             self.write_ai_rows_in(&write_txn, &ai_ids)?;

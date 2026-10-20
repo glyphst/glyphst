@@ -44,6 +44,8 @@ impl LibraryStore {
             vault_notes: HashMap::new(),
             knowledge: Default::default(),
             files_root_chosen: false,
+            sync_ids: Default::default(),
+            sync_revision: Default::default(),
         }
     }
 
@@ -108,6 +110,7 @@ impl LibraryStore {
             .saturating_add(1);
         let vault_notes = super::vault_notes::load_vault_notes(&database)?;
         let knowledge = super::knowledge::load_knowledge(&database)?;
+        let sync_ids = super::syncing::load_sync_ids(&database)?;
 
         let mut store = Self {
             library,
@@ -127,7 +130,11 @@ impl LibraryStore {
             vault_notes,
             knowledge,
             files_root_chosen,
+            sync_ids,
+            sync_revision: Default::default(),
         };
+        store.library.reserve_synced_ids(&store.sync_ids);
+        store.assign_sync_ids()?;
         store.sanitize_ai_catalog();
         store.prune_library_jobs();
         if let Err(error) = store.prune_ai_session_rows() {
@@ -188,6 +195,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_bookmark(&self, bookmark: &Bookmark) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -202,6 +210,7 @@ impl LibraryStore {
     }
 
     pub(super) fn remove_bookmark_from_database(&self, id: u64) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -215,6 +224,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_highlight(&self, highlight: &Highlight) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -229,6 +239,7 @@ impl LibraryStore {
     }
 
     pub(super) fn remove_highlight_from_database(&self, id: u64) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -242,6 +253,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_note(&self, note: &Note) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -256,6 +268,7 @@ impl LibraryStore {
     }
 
     pub(super) fn remove_note_from_database(&self, id: u64) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
         };
@@ -404,6 +417,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_catalog(&self) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Ok(());
         };
@@ -418,6 +432,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_relinked_library(&self) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Ok(());
         };

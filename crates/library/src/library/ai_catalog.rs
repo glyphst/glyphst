@@ -912,6 +912,7 @@ impl LibraryStore {
     }
 
     pub(super) fn write_ai_rows(&self, ids: &[DocumentId]) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Ok(());
         };
@@ -927,6 +928,7 @@ impl LibraryStore {
         write_txn: &redb::WriteTransaction,
         ids: &[DocumentId],
     ) -> Result<()> {
+        self.synced_write();
         {
             let mut assignments = write_txn.open_table(LIBRARY_AI_ASSIGNMENTS_V1_TABLE)?;
             let mut enrichments = write_txn.open_table(LIBRARY_ENRICHMENTS_V1_TABLE)?;

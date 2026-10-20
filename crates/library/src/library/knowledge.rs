@@ -81,10 +81,10 @@ struct StoredSuggestionsV1 {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct KnowledgeState {
-    pages: BTreeMap<u64, PageRecord>,
+    pub(super) pages: BTreeMap<u64, PageRecord>,
     /// Under the pair's lower id.
-    suggestions: BTreeMap<u64, Vec<RelatedSuggestion>>,
-    dismissed: BTreeSet<String>,
+    pub(super) suggestions: BTreeMap<u64, Vec<RelatedSuggestion>>,
+    pub(super) dismissed: BTreeSet<String>,
 }
 
 pub(super) fn ensure_knowledge_tables(write_txn: &redb::WriteTransaction) -> Result<()> {
@@ -153,6 +153,7 @@ impl LibraryStore {
             .keys()
             .next_back()
             .map_or(1, |id| id + 1)
+            .max(self.sync_ids.highest(SyncKind::Page) + 1)
     }
 
     /// Records a page, or forgets it with `None`.
@@ -357,6 +358,7 @@ impl LibraryStore {
         &self,
         write: impl FnOnce(&redb::WriteTransaction) -> Result<()>,
     ) -> Result<()> {
+        self.synced_write();
         let Some(database) = &self.database else {
             return Ok(());
         };

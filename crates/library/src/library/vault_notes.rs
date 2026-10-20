@@ -88,6 +88,7 @@ impl LibraryStore {
 
     /// Records the item's note, or forgets it with `None`.
     pub fn set_vault_note(&mut self, id: DocumentId, note: Option<VaultNoteRecord>) -> Result<()> {
+        self.synced_write();
         let previous = match &note {
             Some(note) => self.vault_notes.insert(id, note.clone()),
             None => self.vault_notes.remove(&id),
