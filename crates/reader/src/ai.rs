@@ -236,6 +236,8 @@ pub struct Assistant {
     /// The library item the conversation is about, when it started from
     /// one (`[ask]`): it continues there.
     item: Option<glyphst_library::DocumentId>,
+    /// Its title, for the header.
+    item_title: Option<String>,
     created: u64,
     messages: Vec<ChatMessage>,
     /// What the panel shows of each message, by index.
@@ -352,6 +354,7 @@ impl Default for Assistant {
             open: false,
             session_id: 0,
             item: None,
+            item_title: None,
             created: 0,
             messages: Vec::new(),
             views: Vec::new(),
@@ -983,6 +986,7 @@ impl Assistant {
         self.run = None;
         self.session_id = 0;
         self.item = None;
+        self.item_title = None;
         self.created = 0;
         self.messages.clear();
         self.views.clear();
@@ -1090,6 +1094,10 @@ impl Assistant {
         self.new_session();
         self.session_id = session.id;
         self.item = session.item;
+        self.item_title = session
+            .item
+            .and_then(|id| library.library_item(id))
+            .map(|item| item.title.clone());
         self.created = session.created;
         self.title = Some(session.title);
         self.summary = session.summary;
@@ -1114,6 +1122,7 @@ impl Assistant {
             None => {
                 self.new_session();
                 self.item = Some(item);
+                self.item_title = library.library_item(item).map(|item| item.title.clone());
             }
         }
     }

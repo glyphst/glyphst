@@ -65,6 +65,7 @@ mod agent_library;
 mod chrome;
 mod couch;
 mod page_chrome;
+mod pages;
 mod present;
 mod ring;
 mod status_bar;
@@ -311,9 +312,15 @@ pub struct ReaderApp {
     /// Links other processes forward to this Reader (`instance.rs`), and
     /// links waiting for the library's search to locate their passages.
     instance: Option<crate::instance::Instance>,
-    pending_links: Vec<crate::links::OpenLink>,
+    pending_links: Vec<crate::links::Link>,
     /// Which app opens `glyphst://` links, asked once for Settings.
     link_handler: Option<Option<String>>,
+    /// Concept pages being written (id and title), and topics for new ones.
+    page_writer: crate::page_writer::PageWriter,
+    page_writing: Vec<(u64, String)>,
+    page_topics: Vec<crate::knowledge::TopicSuggestion>,
+    /// A library demo set up a vault in a temporary folder.
+    demo_vault: bool,
     /// The items close in meaning related suggestions were last made from.
     neighbours_seen: Option<std::sync::Arc<crate::library_search::Neighbours>>,
     pub(crate) pads: Pads,
@@ -650,10 +657,14 @@ impl ReaderApp {
             pending_links: launch
                 .urls
                 .iter()
-                .filter_map(|url| crate::links::parse(url))
+                .filter_map(|url| crate::links::parse_link(url))
                 .collect(),
             link_handler: None,
             neighbours_seen: None,
+            page_writer: Default::default(),
+            page_writing: Vec::new(),
+            page_topics: Vec::new(),
+            demo_vault: false,
             pads,
             pad_router: Router::default(),
             pad_keymap: Default::default(),
@@ -762,8 +773,18 @@ impl ReaderApp {
                 app.open_library();
             }
             let mut demo_merge = None;
+            // Pages, related items and backlinks (04p, 04q, 04f).
+            if matches!(state.as_str(), "item" | "pages" | "page" | "page-cost")
+                && let Some((root, neighbours)) = crate::library_demo::knowledge(&mut app.library)
+            {
+                app.prefs.library.vault = Some(root.display().to_string());
+                app.demo_vault = true;
+                app.neighbours_seen = Some(std::sync::Arc::new(neighbours));
+            }
             if let Some(Page::Library(tab)) = app.pages.last_mut() {
                 match state.as_str() {
+                    "pages" | "page-cost" => tab.view = crate::library_tab::View::Pages,
+                    "page" => tab.view = crate::library_tab::View::Page(1),
                     "item" => {
                         let id = crate::library_demo::first_item(&app.library);
                         tab.view = id
@@ -856,6 +877,16 @@ impl ReaderApp {
                     error: None,
                 }),
                 "identifier" => Some(crate::library_dialogs::Dialog::add_by_identifier(None)),
+                "page-cost" => {
+                    crate::knowledge::suggest_topics(&app.library, app.neighbours_seen.as_deref())
+                        .into_iter()
+                        .next()
+                        .and_then(|topic| {
+                            app.page_dialog(&crate::knowledge::PageAsk::Topic(topic))
+                                .map_err(|error| eprintln!("no page dialog: {error}"))
+                                .ok()
+                        })
+                }
                 _ => None,
             };
             if state.starts_with("zotero") {
@@ -1380,6 +1411,10 @@ impl ReaderApp {
                 }
                 Ok(())
             }
+            Some(DialogAction::WritePage(job)) => {
+                self.start_page(*job, ctx);
+                Ok(())
+            }
             Some(DialogAction::AddWork(work)) => {
                 self.work_adds.push(crate::library_dialogs::WorkAdd::start(
                     *work,
@@ -1524,6 +1559,13 @@ impl ReaderApp {
                     .prefs
                     .library
                     .vault_root(self.library.files_root(), self.library.files_root_chosen());
+                let vault_index = self.vault_sync.index();
+                if tab.view == crate::library_tab::View::Pages {
+                    self.page_topics = crate::knowledge::suggest_topics(
+                        &self.library,
+                        self.neighbours_seen.as_deref(),
+                    );
+                }
                 let action = tab.ui(
                     ui,
                     crate::library_tab::TabContext {
@@ -1534,6 +1576,9 @@ impl ReaderApp {
                         import: self.importer.progress(),
                         search: self.library_search.as_mut(),
                         meaning,
+                        vault_index: Some(&vault_index),
+                        topics: &self.page_topics,
+                        writing: &self.page_writing,
                     },
                 );
                 if let Some(action) = action {
@@ -1635,6 +1680,27 @@ impl ReaderApp {
                 }
                 Ok(())
             }
+            Action::WritePage(ask) => {
+                match self.page_dialog(&ask) {
+                    Ok(dialog) => self.library_dialog = Some(dialog),
+                    Err(error) => self.notices.push(error),
+                }
+                Ok(())
+            }
+            Action::DismissTopic(key) => self.library.dismiss_topic(&key),
+            Action::KeepPage(id) => crate::page_writer::keep(&mut self.library, id),
+            Action::UndoPage(id) => match self.vault_root() {
+                Some(root) => crate::page_writer::undo(&mut self.library, &root, id),
+                None => Err(anyhow::anyhow!("there is no vault")),
+            },
+            Action::ShowPage(id) => {
+                self.show_concept_page(id);
+                Ok(())
+            }
+            Action::AcceptRelated(a, b) => self.library.accept_related(a, b),
+            Action::RejectRelated(a, b) => self.library.reject_related(a, b),
+            Action::AddRelated(a, b) => self.library.add_related_pairs(&[(a, b)]).map(|_| ()),
+            Action::RemoveRelated(a, b) => self.library.remove_related(a, b),
             Action::CancelImport => {
                 if self.importer.is_running() {
                     self.importer.cancel();
@@ -1788,6 +1854,30 @@ impl ReaderApp {
 
     /// Opens what a `glyphst://` link names: a passage the index knows, or
     /// an item at a page.
+    /// Shows concept page `id` in the library tab.
+    fn show_concept_page(&mut self, id: u64) {
+        self.open_library();
+        if let Some(Page::Library(tab)) = self
+            .page_focused
+            .and_then(|index| self.pages.get_mut(index))
+        {
+            tab.view = crate::library_tab::View::Page(id);
+            tab.selected = None;
+        }
+    }
+
+    /// Opens a `glyphst://` link: a passage, an item, or a concept page.
+    fn follow_link(&mut self, link: crate::links::Link, ctx: &egui::Context) {
+        match link {
+            crate::links::Link::Open(link) => {
+                if let Err(error) = self.open_link(link, ctx) {
+                    self.notices.push(error);
+                }
+            }
+            crate::links::Link::Page(id) => self.show_concept_page(id),
+        }
+    }
+
     pub(crate) fn open_link(
         &mut self,
         link: crate::links::OpenLink,
@@ -5351,6 +5441,14 @@ impl eframe::App for ReaderApp {
         for path in opens {
             self.open(&path, &ctx, None);
         }
+        // The vault follows the library (in a scripted run only the demo's,
+        // in a temporary folder).
+        if self.persist || self.demo_vault {
+            let vault = self.vault_root();
+            for notice in self.vault_sync.poll(&mut self.library, vault) {
+                self.notices.push(notice);
+            }
+        }
         if self.persist {
             self.importer.poll(&mut self.library);
             // New items get their metadata looked up (and then the AI pass).
@@ -5384,13 +5482,7 @@ impl eframe::App for ReaderApp {
             {
                 self.notices.push(notice);
             }
-            let vault = self
-                .prefs
-                .library
-                .vault_root(self.library.files_root(), self.library.files_root_chosen());
-            for notice in self.vault_sync.poll(&mut self.library, vault) {
-                self.notices.push(notice);
-            }
+            self.poll_pages();
             if self.library_search.is_none() {
                 let path = crate::library_search::SearchService::default_path();
                 match crate::library_search::SearchService::start(&path, &ctx) {
@@ -5769,21 +5861,20 @@ impl eframe::App for ReaderApp {
         if !forwarded.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        self.pending_links
-            .extend(forwarded.iter().filter_map(|url| crate::links::parse(url)));
+        self.pending_links.extend(
+            forwarded
+                .iter()
+                .filter_map(|url| crate::links::parse_link(url)),
+        );
         if !self.pending_links.is_empty()
             && (self.library_search.is_some() || self.started.elapsed() > Duration::from_secs(3))
         {
             for link in std::mem::take(&mut self.pending_links) {
-                if let Err(error) = self.open_link(link, &ctx) {
-                    self.notices.push(error);
-                }
+                self.follow_link(link, &ctx);
             }
         }
         for link in crate::links::take(&ctx) {
-            if let Err(error) = self.open_link(link, &ctx) {
-                self.notices.push(error);
-            }
+            self.follow_link(link, &ctx);
         }
         self.settle_switcher();
         // A pending overview advances one tile per frame, so keep drawing.

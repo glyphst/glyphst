@@ -2,14 +2,11 @@
 //! from meaning search (for the user to keep or not), and topics a concept
 //! page could be written about, from tags and from groups of papers close
 //! in meaning. Nothing is written by a model until the user picks a topic.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "topics are offered in M4's pages view")
-)]
 
 use std::collections::HashMap;
 
 use glyphst_library::{DocumentId, LibraryStore, LibraryTagId, PageTopic};
+use glyphst_vault::index::{Owner, VaultIndex};
 
 use crate::library_search::Neighbours;
 
@@ -43,6 +40,75 @@ impl TopicSuggestion {
             TopicKind::Cluster => PageTopic::Items(self.items.clone()),
         }
     }
+}
+
+/// What a page is to be written about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageAsk {
+    /// A suggested topic.
+    Topic(TopicSuggestion),
+    /// Page `id` again.
+    Again(u64),
+    /// What the user (or the assistant) names; sources from the library's
+    /// search.
+    Asked(String),
+}
+
+/// A page's Markdown to read in Glyphst: without its frontmatter, title and
+/// block markers, its `[[links]]` made links: to the item or page they
+/// name, to the file of the user's note, else plain words.
+pub fn page_markdown(note: &str, index: &VaultIndex, root: Option<&std::path::Path>) -> String {
+    let (_, body) = glyphst_vault::frontmatter::split(note);
+    let mut lines = body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("<!-- glyphst:"))
+        .skip_while(|line| line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.first().is_some_and(|line| line.starts_with("# ")) {
+        lines.remove(0);
+    }
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let text = lines[start..].join("\n");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find("[[") {
+        let Some(close) = rest[open + 2..].find("]]").map(|end| open + 2 + end) else {
+            break;
+        };
+        // An embed (`![[…]]`) shows as its link.
+        let before = rest[..open].strip_suffix('!').unwrap_or(&rest[..open]);
+        out.push_str(before);
+        let inner = &rest[open + 2..close];
+        let (target, alias) = match inner.split_once('|') {
+            Some((target, alias)) => (target, Some(alias.trim())),
+            None => (inner, None),
+        };
+        let target = target.split('#').next().unwrap_or(target);
+        match index.resolve(target) {
+            Some(note) => {
+                let shown = alias.unwrap_or(&note.title);
+                let url = match note.owner {
+                    Owner::Item(id) => crate::links::item(id),
+                    Owner::Page(id) => crate::links::page(id),
+                    Owner::User => root
+                        .map(|root| format!("file://{}", root.join(&note.path).display()))
+                        .unwrap_or_default(),
+                };
+                if url.is_empty() {
+                    out.push_str(shown);
+                } else {
+                    out.push_str(&format!("[{shown}]({})", url.replace(' ', "%20")));
+                }
+            }
+            None => out.push_str(alias.unwrap_or(target.trim())),
+        }
+        rest = &rest[close + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Suggests each item's close neighbours as related (each pair once; pairs
@@ -126,6 +192,8 @@ pub fn suggest_topics(
                 .collect::<Vec<_>>();
             (tag, items)
         })
+        // A tag a group is named for is offered as that group.
+        .filter(|(tag, _)| !topics.iter().any(|topic| topic.title == tag.name))
         .filter(|(tag, items)| {
             items.len() >= TOPIC_MIN_ITEMS
                 && !written.contains(&PageTopic::Tag(tag.id))
@@ -208,6 +276,35 @@ mod tests {
     }
 
     #[test]
+    fn a_page_reads_without_its_markers_and_with_its_links_made() {
+        let root = std::env::temp_dir().join(format!("glyphst-page-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("items")).unwrap();
+        std::fs::create_dir_all(root.join("thesis")).unwrap();
+        std::fs::write(
+            root.join("items/vaswani2017attention.md"),
+            "---\nglyphst_id: 12\n---\n# Attention Is All You Need\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("thesis/chapter two.md"), "# Chapter 2\n").unwrap();
+        let index = VaultIndex::scan(&root, &VaultIndex::default());
+        let note = "---\nglyphst_page: 1\n---\n\n# Attention\n\n<!-- glyphst:page begin -->\n\
+                    As [[vaswani2017attention]] shows [p 3](glyphst://open?id=12&page=3&chunk=9), \
+                    see [[chapter two|my notes]] and [[nowhere]].\n<!-- glyphst:page end -->\n\n## Notes\n";
+        let markdown = page_markdown(note, &index, Some(&root));
+        assert!(
+            markdown.starts_with("As [Attention Is All You Need](glyphst://open?id=12)"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("[p 3](glyphst://open?id=12&page=3&chunk=9)"));
+        assert!(markdown.contains("[my notes](file://"), "{markdown}");
+        assert!(markdown.contains("chapter%20two.md"));
+        assert!(markdown.contains(" and nowhere."));
+        assert!(!markdown.contains("glyphst:page") && !markdown.contains("# Attention"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn neighbours_become_related_suggestions_and_topics() {
         let mut library = LibraryStore::memory();
         let attention = item(&mut library, "Attention Is All You Need", &["nlp"]);
@@ -232,10 +329,9 @@ mod tests {
         assert_eq!(suggested, vec![(bert, 0.9), (t5, 0.8)]);
         assert!(library.related_suggestions(bread).is_empty());
 
-        // The group shares #nlp: one topic named for it, and #nlp itself
-        // is a topic too (three items).
+        // The group shares #nlp: one topic named for it, not #nlp again.
         let topics = suggest_topics(&library, Some(&neighbours));
-        assert_eq!(topics.len(), 2, "{topics:#?}");
+        assert_eq!(topics.len(), 1, "{topics:#?}");
         assert_eq!(topics[0].title, "nlp");
         assert_eq!(topics[0].kind, TopicKind::Cluster);
         assert_eq!(topics[0].items, vec![attention, bert, t5]);
@@ -243,9 +339,8 @@ mod tests {
             topics[0].topic(),
             PageTopic::Items(vec![attention, bert, t5])
         );
-        assert!(matches!(topics[1].kind, TopicKind::Tag(_)));
 
-        // Dismissed, a topic is not offered again.
+        // Dismissed, the group is not offered again, and its tag is.
         library.dismiss_topic(&topics[0].key).unwrap();
         let topics = suggest_topics(&library, Some(&neighbours));
         assert_eq!(topics.len(), 1);

@@ -1,6 +1,7 @@
 //! The library's dialogs: enriching the existing library (frame 04h),
-//! choosing the library folder and moving the files there (04k), and
-//! adding a work by its DOI, arXiv id or ISBN (06d).
+//! choosing the library folder and moving the files there (04k), adding a
+//! work by its DOI, arXiv id or ISBN (06d), and writing a concept page
+//! (04s).
 
 use std::{
     path::PathBuf,
@@ -29,6 +30,8 @@ pub enum DialogAction {
     /// Add this work (downloading its PDF when it has an open one).
     AddWork(Box<WorkMetadata>),
     StopMove,
+    /// Write this concept page (an asked page finds its sources first).
+    WritePage(Box<crate::page_writer::PageJob>),
 }
 
 pub enum Lookup {
@@ -68,6 +71,14 @@ pub enum Dialog {
         endpoints: MetadataEndpoints,
         mailto: Option<String>,
         looked_up: Option<String>,
+    },
+    WritePage {
+        job: Box<crate::page_writer::PageJob>,
+        model: String,
+        tokens_in: u64,
+        tokens_out: u64,
+        /// The user names the topic; the library's search finds sources.
+        asked: bool,
     },
 }
 
@@ -123,6 +134,7 @@ impl Dialog {
                             Self::ChooseFolder { .. } => self.choose_folder(ui, &tokens),
                             Self::Moving { .. } => self.moving(ui, &tokens),
                             Self::AddByIdentifier { .. } => self.identifier(ui, &tokens, library),
+                            Self::WritePage { .. } => self.write_page(ui, &tokens, library),
                         };
                     });
             });
@@ -188,6 +200,97 @@ impl Dialog {
                 .clicked()
             {
                 action = Some(DialogAction::Enrich(items.clone()));
+                close = true;
+            }
+            if ui.add(Button::ghost("cancel")).clicked() {
+                close = true;
+            }
+        });
+        (action, close)
+    }
+
+    fn write_page(
+        &mut self,
+        ui: &mut Ui,
+        tokens: &Tokens,
+        library: &LibraryStore,
+    ) -> (Option<DialogAction>, bool) {
+        let Self::WritePage {
+            job,
+            model,
+            tokens_in,
+            tokens_out,
+            asked,
+        } = self
+        else {
+            return (None, false);
+        };
+        let title = if *asked {
+            "Write a page".to_string()
+        } else {
+            format!("Write a page on “{}”?", job.input.title)
+        };
+        head(ui, tokens, "file-text", &title);
+        para(
+            ui,
+            tokens,
+            "The main model researches the topic in these papers with the library's search, then writes a page that cites the passages it read. It goes into notes/concepts/ for you to keep or undo; citations it could not show are dropped.",
+        );
+        if *asked {
+            TextField::new(
+                &mut job.input.title,
+                "a topic, such as attention mechanisms",
+            )
+            .width(ui.available_width())
+            .show(ui);
+        }
+        let sources = if *asked {
+            "found by searching the library when you write".to_string()
+        } else {
+            let mut titles = job
+                .input
+                .sources
+                .iter()
+                .take(3)
+                .filter_map(|source| {
+                    library
+                        .library_item(DocumentId(source.id))
+                        .map(|item| item.title.clone())
+                })
+                .collect::<Vec<_>>();
+            if job.input.sources.len() > 3 {
+                titles.push(format!("+{}", job.input.sources.len() - 3));
+            }
+            format!("{} · {}", job.input.sources.len(), titles.join(", "))
+        };
+        facts(
+            ui,
+            tokens,
+            &[
+                ("sources", sources, None),
+                ("model", format!("{model} · main model"), None),
+                (
+                    "tokens",
+                    format!(
+                        "≈ {} in · {} out",
+                        short_count(*tokens_in),
+                        short_count(*tokens_out)
+                    ),
+                    Some(tokens.accent_text),
+                ),
+                (
+                    "time",
+                    "about a minute · in the background".to_string(),
+                    None,
+                ),
+            ],
+        );
+        let mut action = None;
+        let mut close = false;
+        let ready = !job.input.title.trim().is_empty();
+        foot(ui, tokens, Some("settings › ai › main model"), |ui| {
+            if ui.add_enabled(ready, Button::primary("write")).clicked() {
+                action = Some(DialogAction::WritePage(job.clone()));
                 close = true;
             }
             if ui.add(Button::ghost("cancel")).clicked() {
@@ -492,7 +595,7 @@ fn expand_home(path: &str) -> PathBuf {
     }
 }
 
-fn short_count(count: u64) -> String {
+pub(crate) fn short_count(count: u64) -> String {
     if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)
     } else if count >= 1_000 {

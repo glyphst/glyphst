@@ -20,6 +20,7 @@ use glyphst_ui::{
     text,
 };
 
+mod pages_view;
 mod search_view;
 
 use search_view::{filter_words, search_words};
@@ -46,7 +47,14 @@ pub enum View {
     Trash,
     Collection(LibraryCollectionId),
     Tag(LibraryTagId),
+    /// Concept pages and topics for new ones (frame 04p).
+    Pages,
+    /// One concept page (04q).
+    Page(u64),
 }
+
+/// A concept page's text read: the page, its file's time, the vault's notes.
+type PageTextKey = (u64, Option<std::time::SystemTime>, usize);
 
 /// What the tab asks the app to do.
 pub enum LibraryTabAction {
@@ -99,6 +107,21 @@ pub enum LibraryTabAction {
     AskLibrary(String),
     /// Search by meaning's card: download, pause, …
     Meaning(crate::meaning::MeaningAction),
+    /// Ask to write a concept page (the cost first, 04s).
+    WritePage(crate::knowledge::PageAsk),
+    /// Stop suggesting a page topic.
+    DismissTopic(String),
+    /// Keep a page as written, or undo its last write.
+    KeepPage(u64),
+    UndoPage(u64),
+    /// Show a concept page.
+    ShowPage(u64),
+    /// Keep or reject a related item suggested from meaning; relate two
+    /// items by hand, or unrelate them.
+    AcceptRelated(DocumentId, DocumentId),
+    RejectRelated(DocumentId, DocumentId),
+    AddRelated(DocumentId, DocumentId),
+    RemoveRelated(DocumentId, DocumentId),
 }
 
 /// What the tab needs from the app this frame.
@@ -116,6 +139,12 @@ pub struct TabContext<'a> {
     /// Search by meaning's card over the results, when it has something to
     /// say (frame 04o).
     pub meaning: Option<crate::meaning::MeaningCard>,
+    /// The vault's notes and links, for backlinks.
+    pub vault_index: Option<&'a glyphst_vault::index::VaultIndex>,
+    /// Topics for new concept pages (04p).
+    pub topics: &'a [crate::knowledge::TopicSuggestion],
+    /// Pages being written: id and title.
+    pub writing: &'a [(u64, String)],
 }
 
 #[derive(Default)]
@@ -130,6 +159,12 @@ pub struct LibraryTab {
     note: Option<(DocumentId, String)>,
     /// The search's weaker matches are shown.
     weaker_open: bool,
+    /// The concept page shown, as Markdown to read, by page, file time and
+    /// the notes its links could name.
+    page_text: Option<(PageTextKey, String)>,
+    markdown: glyphst_markdown::MarkdownCache,
+    /// Relating an item by hand: the item and the words to find the other.
+    relating: Option<(DocumentId, String)>,
 }
 
 impl LibraryTab {
@@ -144,9 +179,10 @@ impl LibraryTab {
             .map(|id| context.library.resolve_item_id(id))
             .filter(|id| context.library.library_item(*id).is_some());
         let left = Rect::from_min_size(area.min, vec2(LEFT, area.height()));
+        let pages = matches!(self.view, View::Pages | View::Page(_));
         let item = self
             .selected
-            .filter(|_| area.width() > LEFT + ITEM + 480.0)
+            .filter(|_| !pages && area.width() > LEFT + ITEM + 480.0)
             .map(|_| Rect::from_min_max(pos2(area.right() - ITEM, area.top()), area.max));
         let center = Rect::from_min_max(
             pos2(left.right(), area.top()),
@@ -227,6 +263,16 @@ impl LibraryTab {
                     if row.show(ui).clicked() {
                         self.choose(view);
                     }
+                }
+                let pages = library.pages().count().to_string();
+                if ListRow::new("pages")
+                    .icon("file-text")
+                    .meta(pages.as_str())
+                    .active(matches!(self.view, View::Pages | View::Page(_)))
+                    .show(ui)
+                    .clicked()
+                {
+                    self.choose(View::Pages);
                 }
                 ui.add_space(10.0);
                 let collections = library.library_collections().len();
@@ -380,6 +426,9 @@ impl LibraryTab {
         context: &mut TabContext<'_>,
         rect: Rect,
     ) -> Option<LibraryTabAction> {
+        if matches!(self.view, View::Pages | View::Page(_)) {
+            return self.pages_part(ui, tokens, context, rect);
+        }
         let library = context.library;
         let mut action = None;
         let inner = rect.shrink2(vec2(28.0, 24.0));
@@ -783,7 +832,8 @@ impl LibraryTab {
         let mut filter = parse_filter(&self.filter, library);
         let mut sort = self.sort;
         match self.view {
-            View::All | View::NeedsReview => {}
+            // Pages list no items; the views beside them are all items.
+            View::All | View::NeedsReview | View::Pages | View::Page(_) => {}
             View::Recent => {
                 sort = LibrarySort {
                     field: LibrarySortField::DateAdded,
@@ -842,6 +892,14 @@ impl LibraryTab {
                     .unwrap_or_default();
                 named(&name)
             }
+            View::Pages => named("pages"),
+            View::Page(id) => (
+                "library / pages".to_string(),
+                library
+                    .page(id)
+                    .map(|page| page.title.clone())
+                    .unwrap_or_default(),
+            ),
         }
     }
 
@@ -951,7 +1009,12 @@ impl LibraryTab {
                 action = Some(LibraryTabAction::OpenNote(note.clone()));
             }
         }
-        if with_open && foot_ui.add(Button::bracket_muted("ask")).clicked() {
+        let ask = if library.latest_item_session(id).is_some() {
+            "continue"
+        } else {
+            "ask"
+        };
+        if with_open && foot_ui.add(Button::bracket_muted(ask)).clicked() {
             action = Some(LibraryTabAction::Ask {
                 item: id,
                 path: path.clone(),
@@ -1255,19 +1318,92 @@ impl LibraryTab {
         }
 
         // The items related to it, from Zotero or an assistant.
-        let related = library.related_items(id);
-        if !related.is_empty() {
-            flush_rule(ui, "related", None);
-            for other in related {
-                let Some(other) = library.library_item(other) else {
-                    continue;
-                };
-                let year = other.year.map(|year| year.to_string()).unwrap_or_default();
-                if link_row(ui, tokens, "↔", &other.title, &year, tokens.text_2).clicked() {
-                    action = Some(LibraryTabAction::ShowInLibrary(other.id));
+        // Related items: kept ones (× unrelates), ones suggested from
+        // meaning (✓ keeps, × never again), and relating one by hand.
+        flush_rule(ui, "related", None);
+        for other in library.related_items(id) {
+            let Some(other) = library.library_item(other) else {
+                continue;
+            };
+            let year = other.year.map(|year| year.to_string()).unwrap_or_default();
+            let (row, marks) =
+                marked_row(ui, tokens, "↔", &other.title, &year, &[("×", "unrelate")]);
+            if marks[0] {
+                action = Some(LibraryTabAction::RemoveRelated(id, other.id));
+            } else if row.clicked() {
+                action = Some(LibraryTabAction::ShowInLibrary(other.id));
+            }
+        }
+        for (other, _) in library.related_suggestions(id).into_iter().take(5) {
+            let Some(other) = library.library_item(other) else {
+                continue;
+            };
+            let (row, marks) = marked_row(
+                ui,
+                tokens,
+                "◇",
+                &other.title,
+                "close in meaning",
+                &[("✓", "keep"), ("×", "not related")],
+            );
+            if marks[0] {
+                action = Some(LibraryTabAction::AcceptRelated(id, other.id));
+            } else if marks[1] {
+                action = Some(LibraryTabAction::RejectRelated(id, other.id));
+            } else if row.clicked() {
+                action = Some(LibraryTabAction::ShowInLibrary(other.id));
+            }
+        }
+        match &mut self.relating {
+            Some((item, words)) if *item == id => {
+                TextField::new(words, "find an item to relate")
+                    .width(ui.available_width())
+                    .show(ui);
+                let words = words.trim().to_lowercase();
+                let related = library.related_items(id);
+                let found = library
+                    .library_items()
+                    .iter()
+                    .filter(|other| {
+                        other.id != id
+                            && other.trashed_at.is_none()
+                            && !related.contains(&other.id)
+                            && !words.is_empty()
+                            && other.title.to_lowercase().contains(&words)
+                    })
+                    .take(6)
+                    .collect::<Vec<_>>();
+                for other in found {
+                    let year = other.year.map(|year| year.to_string()).unwrap_or_default();
+                    if link_row(ui, tokens, "+", &other.title, &year, tokens.text_2).clicked() {
+                        action = Some(LibraryTabAction::AddRelated(id, other.id));
+                    }
+                }
+                if ui.add(Button::bracket_muted("done")).clicked() || action.is_some() {
+                    self.relating = None;
                 }
             }
-            ui.add_space(10.0);
+            _ => {
+                if ui.add(Button::bracket_muted("+ related")).clicked() {
+                    self.relating = Some((id, String::new()));
+                }
+            }
+        }
+        ui.add_space(10.0);
+
+        // Notes, pages and the user's own notes that link to this one.
+        if let Some(index) = context.vault_index {
+            let backlinks = index.backlinks(glyphst_vault::index::Owner::Item(id.0));
+            if !backlinks.is_empty() {
+                flush_rule(ui, "linked from", None);
+                for note in backlinks {
+                    if let Some(chosen) = pages_view::backlink_row(ui, tokens, note, context.vault)
+                    {
+                        action = Some(chosen);
+                    }
+                }
+                ui.add_space(10.0);
+            }
         }
 
         // The note.
@@ -2155,6 +2291,79 @@ fn duplicate_box(
 
 /// A row of a list in the item pane: a glyph, a name and a faint detail
 /// on the right.
+/// `link_row` with marks at its right (✓, ×), each with its tip; returns
+/// the row's response and which marks were clicked.
+fn marked_row(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    glyph: &str,
+    name: &str,
+    detail: &str,
+    marks: &[(&str, &str)],
+) -> (egui::Response, Vec<bool>) {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
+    let y = rect.center().y;
+    let mut right = rect.right();
+    let mut clicked = vec![false; marks.len()];
+    for (index, (mark, tip)) in marks.iter().enumerate().rev() {
+        let at = Rect::from_center_size(pos2(right - 7.0, y), vec2(14.0, 17.0));
+        let hit = ui
+            .interact(at, response.id.with(index), Sense::click())
+            .on_hover_text(*tip)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let color = match *mark {
+            "✓" => tokens.ok,
+            _ if hit.hovered() => tokens.text,
+            _ => tokens.muted,
+        };
+        ui.painter().text(
+            at.center(),
+            Align2::CENTER_CENTER,
+            *mark,
+            theme::mono(11.0),
+            color,
+        );
+        clicked[index] = hit.clicked();
+        right -= 16.0;
+    }
+    let detail_rect = text::line(
+        ui,
+        pos2(right - 6.0, y),
+        Align2::RIGHT_CENTER,
+        detail,
+        theme::mono(10.0),
+        tokens.faint,
+        rect.width() / 2.0,
+    );
+    ui.painter().text(
+        pos2(rect.left(), y),
+        Align2::LEFT_CENTER,
+        glyph,
+        theme::mono(11.0),
+        if glyph == "◇" {
+            tokens.accent_text
+        } else {
+            tokens.faint
+        },
+    );
+    text::row(
+        ui,
+        pos2(rect.left() + 18.0, y),
+        name,
+        theme::mono(11.0),
+        if response.hovered() {
+            tokens.text
+        } else {
+            tokens.text_2
+        },
+        (detail_rect.left() - rect.left() - 26.0).max(0.0),
+    );
+    (
+        response.on_hover_cursor(egui::CursorIcon::PointingHand),
+        clicked,
+    )
+}
+
 fn link_row(
     ui: &mut Ui,
     tokens: &Tokens,

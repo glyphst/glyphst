@@ -22,6 +22,36 @@ use crate::{
 const MAX_ENRICH: usize = 20;
 
 impl ReaderApp {
+    /// `write_concept_page`: the cost dialog, for the user to confirm.
+    fn agent_concept_page(&mut self, arguments: &Value) -> Result<String, String> {
+        let topic = arguments["topic"]
+            .as_str()
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .ok_or("topic must not be empty")?
+            .to_string();
+        let items = string_list(arguments, "library_ids")
+            .iter()
+            .filter_map(|id| id.trim().trim_start_matches("lib_").parse().ok())
+            .map(DocumentId)
+            .filter(|id| self.library.library_item(*id).is_some())
+            .collect::<Vec<_>>();
+        let ask = if items.is_empty() {
+            crate::knowledge::PageAsk::Asked(topic.clone())
+        } else {
+            crate::knowledge::PageAsk::Topic(crate::knowledge::TopicSuggestion {
+                key: format!("asked:{topic}"),
+                title: topic.clone(),
+                kind: crate::knowledge::TopicKind::Cluster,
+                items,
+            })
+        };
+        self.library_dialog = Some(self.page_dialog(&ask)?);
+        Ok(format!(
+            "Showed the user the cost of a page on “{topic}”. If they confirm, it is written in the background and appears in Library › pages; it is not written yet."
+        ))
+    }
+
     /// Answers a library tool, or `None` when `tool` is not one.
     pub(super) fn agent_library_call(&mut self, tool: &str, arguments: &Value) -> Option<UiReply> {
         let vault = self
@@ -51,6 +81,7 @@ impl ReaderApp {
             "set_related_items" => {
                 item(self).and_then(|id| set_related(&mut self.library, id, arguments))
             }
+            "write_concept_page" => self.agent_concept_page(arguments).map(UiOutput::from),
             "update_vault_note_block" => item(self).and_then(|id| {
                 if self.vault_sync.in_flight(id) {
                     return Err("Glyphst is writing that note now; try again in a moment".into());

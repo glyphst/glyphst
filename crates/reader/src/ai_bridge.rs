@@ -590,6 +590,20 @@ static SPECS: &[Spec] = &[
         document: true,
         describe: |arguments| format!("Wrote the {} block", text_of(arguments, "block")),
     },
+    Spec {
+        name: "write_concept_page",
+        description: "Ask to write a concept page in the user's vault: a topic researched across library items, every claim citing a passage. The user sees the cost and confirms first; the page is written in the background and appears in Library › pages. Give library_ids to write it from those items, else the library's search finds them.",
+        effect: ToolEffect::Mutate,
+        properties: || {
+            json!({
+                "topic": {"type": "string", "description": "The page's title, such as attention mechanisms"},
+                "library_ids": {"type": "array", "items": {"type": "string"}, "description": "Items to write it from (lib_12)"}
+            })
+        },
+        required: &["topic"],
+        document: false,
+        describe: |arguments| format!("Asked to write a page on “{}”", text_of(arguments, "topic")),
+    },
 ];
 
 fn library_id_property() -> Value {
@@ -637,6 +651,7 @@ mod tests {
             ("merge_library_items", ToolEffect::Mutate),
             ("set_related_items", ToolEffect::Mutate),
             ("update_vault_note_block", ToolEffect::Mutate),
+            ("write_concept_page", ToolEffect::Mutate),
         ] {
             let tool = registry
                 .get(name)

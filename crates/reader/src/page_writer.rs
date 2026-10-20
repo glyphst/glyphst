@@ -4,7 +4,6 @@
 //! to the item it names, a `[[link]]` only when the note exists. Then the
 //! page goes into the vault's `concepts/` (merged, so the user's notes and
 //! edits stay) and waits for the user to keep it or undo it.
-#![expect(dead_code, reason = "pages are written from M4's pages view")]
 
 use std::{
     collections::HashSet,
@@ -114,19 +113,6 @@ impl PageWriter {
         }
     }
 
-    /// Whether page `id` is being written.
-    pub fn is_running(&self, id: u64) -> bool {
-        self.running.iter().any(|(running, _)| *running == id)
-    }
-
-    pub fn cancel(&mut self, id: u64) {
-        for (running, cancel) in &self.running {
-            if *running == id {
-                cancel.cancel();
-            }
-        }
-    }
-
     /// The pages that finished since the last call.
     pub fn take(&mut self) -> Vec<PageResult> {
         let results = self.results.try_iter().collect::<Vec<_>>();
@@ -138,6 +124,15 @@ impl PageWriter {
             self.running.retain(|(running, _)| *running != id);
         }
         results
+    }
+}
+
+impl Drop for PageWriter {
+    /// Pages still being written stop with the app.
+    fn drop(&mut self) {
+        for (_, cancel) in &self.running {
+            cancel.cancel();
+        }
     }
 }
 

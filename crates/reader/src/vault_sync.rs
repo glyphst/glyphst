@@ -113,10 +113,6 @@ impl VaultSync {
     }
 
     /// The vault's notes and their links, as of the last scan.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "backlinks are shown in M4's UI step")
-    )]
     pub fn index(&self) -> Arc<VaultIndex> {
         self.index.clone()
     }
@@ -178,14 +174,6 @@ impl VaultSync {
         }
         self.last_revision = Some(revision);
         self.last_check = Some(now);
-        if !self.scanning {
-            let scan = Work::Scan {
-                root: root.clone(),
-                previous: self.index.clone(),
-            };
-            self.scanning = self.requests.send(scan).is_ok();
-        }
-
         let taken = library
             .vault_notes()
             .map(|(_, record)| note_name(&record.relative_path))
@@ -227,6 +215,14 @@ impl VaultSync {
                 self.sent.insert(id, hash);
                 self.in_flight.insert(id);
             }
+        }
+        // After the notes, so the index has those just written.
+        if !self.scanning {
+            let scan = Work::Scan {
+                root,
+                previous: self.index.clone(),
+            };
+            self.scanning = self.requests.send(scan).is_ok();
         }
         notices
     }

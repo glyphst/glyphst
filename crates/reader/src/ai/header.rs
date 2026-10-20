@@ -43,7 +43,11 @@ impl Assistant {
                 None => self.messages[0].display_text(),
             }
         };
-        let title = title.to_lowercase();
+        // A conversation about an item says which (05).
+        let title = match &self.item_title {
+            Some(item) if !self.show_sessions => format!("■ {item}"),
+            _ => title.to_lowercase(),
+        };
         let name = if agent.is_some() {
             "agent"
         } else {

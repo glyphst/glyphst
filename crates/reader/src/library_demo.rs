@@ -11,9 +11,12 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 14] = [
+pub const STATES: [&str; 17] = [
     "all",
     "item",
+    "pages",
+    "page",
+    "page-cost",
     "duplicate",
     "merged",
     "search",
@@ -516,6 +519,130 @@ pub fn first_item(library: &LibraryStore) -> Option<glyphst_library::DocumentId>
         .iter()
         .find(|item| item.title == PAPERS[0].title)
         .map(|item| item.id)
+}
+
+/// The knowledge layer's demo (frames 04p, 04q, 04f): a vault in a temporary
+/// folder with two concept pages (the first waiting for review), a note of
+/// the user's linking a paper and a page, related items kept and suggested,
+/// and papers close in meaning. Returns the vault and the neighbours.
+pub fn knowledge(
+    library: &mut LibraryStore,
+) -> Option<(PathBuf, crate::library_search::Neighbours)> {
+    use glyphst_library::{PageRecord, PageTopic};
+    use glyphst_vault::pages::{PageSnapshot, render_page};
+    let find = |library: &LibraryStore, start: &str| {
+        library
+            .library_items()
+            .iter()
+            .find(|item| item.title.starts_with(start))
+            .map(|item| item.id)
+    };
+    let attention = find(library, "Attention Is All")?;
+    let bert = find(library, "BERT")?;
+    let mamba = find(library, "Mamba")?;
+    let succinct = find(library, "Transformers are Inherently")?;
+    let few_shot = find(library, "Language Models are Few-Shot");
+    let root = std::env::temp_dir().join(format!("glyphst-vault-demo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("concepts")).ok()?;
+    std::fs::create_dir_all(root.join("thesis")).ok()?;
+    let slug = |library: &LibraryStore, id: DocumentId| {
+        let item = library.library_item(id)?;
+        let authors = item
+            .creators
+            .iter()
+            .map(|creator| creator.name.clone())
+            .collect::<Vec<_>>();
+        Some(glyphst_vault::slug(&authors, item.year, &item.title))
+    };
+    let cite =
+        |id: DocumentId, page: usize| format!("glyphst://open?id={}&page={page}&chunk=1", id.0);
+    let pages = [
+        (
+            1,
+            "Attention mechanisms",
+            "attention-mechanisms",
+            vec![attention, bert, mamba, succinct],
+            format!(
+                "Attention lets a model weigh every token of its input against every other, so a long-range link costs one step instead of many [p 3]({}). [[{}]] builds a whole translation model from it, and [[{}]] reads text in both directions with the same layers [p 4]({}).\n\n## Scaled dot-product and many heads\n\nEach head compares queries with keys, scales by the square root of their size and mixes the values; several heads look at different relations at once [p 4]({}) [p 5]({}).\n\n## Where the sources differ\n\nMamba replaces attention with a selective state space for long inputs [p 1]({}); a single head can already express any regular language [p 6]({}).",
+                cite(attention, 3),
+                slug(library, attention)?,
+                slug(library, bert)?,
+                cite(bert, 4),
+                cite(attention, 4),
+                cite(attention, 5),
+                cite(mamba, 1),
+                cite(succinct, 6),
+            ),
+            true,
+        ),
+        (
+            2,
+            "State space models",
+            "state-space-models",
+            vec![mamba, attention],
+            format!(
+                "State space models read a sequence in time linear in its length [p 1]({}), where [[attention-mechanisms|attention]] grows with its square.",
+                cite(mamba, 1)
+            ),
+            false,
+        ),
+    ];
+    for (id, title, file, sources, body, unreviewed) in pages {
+        let snapshot = PageSnapshot {
+            id,
+            title: title.to_string(),
+            sources: sources
+                .iter()
+                .filter_map(|source| slug(library, *source))
+                .collect(),
+            body,
+            model: "haiku-5.5".to_string(),
+            date: "2026-10-20".to_string(),
+        };
+        let written = render_page(&snapshot);
+        let relative = format!("concepts/{file}.md");
+        std::fs::write(root.join(&relative), &written.text).ok()?;
+        library
+            .set_page(
+                id,
+                Some(PageRecord {
+                    id,
+                    title: title.to_string(),
+                    relative_path: relative,
+                    topic: PageTopic::Items(sources.clone()),
+                    sources,
+                    frontmatter_sha256: written.written.frontmatter_sha256,
+                    blocks: written.written.blocks,
+                    modified: 0,
+                    written_at: glyphst_library::current_timestamp(),
+                    model: "haiku-5.5".to_string(),
+                    tokens_in: 24_000,
+                    tokens_out: 1_600,
+                    previous: None,
+                    unreviewed,
+                }),
+            )
+            .ok()?;
+    }
+    std::fs::write(
+        root.join("thesis/chapter 2.md"),
+        format!(
+            "# Chapter 2\n\nAs [[{}]] shows, and as [[attention-mechanisms]] sums up…\n",
+            slug(library, attention)?
+        ),
+    )
+    .ok()?;
+    let _ = library.add_related_pairs(&[(attention, bert)]);
+    if let Some(few_shot) = few_shot {
+        let _ = library.add_related_pairs(&[(attention, few_shot)]);
+    }
+    let _ = library.suggest_related(&[(attention, succinct, 0.82)]);
+    let neighbours = crate::library_search::Neighbours {
+        related: vec![(attention.0, vec![(bert.0, 0.9), (succinct.0, 0.82)])],
+        topics: vec![vec![attention.0, bert.0, succinct.0]],
+    };
+    Some((root, neighbours))
 }
 
 /// The demo's reranker: a passage scores the share of the query's words
