@@ -272,3 +272,74 @@ impl LibraryStore {
         self.commit_export(export)
     }
 }
+
+impl LibraryStore {
+    /// Every register as changes, at the times they were set.
+    fn registered_changes(&self) -> Result<Vec<Change>> {
+        let Some(reader) = self.sync_reader() else {
+            return Ok(Vec::new());
+        };
+        let registers = reader.registers()?;
+        Ok(glyphst_sync::model::changes_of(registers.iter().flat_map(
+            |(key, stored)| {
+                stored
+                    .fields
+                    .iter()
+                    .map(move |(field, register)| (key, field, register))
+            },
+        )))
+    }
+
+    /// Another copy of this library writes as this machine (its database
+    /// was copied): this one becomes a new device and sends everything it
+    /// has again under it, at the times it was set, so nothing is lost and
+    /// nothing newer is overwritten.
+    pub fn sync_fork(&mut self) -> Result<Vec<u64>> {
+        let Some(database) = self.database.clone() else {
+            return Ok(Vec::new());
+        };
+        let changes = self.registered_changes()?;
+        let mut state = self.sync.state.clone();
+        state.device = DeviceId::new();
+        state.next_seq = 1;
+        state.written.clear();
+        let wall = wall_ms();
+        let write_txn = database.begin_write()?;
+        let mut seqs = Vec::new();
+        {
+            let mut outbox = write_txn.open_table(SYNC_OUTBOX_V1_TABLE)?;
+            let old = outbox
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(seq, _)| seq.value()))
+                .collect::<Vec<_>>();
+            for seq in old {
+                outbox.remove(seq)?;
+            }
+            for segment in journal::split_changes(changes) {
+                let seq = state.next_seq;
+                state.next_seq += 1;
+                let bytes = journal::encode_segment(state.device, seq, wall, &segment);
+                outbox.insert(seq, bytes.as_slice())?;
+                seqs.push(seq);
+            }
+        }
+        write_state_in(&write_txn, &state)?;
+        write_txn.commit()?;
+        self.sync.state = state;
+        Ok(seqs)
+    }
+
+    /// What this machine's snapshot holds when it compacts its journal:
+    /// its last segment written, the others' it read, and the merged
+    /// state. `None` while segments wait to be written.
+    pub fn sync_compaction(&self) -> Result<Option<(u64, glyphst_sync::Watermarks, Vec<Change>)>> {
+        if !self.sync_outbox()?.is_empty() || self.sync.state.next_seq <= 1 {
+            return Ok(None);
+        }
+        Ok(Some((
+            self.sync.state.next_seq - 1,
+            self.sync.state.marks.clone(),
+            self.registered_changes()?,
+        )))
+    }
+}

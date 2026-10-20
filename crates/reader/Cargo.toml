@@ -40,6 +40,7 @@ glyphst-search = { path = "../search" }
 glyphst-settings = { path = "../settings", features = ["keychain"] }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
+glyphst-sync = { path = "../sync" }
 glyphst-vault = { path = "../vault" }
 glyphst-zotero-import = { path = "../zotero-import" }
 image.workspace = true

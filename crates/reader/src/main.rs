@@ -56,6 +56,7 @@ mod library_demo;
 mod library_dialogs;
 mod library_jobs;
 mod library_search;
+mod library_sync;
 mod library_tab;
 mod library_view;
 mod links;

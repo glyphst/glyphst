@@ -3119,6 +3119,7 @@ dependencies = [
  "glyphst-pdf-translation-service",
  "glyphst-search",
  "glyphst-settings",
+ "glyphst-sync",
  "glyphst-translation",
  "glyphst-ui",
  "glyphst-vault",

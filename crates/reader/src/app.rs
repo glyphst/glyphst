@@ -462,6 +462,7 @@ pub struct ReaderApp {
     library_jobs_settings: Option<std::sync::Arc<glyphst_settings::Settings>>,
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
+    library_sync: crate::library_sync::LibrarySync,
     /// The sidebar's item card (its note, read once per item).
     sidebar_card: crate::library_tab::LibraryTab,
     /// The library's dialog showing (frames 04h, 04k, 06d).
@@ -753,6 +754,7 @@ impl ReaderApp {
             library_jobs: crate::library_jobs::LibraryJobs::new(&cc.egui_ctx),
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
+            library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
             sidebar_card: Default::default(),
             library_dialog: None,
             folder_move: None,
@@ -5443,13 +5445,21 @@ impl eframe::App for ReaderApp {
         }
         // The vault follows the library (in a scripted run only the demo's,
         // in a temporary folder).
-        if self.persist || self.demo_vault {
+        // Not while other computers' changes are half taken in.
+        if (self.persist || self.demo_vault) && !self.library_sync.inbound() {
             let vault = self.vault_root();
             for notice in self.vault_sync.poll(&mut self.library, vault) {
                 self.notices.push(notice);
             }
         }
         if self.persist {
+            let folder = crate::library_sync::synced_folder(
+                &self.library,
+                self.prefs.library.sync == crate::prefs::SyncMode::Folder,
+            );
+            for notice in self.library_sync.poll(&mut self.library, folder) {
+                self.notices.push(notice);
+            }
             self.importer.poll(&mut self.library);
             // New items get their metadata looked up (and then the AI pass).
             let added = self.importer.take_added();
@@ -5527,7 +5537,7 @@ impl eframe::App for ReaderApp {
             if self.persist {
                 search.set_paused(self.prefs.library.index_paused);
             }
-            search.follow(&self.library);
+            search.follow(&self.library, self.library_sync.files_arrived());
             search.poll(&ctx);
             // Items close in meaning, worked out anew: related suggestions.
             if let Some(found) = search.neighbours()
@@ -5835,6 +5845,7 @@ impl eframe::App for ReaderApp {
         self.covers.poll(&ctx);
         let covers_ready = !self.covers.pending()
             && !self.vault_sync.busy()
+            && !self.library_sync.busy()
             && !self.zotero.as_ref().is_some_and(|zotero| zotero.busy());
         self.run_harness(&ctx, pages_drawn && wallpaper_ready && covers_ready, now);
         if self

@@ -197,7 +197,7 @@ pub struct SearchService {
     answered: u64,
     request: Option<SearchRequest>,
     results: Option<SearchResults>,
-    followed: Option<u64>,
+    followed: Option<(u64, u64)>,
     /// A reader for finding passages from the UI (one row by its key).
     locator: Option<Store>,
     /// Search by meaning and the reranker, when they run; when the last
@@ -355,8 +355,10 @@ impl SearchService {
     }
 
     /// Hands the index the library as it is, when it changed.
-    pub fn follow(&mut self, library: &LibraryStore) {
-        let revision = library.catalog_revision();
+    /// Reads what changed in the library: its catalog, or files another
+    /// computer added that have arrived (`arrived` counts them).
+    pub fn follow(&mut self, library: &LibraryStore, arrived: u64) {
+        let revision = (library.catalog_revision(), arrived);
         if self.followed == Some(revision) {
             return;
         }
@@ -609,6 +611,8 @@ pub fn snapshot(library: &LibraryStore) -> Snapshot {
             .library_attachments()
             .iter()
             .filter(|attachment| attachment.item_id == item.id)
+            // A file another computer added that has not arrived yet.
+            .filter(|attachment| attachment.path.exists())
         {
             snapshot.files.push(LibraryFile {
                 item_id: item.id.0,

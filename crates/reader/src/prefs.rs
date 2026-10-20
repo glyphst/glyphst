@@ -120,6 +120,18 @@ pub struct LibraryPrefs {
     /// Searches and the passages opened from them are kept on this
     /// computer, to measure search by.
     pub learn_from_opened: bool,
+    /// How the library syncs with this person's other computers.
+    pub sync: SyncMode,
+}
+
+/// Where the library's changes go to reach other computers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncMode {
+    #[default]
+    Off,
+    /// Through the library folder, which a sync tool (Syncthing, iCloud,
+    /// Dropbox) carries.
+    Folder,
 }
 
 impl LibraryPrefs {
@@ -154,6 +166,7 @@ impl Default for LibraryPrefs {
             suggest_collections: true,
             vault: None,
             folder_asked: false,
+            sync: SyncMode::Off,
         }
     }
 }
