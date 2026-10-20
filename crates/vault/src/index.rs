@@ -8,18 +8,35 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{frontmatter::split, note_id, pages::page_id, wikilinks::link_key};
+use crate::{
+    frontmatter::split,
+    note_id, note_uid,
+    pages::{page_id, page_uid},
+    wikilinks::link_key,
+};
 
 /// Whose a note is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Owner {
-    /// A library item's note (`glyphst_id`).
+    /// A library item's note, by the item's local number.
     Item(u64),
-    /// A concept page (`glyphst_page`).
+    /// A concept page, by its local number.
     Page(u64),
     /// The user's.
     User,
 }
+
+/// What a note names its owner by: a uid (the same on every computer,
+/// looked up in [`Owners`]), else a local number (older notes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Named {
+    ItemUid(String),
+    PageUid(String),
+    Local(Owner),
+}
+
+/// Local owners by uid, for the notes that name theirs by uid.
+pub type Owners = HashMap<String, Owner>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexedNote {
@@ -34,6 +51,11 @@ pub struct IndexedNote {
     pub owner: Owner,
     /// What it links to, as keys, each once.
     pub links: Vec<String>,
+    /// Another note is its owner's, and this one is a sync tool's copy of
+    /// it (`.sync-conflict-…`, `(conflicted copy)`, `(conflict …)`): not
+    /// the owner's note, listed so the user can merge it.
+    pub conflict_copy: bool,
+    named: Named,
     size: u64,
     modified: Option<SystemTime>,
 }
@@ -47,7 +69,8 @@ pub struct VaultIndex {
 impl VaultIndex {
     /// The vault under `root` now, reusing `previous` for unchanged notes.
     /// Folders starting with `.` (`.obsidian`, `.trash`) are skipped.
-    pub fn scan(root: &Path, previous: &VaultIndex) -> Self {
+    /// `owners` finds the local owner of a note that names its by uid.
+    pub fn scan(root: &Path, previous: &VaultIndex, owners: &Owners) -> Self {
         let known = previous
             .notes
             .iter()
@@ -90,7 +113,49 @@ impl VaultIndex {
             }
         }
         notes.sort_by(|a, b| a.path.cmp(&b.path));
+        for note in &mut notes {
+            note.owner = match &note.named {
+                Named::ItemUid(uid) | Named::PageUid(uid) => {
+                    owners.get(uid).copied().unwrap_or(Owner::User)
+                }
+                Named::Local(owner) => *owner,
+            };
+            note.conflict_copy = false;
+        }
+        // Two notes of one owner: a sync tool's copy is not the note.
+        let mut claimed = HashMap::new();
+        for (index, note) in notes.iter().enumerate() {
+            if note.owner != Owner::User {
+                claimed
+                    .entry(note.owner)
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
+        }
+        for indexes in claimed.into_values().filter(|indexes| indexes.len() > 1) {
+            let original = indexes
+                .iter()
+                .copied()
+                .min_by_key(|index| {
+                    (
+                        is_conflict_name(&notes[*index].path),
+                        notes[*index].path.len(),
+                    )
+                })
+                .unwrap_or(indexes[0]);
+            for index in indexes {
+                if index != original {
+                    notes[index].conflict_copy = true;
+                    notes[index].owner = Owner::User;
+                }
+            }
+        }
         Self { notes }
+    }
+
+    /// Sync tools' copies of owned notes.
+    pub fn conflict_copies(&self) -> impl Iterator<Item = &IndexedNote> {
+        self.notes.iter().filter(|note| note.conflict_copy)
     }
 
     /// The note a link points at: by file name, else by alias.
@@ -132,10 +197,16 @@ fn relative(root: &Path, path: &Path) -> String {
 
 fn read(path: String, text: &str, size: u64, modified: Option<SystemTime>) -> IndexedNote {
     let (frontmatter, body) = split(text);
-    let owner = match (note_id(text), page_id(text)) {
-        (Some(id), _) => Owner::Item(id),
-        (None, Some(id)) => Owner::Page(id),
-        (None, None) => Owner::User,
+    let named = if let Some(uid) = note_uid(text) {
+        Named::ItemUid(uid)
+    } else if let Some(uid) = page_uid(text) {
+        Named::PageUid(uid)
+    } else {
+        Named::Local(match (note_id(text), page_id(text)) {
+            (Some(id), _) => Owner::Item(id),
+            (None, Some(id)) => Owner::Page(id),
+            (None, None) => Owner::User,
+        })
     };
     let aliases = frontmatter
         .get("aliases")
@@ -173,16 +244,84 @@ fn read(path: String, text: &str, size: u64, modified: Option<SystemTime>) -> In
         key,
         aliases,
         title,
-        owner,
+        owner: Owner::User,
         links,
+        conflict_copy: false,
+        named,
         size,
         modified,
     }
 }
 
+/// A file name a sync tool gives the copy it keeps when two computers
+/// changed a file: Syncthing's, Dropbox's, Nextcloud's and Glyphst's own.
+pub fn is_conflict_name(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    name.contains(".sync-conflict-")
+        || name.contains("conflicted copy")
+        || name.contains("(conflict ")
+        || name.contains("_conflict-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_named_by_uid_find_their_owner_and_a_sync_tools_copy_is_not_it() {
+        let root = std::env::temp_dir().join(format!("glyphst-vault-uids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("items")).unwrap();
+        let note = "---\nglyphst_uid: u1\n---\n# Paper\n";
+        std::fs::write(root.join("items/paper.md"), note).unwrap();
+        std::fs::write(
+            root.join("items/paper.sync-conflict-20261020-120000-ABCD.md"),
+            note,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("items/older.md"),
+            "---\nglyphst_id: 9\n---\n# Older\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("items/unknown.md"), "---\nglyphst_uid: u2\n---\n").unwrap();
+        let owners = Owners::from([("u1".to_string(), Owner::Item(4))]);
+        let index = VaultIndex::scan(&root, &VaultIndex::default(), &owners);
+        assert_eq!(
+            index.note_of(Owner::Item(4)).unwrap().path,
+            "items/paper.md"
+        );
+        assert_eq!(
+            index.note_of(Owner::Item(9)).unwrap().path,
+            "items/older.md"
+        );
+        let copies = index
+            .conflict_copies()
+            .map(|note| note.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copies,
+            vec!["items/paper.sync-conflict-20261020-120000-ABCD.md"]
+        );
+        // Not (yet) in this library: the user's, for now.
+        let unknown = index
+            .notes
+            .iter()
+            .find(|note| note.path == "items/unknown.md")
+            .unwrap();
+        assert_eq!(unknown.owner, Owner::User);
+        // Known later, a rescan finds it without reading it again.
+        let owners = Owners::from([
+            ("u1".to_string(), Owner::Item(4)),
+            ("u2".to_string(), Owner::Item(5)),
+        ]);
+        let again = VaultIndex::scan(&root, &index, &owners);
+        assert_eq!(
+            again.note_of(Owner::Item(5)).unwrap().path,
+            "items/unknown.md"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn backlinks_come_from_pages_and_the_users_notes_and_scans_reuse_unchanged_notes() {
@@ -210,7 +349,7 @@ mod tests {
         );
         write(".obsidian/hidden.md", "[[vaswani2017attention]]");
 
-        let index = VaultIndex::scan(&root, &VaultIndex::default());
+        let index = VaultIndex::scan(&root, &VaultIndex::default(), &Owners::new());
         assert_eq!(index.notes.len(), 4, "{:#?}", index.notes);
         let backlinks = index
             .backlinks(Owner::Item(12))
@@ -243,7 +382,7 @@ mod tests {
             .unwrap()
             .set_modified(time)
             .unwrap();
-        let again = VaultIndex::scan(&root, &index);
+        let again = VaultIndex::scan(&root, &index, &Owners::new());
         assert!(again.note_of(Owner::Item(13)).is_some(), "reused");
         let _ = std::fs::remove_dir_all(root);
     }

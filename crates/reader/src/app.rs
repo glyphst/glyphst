@@ -1885,9 +1885,32 @@ impl ReaderApp {
         link: crate::links::OpenLink,
         ctx: &egui::Context,
     ) -> Result<String, String> {
+        // A uid is the same on every computer; a local number only here.
+        let item = match link.uid {
+            Some(uid) => Some(
+                self.library
+                    .sync_local(glyphst_library::SyncKind::Item, uuid::Uuid::from_u128(uid))
+                    .ok_or("that item is not in this library (yet)")?,
+            ),
+            None => link.item,
+        }
+        .map(|item| {
+            self.library
+                .resolve_item_id(glyphst_library::DocumentId(item))
+        });
         let passage = link
             .chunk
-            .and_then(|chunk| self.library_search.as_mut()?.locate(chunk));
+            .and_then(|chunk| self.library_search.as_mut()?.locate(chunk))
+            // A chunk of another computer's index is only taken when this
+            // one's has it in the same item.
+            .filter(|chunk| {
+                link.uid.is_none()
+                    || item.is_some_and(|item| {
+                        self.library
+                            .library_item_for_path(&chunk.path)
+                            .is_some_and(|found| found.id == item)
+                    })
+            });
         let (path, page, anchor) = match passage {
             Some(chunk) => (
                 chunk.path.clone(),
@@ -1900,16 +1923,11 @@ impl ReaderApp {
                 )),
             ),
             None => {
-                let item = link
-                    .item
-                    .ok_or("that passage is not in the index any more")?;
-                let id = self
-                    .library
-                    .resolve_item_id(glyphst_library::DocumentId(item));
+                let id = item.ok_or("that passage is not in the index any more")?;
                 let attachment = self
                     .library
                     .primary_attachment(id)
-                    .ok_or_else(|| format!("lib_{item} has no file to open"))?;
+                    .ok_or_else(|| format!("lib_{} has no file to open", id.0))?;
                 (
                     attachment.path.clone(),
                     link.page.unwrap_or(1).saturating_sub(1),
@@ -5445,10 +5463,10 @@ impl eframe::App for ReaderApp {
         }
         // The vault follows the library (in a scripted run only the demo's,
         // in a temporary folder).
-        // Not while other computers' changes are half taken in.
-        if (self.persist || self.demo_vault) && !self.library_sync.inbound() {
+        if self.persist || self.demo_vault {
             let vault = self.vault_root();
-            for notice in self.vault_sync.poll(&mut self.library, vault) {
+            let quiet = self.library_sync.quiet(&self.library);
+            for notice in self.vault_sync.poll(&mut self.library, vault, quiet) {
                 self.notices.push(notice);
             }
         }

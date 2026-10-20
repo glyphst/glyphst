@@ -14,8 +14,14 @@ pub const PAGES_FOLDER: &str = "concepts";
 
 /// The frontmatter keys Glyphst writes on a page; `aliases` keeps the
 /// user's and adds the title.
-pub const PAGE_OWNED_KEYS: [&str; 5] =
-    ["glyphst_page", "title", "sources", "ai_model", "ai_updated"];
+pub const PAGE_OWNED_KEYS: [&str; 6] = [
+    "glyphst_page",
+    "glyphst_page_uid",
+    "title",
+    "sources",
+    "ai_model",
+    "ai_updated",
+];
 
 /// The block a page's text is in, and the one a newer text waits in when
 /// the user edited it.
@@ -26,6 +32,9 @@ pub const NEXT_BLOCK: &str = "page-next";
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageSnapshot {
     pub id: u64,
+    /// The page's uid, the same on every computer; empty for none (the
+    /// page then names `id`).
+    pub uid: String,
     pub title: String,
     /// The items it was written from, as their notes' names (slugs).
     pub sources: Vec<String>,
@@ -38,7 +47,12 @@ pub struct PageSnapshot {
 
 fn apply_keys(frontmatter: &mut Frontmatter, snapshot: &PageSnapshot) {
     let scalar = |value: &str| Value::Scalar(value.to_string());
-    frontmatter.set("glyphst_page", &scalar(&snapshot.id.to_string()));
+    if snapshot.uid.is_empty() {
+        frontmatter.set("glyphst_page", &scalar(&snapshot.id.to_string()));
+    } else {
+        frontmatter.remove("glyphst_page");
+        frontmatter.set("glyphst_page_uid", &scalar(&snapshot.uid));
+    }
     frontmatter.set("title", &scalar(&snapshot.title));
     let mut aliases = frontmatter
         .get("aliases")
@@ -118,6 +132,11 @@ pub fn merge_page(existing: &str, snapshot: &PageSnapshot, previous: &Written) -
     }
 }
 
+/// The page's uid (`glyphst_page_uid`).
+pub fn page_uid(note: &str) -> Option<String> {
+    crate::scalar_key(note, "glyphst_page_uid")
+}
+
 /// The page's id (`glyphst_page`), to find a page the user renamed.
 pub fn page_id(note: &str) -> Option<u64> {
     let (frontmatter, _) = split(note);
@@ -135,6 +154,7 @@ mod tests {
     fn snapshot(body: &str) -> PageSnapshot {
         PageSnapshot {
             id: 7,
+            uid: String::new(),
             title: "Attention mechanisms".to_string(),
             sources: vec![
                 "vaswani2017attention".to_string(),

@@ -72,6 +72,9 @@ pub(super) struct SyncFields {
     /// Bumped whenever others' changes are applied: an export worked out
     /// before then is stale.
     pub(super) generation: u64,
+    /// When each item (with its AI results) last changed, by the clock:
+    /// what its vault note was written from.
+    pub(super) item_revs: HashMap<Uuid, Hlc>,
 }
 
 pub(super) fn load_sync(database: &Database) -> Result<SyncFields> {
@@ -99,11 +102,13 @@ pub(super) fn load_sync(database: &Database) -> Result<SyncFields> {
     let write_txn = database.begin_write()?;
     write_state_in(&write_txn, &state)?;
     write_txn.commit()?;
+    let item_revs = registers::item_revs(database)?;
     Ok(SyncFields {
         ids,
         revision: AtomicU64::new(0),
         state,
         generation: 0,
+        item_revs,
     })
 }
 
@@ -140,6 +145,20 @@ impl LibraryStore {
     /// The digests of this machine's last segments as written.
     pub fn sync_written(&self) -> &BTreeMap<u64, String> {
         &self.sync.state.written
+    }
+
+    /// When the item (with its AI results) last changed by the sync's
+    /// clock; `None` while it never synced.
+    pub fn sync_item_rev(&self, id: DocumentId) -> Option<Hlc> {
+        let uid = self.sync.ids.uid(SyncKind::Item, id.0)?;
+        self.sync.item_revs.get(&uid).copied()
+    }
+
+    pub(super) fn note_item_rev(&mut self, kind: &str, key: &str, hlc: Hlc) {
+        if let Some(uid) = registers::rev_item(kind, key) {
+            let rev = self.sync.item_revs.entry(uid).or_insert(hlc);
+            *rev = (*rev).max(hlc);
+        }
     }
 }
 

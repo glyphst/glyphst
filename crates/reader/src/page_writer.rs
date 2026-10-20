@@ -20,7 +20,7 @@ use glyphst_ai::{
     pages::{PAGE_TOOL_ROUNDS, PageInput, page_request},
     tools::{ToolContext, ToolRegistry},
 };
-use glyphst_library::{DocumentId, LibraryStore, PageRecord, PageTopic};
+use glyphst_library::{DocumentId, LibraryStore, PageRecord, PageTopic, SyncKind};
 use glyphst_settings::ResolvedAiConfig;
 use glyphst_vault::{
     Written, block_hash, block_text,
@@ -267,6 +267,32 @@ pub fn check(text: &str, known: &HashSet<String>, exists: impl Fn(u64, i64) -> b
     }
 }
 
+/// The page's citations naming their items by uid, as the vault keeps
+/// them (the local numbers differ between computers).
+fn portable_citations(library: &mut LibraryStore, body: &str) -> Result<String> {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("](glyphst://") {
+        let start = at + 2;
+        let end = rest[start..]
+            .find(')')
+            .map_or(rest.len(), |end| start + end);
+        let url = &rest[start..end];
+        out.push_str(&rest[..start]);
+        match crate::links::parse(url).and_then(|link| link.item) {
+            Some(item) => {
+                let item = library.resolve_item_id(DocumentId(item));
+                let uid = library.sync_uid_for(SyncKind::Item, item.0)?;
+                out.push_str(&crate::links::portable(url, uid).unwrap_or_else(|| url.to_string()));
+            }
+            None => out.push_str(url),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// A page's file name from its title: lowercase words joined by `-`.
 pub fn page_slug(title: &str) -> String {
     let slug = title
@@ -314,8 +340,10 @@ pub fn apply(
         }
     };
     let path = root.join(&relative);
+    let uid = library.sync_uid_for(SyncKind::Page, id)?;
     let snapshot = PageSnapshot {
         id,
+        uid: uid.to_string(),
         title: page.job.input.title.clone(),
         sources: page
             .job
@@ -324,7 +352,7 @@ pub fn apply(
             .iter()
             .map(|source| source.slug.clone())
             .collect(),
-        body: page.body.clone(),
+        body: portable_citations(library, &page.body)?,
         model: page.model.clone(),
         date: today(),
     };
@@ -558,7 +586,22 @@ mod tests {
         let record = library.page(1).unwrap().clone();
         assert!(record.unreviewed && record.previous.is_none());
         let first = std::fs::read_to_string(&applied.path).unwrap();
-        assert!(first.contains("glyphst_page: 1"), "{first}");
+        // Named by uids, the same on every computer it syncs to.
+        let uid = library
+            .sync_uid(glyphst_library::SyncKind::Page, 1)
+            .unwrap();
+        assert!(
+            first.contains(&format!("glyphst_page_uid: {uid}")),
+            "{first}"
+        );
+        let item = library
+            .sync_uid(glyphst_library::SyncKind::Item, 3)
+            .unwrap();
+        assert!(
+            first.contains(&format!("glyphst://open?uid={item}&page=")),
+            "{first}"
+        );
+        assert!(!first.contains("glyphst://open?id="), "{first}");
 
         // The user keeps it and adds notes; a rewrite keeps the notes, and
         // undo brings the first text back.

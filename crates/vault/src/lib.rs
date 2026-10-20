@@ -20,9 +20,12 @@ use unicode_normalization::UnicodeNormalization as _;
 
 use frontmatter::{Frontmatter, Value, split};
 
-/// The frontmatter keys Glyphst writes.
-pub const OWNED_KEYS: [&str; 16] = [
+/// The frontmatter keys Glyphst writes. `glyphst_id` (the item's local
+/// number) is only read now, from notes written before `glyphst_uid`.
+pub const OWNED_KEYS: [&str; 18] = [
     "glyphst_id",
+    "glyphst_uid",
+    "glyphst_rev",
     "title",
     "authors",
     "year",
@@ -46,6 +49,13 @@ pub const ITEMS_FOLDER: &str = "items";
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NoteSnapshot {
     pub id: u64,
+    /// The item's uid, the same on every computer it syncs to; empty for
+    /// none (the note then names `id`).
+    pub uid: String,
+    /// When the item last changed, as the sync's clock says: a note
+    /// written from a newer state than this computer has is left alone
+    /// until that state arrives. Empty while the library does not sync.
+    pub rev: String,
     pub title: String,
     pub authors: Vec<String>,
     pub year: Option<i32>,
@@ -62,7 +72,7 @@ pub struct NoteSnapshot {
     pub status: String,
     pub ai_tags: Vec<String>,
     pub summary: Option<Summary>,
-    /// Where the document is, linked from the meta block.
+    /// The document's file name, shown in the meta block.
     pub file: Option<String>,
     /// The note text to start the user's section with (only for a new note).
     pub seed_notes: String,
@@ -218,10 +228,12 @@ fn block(name: &str, content: &str) -> String {
 fn meta_block(snapshot: &NoteSnapshot) -> String {
     let mut parts = Vec::new();
     if let Some(file) = &snapshot.file {
-        parts.push(format!(
-            "[open in Glyphst](glyphst://open?id={}) · `{file}`",
-            snapshot.id
-        ));
+        let link = if snapshot.uid.is_empty() {
+            format!("glyphst://open?id={}", snapshot.id)
+        } else {
+            format!("glyphst://open?uid={}", snapshot.uid)
+        };
+        parts.push(format!("[open in Glyphst]({link}) · `{file}`"));
     }
     let mut line = Vec::new();
     match snapshot.authors.as_slice() {
@@ -283,7 +295,18 @@ fn apply_owned_keys(frontmatter: &mut Frontmatter, snapshot: &NoteSnapshot, tags
         Some(value) => frontmatter.set(key, &scalar(value)),
         None => frontmatter.remove(key),
     };
-    frontmatter.set("glyphst_id", &scalar(&snapshot.id.to_string()));
+    if snapshot.uid.is_empty() {
+        frontmatter.set("glyphst_id", &scalar(&snapshot.id.to_string()));
+    } else {
+        // The local number differs between computers; the uid does not.
+        frontmatter.remove("glyphst_id");
+        frontmatter.set("glyphst_uid", &scalar(&snapshot.uid));
+    }
+    if snapshot.rev.is_empty() {
+        frontmatter.remove("glyphst_rev");
+    } else {
+        frontmatter.set("glyphst_rev", &scalar(&snapshot.rev));
+    }
     frontmatter.set("title", &scalar(&snapshot.title));
     frontmatter.set("authors", &Value::List(snapshot.authors.clone()));
     optional(
@@ -385,12 +408,15 @@ pub fn merge(existing: &str, snapshot: &NoteSnapshot, previous: &Written) -> Mer
         };
         fold(left) == fold(right)
     };
-    let user_tags = (!same(&note_tags, &previous.tags)).then(|| {
-        note_tags
-            .iter()
-            .map(|tag| tag.trim_start_matches('#').to_string())
-            .collect::<Vec<_>>()
-    });
+    // Tags that are what Glyphst would write are not the user's (another
+    // computer wrote them, from the same catalog).
+    let user_tags =
+        (!same(&note_tags, &previous.tags) && !same(&note_tags, &snapshot_tags)).then(|| {
+            note_tags
+                .iter()
+                .map(|tag| tag.trim_start_matches('#').to_string())
+                .collect::<Vec<_>>()
+        });
     let tags = match &user_tags {
         Some(tags) => tags.clone(),
         None => snapshot_tags,
@@ -431,7 +457,11 @@ fn merge_blocks(
             .map(|(_, hash)| *hash);
         match find_block(body, name) {
             Some((range, current)) => {
-                if written.is_none_or(|hash| hash == sha(&current)) {
+                // Untouched since written, or already what would be written
+                // (another computer wrote the same): replaced.
+                if written.is_none_or(|hash| hash == sha(&current))
+                    || current.trim_matches('\n') == content.trim_matches('\n')
+                {
                     body.replace_range(range, &block(name, &content));
                     blocks.push((name.to_string(), sha(content.trim_matches('\n'))));
                 } else {
@@ -507,9 +537,23 @@ fn replace_block_in_body(body: &str, name: &str, content: Option<&str>) -> Strin
 
 /// The note's id (`glyphst_id`), to find a note the user renamed.
 pub fn note_id(note: &str) -> Option<u64> {
+    scalar_key(note, "glyphst_id")?.parse().ok()
+}
+
+/// The item uid a note names (`glyphst_uid`).
+pub fn note_uid(note: &str) -> Option<String> {
+    scalar_key(note, "glyphst_uid")
+}
+
+/// The state of the catalog a note was written from (`glyphst_rev`).
+pub fn note_rev(note: &str) -> Option<String> {
+    scalar_key(note, "glyphst_rev")
+}
+
+pub(crate) fn scalar_key(note: &str, key: &str) -> Option<String> {
     let (frontmatter, _) = split(note);
-    match frontmatter.get("glyphst_id")? {
-        Value::Scalar(id) => id.parse().ok(),
+    match frontmatter.get(key)? {
+        Value::Scalar(value) => Some(value.clone()),
         Value::List(_) => None,
     }
 }
@@ -521,6 +565,8 @@ mod tests {
     fn snapshot() -> NoteSnapshot {
         NoteSnapshot {
             id: 12,
+            uid: String::new(),
+            rev: String::new(),
             title: "Attention Is All You Need".to_string(),
             authors: vec!["Ashish Vaswani".to_string(), "Noam Shazeer".to_string()],
             year: Some(2017),
@@ -541,6 +587,24 @@ mod tests {
             seed_notes: "Compare with RoPE.".to_string(),
             ..NoteSnapshot::default()
         }
+    }
+
+    #[test]
+    fn a_note_another_computer_wrote_from_the_same_catalog_is_taken_as_is() {
+        let mut ours = snapshot();
+        ours.uid = "6f1c".to_string();
+        ours.rev = "0001".to_string();
+        let theirs = render(&ours);
+        // Nothing recorded here: this computer never wrote the note.
+        let merged = merge(&theirs.text, &ours, &Written::default());
+        assert_eq!(merged.text, theirs.text);
+        assert!(merged.edited_blocks.is_empty());
+        assert_eq!(merged.user_tags, None);
+        assert!(merged.text.contains("glyphst_uid: 6f1c"));
+        assert!(merged.text.contains("glyphst://open?uid=6f1c"));
+        assert_eq!(note_uid(&merged.text).as_deref(), Some("6f1c"));
+        assert_eq!(note_rev(&merged.text).as_deref(), Some("0001"));
+        assert_eq!(note_id(&merged.text), None);
     }
 
     #[test]

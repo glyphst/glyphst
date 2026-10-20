@@ -1255,6 +1255,14 @@ impl LibraryStore {
         self.sync.ids = work.ids;
         self.sync.state = state;
         self.sync.generation += 1;
+        for key in &changed {
+            if let Some(newest) = registers
+                .get(key)
+                .and_then(|stored| stored.fields.values().map(|register| register.hlc).max())
+            {
+                self.note_item_rev(&key.kind, &key.key, newest);
+            }
+        }
         self.catalog_revision = self.catalog_revision.wrapping_add(1);
         self.bookmarks_revision = self.bookmarks_revision.wrapping_add(1);
         for path in &work.annotation_paths {

@@ -281,6 +281,30 @@ impl LibraryStore {
         Ok(&self.sync.ids)
     }
 
+    /// The uid of a record, given one now (and kept) if it has none: for a
+    /// record about to be written somewhere it must be named by uid.
+    pub fn sync_uid_for(&mut self, kind: SyncKind, local: u64) -> Result<Uuid> {
+        if let Some(uid) = self.sync.ids.uid(kind, local) {
+            return Ok(uid);
+        }
+        let uid = Uuid::new_v4();
+        if let Some(database) = &self.database {
+            let write_txn = database.begin_write()?;
+            write_txn
+                .open_table(SYNC_IDS_V1_TABLE)?
+                .insert(row_key(kind, local).as_str(), uid.as_bytes().as_slice())?;
+            write_txn.commit()?;
+        }
+        self.sync.ids.insert(kind, local, uid);
+        self.library.reserve_synced_ids(&self.sync.ids);
+        Ok(uid)
+    }
+
+    /// The local record a uid names here, if it is here.
+    pub fn sync_local(&self, kind: SyncKind, uid: Uuid) -> Option<u64> {
+        self.sync.ids.local(kind, uid)
+    }
+
     /// The uid of a record, if it has one yet.
     pub fn sync_uid(&self, kind: SyncKind, local: u64) -> Option<Uuid> {
         self.sync.ids.uid(kind, local)

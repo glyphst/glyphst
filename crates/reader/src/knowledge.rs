@@ -286,7 +286,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("thesis/chapter two.md"), "# Chapter 2\n").unwrap();
-        let index = VaultIndex::scan(&root, &VaultIndex::default());
+        let index = VaultIndex::scan(
+            &root,
+            &VaultIndex::default(),
+            &glyphst_vault::index::Owners::new(),
+        );
         let note = "---\nglyphst_page: 1\n---\n\n# Attention\n\n<!-- glyphst:page begin -->\n\
                     As [[vaswani2017attention]] shows [p 3](glyphst://open?id=12&page=3&chunk=9), \
                     see [[chapter two|my notes]] and [[nowhere]].\n<!-- glyphst:page end -->\n\n## Notes\n";

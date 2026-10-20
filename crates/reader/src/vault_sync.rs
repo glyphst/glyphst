@@ -3,6 +3,12 @@
 //! user's text and edits stay), and reads it again when the file changes;
 //! tags the user changed in a note come back to the catalog. The same
 //! thread keeps an index of every note's links, for backlinks.
+//!
+//! When the library syncs, notes come from other computers too, in their
+//! own time: a note written from a newer state of the catalog than this
+//! computer has (`glyphst_rev`) is left alone until that state arrives,
+//! and a note another computer is writing is not made here meanwhile.
+//! Written from the same state, a note is the same on every computer.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,12 +24,19 @@ use std::{
 
 use glyphst_library::{
     AssignmentState, AssignmentTarget, DocumentId, LibraryItemKind, LibraryStore, ReadingStatus,
-    VaultNoteRecord,
+    SyncKind, VaultNoteRecord,
 };
-use glyphst_vault::{ITEMS_FOLDER, Merged, NoteSnapshot, Summary, Written, index::VaultIndex};
+use glyphst_sync::{DeviceId, Hlc};
+use glyphst_vault::{
+    ITEMS_FOLDER, Merged, NoteSnapshot, Summary, Written,
+    index::{Owner, Owners, VaultIndex},
+};
 
 /// How often snapshots are compared and notes' files checked.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
+/// How long a note another computer made may take to arrive before this
+/// one makes it.
+const ARRIVE_WITHIN_MS: u64 = 10 * 60 * 1000;
 
 struct NoteRequest {
     root: PathBuf,
@@ -32,6 +45,9 @@ struct NoteRequest {
     record: Option<VaultNoteRecord>,
     /// Note names already used by other items.
     taken: HashSet<String>,
+    /// This computer, and when (and where) the item last changed.
+    own: DeviceId,
+    rev: Option<Hlc>,
 }
 
 enum Work {
@@ -41,6 +57,7 @@ enum Work {
     Scan {
         root: PathBuf,
         previous: Arc<VaultIndex>,
+        owners: Owners,
     },
 }
 
@@ -57,6 +74,11 @@ enum NoteResult {
     Failed {
         id: DocumentId,
         error: String,
+    },
+    /// Left alone until this computer has what the note was written from
+    /// (or the note another computer made arrives).
+    Deferred {
+        id: DocumentId,
     },
 }
 
@@ -85,8 +107,12 @@ impl VaultSync {
                 for work in wanted {
                     let result = match work {
                         Work::Note(request) => write_note(*request),
-                        Work::Scan { root, previous } => NoteResult::Scanned {
-                            index: VaultIndex::scan(&root, &previous),
+                        Work::Scan {
+                            root,
+                            previous,
+                            owners,
+                        } => NoteResult::Scanned {
+                            index: VaultIndex::scan(&root, &previous, &owners),
                             root,
                         },
                     };
@@ -119,8 +145,15 @@ impl VaultSync {
 
     /// Takes in written notes, and sends the notes that changed (or whose
     /// files changed) to be written. `root` is the vault, `None` while
-    /// there is none. Returns notices for the user.
-    pub fn poll(&mut self, library: &mut LibraryStore, root: Option<PathBuf>) -> Vec<String> {
+    /// there is none; while not `quiet` (the library sync has changes to
+    /// export or take in) nothing new is written. Returns notices for the
+    /// user.
+    pub fn poll(
+        &mut self,
+        library: &mut LibraryStore,
+        root: Option<PathBuf>,
+        quiet: bool,
+    ) -> Vec<String> {
         let mut notices = Vec::new();
         if root != self.root {
             self.root = root;
@@ -158,11 +191,19 @@ impl VaultSync {
                     self.in_flight.remove(&id);
                     notices.push(format!("Could not write a note: {error}"));
                 }
+                NoteResult::Deferred { id } => {
+                    self.in_flight.remove(&id);
+                    // Looked at again next check.
+                    self.sent.remove(&id);
+                }
             }
         }
         let Some(root) = self.root.clone() else {
             return notices;
         };
+        if !quiet {
+            return notices;
+        }
         let now = Instant::now();
         let revision = library.catalog_revision();
         if self.last_revision == Some(revision)
@@ -210,6 +251,8 @@ impl VaultSync {
                 snapshot,
                 record,
                 taken: taken.clone(),
+                own: library.sync_device(),
+                rev: library.sync_item_rev(id),
             };
             if self.requests.send(Work::Note(Box::new(request))).is_ok() {
                 self.sent.insert(id, hash);
@@ -218,9 +261,21 @@ impl VaultSync {
         }
         // After the notes, so the index has those just written.
         if !self.scanning {
+            let mut owners = Owners::new();
+            for item in library.library_items() {
+                if let Some(uid) = library.sync_uid(SyncKind::Item, item.id.0) {
+                    owners.insert(uid.to_string(), Owner::Item(item.id.0));
+                }
+            }
+            for page in library.pages() {
+                if let Some(uid) = library.sync_uid(SyncKind::Page, page.id) {
+                    owners.insert(uid.to_string(), Owner::Page(page.id));
+                }
+            }
             let scan = Work::Scan {
                 root,
                 previous: self.index.clone(),
+                owners,
             };
             self.scanning = self.requests.send(scan).is_ok();
         }
@@ -276,6 +331,14 @@ fn snapshot(library: &LibraryStore, id: DocumentId) -> Option<NoteSnapshot> {
     });
     Some(NoteSnapshot {
         id: id.0,
+        uid: library
+            .sync_uid(SyncKind::Item, id.0)
+            .map(|uid| uid.to_string())
+            .unwrap_or_default(),
+        rev: library
+            .sync_item_rev(id)
+            .map(|rev| rev.to_string())
+            .unwrap_or_default(),
         title: item.title.clone(),
         authors: item
             .creators
@@ -303,9 +366,13 @@ fn snapshot(library: &LibraryStore, id: DocumentId) -> Option<NoteSnapshot> {
         .to_string(),
         ai_tags,
         summary,
-        file: library
-            .primary_attachment(id)
-            .map(|attachment| attachment.path.display().to_string()),
+        // Its name only: where it is differs between computers.
+        file: library.primary_attachment(id).and_then(|attachment| {
+            attachment
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
         seed_notes: item.work_note.clone(),
     })
 }
@@ -348,7 +415,8 @@ fn note_name(relative_path: &str) -> String {
 fn write_note(request: NoteRequest) -> NoteResult {
     let id = request.id;
     match write_note_inner(request) {
-        Ok((record, user_tags)) => NoteResult::Written {
+        Ok(None) => NoteResult::Deferred { id },
+        Ok(Some((record, user_tags))) => NoteResult::Written {
             id,
             record,
             user_tags,
@@ -360,9 +428,19 @@ fn write_note(request: NoteRequest) -> NoteResult {
     }
 }
 
+/// Whether the item's newest change is another computer's, made so
+/// recently that the note it writes may still be on its way.
+fn others_note_on_its_way(request: &NoteRequest) -> bool {
+    request.rev.is_some_and(|rev| {
+        rev.device != request.own
+            && glyphst_sync::wall_ms().saturating_sub(rev.millis) < ARRIVE_WITHIN_MS
+    })
+}
+
+/// `None` when the note is left alone for now.
 fn write_note_inner(
     request: NoteRequest,
-) -> anyhow::Result<(VaultNoteRecord, Option<Vec<String>>)> {
+) -> anyhow::Result<Option<(VaultNoteRecord, Option<Vec<String>>)>> {
     let folder = request.root.join(ITEMS_FOLDER);
     fs::create_dir_all(&folder)?;
     // Where the note is: as recorded, else found by its id (the user
@@ -372,9 +450,13 @@ fn write_note_inner(
         .as_ref()
         .map(|record| request.root.join(&record.relative_path))
         .filter(|path| path.is_file());
-    let path = match recorded {
+    let found = recorded.or_else(|| find_note(&folder, &request.snapshot.uid, request.id.0));
+    if found.is_none() && others_note_on_its_way(&request) {
+        return Ok(None);
+    }
+    let path = match found {
         Some(path) => path,
-        None => find_by_id(&folder, request.id.0).unwrap_or_else(|| {
+        None => {
             let mut taken = request.taken.clone();
             if let Ok(entries) = fs::read_dir(&folder) {
                 taken.extend(entries.flatten().map(|entry| {
@@ -391,9 +473,17 @@ fn write_note_inner(
                 &request.snapshot.title,
             );
             folder.join(format!("{}.md", glyphst_vault::unique_slug(&slug, &taken)))
-        }),
+        }
     };
     let existing = fs::read_to_string(&path).ok();
+    // Written by another computer from a newer catalog than this one has.
+    if let Some(existing) = &existing
+        && !request.snapshot.rev.is_empty()
+        && let Some(theirs) = glyphst_vault::note_rev(existing)
+        && theirs > request.snapshot.rev
+    {
+        return Ok(None);
+    }
     let merged: Merged = match (&existing, &request.record) {
         (Some(existing), record) => {
             let written = record
@@ -428,21 +518,29 @@ fn write_note_inner(
         modified: modified(&path).unwrap_or(0),
         written_at: glyphst_library::current_timestamp(),
     };
-    Ok((record, merged.user_tags))
+    Ok(Some((record, merged.user_tags)))
 }
 
-fn find_by_id(folder: &Path, id: u64) -> Option<PathBuf> {
-    fs::read_dir(folder)
+/// The item's note, renamed by the user: by its uid, else (an older note)
+/// its local number. A sync tool's copy of a note is not it.
+fn find_note(folder: &Path, uid: &str, id: u64) -> Option<PathBuf> {
+    let notes = fs::read_dir(folder)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .find(|path| {
-            fs::read_to_string(path)
-                .ok()
-                .and_then(|text| glyphst_vault::note_id(&text))
-                == Some(id)
+        .filter(|path| !glyphst_vault::index::is_conflict_name(&path.to_string_lossy()))
+        .filter_map(|path| Some((fs::read_to_string(&path).ok()?, path)))
+        .collect::<Vec<_>>();
+    notes
+        .iter()
+        .find(|(text, _)| !uid.is_empty() && glyphst_vault::note_uid(text).as_deref() == Some(uid))
+        .or_else(|| {
+            notes.iter().find(|(text, _)| {
+                glyphst_vault::note_uid(text).is_none() && glyphst_vault::note_id(text) == Some(id)
+            })
         })
+        .map(|(_, path)| path.clone())
 }
 
 #[cfg(test)]
@@ -456,7 +554,7 @@ mod tests {
         // One check now; the rest only take what the worker finished.
         sync.last_check = None;
         loop {
-            let notices = sync.poll(library, Some(root.to_path_buf()));
+            let notices = sync.poll(library, Some(root.to_path_buf()), true);
             assert!(notices.is_empty(), "{notices:?}");
             if !sync.busy() {
                 break;
@@ -464,6 +562,118 @@ mod tests {
             assert!(Instant::now() < deadline, "the vault never settled");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Two computers' libraries, synced by hand through a journal.
+    struct Pair {
+        a: LibraryStore,
+        b: LibraryStore,
+        journal: glyphst_sync::Journal,
+    }
+
+    impl Pair {
+        fn export(store: &mut LibraryStore, journal: &glyphst_sync::Journal) {
+            store.export_now().unwrap();
+            for (seq, bytes) in store.sync_outbox().unwrap() {
+                journal
+                    .write_segment(store.sync_device(), seq, &bytes)
+                    .unwrap();
+                let digest = glyphst_sync::Journal::digest_of(&bytes).unwrap();
+                store.sync_segment_written(seq, digest).unwrap();
+            }
+        }
+
+        fn take(store: &mut LibraryStore, journal: &glyphst_sync::Journal) {
+            let batches = journal
+                .pending(store.sync_device(), store.sync_watermarks(), usize::MAX)
+                .unwrap();
+            store.apply_sync(&batches).unwrap();
+        }
+
+        fn exchange(&mut self) {
+            Self::export(&mut self.a, &self.journal);
+            Self::export(&mut self.b, &self.journal);
+            Self::take(&mut self.a, &self.journal);
+            Self::take(&mut self.b, &self.journal);
+        }
+    }
+
+    #[test]
+    fn a_note_is_the_same_on_two_computers_and_never_written_back_and_forth() {
+        let dir = std::env::temp_dir().join(format!("glyphst-vault-two-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("notes");
+        let document = dir.join("attention.pdf");
+        fs::write(&document, b"%PDF-1.4 two").unwrap();
+        let mut pair = Pair {
+            a: LibraryStore::open_for_test(dir.join("a.redb")).unwrap(),
+            b: LibraryStore::open_for_test(dir.join("b.redb")).unwrap(),
+            journal: glyphst_sync::Journal::in_library(&dir.join("shared")),
+        };
+        let LibraryImportOutcome::Added(id) = pair
+            .a
+            .link_item(&document, LibraryItemMetadata::for_path(&document), None)
+            .unwrap()
+        else {
+            panic!("expected item");
+        };
+        let mut item = pair.a.library_item(id).unwrap().clone();
+        item.title = "Attention Is All You Need".to_string();
+        item.year = Some(2017);
+        pair.a.update_library_item_metadata(item).unwrap();
+        pair.a
+            .set_item_tag_names(id, &["to read".to_string()])
+            .unwrap();
+        pair.exchange();
+
+        let ctx = egui::Context::default();
+        let (mut on_a, mut on_b) = (VaultSync::new(&ctx), VaultSync::new(&ctx));
+        wait(&mut on_a, &mut pair.a, &root);
+        let path = root.join(&pair.a.vault_note(id).unwrap().relative_path);
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("glyphst_uid: "), "{written}");
+        assert!(!written.contains("glyphst_id"), "{written}");
+        assert!(
+            !written.contains(&dir.display().to_string()),
+            "no paths: {written}"
+        );
+        // b, from the same catalog, writes the same note: nothing changes.
+        wait(&mut on_b, &mut pair.b, &root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        let on_b_id = pair.b.library_items()[0].id;
+        assert!(pair.b.vault_note(on_b_id).is_some());
+
+        // a retitles; its note reaches b before the change does.
+        let mut item = pair.a.library_item(id).unwrap().clone();
+        item.title = "Attention, revisited".to_string();
+        pair.a.update_library_item_metadata(item).unwrap();
+        Pair::export(&mut pair.a, &pair.journal);
+        wait(&mut on_a, &mut pair.a, &root);
+        let retitled = fs::read_to_string(&path).unwrap();
+        assert!(
+            retitled.contains("title: Attention, revisited"),
+            "{retitled}"
+        );
+        wait(&mut on_b, &mut pair.b, &root);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            retitled,
+            "b left it alone"
+        );
+
+        // Once b has the change, nothing goes back and forth.
+        for _ in 0..3 {
+            pair.exchange();
+            wait(&mut on_b, &mut pair.b, &root);
+            wait(&mut on_a, &mut pair.a, &root);
+            assert_eq!(fs::read_to_string(&path).unwrap(), retitled);
+        }
+        assert_eq!(
+            pair.b.library_item(on_b_id).unwrap().title,
+            "Attention, revisited"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

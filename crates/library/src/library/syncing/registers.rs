@@ -7,9 +7,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use glyphst_sync::{Change, DELETED, Fields, RecordKey, Register, journal, wall_ms};
+use glyphst_sync::{Change, DELETED, Fields, Hlc, RecordKey, Register, journal, wall_ms};
 use serde_json::Value;
 
+use super::canonical::kinds;
 use super::*;
 
 /// `<kind>/<key>` → the record's registers.
@@ -41,6 +42,40 @@ pub(super) fn row_key(key: &RecordKey) -> String {
 fn parse_row_key(text: &str) -> Option<RecordKey> {
     let (kind, key) = text.split_once('/')?;
     Some(RecordKey::new(kind, key))
+}
+
+/// The item a record's changes show in its vault note, if any.
+pub(super) fn rev_item(kind: &str, key: &str) -> Option<Uuid> {
+    match kind {
+        kinds::ITEM | kinds::ENRICHMENT | kinds::METADATA => Uuid::parse_str(key).ok(),
+        kinds::ASSIGNMENT => Uuid::parse_str(key.split('|').next()?).ok(),
+        _ => None,
+    }
+}
+
+/// Each item's newest change, from the registers (none while the
+/// library never synced).
+pub(super) fn item_revs(database: &Database) -> Result<HashMap<Uuid, Hlc>> {
+    let read_txn = database.begin_read()?;
+    let table = read_txn.open_table(SYNC_REGISTERS_V1_TABLE)?;
+    let mut revs = HashMap::<Uuid, Hlc>::new();
+    for entry in table.iter()? {
+        let (key, value) = entry?;
+        let Some(record) = parse_row_key(key.value()) else {
+            continue;
+        };
+        let Some(uid) = rev_item(&record.kind, &record.key) else {
+            continue;
+        };
+        let Ok(stored) = decode::<StoredRecordV1>(value.value()) else {
+            continue;
+        };
+        if let Some(newest) = stored.fields.values().map(|register| register.hlc).max() {
+            let rev = revs.entry(uid).or_insert(newest);
+            *rev = (*rev).max(newest);
+        }
+    }
+    Ok(revs)
 }
 
 /// What changed since the last export, field by field (a field gone is
@@ -210,6 +245,10 @@ impl LibraryStore {
                 table.insert(key.as_str(), encode(&stored)?.as_slice())?;
             }
         }
+        let revs = changes
+            .iter()
+            .map(|change| (change.kind.clone(), change.key.clone(), change.hlc))
+            .collect::<Vec<_>>();
         let mut seqs = Vec::new();
         {
             let mut outbox = write_txn.open_table(SYNC_OUTBOX_V1_TABLE)?;
@@ -225,6 +264,9 @@ impl LibraryStore {
         write_state_in(&write_txn, &state)?;
         write_txn.commit()?;
         self.sync.state = state;
+        for (kind, key, hlc) in revs {
+            self.note_item_rev(&kind, &key, hlc);
+        }
         Ok(seqs)
     }
 

@@ -591,6 +591,7 @@ pub fn knowledge(
     for (id, title, file, sources, body, unreviewed) in pages {
         let snapshot = PageSnapshot {
             id,
+            uid: String::new(),
             title: title.to_string(),
             sources: sources
                 .iter()

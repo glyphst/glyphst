@@ -166,10 +166,21 @@ impl LibrarySync {
         self.arrived
     }
 
-    /// Whether changes from other machines are still being taken in (the
-    /// vault waits, so it does not write notes from half of them).
-    pub fn inbound(&self) -> bool {
+    /// Whether changes from other machines are still being taken in.
+    #[cfg(test)]
+    fn inbound(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Whether nothing here waits to be exported and nothing from other
+    /// computers waits to be taken in (the vault writes notes only then,
+    /// so a note shows a state every computer will have). Always while
+    /// the library does not sync.
+    pub fn quiet(&self, library: &LibraryStore) -> bool {
+        self.folder.is_none()
+            || (self.pending.is_empty()
+                && self.diffing.is_none()
+                && self.exported == Some(library.sync_revision()))
     }
 
     /// Whether the thread is at work (screenshots wait).

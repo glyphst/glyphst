@@ -136,6 +136,7 @@ impl ReaderApp {
         self.open_link(
             crate::links::OpenLink {
                 item,
+                uid: None,
                 page: arguments["page"].as_u64().map(|page| page as usize),
                 chunk,
             },
