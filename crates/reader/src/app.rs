@@ -314,6 +314,8 @@ pub struct ReaderApp {
     pending_links: Vec<crate::links::OpenLink>,
     /// Which app opens `glyphst://` links, asked once for Settings.
     link_handler: Option<Option<String>>,
+    /// The items close in meaning related suggestions were last made from.
+    neighbours_seen: Option<std::sync::Arc<crate::library_search::Neighbours>>,
     pub(crate) pads: Pads,
     pad_router: Router,
     pub(crate) pad_keymap: crate::pad_keys::PadKeymap,
@@ -651,6 +653,7 @@ impl ReaderApp {
                 .filter_map(|url| crate::links::parse(url))
                 .collect(),
             link_handler: None,
+            neighbours_seen: None,
             pads,
             pad_router: Router::default(),
             pad_keymap: Default::default(),
@@ -5431,6 +5434,18 @@ impl eframe::App for ReaderApp {
             }
             search.follow(&self.library);
             search.poll(&ctx);
+            // Items close in meaning, worked out anew: related suggestions.
+            if let Some(found) = search.neighbours()
+                && !self
+                    .neighbours_seen
+                    .as_ref()
+                    .is_some_and(|seen| std::sync::Arc::ptr_eq(seen, &found))
+            {
+                if let Err(error) = crate::knowledge::refresh_related(&mut self.library, &found) {
+                    log::warn!("could not suggest related items: {error:#}");
+                }
+                self.neighbours_seen = Some(found);
+            }
         }
         // Pictures dropped while the assistant is open go with its next
         // message.

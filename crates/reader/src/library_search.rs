@@ -28,6 +28,18 @@ const TYPING_PAUSE: Duration = Duration::from_millis(120);
 /// The vectors in memory are loaded again at most this often while the
 /// index grows.
 const RELOAD_EVERY: Duration = Duration::from_secs(10);
+/// Items close in meaning are worked out again this often.
+const NEIGHBOURS_EVERY: Duration = Duration::from_secs(30);
+/// Related items suggested for each item, at most.
+const NEIGHBOURS_PER_ITEM: usize = 5;
+
+/// Items close in meaning (each with its closest, and their cosine), and
+/// topics: groups of three or more that are each other's neighbours.
+#[derive(Clone, Debug, Default)]
+pub struct Neighbours {
+    pub related: Vec<(u64, Vec<(u64, f32)>)>,
+    pub topics: Vec<Vec<u64>>,
+}
 
 /// A search's passes, in the order they answer: each replaces the one
 /// before and is never replaced by it.
@@ -54,6 +66,8 @@ enum Query {
         request: SearchRequest,
         reply: Sender<Result<SearchResults, String>>,
     },
+    /// Items close in meaning, from the vectors in memory.
+    Neighbours(Sender<Neighbours>),
     /// The service is gone (the assistant's handles may outlive it).
     Stop,
 }
@@ -97,6 +111,46 @@ struct Models {
 impl Models {
     /// `request` as far as `pass` goes, with what runs: a pass whose model
     /// does not run (or fails) falls back to the one before.
+    /// The vectors, loaded again as the index grows.
+    fn refresh_vectors(&mut self, store: &Store) {
+        let Some(embedder) = &self.embedder else {
+            return;
+        };
+        let stale = self
+            .vectors
+            .as_ref()
+            .is_none_or(|(_, loaded)| loaded.elapsed() > RELOAD_EVERY);
+        if stale {
+            match &mut self.vectors {
+                Some((index, loaded)) => {
+                    let _ = index.refresh(store);
+                    *loaded = Instant::now();
+                }
+                None => {
+                    self.vectors = VectorIndex::load(store, embedder.model_key())
+                        .ok()
+                        .map(|index| (index, Instant::now()));
+                }
+            }
+        }
+    }
+
+    /// Items close in meaning, while search by meaning runs.
+    fn neighbours(&mut self, store: &Store) -> Neighbours {
+        self.refresh_vectors(store);
+        let Some((index, _)) = &self.vectors else {
+            return Neighbours::default();
+        };
+        let Ok(owners) = store.chunk_owners() else {
+            return Neighbours::default();
+        };
+        let items = index.item_means(&owners);
+        Neighbours {
+            related: items.neighbours(NEIGHBOURS_PER_ITEM),
+            topics: items.clusters(NEIGHBOURS_PER_ITEM, 3),
+        }
+    }
+
     fn answer(
         &mut self,
         store: &Store,
@@ -105,26 +159,9 @@ impl Models {
     ) -> Result<SearchResults> {
         let mut query = None;
         if pass >= Pass::Meaning
-            && let Some(embedder) = &self.embedder
+            && let Some(embedder) = self.embedder.clone()
         {
-            // The vectors, loaded again as the index grows.
-            let stale = self
-                .vectors
-                .as_ref()
-                .is_none_or(|(_, loaded)| loaded.elapsed() > RELOAD_EVERY);
-            if stale {
-                match &mut self.vectors {
-                    Some((index, loaded)) => {
-                        let _ = index.refresh(store);
-                        *loaded = Instant::now();
-                    }
-                    None => {
-                        self.vectors = VectorIndex::load(store, embedder.model_key())
-                            .ok()
-                            .map(|index| (index, Instant::now()));
-                    }
-                }
-            }
+            self.refresh_vectors(store);
             match embedder.embed_query(&request.text) {
                 Ok(vector) => query = Some(vector),
                 Err(error) => log::warn!("library search: the query's meaning: {error:#}"),
@@ -170,6 +207,10 @@ pub struct SearchService {
     changed_at: Instant,
     sent: Pass,
     shown: Pass,
+    /// Items close in meaning, as last worked out; the request out, and when.
+    neighbours: Option<Arc<Neighbours>>,
+    neighbours_reply: Option<Receiver<Neighbours>>,
+    neighbours_at: Option<Instant>,
 }
 
 impl SearchService {
@@ -197,6 +238,7 @@ impl SearchService {
                     // The models as they now are, and only the newest search.
                     let mut search = None;
                     let mut tools = Vec::new();
+                    let mut neighbours = Vec::new();
                     for query in std::iter::once(first).chain(receiver.try_iter()) {
                         match query {
                             Query::Embedder(next) => {
@@ -206,11 +248,19 @@ impl SearchService {
                             Query::Reranker(next) => models.reranker = next,
                             Query::Search { .. } => search = Some(query),
                             Query::Tool { request, reply } => tools.push((request, reply)),
+                            Query::Neighbours(reply) => neighbours.push(reply),
                             Query::Stop => return,
                         }
                     }
                     if store.is_none() {
                         store = Store::open_reader(&path).ok();
+                    }
+                    if let (Some(store), false) = (&store, neighbours.is_empty()) {
+                        let found = models.neighbours(store);
+                        for reply in neighbours {
+                            let _ = reply.send(found.clone());
+                        }
+                        ctx.request_repaint();
                     }
                     // Each of the assistant's searches is answered.
                     for (request, reply) in tools {
@@ -265,6 +315,9 @@ impl SearchService {
             changed_at: Instant::now(),
             sent: Pass::Keyword,
             shown: Pass::Keyword,
+            neighbours: None,
+            neighbours_reply: None,
+            neighbours_at: None,
         })
     }
 
@@ -336,6 +389,7 @@ impl SearchService {
     /// Takes the answers that came; sends the meaning pass once typing
     /// stopped, and the rerank pass once that answered.
     pub fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_neighbours();
         while let Ok(answer) = self.answers.try_recv() {
             // A pass never replaces a later one.
             if answer.asked != self.asked
@@ -391,6 +445,36 @@ impl SearchService {
     #[cfg(test)]
     pub fn indexer(&self) -> &Indexer {
         &self.indexer
+    }
+
+    /// Asks for items close in meaning every so often while search by
+    /// meaning runs, and takes the answer.
+    fn poll_neighbours(&mut self) {
+        if let Some(reply) = &self.neighbours_reply {
+            match reply.try_recv() {
+                Ok(found) => {
+                    self.neighbours = Some(Arc::new(found));
+                    self.neighbours_reply = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.neighbours_reply = None,
+            }
+        }
+        let due = self
+            .neighbours_at
+            .is_none_or(|at| at.elapsed() >= NEIGHBOURS_EVERY);
+        if self.meaning && due {
+            let (sender, reply) = mpsc::channel();
+            if self.queries.send(Query::Neighbours(sender)).is_ok() {
+                self.neighbours_reply = Some(reply);
+                self.neighbours_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Items close in meaning and topics, once worked out.
+    pub fn neighbours(&self) -> Option<Arc<Neighbours>> {
+        self.neighbours.clone()
     }
 
     /// A handle for the assistant's search.

@@ -50,6 +50,7 @@ mod import;
 mod instance;
 mod keymap_page;
 mod keys;
+mod knowledge;
 mod launcher;
 mod library_demo;
 mod library_dialogs;

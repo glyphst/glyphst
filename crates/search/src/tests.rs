@@ -688,3 +688,61 @@ fn compare_scores_every_run_the_models_allow() {
     assert!(time.is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn items_close_in_meaning_are_neighbours_and_form_a_topic() {
+    use crate::{embed::Embedder as _, embed::FakeEmbedder, vectors::VectorIndex};
+    let dir = folder("neighbours");
+    let texts = [
+        "attention heads transformer encoder decoder layers",
+        "transformer attention heads pretraining encoder",
+        "encoder decoder attention transformer translation",
+        "bread flour yeast oven baking",
+        "garden tomatoes watering soil",
+        "chess openings endgame tactics",
+        "volcano lava eruption magma",
+        "ocean tides currents waves",
+    ];
+    let mut snapshot = Snapshot::default();
+    for (index, text) in texts.iter().enumerate() {
+        let path = dir.join(format!("{index}.pdf"));
+        std::fs::write(&path, text_pages_pdf(&[&[text]])).unwrap();
+        let id = index as u64 + 1;
+        snapshot.files.push(file(id, path, index as u8 + 1));
+        snapshot.items.push(item(id, &format!("paper {id}")));
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    store.reconcile(&snapshot, 0).unwrap();
+    let mut store = run_steps(store, 30);
+    let pending = store.next_to_embed(FakeEmbedder.model_key(), 100).unwrap();
+    let vectors = FakeEmbedder
+        .embed_documents(
+            &pending
+                .iter()
+                .map(|p| ("", p.text.as_str()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let rows = pending
+        .into_iter()
+        .zip(vectors)
+        .map(|(p, v)| (p.chunk_id, p.title, v))
+        .collect::<Vec<_>>();
+    store.save_vectors(FakeEmbedder.model_key(), &rows).unwrap();
+
+    let index = VectorIndex::load(&store, FakeEmbedder.model_key()).unwrap();
+    let items = index.item_means(&store.chunk_owners().unwrap());
+    assert_eq!(items.len(), texts.len());
+    let neighbours = items
+        .neighbours(5)
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    let of_one = neighbours[&1].iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    assert!(of_one.contains(&2) && of_one.contains(&3), "{neighbours:?}");
+    assert!(
+        !neighbours.contains_key(&4),
+        "bread is close to nothing: {neighbours:?}"
+    );
+    assert_eq!(items.clusters(5, 3), vec![vec![1, 2, 3]]);
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -79,6 +79,24 @@ impl Store {
             .execute("DELETE FROM vectors WHERE model_key != ?1", [model_key])?)
     }
 
+    /// The items each passage belongs to (items in the trash left out).
+    pub fn chunk_owners(&self) -> Result<std::collections::HashMap<i64, Vec<u64>>> {
+        let mut statement = self.conn.prepare(
+            "SELECT c.id, f.item_id FROM chunks c
+             JOIN item_files f ON f.doc_id = c.doc_id
+             JOIN items i ON i.item_id = f.item_id WHERE i.trashed = 0",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        let mut owners: std::collections::HashMap<i64, Vec<u64>> = Default::default();
+        for row in rows {
+            let (chunk, item) = row?;
+            owners.entry(chunk).or_default().push(item);
+        }
+        Ok(owners)
+    }
+
     pub fn vector_count(&self, model_key: &str) -> Result<usize> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM vectors WHERE model_key = ?1",
@@ -188,5 +206,155 @@ impl VectorIndex {
             ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         }
         (ranked, Spread { mean, std })
+    }
+}
+
+/// One vector per item: the mean of its passages' vectors, at unit length.
+/// Close items are related; groups of them are topics.
+#[derive(Clone, Debug, Default)]
+pub struct ItemVectors {
+    dims: usize,
+    ids: Vec<u64>,
+    data: Vec<f32>,
+}
+
+/// How unusual a pair's closeness has to be (standard deviations over all
+/// pairs) to be related, or in one topic.
+pub const RELATED_Z: f32 = 2.5;
+
+impl VectorIndex {
+    /// Each item's mean vector, from `owners` (passage → items).
+    pub fn item_means(&self, owners: &std::collections::HashMap<i64, Vec<u64>>) -> ItemVectors {
+        let mut sums: std::collections::BTreeMap<u64, Vec<f32>> = Default::default();
+        if self.dims == 0 {
+            return ItemVectors::default();
+        }
+        for (row, chunk) in self.ids.iter().enumerate() {
+            let vector = &self.data[row * self.dims..(row + 1) * self.dims];
+            for item in owners.get(chunk).into_iter().flatten() {
+                let sum = sums.entry(*item).or_insert_with(|| vec![0.0; self.dims]);
+                for (total, value) in sum.iter_mut().zip(vector) {
+                    *total += value;
+                }
+            }
+        }
+        let mut items = ItemVectors {
+            dims: self.dims,
+            ..ItemVectors::default()
+        };
+        for (id, sum) in sums {
+            let norm = sum.iter().map(|value| value * value).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                items.ids.push(id);
+                items.data.extend(sum.iter().map(|value| value / norm));
+            }
+        }
+        items
+    }
+}
+
+impl ItemVectors {
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn row(&self, index: usize) -> &[f32] {
+        &self.data[index * self.dims..(index + 1) * self.dims]
+    }
+
+    /// Every pair's closeness (row-major, `len × len`), and how all pairs
+    /// scored.
+    fn pairs(&self) -> (Vec<f32>, Spread) {
+        let count = self.ids.len();
+        let mut matrix = vec![0.0; count * count];
+        let (mut sum, mut squares, mut pairs) = (0.0_f64, 0.0_f64, 0_u64);
+        for a in 0..count {
+            for b in a + 1..count {
+                let cosine = self
+                    .row(a)
+                    .iter()
+                    .zip(self.row(b))
+                    .map(|(x, y)| x * y)
+                    .sum::<f32>();
+                matrix[a * count + b] = cosine;
+                matrix[b * count + a] = cosine;
+                sum += cosine as f64;
+                squares += (cosine as f64).powi(2);
+                pairs += 1;
+            }
+        }
+        let pairs = pairs.max(1) as f64;
+        let mean = sum / pairs;
+        let std = (squares / pairs - mean * mean).max(0.0).sqrt();
+        (
+            matrix,
+            Spread {
+                mean: mean as f32,
+                std: std as f32,
+            },
+        )
+    }
+
+    /// For each item, up to `k` others unusually close to it (z ≥
+    /// `RELATED_Z`), closest first, with their cosine.
+    pub fn neighbours(&self, k: usize) -> Vec<(u64, Vec<(u64, f32)>)> {
+        let (matrix, spread) = self.pairs();
+        let std = spread.std.max(0.02);
+        let count = self.ids.len();
+        (0..count)
+            .filter_map(|a| {
+                let row = &matrix[a * count..(a + 1) * count];
+                let mut close = (0..count)
+                    .filter(|b| *b != a && (row[*b] - spread.mean) / std >= RELATED_Z)
+                    .map(|b| (self.ids[b], row[b]))
+                    .collect::<Vec<_>>();
+                close.sort_by(|x, y| y.1.total_cmp(&x.1));
+                close.truncate(k);
+                (!close.is_empty()).then(|| (self.ids[a], close))
+            })
+            .collect()
+    }
+
+    /// Topics: groups of at least `min_size` items joined by pairs that are
+    /// each other's close neighbours (within each other's `k` closest, and
+    /// unusually close), largest first.
+    pub fn clusters(&self, k: usize, min_size: usize) -> Vec<Vec<u64>> {
+        let neighbours = self
+            .neighbours(k)
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        let close = |a: u64, b: u64| {
+            neighbours
+                .get(&a)
+                .is_some_and(|list| list.iter().any(|(other, _)| *other == b))
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut groups = Vec::new();
+        for start in &self.ids {
+            if !seen.insert(*start) {
+                continue;
+            }
+            let mut group = vec![*start];
+            let mut index = 0;
+            while index < group.len() {
+                let current = group[index];
+                for (other, _) in neighbours.get(&current).into_iter().flatten() {
+                    if close(*other, current) && seen.insert(*other) {
+                        group.push(*other);
+                    }
+                }
+                index += 1;
+            }
+            if group.len() >= min_size {
+                group.sort();
+                groups.push(group);
+            }
+        }
+        groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
+        groups
     }
 }
