@@ -6,6 +6,8 @@
 
 pub mod hlc;
 pub mod journal;
+#[cfg(feature = "remote")]
+pub mod mirror;
 pub mod model;
 
 pub use hlc::{Clock, DeviceId, Hlc, Observed, wall_ms};

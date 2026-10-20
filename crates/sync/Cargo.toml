@@ -12,3 +12,22 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid = { workspace = true, features = ["serde"] }
+opendal = { version = "=0.59.5", default-features = false, features = [
+    "services-s3",
+    "services-webdav",
+    "layers-retry",
+    "http-transport-reqwest",
+    "executors-tokio",
+], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }
+
+[features]
+# Mirroring the library folder to WebDAV or S3.
+remote = ["dep:opendal", "dep:tokio"]
+
+[dev-dependencies]
+opendal = { version = "=0.59.5", default-features = false, features = [
+    "services-memory",
+    "services-fs",
+] }
+tiny_http.workspace = true
