@@ -153,7 +153,7 @@ impl LibraryStore {
             .keys()
             .next_back()
             .map_or(1, |id| id + 1)
-            .max(self.sync_ids.highest(SyncKind::Page) + 1)
+            .max(self.sync.ids.highest(SyncKind::Page) + 1)
     }
 
     /// Records a page, or forgets it with `None`.

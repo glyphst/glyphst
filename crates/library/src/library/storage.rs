@@ -44,8 +44,7 @@ impl LibraryStore {
             vault_notes: HashMap::new(),
             knowledge: Default::default(),
             files_root_chosen: false,
-            sync_ids: Default::default(),
-            sync_revision: Default::default(),
+            sync: Default::default(),
         }
     }
 
@@ -110,7 +109,7 @@ impl LibraryStore {
             .saturating_add(1);
         let vault_notes = super::vault_notes::load_vault_notes(&database)?;
         let knowledge = super::knowledge::load_knowledge(&database)?;
-        let sync_ids = super::syncing::load_sync_ids(&database)?;
+        let sync = super::syncing::load_sync(&database)?;
 
         let mut store = Self {
             library,
@@ -130,10 +129,9 @@ impl LibraryStore {
             vault_notes,
             knowledge,
             files_root_chosen,
-            sync_ids,
-            sync_revision: Default::default(),
+            sync,
         };
-        store.library.reserve_synced_ids(&store.sync_ids);
+        store.library.reserve_synced_ids(&store.sync.ids);
         store.assign_sync_ids()?;
         store.sanitize_ai_catalog();
         store.prune_library_jobs();

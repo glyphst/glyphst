@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::super::*;
+use super::*;
 
 /// `<kind>/<local id>` → the uid's 16 bytes.
 pub(in crate::library) const SYNC_IDS_V1_TABLE: TableDefinition<&str, &[u8]> =
@@ -64,6 +64,9 @@ pub struct SyncIds {
     by_local: HashMap<(SyncKind, u64), Uuid>,
     by_uid: HashMap<(SyncKind, Uuid), u64>,
     highest: BTreeMap<SyncKind, u64>,
+    /// Enrichment runs taken from other machines: the local run → the
+    /// run as the journal names it (`<device>:<run>`).
+    runs: HashMap<u64, String>,
 }
 
 impl SyncIds {
@@ -80,6 +83,15 @@ impl SyncIds {
         self.highest.get(&kind).copied().unwrap_or(0)
     }
 
+    /// How the journal names a local enrichment run of this machine's
+    /// (`device`) or one taken from another.
+    pub fn run_token(&self, device: glyphst_sync::DeviceId, run: u64) -> String {
+        self.runs
+            .get(&run)
+            .cloned()
+            .unwrap_or_else(|| format!("{device}:{run}"))
+    }
+
     fn insert(&mut self, kind: SyncKind, local: u64, uid: Uuid) {
         self.by_local.insert((kind, local), uid);
         self.by_uid.insert((kind, uid), local);
@@ -92,12 +104,21 @@ fn row_key(kind: SyncKind, local: u64) -> String {
     format!("{}/{local}", kind.name())
 }
 
-pub(in crate::library) fn load_sync_ids(database: &Database) -> Result<SyncIds> {
+pub(super) fn load_sync_ids(database: &Database) -> Result<SyncIds> {
     let read_txn = database.begin_read()?;
     let table = read_txn.open_table(SYNC_IDS_V1_TABLE)?;
     let mut ids = SyncIds::default();
     for entry in table.iter()? {
         let (key, value) = entry?;
+        if let Some(run) = key
+            .value()
+            .strip_prefix("run/")
+            .and_then(|run| run.parse::<u64>().ok())
+        {
+            ids.runs
+                .insert(run, String::from_utf8_lossy(value.value()).into_owned());
+            continue;
+        }
         let parsed = key.value().split_once('/').and_then(|(kind, local)| {
             Some((SyncKind::from_name(kind)?, local.parse::<u64>().ok()?))
         });
@@ -160,7 +181,7 @@ impl LibraryStore {
         let missing = self
             .sync_locals()
             .into_iter()
-            .filter(|(kind, local)| self.sync_ids.uid(*kind, *local).is_none())
+            .filter(|(kind, local)| self.sync.ids.uid(*kind, *local).is_none())
             .map(|(kind, local)| (kind, local, Uuid::new_v4()))
             .collect::<Vec<_>>();
         if missing.is_empty() {
@@ -177,31 +198,31 @@ impl LibraryStore {
             write_txn.commit()?;
         }
         for (kind, local, uid) in missing {
-            self.sync_ids.insert(kind, local, uid);
+            self.sync.ids.insert(kind, local, uid);
         }
-        self.library.reserve_synced_ids(&self.sync_ids);
+        self.library.reserve_synced_ids(&self.sync.ids);
         Ok(())
     }
 
     /// Uids, every record given one first.
     pub fn sync_ids(&mut self) -> Result<&SyncIds> {
         self.assign_sync_ids()?;
-        Ok(&self.sync_ids)
+        Ok(&self.sync.ids)
     }
 
     /// The uid of a record, if it has one yet.
     pub fn sync_uid(&self, kind: SyncKind, local: u64) -> Option<Uuid> {
-        self.sync_ids.uid(kind, local)
+        self.sync.ids.uid(kind, local)
     }
 
     /// Counts every write of something synced (the catalog, annotations,
     /// AI results, pages, vault notes), so the sync knows when to look.
     pub fn sync_revision(&self) -> u64 {
-        self.sync_revision.load(AtomicOrdering::Relaxed)
+        self.sync.revision.load(AtomicOrdering::Relaxed)
     }
 
     pub(in crate::library) fn synced_write(&self) {
-        self.sync_revision.fetch_add(1, AtomicOrdering::Relaxed);
+        self.sync.revision.fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 

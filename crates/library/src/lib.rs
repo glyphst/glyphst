@@ -23,7 +23,8 @@ pub use library::{
     ReaderSessionSnapshot, ReaderSidebar, ReaderSplitAxis, ReaderSynchronizedGroup, ReaderTabKind,
     ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession,
     ReaderWindowState, ReadingSession, ReadingStatus, ReflowPosition, RegionImageReference,
-    RelatedSuggestion, SemanticTextAnchor, SemanticTextRange, SidebarWidths, VaultNoteRecord,
-    copy_planned_files, current_timestamp, is_edit_conflict, normalize_path, prepare_linked_import,
-    prepare_managed_import,
+    RelatedSuggestion, SemanticTextAnchor, SemanticTextRange, SidebarWidths, SyncExport, SyncIds,
+    SyncKind, SyncReader, SyncSnapshot, VaultNoteRecord, copy_planned_files, current_timestamp,
+    is_edit_conflict, normalize_path, prepare_linked_import, prepare_managed_import, sync_kinds,
+    sync_records,
 };

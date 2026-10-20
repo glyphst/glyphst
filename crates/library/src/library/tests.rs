@@ -809,8 +809,7 @@ fn failed_edits_do_not_move_and_conflicts_clear_history() {
         vault_notes: HashMap::new(),
         knowledge: Default::default(),
         files_root_chosen: false,
-        sync_ids: Default::default(),
-        sync_revision: Default::default(),
+        sync: Default::default(),
     };
     assert!(
         unavailable
@@ -1703,8 +1702,7 @@ fn history_save_fails_when_database_is_unavailable() {
         vault_notes: HashMap::new(),
         knowledge: Default::default(),
         files_root_chosen: false,
-        sync_ids: Default::default(),
-        sync_revision: Default::default(),
+        sync: Default::default(),
     };
     store.record_history(document_path, position(1));
 
@@ -1746,8 +1744,7 @@ fn document_preference_writes_fail_when_database_is_unavailable() {
         vault_notes: HashMap::new(),
         knowledge: Default::default(),
         files_root_chosen: false,
-        sync_ids: Default::default(),
-        sync_revision: Default::default(),
+        sync: Default::default(),
     };
 
     let language_error = store

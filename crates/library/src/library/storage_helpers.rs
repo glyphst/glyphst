@@ -78,6 +78,8 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
     {
         write_txn.open_table(super::syncing::SYNC_IDS_V1_TABLE)?;
         write_txn.open_table(super::syncing::SYNC_STATE_V1_TABLE)?;
+        write_txn.open_table(super::syncing::SYNC_REGISTERS_V1_TABLE)?;
+        write_txn.open_table(super::syncing::SYNC_OUTBOX_V1_TABLE)?;
         write_txn.open_table(HISTORY_V2_TABLE)?;
     }
     {

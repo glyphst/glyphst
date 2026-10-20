@@ -2977,6 +2977,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glyphst-core",
+ "glyphst-sync",
  "redb",
  "serde",
  "serde_json",

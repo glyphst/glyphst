@@ -12,6 +12,7 @@ test-support = []
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
+glyphst-sync = { path = "../sync" }
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true

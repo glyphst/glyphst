@@ -238,10 +238,10 @@ pub(super) struct AiRows {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct AiCatalogState {
-    assignments: HashMap<DocumentId, Vec<AiAssignment>>,
-    enrichments: HashMap<DocumentId, ItemEnrichment>,
-    metadata: HashMap<DocumentId, MetadataRecord>,
-    next_run: u64,
+    pub(super) assignments: HashMap<DocumentId, Vec<AiAssignment>>,
+    pub(super) enrichments: HashMap<DocumentId, ItemEnrichment>,
+    pub(super) metadata: HashMap<DocumentId, MetadataRecord>,
+    pub(super) next_run: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

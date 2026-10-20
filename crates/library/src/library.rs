@@ -1987,9 +1987,8 @@ pub struct LibraryStore {
     knowledge: knowledge::KnowledgeState,
     /// The files are in a folder the user chose (`files_root.rs`).
     files_root_chosen: bool,
-    /// Uids of the records that sync (`syncing`).
-    sync_ids: SyncIds,
-    sync_revision: std::sync::atomic::AtomicU64,
+    /// Uids, the clock and the journal's state (`syncing`).
+    sync: syncing::SyncFields,
 }
 
 pub struct HistoryEntryPersistenceSnapshot {
@@ -2144,7 +2143,10 @@ pub use item_links::{LibraryItemMerge, LibraryItemPair, LibraryTagColor};
 pub use jobs::{LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState};
 pub use knowledge::{PageRecord, PageTopic, RelatedSuggestion};
 use storage_helpers::require_storage_version;
-pub use syncing::{SyncIds, SyncKind};
+pub use syncing::{
+    Export as SyncExport, SyncIds, SyncKind, SyncReader, SyncSnapshot, canonical as sync_records,
+    kinds as sync_kinds,
+};
 pub use vault_notes::VaultNoteRecord;
 
 pub fn normalize_path(path: &Path) -> PathBuf {
