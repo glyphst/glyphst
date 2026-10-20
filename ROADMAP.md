@@ -97,6 +97,17 @@ and the abandoned Files app in M5). It has:
   and reviewed with ✓ / ×; backlinks from every note in the vault, the
   user's included; `[ask]` continues an item's conversation; citations
   clicked in other apps open the passage in the running Reader.
+- **Library sync (2026-10-20):** the library syncs between computers
+  through each computer's own journal of changes in the library folder,
+  merged field by field (the later edit wins; a removal wins over an
+  edit): carried by a sync tool (Syncthing, iCloud, Dropbox) or mirrored
+  by Glyphst to WebDAV or S3 (Cloudflare R2, Backblaze B2), PDFs and the
+  notes vault included. Catalog, collections, tags, highlights, notes,
+  bookmarks, AI results and the knowledge layer sync; one file added on
+  two computers is one item, a collection made on both is one; vault
+  notes are the same bytes on every computer; a note changed on both is
+  kept twice. Settings › Library › sync (07s) shows each computer and the
+  conflicts; choosing a folder others sync asks to join (04t).
 - **Before M7:** selections run across pages (a drag follows the pointer
   onto other pages, Shift+click extends; copy, highlights, notes,
   translation and the assistant get all of it); typing Chinese or
@@ -177,14 +188,23 @@ Known gaps:
   thresholds untuned on a real library. The glyphst:// handler is Linux
   only, untried by hand, and a forwarded link may not raise the window
   under Wayland. A page has no in-app editor (by choice).
+- Library sync: checked by tests on fakes (two stores through a journal
+  folder, an in-process S3); a real Syncthing folder, R2 or B2 bucket and
+  WebDAV server are untried by hand (an ignored test runs against a
+  bucket given `GLYPHST_SYNC_S3_*`). Reading positions, chats and
+  settings wait for a Glyphst account. Linked files' records sync but
+  not the files. A first mirror of a large library holds the sync
+  thread's exports until it is done. Tombstones are kept forever; a
+  journal is compacted past 200 segments or 8 MB. macOS and Windows
+  are untried (the keychain there especially).
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
 
-**Next step:** the user picks the next milestone. Candidates: the
-library's M3, syncing the library folder (sync-tool friendly per-item
-records first, then WebDAV or S3); scanned pages (EmbeddingGemma 2's
-vision part, or OCR); then, from the gaps above, restoring translation
+**Next step:** the user picks the next milestone. Candidates: scanned
+pages (EmbeddingGemma 2's vision part, or OCR); a Glyphst account for
+settings, reading positions and chats (another transport for the sync's
+journal); then, from the gaps above, restoring translation
 sessions from the cache, and a dense page's
 first load (MuPDF's interpretation
 dominates; only a faster content-stream reader would cut it).

@@ -12,6 +12,7 @@
 | `vault` | The Markdown vault: one Obsidian-compatible note per library item, and concept pages in `concepts/`; the frontmatter keys and `glyphst:` blocks Glyphst owns, merged without touching the user's text; `[[wikilinks]]` as Obsidian reads them, and an index of every note's links for backlinks |
 | `search` | The library's text search: an SQLite index (FTS5 words, trigrams for Chinese, Japanese and Korean, float16 vectors) of every item's pages in chunks with their anchors; the thread that reads and embeds documents in resumable steps; keyword and meaning search mixed by z-scores (or RRF), and reread by a reranker; the `Embedder` and `Reranker` traits; the evaluation set, its scores and the comparison of every run |
 | `embed` | Search by meaning's engine: pinned llama.cpp `llama-server` builds, EmbeddingGemma 2 and the bge-reranker-v2-m3 reranker, downloaded resumably and checked by SHA-256 (the engine once, for both); each model's server run on loopback with its key in the environment, ending with the app; the `Embedder` and `Reranker` over them |
+| `sync` | Syncing a library between computers with no library knowledge: hybrid logical clocks, records as last-writer-wins field registers with a `deleted` tombstone, each computer's journal of changes in `sync/devices/<device>/` (single-writer segment files with a SHA-256 trailer, snapshots when compacted), and (feature `remote`, OpenDAL) the mirror of the library folder to WebDAV or S3 |
 | `zotero-import` | Reading a Zotero library for import from a copy of `zotero.sqlite` (with its write-ahead log): items, creators, tags, collections, attachments, notes as Markdown and PDF annotations in user space; read only |
 | `ai` | AI services: providers, the agent, ChatGPT Subscription sign-in |
 | `agent-host` | External agents (Claude Code, Codex, Pi, ACP agents): their drivers, working folders with git checkpoints, and the MCP server that serves them the Reader's tools |
@@ -440,10 +441,44 @@ to them:
   `AiSession` remembers the item a conversation is about, so `[ask]`
   continues it.
 
+- `sync_ids_v1`, `sync_state_v1`, `sync_registers_v1` and
+  `sync_outbox_v1` (`syncing/`): each synced record's uid (the same on
+  every computer; local numbers are never given out again below the
+  highest one mapped), aliases of other computers' uids for a record this
+  one has (a collection or file both made) and their enrichment runs;
+  this computer's device, clock, next segment, the others' segments read
+  and the digests written; every synced field's winning value and clock
+  (the baseline the next export is the difference from, and whether the
+  record is materialized here, so one waiting for its file is never taken
+  for a removal); and segments exported but not yet in the journal,
+  committed with the registers in one transaction.
+
 The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
 `library.redb` itself always stays in the data folder, out of a folder
 that sync tools write to.
+
+Syncing (`crates/sync`, `library/syncing/`, `reader/src/library_sync.rs`):
+the records go into the journal named only by uids and tag names, paths
+relative to the library folder (`syncing/canonical.rs`); reading
+positions, document preferences, activity, AI chats and settings stay on
+each computer. On the sync thread an export is the difference between a
+copy of the library and the registers; the UI thread commits it, and
+takes other computers' changes in 500 at a time only while nothing here
+waits to be exported, so a newer local edit is never overwritten
+(`syncing/apply.rs`). A record that names something not here yet waits;
+two copies of one file become one item under the lower uid, and merges
+and removals go through the library's own operations, the same on every
+computer. Vault notes are written from synced state only (`glyphst_uid`,
+`glyphst_rev`, no paths), so two computers write the same bytes; a note
+from a newer catalog than this computer has is left alone until that
+state arrives, and nothing is written while the sync has changes to
+export or take in. A sync tool carries the library folder, or the sync
+thread mirrors it to WebDAV or S3 against a manifest of both sides
+(`sync-v1/mirror-<store and folder>.json` in the data folder; a note
+changed on both is kept twice). The store's secret is in the keychain
+(`https://glyphst.app/credentials/sync/v1/<s3|webdav>`). Turning sync on
+copies `library.redb` aside once (`library.redb.before-sync-<date>`).
 
 The search index is `search-v1/search.sqlite` in the data folder (SQLite,
 WAL), apart from `library.redb`: it can be rebuilt from the library, but
