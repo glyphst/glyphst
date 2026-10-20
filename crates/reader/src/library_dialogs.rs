@@ -1,5 +1,6 @@
 //! The library's dialogs: enriching the existing library (frame 04h),
-//! choosing the library folder and moving the files there (04k), adding a
+//! choosing the library folder and moving the files there (04k), joining a
+//! library other computers sync there (04t), adding a
 //! work by its DOI, arXiv id or ISBN (06d), and writing a concept page
 //! (04s).
 
@@ -25,6 +26,8 @@ pub enum DialogAction {
     Enrich(Vec<DocumentId>),
     /// Move the library's files into this folder.
     UseFolder(PathBuf),
+    /// Move them into this folder, which other computers sync, and sync.
+    JoinFolder(PathBuf),
     /// Not now: don't ask about the folder again.
     LaterFolder,
     /// Add this work (downloading its PDF when it has an open one).
@@ -60,6 +63,14 @@ pub enum Dialog {
         bytes: u64,
         linked: usize,
         error: Option<String>,
+    },
+    /// The chosen folder holds a library other computers sync.
+    JoinSynced {
+        path: PathBuf,
+        /// The other computers and when each last wrote.
+        computers: Vec<(String, Option<std::time::SystemTime>)>,
+        items: usize,
+        linked: usize,
     },
     Moving {
         done: usize,
@@ -112,7 +123,7 @@ impl Dialog {
         }
         let width = match self {
             Self::AddByIdentifier { .. } => 600.0,
-            Self::ChooseFolder { .. } => 600.0,
+            Self::ChooseFolder { .. } | Self::JoinSynced { .. } => 600.0,
             _ => 560.0,
         };
         let screen = ctx.content_rect();
@@ -132,6 +143,7 @@ impl Dialog {
                         result = match self {
                             Self::Backfill { .. } => self.backfill(ui, &tokens),
                             Self::ChooseFolder { .. } => self.choose_folder(ui, &tokens),
+                            Self::JoinSynced { .. } => self.join_synced(ui, &tokens),
                             Self::Moving { .. } => self.moving(ui, &tokens),
                             Self::AddByIdentifier { .. } => self.identifier(ui, &tokens, library),
                             Self::WritePage { .. } => self.write_page(ui, &tokens, library),
@@ -372,6 +384,101 @@ impl Dialog {
                 }
             },
         );
+        (action, close)
+    }
+
+    fn join_synced(&mut self, ui: &mut Ui, tokens: &Tokens) -> (Option<DialogAction>, bool) {
+        let Self::JoinSynced {
+            path,
+            computers,
+            items,
+            linked,
+        } = self
+        else {
+            return (None, false);
+        };
+        let shown = match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
+            Some(relative) => format!("~/{}", relative.display()),
+            None => path.display().to_string(),
+        };
+        let names = computers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let who = match names.as_slice() {
+            [one] => format!("another computer syncs: {one}"),
+            [first @ .., last] => format!(
+                "{} other computers sync: {} and {last}",
+                names.len(),
+                first.join(", ")
+            ),
+            [] => "other computers sync".to_string(),
+        };
+        head(
+            ui,
+            tokens,
+            "folder-open",
+            "This folder holds a synced library",
+        );
+        para(
+            ui,
+            tokens,
+            &format!(
+                "{shown} has a Glyphst library {who}. Join it, and your library and theirs become one."
+            ),
+        );
+        let mut layout = format!(
+            "{}/\n├─ files/      their papers and books\n├─ notes/      their vault\n└─ sync/       each computer's changes, in files of its own",
+            shown.trim_end_matches('/')
+        );
+        for (index, (name, written)) in computers.iter().enumerate() {
+            let branch = if index + 1 == computers.len() {
+                "└─"
+            } else {
+                "├─"
+            };
+            let when = written
+                .map(|at| format!("last wrote {}", crate::library_sync::ago(at)))
+                .unwrap_or_default();
+            layout.push_str(&format!("\n   {branch} {name:<10} {when}"));
+        }
+        ui.label(
+            egui::RichText::new(layout)
+                .font(theme::mono(11.0))
+                .color(tokens.text_2),
+        );
+        facts(
+            ui,
+            tokens,
+            &[
+                (
+                    "joining",
+                    format!("your {items} items join theirs · one file is one item"),
+                    None,
+                ),
+                (
+                    "backup",
+                    "this library is copied aside first (library.redb.before-sync)".to_string(),
+                    None,
+                ),
+                (
+                    "linked",
+                    format!("{linked} linked files stay on this computer; only their records sync"),
+                    None,
+                ),
+            ],
+        );
+        let mut action = None;
+        let mut close = false;
+        foot(ui, tokens, Some("or choose another folder"), |ui| {
+            if ui.add(Button::primary("join")).clicked() {
+                action = Some(DialogAction::JoinFolder(path.clone()));
+            }
+            if ui.add(Button::ghost("later")).clicked() {
+                action = Some(DialogAction::LaterFolder);
+                close = true;
+            }
+        });
         (action, close)
     }
 

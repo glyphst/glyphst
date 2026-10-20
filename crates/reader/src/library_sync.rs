@@ -155,7 +155,6 @@ impl LibrarySync {
         }
     }
 
-    #[expect(dead_code, reason = "Settings shows it (M3 step 8)")]
     pub fn status(&self) -> &SyncStatus {
         &self.status
     }
@@ -188,8 +187,12 @@ impl LibrarySync {
         self.diffing.is_some() || self.writing || self.reading || self.compacting
     }
 
+    /// Shows `status` (the screenshots' demo, which never syncs).
+    pub fn show_status(&mut self, status: SyncStatus) {
+        self.status = status;
+    }
+
     /// Reads the other machines now.
-    #[expect(dead_code, reason = "Settings' [ sync now ] (M3 step 8)")]
     pub fn sync_now(&mut self) {
         self.last_read = None;
         self.exported = None;
@@ -533,6 +536,53 @@ fn run(work: Work) -> Done {
                 .map_err(|error| format!("{error:#}")),
         ),
     }
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+pub fn ago(then: SystemTime) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(then)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    match seconds {
+        0..60 => "just now".to_string(),
+        60..3_600 => format!("{} min ago", seconds / 60),
+        3_600..86_400 => format!("{} h ago", seconds / 3_600),
+        86_400..172_800 => "yesterday".to_string(),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+/// How far ahead a clock runs, roughly.
+pub fn ahead(by: Duration) -> String {
+    let minutes = by.as_secs() / 60;
+    if minutes < 120 {
+        format!("{minutes} min")
+    } else if minutes < 48 * 60 {
+        format!("{} h", minutes / 60)
+    } else {
+        format!("{} days", minutes / (24 * 60))
+    }
+}
+
+/// Other computers in the library folder's journal (the folder is
+/// joined, not just chosen, when there are).
+pub fn computers_in(folder: &Path, own: DeviceId) -> Vec<(String, Option<SystemTime>)> {
+    Journal::in_library(folder)
+        .devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|device| device.id != own)
+        .map(|device| {
+            (
+                device
+                    .info
+                    .map(|info| info.name)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "another computer".to_string()),
+                device.last_written,
+            )
+        })
+        .collect()
 }
 
 /// This computer's name, for the other machines' lists.

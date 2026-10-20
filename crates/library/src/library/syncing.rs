@@ -21,7 +21,7 @@ pub use ids::{SyncIds, SyncKind};
 pub use registers::{Export, SyncReader};
 pub(super) use registers::{SYNC_OUTBOX_V1_TABLE, SYNC_REGISTERS_V1_TABLE};
 
-use super::storage_helpers::{decode, encode};
+use super::storage_helpers::{decode, encode, restrict_library_file};
 use super::*;
 
 const STATE_KEY: &str = "state";
@@ -75,6 +75,8 @@ pub(super) struct SyncFields {
     /// When each item (with its AI results) last changed, by the clock:
     /// what its vault note was written from.
     pub(super) item_revs: HashMap<Uuid, Hlc>,
+    /// The database file, to copy aside before joining a synced library.
+    pub(super) database_path: Option<PathBuf>,
 }
 
 pub(super) fn load_sync(database: &Database) -> Result<SyncFields> {
@@ -109,7 +111,23 @@ pub(super) fn load_sync(database: &Database) -> Result<SyncFields> {
         state,
         generation: 0,
         item_revs,
+        database_path: None,
     })
+}
+
+/// `YYYY-MM-DD` of `seconds` since the epoch.
+fn chrono_free_date(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year}-{month:02}-{day:02}")
 }
 
 fn write_state_in(write_txn: &redb::WriteTransaction, state: &SyncState) -> Result<()> {
@@ -145,6 +163,37 @@ impl LibraryStore {
     /// The digests of this machine's last segments as written.
     pub fn sync_written(&self) -> &BTreeMap<u64, String> {
         &self.sync.state.written
+    }
+
+    /// Copies the database aside (`library.redb.before-sync-<date>`) the
+    /// first time this library syncs, so joining another can be undone by
+    /// hand. Returns the copy, or `None` when there is one already.
+    pub fn backup_before_sync(&self) -> Result<Option<PathBuf>> {
+        let Some(path) = &self.sync.database_path else {
+            return Ok(None);
+        };
+        let date = chrono_free_date(current_timestamp());
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".before-sync-{date}"));
+        let copy = path.with_file_name(name);
+        let prefix = format!(
+            "{}.before-sync-",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let exists = path
+            .parent()
+            .and_then(|dir| fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+        if exists {
+            return Ok(None);
+        }
+        // Between transactions the file is whole: every commit is synced.
+        fs::copy(path, &copy).with_context(|| format!("copying {}", path.display()))?;
+        restrict_library_file(&copy)?;
+        Ok(Some(copy))
     }
 
     /// When the item (with its AI results) last changed by the sync's

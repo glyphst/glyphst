@@ -614,7 +614,7 @@ fn a_removal_wins_over_an_edit_and_says_what_it_leaves() {
     assert!(
         conflicts
             .iter()
-            .any(|conflict| conflict.contains("deleted on another machine")),
+            .any(|conflict| conflict.contains("deleted on another computer")),
         "{conflicts:?}"
     );
     assert_eq!(records(&mut a), records(&mut b));
@@ -777,5 +777,39 @@ fn views_assignments_and_topics_are_remapped_to_local_numbers() {
     assert_eq!(b.store.undo_enrichment_run(on_b, b_run).unwrap(), 1);
     settle(&mut [&mut a, &mut b], &journal);
     assert!(a.store.tags_for_item(id).is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn two_libraries_join_into_one() {
+    let dir = folder("join");
+    let (mut a, mut b, journal) = pair(&dir);
+    let shared = file(&dir, "shared");
+    let only_a = file(&dir, "only-a");
+    let only_b = file(&dir, "only-b");
+    for (machine, own) in [(&mut a, &only_a), (&mut b, &only_b)] {
+        let both = link(&mut machine.store, &shared);
+        let mine = link(&mut machine.store, own);
+        machine
+            .store
+            .set_item_tag_names(both, &["ml".to_string()])
+            .unwrap();
+        let reading = machine
+            .store
+            .create_library_collection(None, "Reading")
+            .unwrap();
+        machine
+            .store
+            .add_items_to_collection(&[both, mine], reading)
+            .unwrap();
+    }
+    settle(&mut [&mut a, &mut b], &journal);
+    for machine in [&a, &b] {
+        let store = &machine.store;
+        assert_eq!(store.library_items().len(), 3, "one shared file, one each");
+        assert_eq!(store.library_tags().len(), 1);
+        assert_eq!(store.library_collections().len(), 1);
+        assert_eq!(store.library_item_collections().len(), 3);
+    }
     fs::remove_dir_all(dir).unwrap();
 }

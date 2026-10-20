@@ -109,7 +109,8 @@ impl LibraryStore {
             .saturating_add(1);
         let vault_notes = super::vault_notes::load_vault_notes(&database)?;
         let knowledge = super::knowledge::load_knowledge(&database)?;
-        let sync = super::syncing::load_sync(&database)?;
+        let mut sync = super::syncing::load_sync(&database)?;
+        sync.database_path = Some(path.clone());
 
         let mut store = Self {
             library,

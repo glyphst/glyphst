@@ -1438,7 +1438,7 @@ impl LibraryStore {
             }
             if let Err(error) = self.merge_items(keep, absorb) {
                 report.conflicts.push(format!(
-                    "Could not merge two items another machine made one: {error:#}"
+                    "Could not merge two items another computer made one: {error:#}"
                 ));
             }
         }
@@ -1455,11 +1455,11 @@ impl LibraryStore {
             })();
             match removed {
                 Err(error) => report.conflicts.push(format!(
-                    "Could not remove “{}”, deleted on another machine: {error:#}",
+                    "Could not remove “{}”, deleted on another computer: {error:#}",
                     item.title
                 )),
                 Ok(()) if annotations > 0 => report.conflicts.push(format!(
-                    "“{}” was deleted on another machine; its {annotations} highlights and notes here are no longer in the library.",
+                    "“{}” was deleted on another computer; its {annotations} highlights and notes here are no longer in the library.",
                     item.title
                 )),
                 Ok(()) => {}

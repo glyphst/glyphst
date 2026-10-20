@@ -11,7 +11,7 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 17] = [
+pub const STATES: [&str; 20] = [
     "all",
     "item",
     "pages",
@@ -29,6 +29,9 @@ pub const STATES: [&str; 17] = [
     "identifier",
     "zotero",
     "zotero-done",
+    "sync",
+    "sync-conflicts",
+    "join",
 ];
 
 /// A sample Zotero data folder for frame 04j.

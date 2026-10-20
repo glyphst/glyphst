@@ -463,6 +463,8 @@ pub struct ReaderApp {
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
     library_sync: crate::library_sync::LibrarySync,
+    /// The database was copied aside before syncing (once a run).
+    sync_backed_up: bool,
     /// The sidebar's item card (its note, read once per item).
     sidebar_card: crate::library_tab::LibraryTab,
     /// The library's dialog showing (frames 04h, 04k, 06d).
@@ -755,6 +757,7 @@ impl ReaderApp {
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
             library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
+            sync_backed_up: false,
             sidebar_card: Default::default(),
             library_dialog: None,
             folder_move: None,
@@ -869,8 +872,61 @@ impl ReaderApp {
                     &cc.egui_ctx,
                 );
             }
+            // The sync's group as it stands with two other computers (07s).
+            if state.starts_with("sync") {
+                use crate::library_sync::{DeviceStatus, SyncStatus};
+                use std::time::{Duration, SystemTime};
+                let ago = |seconds| SystemTime::now().checked_sub(Duration::from_secs(seconds));
+                app.prefs.library.sync = crate::prefs::SyncMode::Folder;
+                let device = |name: &str, this, last: Option<SystemTime>, ahead| DeviceStatus {
+                    id: glyphst_sync::DeviceId::new(),
+                    name: name.to_string(),
+                    this,
+                    last_written: last,
+                    clock_ahead: ahead,
+                };
+                let mut status = SyncStatus {
+                    devices: vec![
+                        device("meowos", true, ago(120), None),
+                        device("laptop", false, ago(300), None),
+                        device(
+                            "studio",
+                            false,
+                            ago(90_000),
+                            Some(Duration::from_secs(7_200)),
+                        ),
+                    ],
+                    last_synced: ago(120),
+                    ..SyncStatus::default()
+                };
+                if state == "sync-conflicts" {
+                    status.parked = 1;
+                    status.conflicts = vec![
+                        "“Old draft” was deleted on another computer; its 2 highlights and notes here are no longer in the library.".to_string(),
+                    ];
+                    app.settings_window.show_conflicts = true;
+                }
+                app.library_sync.show_status(status);
+            }
             app.library_dialog = match state.as_str() {
                 "backfill" => app.backfill_dialog(None),
+                "join" => Some(crate::library_dialogs::Dialog::JoinSynced {
+                    path: dirs::home_dir().unwrap_or_default().join("Sync/Glyphst"),
+                    computers: vec![
+                        (
+                            "laptop".to_string(),
+                            std::time::SystemTime::now()
+                                .checked_sub(std::time::Duration::from_secs(300)),
+                        ),
+                        (
+                            "studio".to_string(),
+                            std::time::SystemTime::now()
+                                .checked_sub(std::time::Duration::from_secs(90_000)),
+                        ),
+                    ],
+                    items: 128,
+                    linked: 9,
+                }),
                 "folder" => Some(crate::library_dialogs::Dialog::ChooseFolder {
                     path: "~/Documents/Glyphst".to_string(),
                     files: 128,
@@ -1266,6 +1322,42 @@ impl ReaderApp {
     }
 
     /// Frame 04k with what a move would take.
+    /// Starts moving the library's files into `path` (04k's next step).
+    fn move_library_to(&mut self, path: &std::path::Path, ctx: &egui::Context) {
+        use crate::library_dialogs::Dialog;
+        match self.library.plan_files_move(path) {
+            Ok(plan) => {
+                self.library_dialog = Some(Dialog::Moving {
+                    done: 0,
+                    total: plan.files(),
+                });
+                self.folder_move = Some(crate::library_dialogs::FolderMove::start(plan, ctx));
+            }
+            Err(error) => match &mut self.library_dialog {
+                Some(Dialog::ChooseFolder { error: shown, .. }) => {
+                    *shown = Some(format!("{error:#}"));
+                }
+                _ => self
+                    .notices
+                    .push(format!("Could not move the library: {error:#}")),
+            },
+        }
+    }
+
+    /// Copies the database aside the first time the library syncs.
+    fn sync_backup(&mut self) {
+        if !self.persist {
+            return;
+        }
+        match self.library.backup_before_sync() {
+            Ok(Some(copy)) => log::info!("library copied aside to {}", copy.display()),
+            Ok(None) => {}
+            Err(error) => self.notices.push(format!(
+                "Could not copy the library aside before syncing: {error:#}"
+            )),
+        }
+    }
+
     fn choose_folder_dialog(&self) -> crate::library_dialogs::Dialog {
         let attachments = self.library.library_attachments();
         let managed = attachments.iter().filter(|a| !a.is_linked());
@@ -1389,24 +1481,30 @@ impl ReaderApp {
                 self.prefs.library.folder_asked = true;
                 Ok(())
             }
-            Some(DialogAction::UseFolder(path)) => match self.library.plan_files_move(&path) {
-                Ok(plan) => {
-                    self.library_dialog = Some(Dialog::Moving {
-                        done: 0,
-                        total: plan.files(),
-                    });
-                    self.folder_move = Some(crate::library_dialogs::FolderMove::start(plan, ctx));
-                    Ok(())
-                }
-                Err(error) => {
-                    if let Some(Dialog::ChooseFolder { error: shown, .. }) =
-                        &mut self.library_dialog
-                    {
-                        *shown = Some(format!("{error:#}"));
-                    }
-                    Ok(())
-                }
-            },
+            // Other computers sync this folder: joining them is asked (04t).
+            Some(DialogAction::UseFolder(path))
+                if !crate::library_sync::computers_in(&path, self.library.sync_device())
+                    .is_empty() =>
+            {
+                let attachments = self.library.library_attachments();
+                self.library_dialog = Some(Dialog::JoinSynced {
+                    computers: crate::library_sync::computers_in(&path, self.library.sync_device()),
+                    items: self.library.library_items().len(),
+                    linked: attachments.iter().filter(|a| a.is_linked()).count(),
+                    path,
+                });
+                Ok(())
+            }
+            Some(DialogAction::JoinFolder(path)) => {
+                self.prefs.library.sync = crate::prefs::SyncMode::Folder;
+                self.sync_backup();
+                self.move_library_to(&path, ctx);
+                Ok(())
+            }
+            Some(DialogAction::UseFolder(path)) => {
+                self.move_library_to(&path, ctx);
+                Ok(())
+            }
             Some(DialogAction::StopMove) => {
                 if let Some(moving) = &self.folder_move {
                     moving.stop();
@@ -4101,6 +4199,17 @@ impl ReaderApp {
                         glyphst_search::Store::size_on_disk(search.path()),
                     )
                 }),
+                sync: self.library_sync.status().clone(),
+                note_copies: self
+                    .vault_root()
+                    .map(|root| {
+                        self.vault_sync
+                            .index()
+                            .conflict_copies()
+                            .map(|note| root.join(&note.path))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
             self.settings_window.show(
                 ctx,
@@ -4148,6 +4257,17 @@ impl ReaderApp {
                         }
                         continue;
                     }
+                    LibraryAction::SyncNow => {
+                        self.library_sync.sync_now();
+                        continue;
+                    }
+                    LibraryAction::OpenFile(path) => {
+                        self.library_tab_action(
+                            crate::library_tab::LibraryTabAction::OpenNote(path),
+                            ctx,
+                        );
+                        continue;
+                    }
                     LibraryAction::RegisterLinks => {
                         match crate::instance::register() {
                             Ok(()) => self.notices.push(
@@ -4168,7 +4288,9 @@ impl ReaderApp {
                     | LibraryAction::Meaning(_)
                     | LibraryAction::Rerank(_)
                     | LibraryAction::ForgetOpened
-                    | LibraryAction::RegisterLinks => {}
+                    | LibraryAction::RegisterLinks
+                    | LibraryAction::SyncNow
+                    | LibraryAction::OpenFile(_) => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5471,6 +5593,10 @@ impl eframe::App for ReaderApp {
             }
         }
         if self.persist {
+            if self.prefs.library.sync != crate::prefs::SyncMode::Off && !self.sync_backed_up {
+                self.sync_backed_up = true;
+                self.sync_backup();
+            }
             let folder = crate::library_sync::synced_folder(
                 &self.library,
                 self.prefs.library.sync == crate::prefs::SyncMode::Folder,

@@ -177,6 +177,8 @@ pub struct SettingsWindow {
     pub open_shortcuts: bool,
     /// A group of the page to scroll to once drawn (scripted runs).
     pub scroll_to: Option<String>,
+    /// Settings › Library lists the sync's conflicts.
+    pub show_conflicts: bool,
     /// The settings search.
     query: String,
     /// Installed families for the font pickers (chrome, prose), read once.
@@ -221,6 +223,10 @@ pub struct LibraryFacts {
     pub rerank: Option<crate::meaning::MeaningCard>,
     /// The desktop entry that opens `glyphst://` links, when known.
     pub link_handler: Option<String>,
+    /// How the library's sync stands.
+    pub sync: crate::library_sync::SyncStatus,
+    /// Sync tools' copies of notes in the vault.
+    pub note_copies: Vec<std::path::PathBuf>,
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -239,7 +245,7 @@ fn short_path(path: &std::path::Path, chars: usize) -> String {
 }
 
 /// What Settings › Library asks the app to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibraryAction {
     ChooseFolder,
     Enrich,
@@ -252,6 +258,10 @@ pub enum LibraryAction {
     ForgetOpened,
     /// Make this Reader open `glyphst://` links from other apps.
     RegisterLinks,
+    /// Read the other computers' changes now.
+    SyncNow,
+    /// Open a note's copy in the system's editor.
+    OpenFile(std::path::PathBuf),
 }
 
 /// The caption of a downloaded model's row (search by meaning, the
@@ -328,6 +338,136 @@ fn model_buttons(
     }
 }
 
+/// The library's sync (frame 07s): how, how it stands, each computer and
+/// what could not be kept.
+fn sync_group(
+    ui: &mut egui::Ui,
+    mode: &mut crate::prefs::SyncMode,
+    facts: &LibraryFacts,
+    actions: &mut Vec<LibraryAction>,
+    show_conflicts: &mut bool,
+) {
+    use crate::library_sync::{ago, ahead};
+    use crate::prefs::SyncMode;
+    let status = &facts.sync;
+    ui_settings::group(ui, "sync", |group| {
+        let caption = if facts.folder_chosen {
+            "a sync tool (syncthing, icloud, dropbox) carries the library folder"
+        } else {
+            "choose a library folder first, one a sync tool carries"
+        };
+        group.row("sync with", Some(caption), |ui| {
+            let before = *mode;
+            glyphst_ui::segmented::labels(
+                ui,
+                mode,
+                &[(SyncMode::Off, "off"), (SyncMode::Folder, "library folder")],
+            );
+            if *mode != before && *mode == SyncMode::Folder && !facts.folder_chosen {
+                *mode = SyncMode::Off;
+                actions.push(LibraryAction::ChooseFolder);
+            }
+        });
+        if *mode == SyncMode::Off {
+            return;
+        }
+        let tokens = theme::Tokens::get(group.ctx());
+        let (text, colour) = match (&status.error, status.last_synced) {
+            (Some(error), _) => (format!("▲ {error}"), tokens.err),
+            (None, Some(at)) => {
+                let mut text = format!("● synced {}", ago(at));
+                if status.files_waiting > 0 {
+                    text.push_str(&format!(" · {} files on their way", status.files_waiting));
+                }
+                (text, tokens.ok)
+            }
+            (None, None) => ("○ not synced yet".to_string(), tokens.muted),
+        };
+        group.row_with(
+            "status",
+            Some(
+                egui::RichText::new(text)
+                    .font(theme::regular(12.0))
+                    .color(colour),
+            ),
+            |ui| {
+                if ui.add(Button::bracket("sync now")).clicked() {
+                    actions.push(LibraryAction::SyncNow);
+                }
+            },
+        );
+        for device in &status.devices {
+            let (text, colour) = match (device.this, device.clock_ahead) {
+                (true, _) => ("this computer".to_string(), tokens.muted),
+                (false, Some(by)) => (
+                    format!(
+                        "▲ its clock runs {} ahead · changes still merge by time",
+                        ahead(by)
+                    ),
+                    tokens.err,
+                ),
+                (false, None) => (
+                    match device.last_written {
+                        Some(at) => format!("last wrote {}", ago(at)),
+                        None => "has not written yet".to_string(),
+                    },
+                    tokens.muted,
+                ),
+            };
+            group.row_with(
+                &device.name,
+                Some(
+                    egui::RichText::new(text)
+                        .font(theme::regular(12.0))
+                        .color(colour),
+                ),
+                |_| {},
+            );
+        }
+        let problems = status.conflicts.len() + facts.note_copies.len();
+        if problems > 0 || status.parked > 0 {
+            let mut parts = Vec::new();
+            if !facts.note_copies.is_empty() {
+                parts.push(match facts.note_copies.len() {
+                    1 => "1 note kept twice".to_string(),
+                    count => format!("{count} notes kept twice"),
+                });
+            }
+            if status.parked > 0 {
+                parts.push(match status.parked {
+                    1 => "1 record waits for what it names".to_string(),
+                    count => format!("{count} records wait for what they name"),
+                });
+            }
+            if !status.conflicts.is_empty() {
+                parts.push(format!("{} left out", status.conflicts.len()));
+            }
+            group.row("conflicts", Some(&*parts.join(" · ")), |ui| {
+                let label = if *show_conflicts { "hide" } else { "show" };
+                if problems > 0 && ui.add(Button::bracket_muted(label)).clicked() {
+                    *show_conflicts = !*show_conflicts;
+                }
+            });
+            if *show_conflicts {
+                for copy in &facts.note_copies {
+                    group.row(
+                        "note kept twice",
+                        Some(&*copy.display().to_string()),
+                        |ui| {
+                            if ui.add(Button::bracket_muted("open")).clicked() {
+                                actions.push(LibraryAction::OpenFile(copy.clone()));
+                            }
+                        },
+                    );
+                }
+                for conflict in &status.conflicts {
+                    group.row("left out", Some(conflict), |_| {});
+                }
+            }
+        }
+    });
+}
+
 /// The Library page (frame 07 · library).
 fn library(
     ui: &mut egui::Ui,
@@ -335,6 +475,7 @@ fn library(
     facts: &LibraryFacts,
     actions: &mut Vec<LibraryAction>,
     scroll_to: &mut Option<String>,
+    show_conflicts: &mut bool,
 ) {
     use crate::prefs::{AddOnOpen, ImportMode};
     let library = &mut prefs.library;
@@ -387,6 +528,13 @@ fn library(
             }
         });
     });
+    ui.add_space(10.0);
+    if scroll_to.as_deref() == Some("sync") {
+        let at = egui::Rect::from_min_size(ui.cursor().min, vec2(1.0, 1.0));
+        ui.scroll_to_rect(at, Some(egui::Align::Min));
+        *scroll_to = None;
+    }
+    sync_group(ui, &mut library.sync, facts, actions, show_conflicts);
     ui.add_space(10.0);
     ui_settings::group(ui, "adding", |group| {
         group.row(
@@ -859,6 +1007,7 @@ impl SettingsWindow {
                         &app.library,
                         &mut self.library_actions,
                         &mut self.scroll_to,
+                        &mut self.show_conflicts,
                     ),
                     Section::Effects => {
                         // The previews are animated.
