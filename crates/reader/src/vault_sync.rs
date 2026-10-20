@@ -1,14 +1,18 @@
 //! Keeping the Markdown vault and the catalog in step. A worker thread
 //! writes each item's note when what it shows changes (merging, so the
 //! user's text and edits stay), and reads it again when the file changes;
-//! tags the user changed in a note come back to the catalog.
+//! tags the user changed in a note come back to the catalog. The same
+//! thread keeps an index of every note's links, for backlinks.
 
 use std::{
     collections::{HashMap, HashSet},
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -16,7 +20,7 @@ use glyphst_library::{
     AssignmentState, AssignmentTarget, DocumentId, LibraryItemKind, LibraryStore, ReadingStatus,
     VaultNoteRecord,
 };
-use glyphst_vault::{ITEMS_FOLDER, Merged, NoteSnapshot, Summary, Written};
+use glyphst_vault::{ITEMS_FOLDER, Merged, NoteSnapshot, Summary, Written, index::VaultIndex};
 
 /// How often snapshots are compared and notes' files checked.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -30,7 +34,21 @@ struct NoteRequest {
     taken: HashSet<String>,
 }
 
+enum Work {
+    Note(Box<NoteRequest>),
+    /// Index the vault's links again, reusing `previous` for notes that
+    /// did not change.
+    Scan {
+        root: PathBuf,
+        previous: Arc<VaultIndex>,
+    },
+}
+
 enum NoteResult {
+    Scanned {
+        root: PathBuf,
+        index: VaultIndex,
+    },
     Written {
         id: DocumentId,
         record: VaultNoteRecord,
@@ -43,7 +61,7 @@ enum NoteResult {
 }
 
 pub struct VaultSync {
-    requests: Sender<NoteRequest>,
+    requests: Sender<Work>,
     results: Receiver<NoteResult>,
     /// The hash of each item's last snapshot sent.
     sent: HashMap<DocumentId, u64>,
@@ -51,18 +69,28 @@ pub struct VaultSync {
     root: Option<PathBuf>,
     last_check: Option<Instant>,
     last_revision: Option<u64>,
+    /// The vault's links, as of the last scan, and whether one is running.
+    index: Arc<VaultIndex>,
+    scanning: bool,
 }
 
 impl VaultSync {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (requests, wanted) = channel::<NoteRequest>();
+        let (requests, wanted) = channel::<Work>();
         let (finished, results) = channel();
         let ctx = ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("vault".into())
             .spawn(move || {
-                for request in wanted {
-                    if finished.send(write_note(request)).is_err() {
+                for work in wanted {
+                    let result = match work {
+                        Work::Note(request) => write_note(*request),
+                        Work::Scan { root, previous } => NoteResult::Scanned {
+                            index: VaultIndex::scan(&root, &previous),
+                            root,
+                        },
+                    };
+                    if finished.send(result).is_err() {
                         break;
                     }
                     ctx.request_repaint();
@@ -79,7 +107,18 @@ impl VaultSync {
             root: None,
             last_check: None,
             last_revision: None,
+            index: Arc::default(),
+            scanning: false,
         }
+    }
+
+    /// The vault's notes and their links, as of the last scan.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "backlinks are shown in M4's UI step")
+    )]
+    pub fn index(&self) -> Arc<VaultIndex> {
+        self.index.clone()
     }
 
     /// Takes in written notes, and sends the notes that changed (or whose
@@ -91,9 +130,16 @@ impl VaultSync {
             self.root = root;
             self.sent.clear();
             self.last_check = None;
+            self.index = Arc::default();
         }
         while let Ok(result) = self.results.try_recv() {
             match result {
+                NoteResult::Scanned { root, index } => {
+                    self.scanning = false;
+                    if Some(&root) == self.root.as_ref() && *self.index != index {
+                        self.index = Arc::new(index);
+                    }
+                }
                 NoteResult::Written {
                     id,
                     record,
@@ -132,6 +178,13 @@ impl VaultSync {
         }
         self.last_revision = Some(revision);
         self.last_check = Some(now);
+        if !self.scanning {
+            let scan = Work::Scan {
+                root: root.clone(),
+                previous: self.index.clone(),
+            };
+            self.scanning = self.requests.send(scan).is_ok();
+        }
 
         let taken = library
             .vault_notes()
@@ -170,7 +223,7 @@ impl VaultSync {
                 record,
                 taken: taken.clone(),
             };
-            if self.requests.send(request).is_ok() {
+            if self.requests.send(Work::Note(Box::new(request))).is_ok() {
                 self.sent.insert(id, hash);
                 self.in_flight.insert(id);
             }
@@ -185,7 +238,7 @@ impl VaultSync {
     }
 
     pub fn busy(&self) -> bool {
-        !self.in_flight.is_empty()
+        !self.in_flight.is_empty() || self.scanning
     }
 }
 
@@ -404,8 +457,9 @@ mod tests {
 
     fn wait(sync: &mut VaultSync, library: &mut LibraryStore, root: &Path) {
         let deadline = Instant::now() + Duration::from_secs(10);
+        // One check now; the rest only take what the worker finished.
+        sync.last_check = None;
         loop {
-            sync.last_check = None;
             let notices = sync.poll(library, Some(root.to_path_buf()));
             assert!(notices.is_empty(), "{notices:?}");
             if !sync.busy() {
@@ -468,6 +522,20 @@ mod tests {
             text.contains("  - classics\n") && text.contains("  - to-read\n"),
             "{text}"
         );
+
+        // A note of the user's links the paper: its backlink is indexed.
+        fs::create_dir_all(root.join("thesis")).unwrap();
+        fs::write(
+            root.join("thesis/chapter 2.md"),
+            "# Chapter 2\nAs [[vaswani2017attention]] shows…\n",
+        )
+        .unwrap();
+        wait(&mut sync, &mut library, &root);
+        wait(&mut sync, &mut library, &root);
+        let index = sync.index();
+        let backlinks = index.backlinks(glyphst_vault::index::Owner::Item(id.0));
+        assert_eq!(backlinks.len(), 1, "{index:#?}");
+        assert_eq!(backlinks[0].title, "Chapter 2");
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(document);

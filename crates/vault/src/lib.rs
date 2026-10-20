@@ -1,5 +1,6 @@
 //! The Markdown vault: one note per library item, Obsidian-compatible,
-//! that Glyphst writes and the user (or an agent) edits.
+//! that Glyphst writes and the user (or an agent) edits, and concept pages
+//! (`concepts/`) written on request from several items (`pages`).
 //!
 //! Glyphst owns some frontmatter keys and the blocks between
 //! `<!-- glyphst:NAME begin -->` and `<!-- glyphst:NAME end -->`; the rest
@@ -8,6 +9,9 @@
 //! the catalog.
 
 pub mod frontmatter;
+pub mod index;
+pub mod pages;
+pub mod wikilinks;
 
 use std::collections::HashSet;
 
@@ -395,15 +399,37 @@ pub fn merge(existing: &str, snapshot: &NoteSnapshot, previous: &Written) -> Mer
     let header = frontmatter.render();
 
     let mut body = body.to_string();
+    let (blocks, edited_blocks) = merge_blocks(&mut body, owned_blocks(snapshot), previous);
+    Merged {
+        text: format!("{header}{body}"),
+        written: Written {
+            tags,
+            frontmatter_sha256: sha(&header),
+            blocks,
+        },
+        user_tags,
+        edited_blocks,
+    }
+}
+
+/// Writes the `owned` blocks into `body` as last written `previous`: an
+/// untouched block is replaced, one the user edited stays (and is listed),
+/// one the user deleted is not written again, and a new one goes before
+/// `## Notes`. Blocks it does not own (an agent's) keep their hashes.
+fn merge_blocks(
+    body: &mut String,
+    owned: Vec<(&str, String)>,
+    previous: &Written,
+) -> (Vec<(String, [u8; 32])>, Vec<String>) {
     let mut blocks = Vec::new();
     let mut edited_blocks = Vec::new();
-    for (name, content) in owned_blocks(snapshot) {
+    for (name, content) in owned {
         let written = previous
             .blocks
             .iter()
             .find(|(written, _)| written == name)
             .map(|(_, hash)| *hash);
-        match find_block(&body, name) {
+        match find_block(body, name) {
             Some((range, current)) => {
                 if written.is_none_or(|hash| hash == sha(&current)) {
                     body.replace_range(range, &block(name, &content));
@@ -424,22 +450,12 @@ pub fn merge(existing: &str, snapshot: &NoteSnapshot, previous: &Written) -> Mer
             }
         }
     }
-    // Blocks it does not own (an agent's) keep their hashes.
     for (name, hash) in &previous.blocks {
         if !blocks.iter().any(|(written, _)| written == name) {
             blocks.push((name.clone(), *hash));
         }
     }
-    Merged {
-        text: format!("{header}{body}"),
-        written: Written {
-            tags,
-            frontmatter_sha256: sha(&header),
-            blocks,
-        },
-        user_tags,
-        edited_blocks,
-    }
+    (blocks, edited_blocks)
 }
 
 /// The hash Glyphst keeps of a block's contents, to tell later edits.
@@ -458,6 +474,11 @@ pub fn block_text(note: &str, name: &str) -> Option<String> {
 pub fn replace_block(note: &str, name: &str, content: Option<&str>) -> String {
     let (_, body) = split(note);
     let header = &note[..note.len() - body.len()];
+    format!("{header}{}", replace_block_in_body(body, name, content))
+}
+
+/// `replace_block` on a note's body (no frontmatter).
+fn replace_block_in_body(body: &str, name: &str, content: Option<&str>) -> String {
     let mut body = body.to_string();
     match (find_block(&body, name), content) {
         (Some((range, _)), Some(content)) => body.replace_range(range, &block(name, content)),
@@ -481,7 +502,7 @@ pub fn replace_block(note: &str, name: &str, content: Option<&str>) -> String {
         }
         (None, None) => {}
     }
-    format!("{header}{body}")
+    body
 }
 
 /// The note's id (`glyphst_id`), to find a note the user renamed.
