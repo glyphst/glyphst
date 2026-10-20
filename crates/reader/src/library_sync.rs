@@ -1,5 +1,6 @@
 //! Syncing the library with this person's other machines through the
-//! library folder (a sync tool carries it): a worker thread works out what
+//! library folder (a sync tool carries it, or this thread mirrors it to a
+//! WebDAV server or an S3 bucket): a worker thread works out what
 //! changed here and writes it into this machine's journal, reads the other
 //! machines' journals, and keeps the journal compact; the UI thread takes
 //! the changes into the library a few at a time. Nothing is applied while
@@ -9,12 +10,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
 use glyphst_library::{LibraryStore, SyncExport, SyncReader, SyncSnapshot};
-use glyphst_sync::{Batch, Change, DeviceId, DeviceInfo, DeviceListing, Journal, Watermarks};
+use glyphst_settings::CredentialStore;
+use glyphst_sync::{
+    Batch, Change, DeviceId, DeviceInfo, DeviceListing, Journal, Watermarks,
+    mirror::{Mirror, MirrorReport, Remote},
+};
 
 /// How long after the last change here an export waits.
 const EXPORT_AFTER: Duration = Duration::from_secs(2);
@@ -24,6 +32,61 @@ const READ_EVERY: Duration = Duration::from_secs(5);
 const APPLY_PER_FRAME: usize = 500;
 /// Conflicts kept for Settings.
 const CONFLICTS_KEPT: usize = 50;
+/// How often a remote store is mirrored (a list costs a request).
+const MIRROR_EVERY: Duration = Duration::from_secs(60);
+/// How soon after writing this computer's changes they go up.
+const MIRROR_AFTER_WRITE: Duration = Duration::from_secs(10);
+/// Where the keychain keeps the secrets of the two kinds of store.
+pub const S3_CREDENTIAL: &str = "https://glyphst.app/credentials/sync/v1/s3";
+pub const WEBDAV_CREDENTIAL: &str = "https://glyphst.app/credentials/sync/v1/webdav";
+
+/// Where the library syncs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// The library folder.
+    pub folder: PathBuf,
+    /// The store it is mirrored to, `None` when a sync tool carries it.
+    pub remote: Option<RemoteTarget>,
+}
+
+/// A store, its secret still in the keychain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteTarget {
+    /// With an empty secret.
+    pub remote: Remote,
+    pub credential: &'static str,
+    /// Whether the vault is the library folder's `notes/` (else it stays
+    /// on this computer).
+    pub notes: bool,
+}
+
+impl RemoteTarget {
+    /// The store, with the secret from `store`.
+    fn with_secret(&self, store: &dyn CredentialStore) -> Result<Remote, String> {
+        let secret = store
+            .read_item(self.credential)
+            .map_err(|error| format!("the keychain: {error:#}"))?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .filter(|secret| !secret.is_empty())
+            .ok_or("no secret saved yet: type it and test the connection")?;
+        let mut remote = self.remote.clone();
+        match &mut remote {
+            Remote::S3 {
+                secret_access_key, ..
+            } => *secret_access_key = secret,
+            Remote::WebDav { password, .. } => *password = secret,
+        }
+        Ok(remote)
+    }
+
+    /// The name the keychain item carries.
+    fn user(&self) -> &str {
+        match &self.remote {
+            Remote::S3 { access_key_id, .. } => access_key_id,
+            Remote::WebDav { user, .. } => user,
+        }
+    }
+}
 
 enum Work {
     Diff {
@@ -50,6 +113,17 @@ enum Work {
         covers: Watermarks,
         changes: Vec<Change>,
     },
+    Mirror {
+        target: RemoteTarget,
+        store: Arc<dyn CredentialStore>,
+        folder: PathBuf,
+    },
+    /// Keeps `secret` (when given), then tries the store.
+    Probe {
+        target: RemoteTarget,
+        store: Arc<dyn CredentialStore>,
+        secret: Option<String>,
+    },
 }
 
 enum Done {
@@ -57,6 +131,8 @@ enum Done {
     Written(Result<Vec<(u64, String)>, String>),
     Read(Result<Read, String>),
     Compacted(Result<(), String>),
+    Mirrored(Result<MirrorReport, String>),
+    Probed(Result<usize, String>),
 }
 
 struct Read {
@@ -90,13 +166,23 @@ pub struct SyncStatus {
     pub conflicts: Vec<String>,
     /// Copied files other machines added that have not arrived.
     pub files_waiting: usize,
+    /// The last connection test: files found under `sync/`, or why not.
+    pub probe: Option<Result<usize, String>>,
+    /// The store is being mirrored now.
+    pub mirroring: bool,
 }
 
 pub struct LibrarySync {
     requests: Sender<Work>,
     results: Receiver<Done>,
-    /// The library folder synced, `None` while off.
-    folder: Option<PathBuf>,
+    /// Where the library syncs, `None` while off.
+    target: Option<Target>,
+    mirroring: bool,
+    probing: bool,
+    /// When the store is mirrored next, `None` for now.
+    mirror_at: Option<Instant>,
+    mirror_every: Duration,
+    mirror_after_write: Duration,
     /// The sync revision the last export saw, `None` to export again.
     exported: Option<u64>,
     /// When the sync revision last moved, to wait for edits to settle.
@@ -137,7 +223,12 @@ impl LibrarySync {
         Self {
             requests,
             results,
-            folder: None,
+            target: None,
+            mirroring: false,
+            probing: false,
+            mirror_at: None,
+            mirror_every: MIRROR_EVERY,
+            mirror_after_write: MIRROR_AFTER_WRITE,
             exported: None,
             revision_seen: None,
             diffing: None,
@@ -176,7 +267,7 @@ impl LibrarySync {
     /// so a note shows a state every computer will have). Always while
     /// the library does not sync.
     pub fn quiet(&self, library: &LibraryStore) -> bool {
-        self.folder.is_none()
+        self.target.is_none()
             || (self.pending.is_empty()
                 && self.diffing.is_none()
                 && self.exported == Some(library.sync_revision()))
@@ -184,7 +275,12 @@ impl LibrarySync {
 
     /// Whether the thread is at work (screenshots wait).
     pub fn busy(&self) -> bool {
-        self.diffing.is_some() || self.writing || self.reading || self.compacting
+        self.diffing.is_some()
+            || self.writing
+            || self.reading
+            || self.compacting
+            || self.mirroring
+            || self.probing
     }
 
     /// Shows `status` (the screenshots' demo, which never syncs).
@@ -196,6 +292,24 @@ impl LibrarySync {
     pub fn sync_now(&mut self) {
         self.last_read = None;
         self.exported = None;
+        self.mirror_at = None;
+    }
+
+    /// Tries the store `target` names, keeping `secret` in the keychain
+    /// first when one was typed.
+    pub fn test(
+        &mut self,
+        target: RemoteTarget,
+        store: Arc<dyn CredentialStore>,
+        secret: Option<String>,
+    ) {
+        self.status.probe = None;
+        let work = Work::Probe {
+            target,
+            store,
+            secret,
+        };
+        self.probing = self.requests.send(work).is_ok();
     }
 
     #[cfg(test)]
@@ -204,23 +318,35 @@ impl LibrarySync {
         self.exported = None;
     }
 
-    /// Takes in what the thread finished and starts what is due. `folder`
-    /// is the library folder synced, `None` while sync is off.
-    pub fn poll(&mut self, library: &mut LibraryStore, folder: Option<PathBuf>) -> Vec<String> {
+    /// Takes in what the thread finished and starts what is due. `target`
+    /// is where the library syncs, `None` while sync is off; `store` keeps
+    /// a remote store's secret.
+    pub fn poll(
+        &mut self,
+        library: &mut LibraryStore,
+        target: Option<Target>,
+        store: &Arc<dyn CredentialStore>,
+    ) -> Vec<String> {
         let mut notices = Vec::new();
-        if folder != self.folder {
-            self.folder = folder;
+        if target != self.target {
+            self.target = target;
             self.exported = None;
             self.last_read = None;
+            self.mirror_at = None;
             self.pending.clear();
-            self.status = SyncStatus::default();
+            let probe = self.status.probe.take();
+            self.status = SyncStatus {
+                probe,
+                ..SyncStatus::default()
+            };
         }
         while let Ok(done) = self.results.try_recv() {
             self.take(done, library, &mut notices);
         }
-        let Some(folder) = self.folder.clone() else {
+        let Some(target) = self.target.clone() else {
             return notices;
         };
+        let folder = target.folder.clone();
         let journal = Journal::in_library(&folder);
         let now = Instant::now();
 
@@ -270,6 +396,22 @@ impl LibrarySync {
                 Ok(_) => {}
                 Err(error) => self.status.error = Some(format!("{error:#}")),
             }
+        }
+
+        // Mirror the store: this computer's changes up, the others' down.
+        if let Some(remote) = &target.remote
+            && !self.mirroring
+            && !self.writing
+            && self.mirror_at.is_none_or(|at| now >= at)
+        {
+            self.mirror_at = Some(now + self.mirror_every);
+            let work = Work::Mirror {
+                target: remote.clone(),
+                store: store.clone(),
+                folder: folder.clone(),
+            };
+            self.mirroring = self.requests.send(work).is_ok();
+            self.status.mirroring = self.mirroring;
         }
 
         // Read the others.
@@ -347,6 +489,9 @@ impl LibrarySync {
             }
             Done::Written(result) => {
                 self.writing = false;
+                // Up to the store soon.
+                let soon = Instant::now() + self.mirror_after_write;
+                self.mirror_at = self.mirror_at.map(|at| at.min(soon));
                 match result {
                     Ok(written) => {
                         for (seq, digest) in written {
@@ -405,11 +550,34 @@ impl LibrarySync {
                     self.status.error = Some(error);
                 }
             }
+            Done::Mirrored(result) => {
+                self.mirroring = false;
+                self.status.mirroring = false;
+                match result {
+                    Ok(report) => {
+                        if !report.downloaded.is_empty() {
+                            // What came down is read now.
+                            self.last_read = None;
+                        }
+                        for copy in report.conflicts {
+                            notices.push(format!(
+                                "A note changed here and elsewhere; yours is kept as {copy}."
+                            ));
+                        }
+                        self.status.error = None;
+                    }
+                    Err(error) => self.status.error = Some(error),
+                }
+            }
+            Done::Probed(result) => {
+                self.probing = false;
+                self.status.probe = Some(result);
+            }
         }
     }
 
     fn compact(&mut self, library: &LibraryStore) {
-        let Some(folder) = &self.folder else {
+        let Some(folder) = self.target.as_ref().map(|target| &target.folder) else {
             return;
         };
         match library.sync_compaction() {
@@ -535,6 +703,45 @@ fn run(work: Work) -> Done {
                 .compact(own, seq, glyphst_sync::wall_ms(), &covers, &changes)
                 .map_err(|error| format!("{error:#}")),
         ),
+        Work::Mirror {
+            target,
+            store,
+            folder,
+        } => Done::Mirrored((|| {
+            let remote = target.with_secret(store.as_ref())?;
+            let operator = remote.operator().map_err(|error| format!("{error:#}"))?;
+            // One per store and library folder: a manifest of another
+            // folder would take its files for ones removed here.
+            let manifest = glyphst_core::paths::data_dir()
+                .join("sync-v1")
+                .join(format!("mirror-{}.json", remote.key_for(&folder)));
+            let mut mirror = Mirror::new(operator, &folder, &manifest, &device_name())
+                .map_err(|error| format!("{error:#}"))?;
+            let mut prefixes = vec!["sync/", "files/"];
+            if target.notes {
+                prefixes.push("notes/");
+            }
+            mirror
+                .run(&prefixes)
+                .map_err(|error| format!("Could not sync with the store: {error:#}"))
+        })()),
+        Work::Probe {
+            target,
+            store,
+            secret,
+        } => Done::Probed((|| {
+            if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+                store
+                    .write_item(target.credential, target.user(), secret.as_bytes())
+                    .map_err(|error| format!("the keychain: {error:#}"))?;
+            }
+            let remote = target.with_secret(store.as_ref())?;
+            let operator = remote.operator().map_err(|error| format!("{error:#}"))?;
+            let manifest = std::env::temp_dir().join("glyphst-probe.json");
+            Mirror::new(operator, Path::new("."), &manifest, "probe")
+                .and_then(|mirror| mirror.probe())
+                .map_err(|error| format!("{error:#}"))
+        })()),
     }
 }
 
@@ -596,12 +803,59 @@ pub fn device_name() -> String {
         .unwrap_or_else(|| "this computer".to_string())
 }
 
-/// The library folder to sync: only one the user chose (the default one
-/// in the data folder is no sync tool's).
-pub fn synced_folder(library: &LibraryStore, enabled: bool) -> Option<PathBuf> {
-    (enabled && library.files_root_chosen())
-        .then(|| library.files_root().map(Path::to_path_buf))
-        .flatten()
+/// Where the library syncs, from the prefs: through a library folder the
+/// user chose (the default one in the data folder is no sync tool's), or
+/// to the store named, once it is named. `vault` is the vault in use.
+pub fn target(
+    library: &LibraryStore,
+    prefs: &crate::prefs::LibraryPrefs,
+    vault: Option<&Path>,
+) -> Option<Target> {
+    use crate::prefs::SyncMode;
+    let folder = library.files_root()?.to_path_buf();
+    let settings = &prefs.sync_remote;
+    let (remote, credential) = match prefs.sync {
+        SyncMode::Off => return None,
+        SyncMode::Folder => {
+            return library.files_root_chosen().then_some(Target {
+                folder,
+                remote: None,
+            });
+        }
+        SyncMode::WebDav if !settings.webdav_url.trim().is_empty() => (
+            Remote::WebDav {
+                url: settings.webdav_url.trim().to_string(),
+                user: settings.webdav_user.trim().to_string(),
+                password: String::new(),
+            },
+            WEBDAV_CREDENTIAL,
+        ),
+        SyncMode::S3
+            if !settings.s3_endpoint.trim().is_empty() && !settings.s3_bucket.trim().is_empty() =>
+        {
+            (
+                Remote::S3 {
+                    endpoint: settings.s3_endpoint.trim().to_string(),
+                    region: settings.s3_region.trim().to_string(),
+                    bucket: settings.s3_bucket.trim().to_string(),
+                    prefix: settings.s3_prefix.trim().to_string(),
+                    access_key_id: settings.s3_key_id.trim().to_string(),
+                    secret_access_key: String::new(),
+                },
+                S3_CREDENTIAL,
+            )
+        }
+        SyncMode::WebDav | SyncMode::S3 => return None,
+    };
+    let notes = vault == Some(folder.join("notes").as_path());
+    Some(Target {
+        folder,
+        remote: Some(RemoteTarget {
+            remote,
+            credential,
+            notes,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -618,6 +872,9 @@ mod tests {
         store: LibraryStore,
         sync: LibrarySync,
         folder: PathBuf,
+        /// The store it mirrors to; none when a sync tool carries it.
+        remote: Option<RemoteTarget>,
+        keys: Arc<dyn CredentialStore>,
     }
 
     impl Machine {
@@ -628,18 +885,31 @@ mod tests {
                 store: LibraryStore::open_for_test(dir.join(format!("{name}.redb"))).unwrap(),
                 sync: quick_sync(),
                 folder,
+                remote: None,
+                keys: Arc::new(glyphst_settings::MemoryCredentials::default()),
             }
         }
 
         /// Polls until the thread is idle and nothing waits.
         fn settle(&mut self) {
+            let started = Instant::now();
             for _ in 0..2_000 {
-                self.sync.poll(&mut self.store, Some(self.folder.clone()));
+                let target = Target {
+                    folder: self.folder.clone(),
+                    remote: self.remote.clone(),
+                };
+                self.sync.poll(&mut self.store, Some(target), &self.keys);
                 let idle = !self.sync.busy()
                     && !self.sync.inbound()
                     && self.sync.exported == Some(self.store.sync_revision())
                     && self.store.sync_outbox().unwrap().is_empty();
-                if idle && self.sync.last_read.is_some() {
+                // With a store, one mirror that began in this call is done.
+                let mirrored = self.remote.is_none()
+                    || self
+                        .sync
+                        .mirror_at
+                        .is_some_and(|at| at > started + self.sync.mirror_every);
+                if idle && mirrored && self.sync.last_read.is_some() {
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(2));
@@ -660,6 +930,8 @@ mod tests {
         let mut sync = LibrarySync::new(&egui::Context::default());
         sync.export_after = Duration::ZERO;
         sync.read_every = Duration::from_millis(30);
+        sync.mirror_every = Duration::from_millis(30);
+        sync.mirror_after_write = Duration::ZERO;
         sync
     }
 
@@ -841,6 +1113,54 @@ mod tests {
             assert!(a.item(title).is_some(), "{title} on a");
             assert!(copy.item(title).is_some(), "{title} on the copy");
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_computers_sync_through_an_s3_bucket() {
+        let stub = glyphst_sync::mirror::s3_stub::start();
+        let dir = folder("s3");
+        let (mut a, mut b) = (Machine::open(&dir, "a"), Machine::open(&dir, "b"));
+        let remote = RemoteTarget {
+            remote: Remote::S3 {
+                endpoint: stub.endpoint.clone(),
+                region: "auto".to_string(),
+                bucket: "library".to_string(),
+                prefix: "glyphst".to_string(),
+                access_key_id: "key".to_string(),
+                secret_access_key: String::new(),
+            },
+            credential: S3_CREDENTIAL,
+            notes: false,
+        };
+        // Each machine's own keychain; the secret goes in with the test.
+        for machine in [&mut a, &mut b] {
+            machine.remote = Some(remote.clone());
+            machine.sync.test(
+                remote.clone(),
+                machine.keys.clone(),
+                Some("secret".to_string()),
+            );
+        }
+        let file = paper(&a.folder, "paper");
+        link(&mut a.store, &file);
+        for _ in 0..4 {
+            a.settle();
+            b.settle();
+        }
+        assert!(
+            matches!(a.sync.status.probe, Some(Ok(_))),
+            "{:?}",
+            a.sync.status
+        );
+        assert!(b.item("paper").is_some(), "{:?}", b.sync.status);
+        assert!(
+            stub.objects
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with("glyphst/sync/devices/"))
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

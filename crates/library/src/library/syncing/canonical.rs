@@ -255,10 +255,9 @@ pub fn canonical(snapshot: &SyncSnapshot) -> BTreeMap<RecordKey, Fields> {
             put(
                 kinds::ITEM,
                 absorbed.to_string(),
-                Fields::from([
-                    ("merged_into".into(), json!(into.to_string())),
-                    ("merged_at".into(), json!(merge.at)),
-                ]),
+                // Not when: each computer merges in its own time, and the
+                // two would overwrite each other's.
+                Fields::from([("merged_into".into(), json!(into.to_string()))]),
             );
         }
     }
@@ -586,8 +585,9 @@ pub fn canonical(snapshot: &SyncSnapshot) -> BTreeMap<RecordKey, Fields> {
             put(
                 kinds::SUGGESTION,
                 pair_key(a, b),
+                // Not the score: each computer's index has its own, and
+                // they would overwrite each other at every refresh.
                 Fields::from([
-                    ("score".into(), json!(suggestion.score)),
                     ("state".into(), value(&suggestion.state)),
                     ("at".into(), json!(suggestion.at)),
                 ]),

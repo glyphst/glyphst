@@ -20,14 +20,16 @@ opendal = { version = "=0.59.5", default-features = false, features = [
     "executors-tokio",
 ], optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }
+tiny_http = { workspace = true, optional = true }
 
 [features]
 # Mirroring the library folder to WebDAV or S3.
 remote = ["dep:opendal", "dep:tokio"]
+# An in-process S3 for tests, here and in the Reader.
+test-support = ["remote", "dep:tiny_http"]
 
 [dev-dependencies]
 opendal = { version = "=0.59.5", default-features = false, features = [
     "services-memory",
     "services-fs",
 ] }
-tiny_http.workspace = true

@@ -61,6 +61,13 @@ impl Remote {
         hex(&Sha256::digest(text.as_bytes()))[..16].to_string()
     }
 
+    /// [`Self::key`] for this store and a library folder: the name of the
+    /// manifest of what the two held.
+    pub fn key_for(&self, folder: &Path) -> String {
+        let text = format!("{}\n{}", self.key(), folder.display());
+        hex(&Sha256::digest(text.as_bytes()))[..16].to_string()
+    }
+
     /// The store, retrying what fails on the way.
     pub fn operator(&self) -> Result<Operator> {
         // The process-wide HTTP transport (reqwest), once.
@@ -375,6 +382,20 @@ impl Mirror {
             .filter(|path| path.starts_with(prefix))
             .cloned()
             .collect::<Vec<_>>();
+        // A folder that lost everything it had (a disk not mounted, a
+        // folder moved) does not empty the store.
+        let based_here = self
+            .manifest
+            .files
+            .keys()
+            .filter(|path| path.starts_with(prefix) && remote.contains_key(*path))
+            .count();
+        if local.is_empty() && based_here > 0 {
+            anyhow::bail!(
+                "{} in the library folder is empty but held {based_here} files; nothing is removed from the store",
+                prefix.trim_end_matches('/')
+            );
+        }
         let paths = remote
             .keys()
             .chain(local.keys())
@@ -646,6 +667,7 @@ mod tests {
         let operator = Operator::new(opendal::services::Memory::default()).unwrap();
         let mut a = computer(&dir, "a", &operator);
         let mut b = computer(&dir, "b", &operator);
+        write(&a.folder, "sync/devices/1/device.json", "{}");
         write(
             &a.folder,
             "sync/devices/1/seg-000000000001.jsonl",
@@ -657,10 +679,10 @@ mod tests {
         write(&a.folder, ".staging/x/half.pdf", "half");
         write(&a.folder, "notes/items/.paper.md.swp", "editor");
         let report = a.run(&ALL).unwrap();
-        assert_eq!(report.uploaded.len(), 3, "{report:?}");
+        assert_eq!(report.uploaded.len(), 4, "{report:?}");
 
         let report = b.run(&ALL).unwrap();
-        assert_eq!(report.downloaded.len(), 3, "{report:?}");
+        assert_eq!(report.downloaded.len(), 4, "{report:?}");
         assert_eq!(
             read(&b.folder, "files/k1/paper.pdf").as_deref(),
             Some("%PDF a big file")
@@ -728,6 +750,24 @@ mod tests {
     }
 
     #[test]
+    fn an_emptied_folder_does_not_empty_the_store() {
+        let dir = folder("emptied");
+        let operator = Operator::new(opendal::services::Memory::default()).unwrap();
+        let mut a = computer(&dir, "a", &operator);
+        write(&a.folder, "files/k1/paper.pdf", "%PDF");
+        a.run(&ALL).unwrap();
+        fs::remove_dir_all(a.folder.join("files")).unwrap();
+        let error = a.run(&ALL).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing is removed"),
+            "{error:#}"
+        );
+        let mut b = computer(&dir, "b", &operator);
+        assert_eq!(b.run(&ALL).unwrap().downloaded.len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn web_addresses_split_into_server_and_folder() {
         assert_eq!(
             split_url("https://cloud.example.org/remote.php/dav/files/me/Glyphst/"),
@@ -753,8 +793,8 @@ mod tests {
 /// A small S3 for tests: path-style buckets, objects in memory, listing
 /// two keys a page, ranges, single and batch deletes. Signatures are not
 /// checked; the requests are opendal's own.
-#[cfg(test)]
-mod s3_stub {
+#[cfg(feature = "test-support")]
+pub mod s3_stub {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
@@ -964,7 +1004,7 @@ mod s3_stub {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod s3_tests {
     use super::*;
 

@@ -314,6 +314,8 @@ if [[ ${tier} == screens ]]; then
         "07-library-search @ --settings library:search --library-demo search"
         "07s-library-sync @ --settings library:sync --library-demo sync"
         "07s-library-sync-conflicts @ --settings library:sync --library-demo sync-conflicts"
+        "07s-library-sync-s3 @ --settings library:sync --library-demo sync-s3"
+        "07s-library-sync-webdav @ --settings library:sync --library-demo sync-webdav"
         "07-effects @ --settings effects"
         "07-translation @ --settings translation"
         "07-ai @ --settings ai"

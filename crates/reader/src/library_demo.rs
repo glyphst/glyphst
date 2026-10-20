@@ -11,7 +11,7 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 20] = [
+pub const STATES: [&str; 22] = [
     "all",
     "item",
     "pages",
@@ -31,6 +31,8 @@ pub const STATES: [&str; 20] = [
     "zotero-done",
     "sync",
     "sync-conflicts",
+    "sync-s3",
+    "sync-webdav",
     "join",
 ];
 

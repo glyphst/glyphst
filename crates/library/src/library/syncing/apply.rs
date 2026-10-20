@@ -975,11 +975,16 @@ impl Work {
             };
         };
         let row = self.knowledge.suggestions.entry(pair.0.0).or_default();
+        // The score is this computer's own, when it has one.
+        let score = row
+            .iter()
+            .find(|suggestion| suggestion.other == pair.1)
+            .map_or(0.0, |suggestion| suggestion.score);
         row.retain(|suggestion| suggestion.other != pair.1);
         if !record.deleted {
             row.push(RelatedSuggestion {
                 other: pair.1,
-                score: record.get("score").unwrap_or(0.0),
+                score,
                 state: record.get("state").unwrap_or(AssignmentState::Suggested),
                 at: record.get("at").unwrap_or(0),
             });

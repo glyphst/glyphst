@@ -122,6 +122,25 @@ pub struct LibraryPrefs {
     pub learn_from_opened: bool,
     /// How the library syncs with this person's other computers.
     pub sync: SyncMode,
+    /// The WebDAV server or S3 bucket it syncs through (the secret is in
+    /// the keychain).
+    pub sync_remote: SyncRemotePrefs,
+}
+
+/// Where the library syncs when it is not through a sync tool.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncRemotePrefs {
+    pub s3_endpoint: String,
+    /// `auto` for Cloudflare R2; the bucket's region elsewhere.
+    pub s3_region: String,
+    pub s3_bucket: String,
+    /// A folder in the bucket, or empty.
+    pub s3_prefix: String,
+    pub s3_key_id: String,
+    /// The library's folder on the server.
+    pub webdav_url: String,
+    pub webdav_user: String,
 }
 
 /// Where the library's changes go to reach other computers.
@@ -132,6 +151,10 @@ pub enum SyncMode {
     /// Through the library folder, which a sync tool (Syncthing, iCloud,
     /// Dropbox) carries.
     Folder,
+    /// Mirrored to a WebDAV server (Nextcloud, a NAS).
+    WebDav,
+    /// Mirrored to an S3 bucket (Cloudflare R2, Backblaze B2).
+    S3,
 }
 
 impl LibraryPrefs {
@@ -167,6 +190,7 @@ impl Default for LibraryPrefs {
             vault: None,
             folder_asked: false,
             sync: SyncMode::Off,
+            sync_remote: SyncRemotePrefs::default(),
         }
     }
 }

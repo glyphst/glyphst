@@ -179,6 +179,8 @@ pub struct SettingsWindow {
     pub scroll_to: Option<String>,
     /// Settings › Library lists the sync's conflicts.
     pub show_conflicts: bool,
+    /// The store's secret as typed, until tested (then in the keychain).
+    pub sync_secret: String,
     /// The settings search.
     query: String,
     /// Installed families for the font pickers (chrome, prose), read once.
@@ -260,6 +262,8 @@ pub enum LibraryAction {
     RegisterLinks,
     /// Read the other computers' changes now.
     SyncNow,
+    /// Keep the typed secret in the keychain and try the store.
+    TestSync,
     /// Open a note's copy in the system's editor.
     OpenFile(std::path::PathBuf),
 }
@@ -342,26 +346,40 @@ fn model_buttons(
 /// what could not be kept.
 fn sync_group(
     ui: &mut egui::Ui,
-    mode: &mut crate::prefs::SyncMode,
+    library: &mut crate::prefs::LibraryPrefs,
     facts: &LibraryFacts,
     actions: &mut Vec<LibraryAction>,
     show_conflicts: &mut bool,
+    sync_secret: &mut String,
 ) {
     use crate::library_sync::{ago, ahead};
     use crate::prefs::SyncMode;
     let status = &facts.sync;
+    let mode = &mut library.sync;
     ui_settings::group(ui, "sync", |group| {
-        let caption = if facts.folder_chosen {
-            "a sync tool (syncthing, icloud, dropbox) carries the library folder"
-        } else {
-            "choose a library folder first, one a sync tool carries"
+        let caption = match *mode {
+            SyncMode::Folder | SyncMode::Off if !facts.folder_chosen => {
+                "through a library folder a sync tool carries, or a webdav server or s3 bucket"
+            }
+            SyncMode::Off | SyncMode::Folder => {
+                "a sync tool (syncthing, icloud, dropbox) carries the library folder"
+            }
+            SyncMode::WebDav => "nextcloud, a nas, any webdav · glyphst mirrors the library there",
+            SyncMode::S3 => {
+                "cloudflare r2, backblaze b2, any s3 · glyphst mirrors the library there"
+            }
         };
         group.row("sync with", Some(caption), |ui| {
             let before = *mode;
             glyphst_ui::segmented::labels(
                 ui,
                 mode,
-                &[(SyncMode::Off, "off"), (SyncMode::Folder, "library folder")],
+                &[
+                    (SyncMode::Off, "off"),
+                    (SyncMode::Folder, "library folder"),
+                    (SyncMode::WebDav, "webdav"),
+                    (SyncMode::S3, "s3"),
+                ],
             );
             if *mode != before && *mode == SyncMode::Folder && !facts.folder_chosen {
                 *mode = SyncMode::Off;
@@ -372,6 +390,97 @@ fn sync_group(
             return;
         }
         let tokens = theme::Tokens::get(group.ctx());
+        let remote = &mut library.sync_remote;
+        let field = |group: &mut ui_settings::Group<'_>,
+                     label: &str,
+                     caption: Option<&str>,
+                     value: &mut String,
+                     hint: &str| {
+            group.row(label, caption, |ui| {
+                TextField::new(value, hint).width(320.0).show(ui);
+            });
+        };
+        match *mode {
+            SyncMode::S3 => {
+                field(
+                    group,
+                    "endpoint",
+                    None,
+                    &mut remote.s3_endpoint,
+                    "https://<account>.r2.cloudflarestorage.com",
+                );
+                field(
+                    group,
+                    "region",
+                    Some("r2: auto · b2: the bucket's, like us-west-004"),
+                    &mut remote.s3_region,
+                    "auto",
+                );
+                field(group, "bucket", None, &mut remote.s3_bucket, "glyphst");
+                field(
+                    group,
+                    "prefix",
+                    Some("a folder in the bucket, or empty"),
+                    &mut remote.s3_prefix,
+                    "library/",
+                );
+                field(group, "access key id", None, &mut remote.s3_key_id, "");
+            }
+            SyncMode::WebDav => {
+                field(
+                    group,
+                    "url",
+                    Some("the library's folder on the server"),
+                    &mut remote.webdav_url,
+                    "https://cloud.example.org/remote.php/dav/files/me/Glyphst",
+                );
+                field(group, "user", None, &mut remote.webdav_user, "");
+            }
+            SyncMode::Off | SyncMode::Folder => {}
+        }
+        if matches!(*mode, SyncMode::S3 | SyncMode::WebDav) {
+            let label = if *mode == SyncMode::S3 {
+                "secret"
+            } else {
+                "password"
+            };
+            group.row(
+                label,
+                Some("kept in the system keychain once tested · an app password works best"),
+                |ui| {
+                    glyphst_ui::text::fitted(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(sync_secret)
+                                .margin(glyphst_ui::text::FIELD_MARGIN)
+                                .password(true)
+                                .hint_text("unchanged")
+                                .desired_width(320.0),
+                        )
+                    });
+                },
+            );
+            let (text, colour) = match &status.probe {
+                None => ("not tried yet".to_string(), tokens.muted),
+                Some(Ok(files)) => (
+                    format!("● connected · {files} files of other computers' changes"),
+                    tokens.ok,
+                ),
+                Some(Err(error)) => (format!("▲ {error}"), tokens.err),
+            };
+            group.row_with(
+                "connection",
+                Some(
+                    egui::RichText::new(text)
+                        .font(theme::regular(12.0))
+                        .color(colour),
+                ),
+                |ui| {
+                    if ui.add(Button::bracket("test connection")).clicked() {
+                        actions.push(LibraryAction::TestSync);
+                    }
+                },
+            );
+        }
         let (text, colour) = match (&status.error, status.last_synced) {
             (Some(error), _) => (format!("▲ {error}"), tokens.err),
             (None, Some(at)) => {
@@ -476,6 +585,7 @@ fn library(
     actions: &mut Vec<LibraryAction>,
     scroll_to: &mut Option<String>,
     show_conflicts: &mut bool,
+    sync_secret: &mut String,
 ) {
     use crate::prefs::{AddOnOpen, ImportMode};
     let library = &mut prefs.library;
@@ -534,7 +644,7 @@ fn library(
         ui.scroll_to_rect(at, Some(egui::Align::Min));
         *scroll_to = None;
     }
-    sync_group(ui, &mut library.sync, facts, actions, show_conflicts);
+    sync_group(ui, library, facts, actions, show_conflicts, sync_secret);
     ui.add_space(10.0);
     ui_settings::group(ui, "adding", |group| {
         group.row(
@@ -1008,6 +1118,7 @@ impl SettingsWindow {
                         &mut self.library_actions,
                         &mut self.scroll_to,
                         &mut self.show_conflicts,
+                        &mut self.sync_secret,
                     ),
                     Section::Effects => {
                         // The previews are animated.

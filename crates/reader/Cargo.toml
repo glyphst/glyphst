@@ -40,7 +40,7 @@ glyphst-search = { path = "../search" }
 glyphst-settings = { path = "../settings", features = ["keychain"] }
 glyphst-translation = { path = "../translation" }
 glyphst-ui = { path = "../ui" }
-glyphst-sync = { path = "../sync" }
+glyphst-sync = { path = "../sync", features = ["remote"] }
 glyphst-vault = { path = "../vault" }
 glyphst-zotero-import = { path = "../zotero-import" }
 image.workspace = true
@@ -74,3 +74,4 @@ wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
 glyphst-library = { path = "../library", features = ["test-support"] }
 glyphst-pdf = { path = "../pdf", features = ["test-support"] }
 glyphst-search = { path = "../search", features = ["test-support"] }
+glyphst-sync = { path = "../sync", features = ["test-support"] }

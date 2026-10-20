@@ -906,6 +906,33 @@ impl ReaderApp {
                     ];
                     app.settings_window.show_conflicts = true;
                 }
+                // The forms, filled in, with a test's result each.
+                let remote = &mut app.prefs.library.sync_remote;
+                match state.as_str() {
+                    "sync-s3" => {
+                        app.prefs.library.sync = crate::prefs::SyncMode::S3;
+                        remote.s3_endpoint = "https://8a3f0c.r2.cloudflarestorage.com".to_string();
+                        remote.s3_region = "auto".to_string();
+                        remote.s3_bucket = "glyphst".to_string();
+                        remote.s3_prefix = "library/".to_string();
+                        remote.s3_key_id = "a51c0e7d9e2".to_string();
+                        app.settings_window.sync_secret = "secret-in-the-keychain".to_string();
+                        status.probe = Some(Ok(1_284));
+                    }
+                    "sync-webdav" => {
+                        app.prefs.library.sync = crate::prefs::SyncMode::WebDav;
+                        remote.webdav_url =
+                            "https://cloud.example.org/remote.php/dav/files/me/Glyphst".to_string();
+                        remote.webdav_user = "me".to_string();
+                        app.settings_window.sync_secret = "password".to_string();
+                        status.probe = Some(Err(
+                            "401 · the server refused the user or password".to_string()
+                        ));
+                        status.devices.clear();
+                        status.last_synced = None;
+                    }
+                    _ => {}
+                }
                 app.library_sync.show_status(status);
             }
             app.library_dialog = match state.as_str() {
@@ -4261,6 +4288,27 @@ impl ReaderApp {
                         self.library_sync.sync_now();
                         continue;
                     }
+                    LibraryAction::TestSync => {
+                        let secret = std::mem::take(&mut self.settings_window.sync_secret);
+                        let vault = self.vault_root();
+                        match crate::library_sync::target(
+                            &self.library,
+                            &self.prefs.library,
+                            vault.as_deref(),
+                        )
+                        .and_then(|target| target.remote)
+                        {
+                            Some(remote) => self.library_sync.test(
+                                remote,
+                                self.user_settings.store(),
+                                Some(secret),
+                            ),
+                            None => self
+                                .notices
+                                .push("Fill in where the library goes first.".to_string()),
+                        }
+                        continue;
+                    }
                     LibraryAction::OpenFile(path) => {
                         self.library_tab_action(
                             crate::library_tab::LibraryTabAction::OpenNote(path),
@@ -4290,6 +4338,7 @@ impl ReaderApp {
                     | LibraryAction::ForgetOpened
                     | LibraryAction::RegisterLinks
                     | LibraryAction::SyncNow
+                    | LibraryAction::TestSync
                     | LibraryAction::OpenFile(_) => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
@@ -5597,11 +5646,11 @@ impl eframe::App for ReaderApp {
                 self.sync_backed_up = true;
                 self.sync_backup();
             }
-            let folder = crate::library_sync::synced_folder(
-                &self.library,
-                self.prefs.library.sync == crate::prefs::SyncMode::Folder,
-            );
-            for notice in self.library_sync.poll(&mut self.library, folder) {
+            let vault = self.vault_root();
+            let target =
+                crate::library_sync::target(&self.library, &self.prefs.library, vault.as_deref());
+            let keys = self.user_settings.store();
+            for notice in self.library_sync.poll(&mut self.library, target, &keys) {
                 self.notices.push(notice);
             }
             self.importer.poll(&mut self.library);
