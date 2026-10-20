@@ -233,6 +233,9 @@ struct Editing {
 pub struct Assistant {
     pub open: bool,
     session_id: u64,
+    /// The library item the conversation is about, when it started from
+    /// one (`[ask]`): it continues there.
+    item: Option<glyphst_library::DocumentId>,
     created: u64,
     messages: Vec<ChatMessage>,
     /// What the panel shows of each message, by index.
@@ -348,6 +351,7 @@ impl Default for Assistant {
         Self {
             open: false,
             session_id: 0,
+            item: None,
             created: 0,
             messages: Vec::new(),
             views: Vec::new(),
@@ -978,6 +982,7 @@ impl Assistant {
         self.stop();
         self.run = None;
         self.session_id = 0;
+        self.item = None;
         self.created = 0;
         self.messages.clear();
         self.views.clear();
@@ -1084,6 +1089,7 @@ impl Assistant {
         };
         self.new_session();
         self.session_id = session.id;
+        self.item = session.item;
         self.created = session.created;
         self.title = Some(session.title);
         self.summary = session.summary;
@@ -1094,6 +1100,28 @@ impl Assistant {
             self.messages.push(chat);
             self.views.push(view);
         }
+    }
+
+    /// Continues the latest conversation about library item `item`, or
+    /// starts one about it.
+    pub fn ask_about(&mut self, item: glyphst_library::DocumentId, library: &LibraryStore) {
+        if self.item == Some(item) {
+            return;
+        }
+        self.refresh_sessions(library);
+        match library.latest_item_session(item).map(|session| session.id) {
+            Some(id) => self.load_session(id, library),
+            None => {
+                self.new_session();
+                self.item = Some(item);
+            }
+        }
+    }
+
+    /// The item the conversation is about.
+    #[cfg(test)]
+    pub fn item(&self) -> Option<glyphst_library::DocumentId> {
+        self.item
     }
 
     /// Saves the conversation as a library AI session.
@@ -1128,7 +1156,7 @@ impl Assistant {
             .map(|(message, view)| session_message(message, view, library))
             .collect();
         let session = AiSession {
-            item: None,
+            item: self.item,
             id: self.session_id,
             title,
             messages,
@@ -1865,6 +1893,62 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn asking_about_an_item_continues_its_conversation() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings
+            .ai
+            .provider_config_mut(AiProvider::OpenAi)
+            .api_key
+            .clear();
+        let ask = || AskContext {
+            path: "doc.pdf".into(),
+            id: "doc_1".into(),
+            title: "doc.pdf".into(),
+            authors: None,
+            section: None,
+            others: Vec::new(),
+            layout: DocumentLayout::Fixed,
+            page_count: 1,
+            current_page: 0,
+            page_text: None,
+            selection: None,
+            library: None,
+        };
+        let mut library = LibraryStore::memory();
+        let (paper, other) = (
+            glyphst_library::DocumentId(5),
+            glyphst_library::DocumentId(6),
+        );
+        let mut assistant = Assistant::default();
+        assistant.ask_about(paper, &library);
+        assert_eq!(assistant.item(), Some(paper));
+        assistant.send(
+            Draft::plain("What does it claim?"),
+            ask(),
+            ToolRegistry::new(),
+            None,
+            &settings,
+            &ctx,
+        );
+        assistant.save(&mut library);
+
+        // Another item starts afresh; the first continues where it was.
+        assistant.ask_about(other, &library);
+        assert!(assistant.messages().is_empty());
+        assert_eq!(assistant.item(), Some(other));
+        assistant.ask_about(paper, &library);
+        assert_eq!(assistant.messages().len(), 1);
+        assert_eq!(
+            assistant.messages()[0].display_text(),
+            "What does it claim?"
+        );
+        // A plain new chat is about nothing.
+        assistant.new_session();
+        assert_eq!(assistant.item(), None);
     }
 
     #[test]

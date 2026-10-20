@@ -51,8 +51,12 @@ pub enum View {
 /// What the tab asks the app to do.
 pub enum LibraryTabAction {
     Open(PathBuf),
-    /// Ask the assistant about the item's document.
-    Ask(PathBuf),
+    /// Ask the assistant about an item: its conversation continues, with
+    /// its document open when it has one.
+    Ask {
+        item: DocumentId,
+        path: Option<PathBuf>,
+    },
     /// Run the AI pass on the item again.
     Enrich(DocumentId),
     /// Keep or reject one of the AI's tags or collections.
@@ -946,9 +950,12 @@ impl LibraryTab {
             {
                 action = Some(LibraryTabAction::OpenNote(note.clone()));
             }
-            if with_open && foot_ui.add(Button::bracket_muted("ask")).clicked() {
-                action = Some(LibraryTabAction::Ask(path.clone()));
-            }
+        }
+        if with_open && foot_ui.add(Button::bracket_muted("ask")).clicked() {
+            action = Some(LibraryTabAction::Ask {
+                item: id,
+                path: path.clone(),
+            });
         }
         foot_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(Button::bracket_muted("◆ re-run")).clicked() {

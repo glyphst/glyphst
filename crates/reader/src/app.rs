@@ -1582,11 +1582,14 @@ impl ReaderApp {
                 self.open(&path, ctx, None);
                 Ok(())
             }
-            Action::Ask(path) => {
-                self.open(&path, ctx, None);
+            Action::Ask { item, path } => {
+                if let Some(path) = &path {
+                    self.open(path, ctx, None);
+                }
                 if !self.assistant.open {
                     self.toggle_assistant();
                 }
+                self.assistant.ask_about(item, &self.library);
                 Ok(())
             }
             Action::Enrich(id) => self
