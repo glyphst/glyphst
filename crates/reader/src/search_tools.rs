@@ -64,7 +64,7 @@ impl IndexHandle {
         }
     }
 
-    fn open(&self) -> Result<Store> {
+    pub(crate) fn open(&self) -> Result<Store> {
         let path = self
             .0
             .read()

@@ -64,6 +64,7 @@ mod meaning;
 mod overview;
 mod pad;
 mod pad_keys;
+mod page_writer;
 mod pages;
 mod palette;
 mod panes;

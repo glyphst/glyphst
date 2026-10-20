@@ -2,8 +2,11 @@
 //! and no keys. The translation server speaks the Google Translation API
 //! (as `translation/src/tests.rs` fakes it) and returns each text in «».
 //! The AI server speaks OpenAI's streaming chat completions: it first asks
-//! for a `search_document` call, then answers in Markdown. It lists
-//! [`FAKE_MODELS`] as its models.
+//! for a `search_document` call, then answers in Markdown. Asked for a
+//! concept page, it searches the library and writes one that cites the
+//! first passage found, plus a made-up passage and a note that does not
+//! exist (which the page writer must drop). It lists [`FAKE_MODELS`] as
+//! its models.
 
 use std::thread;
 
@@ -91,6 +94,35 @@ pub const FAKE_ENRICHMENT: &str = r#"{"tldr":"A fake summary of the item.","key_
 pub const FAKE_ANSWER: &str = "## In short\n\nThe document **mentions** this in two places:\n\n\
 1. on the first page\n2. near the end\n\nSee `search_document` above.";
 
+/// The library search the fake model runs for a concept page.
+pub const FAKE_PAGE_SEARCH: &str = "attention";
+
+/// The fake model's page: the first passage the search found, cited twice,
+/// a made-up passage, the first source's note and a note that does not
+/// exist.
+fn fake_page(conversation: &str, last: &str) -> String {
+    let found = last
+        .find("glyphst://open?id=")
+        .map(|start| {
+            let rest = &last[start..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || "/:?=&_".contains(c)))
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        })
+        .unwrap_or_default();
+    let source = conversation
+        .split("[[")
+        .nth(1)
+        .and_then(|rest| rest.split("]]").next())
+        .unwrap_or("nobody");
+    format!(
+        "Attention lets a model weigh every token [p 1]({found}), as [[{source}]] shows; \
+         it was also invented on the moon [p 9](glyphst://open?id=1&page=9&chunk=999999).\n\n\
+         ## In practice\n\nSee [[no-such-note]] and again [the passage]({found})."
+    )
+}
+
 /// Starts the fake AI server; returns its port.
 pub fn start_ai_server() -> Result<u16> {
     let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
@@ -129,8 +161,14 @@ pub fn start_ai_server() -> Result<u16> {
                     .and_then(|messages| messages.last())
                     .map(|message| message["content"].to_string())
                     .unwrap_or_default();
+                let all = query["messages"].to_string();
+                let page = all
+                    .contains("<concept_page>")
+                    .then(|| fake_page(&all, &last));
                 // Titles and summaries are answered at once.
-                let reply = if last.contains("Generate a concise") {
+                let reply = if page.is_some() && answered {
+                    page.as_deref()
+                } else if last.contains("Generate a concise") {
                     Some(FAKE_TITLE)
                 } else if last.contains("Summarize this conversation") {
                     Some(FAKE_SUMMARY)
@@ -152,13 +190,21 @@ pub fn start_ai_server() -> Result<u16> {
                     events.push(json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}));
                     events
                 } else {
+                    let (tool, arguments) = if page.is_some() {
+                        ("search_library", json!({"query": FAKE_PAGE_SEARCH}))
+                    } else {
+                        (
+                            "search_document",
+                            json!({"query": FAKE_SEARCH, "max_results": 3}),
+                        )
+                    };
                     vec![
                         json!({"choices": [{"delta": {"tool_calls": [{
                             "index": 0,
                             "id": "call_1",
                             "function": {
-                                "name": "search_document",
-                                "arguments": json!({"query": FAKE_SEARCH, "max_results": 3}).to_string()
+                                "name": tool,
+                                "arguments": arguments.to_string()
                             }
                         }]}}]}),
                         json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),

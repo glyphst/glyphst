@@ -5,6 +5,7 @@ pub mod chatgpt_subscription;
 pub mod compaction;
 pub mod enrichment;
 mod json;
+pub mod pages;
 pub mod prompt;
 pub mod tools;
 pub mod translation;
