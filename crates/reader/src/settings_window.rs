@@ -219,6 +219,8 @@ pub struct LibraryFacts {
     pub meaning: Option<crate::meaning::MeaningCard>,
     /// The reranker's.
     pub rerank: Option<crate::meaning::MeaningCard>,
+    /// The desktop entry that opens `glyphst://` links, when known.
+    pub link_handler: Option<String>,
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -248,6 +250,8 @@ pub enum LibraryAction {
     Rerank(crate::meaning::MeaningAction),
     /// Forget the searches and the passages opened from them.
     ForgetOpened,
+    /// Make this Reader open `glyphst://` links from other apps.
+    RegisterLinks,
 }
 
 /// The caption of a downloaded model's row (search by meaning, the
@@ -366,6 +370,22 @@ fn library(
                 }
             },
         );
+        let registered = facts.link_handler.as_deref() == Some(crate::instance::HANDLER_ENTRY);
+        let caption = match &facts.link_handler {
+            _ if registered => "citations clicked in obsidian and other apps open here".to_string(),
+            Some(other) => format!("{other} opens them now"),
+            None => "open citations from obsidian and other apps here".to_string(),
+        };
+        group.row("glyphst:// links", Some(&*caption), |ui| {
+            let button = if registered {
+                Button::bracket_muted("register again")
+            } else {
+                Button::bracket("register")
+            };
+            if ui.add(button).clicked() {
+                actions.push(LibraryAction::RegisterLinks);
+            }
+        });
     });
     ui.add_space(10.0);
     ui_settings::group(ui, "adding", |group| {

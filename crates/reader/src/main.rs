@@ -47,6 +47,7 @@ mod gpu;
 mod harness;
 mod home;
 mod import;
+mod instance;
 mod keymap_page;
 mod keys;
 mod launcher;
@@ -106,6 +107,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
         files: Vec::new(),
+        urls: Vec::new(),
         harness: None,
         background: None,
         transition: None,
@@ -383,6 +385,7 @@ fn parse_args() -> Result<Launch> {
                 std::process::exit(0);
             }
             _ if arg.starts_with("--") => bail!("unknown option {arg}\n{USAGE}"),
+            _ if arg.starts_with(links::SCHEME) => launch.urls.push(arg),
             _ => launch
                 .files
                 .push(std::path::absolute(&arg).unwrap_or_else(|_| PathBuf::from(&arg))),
@@ -450,6 +453,14 @@ fn main() -> Result<()> {
         return eval_search::run(std::env::args().nth(2).map(PathBuf::from));
     }
     let launch = parse_args()?;
+    // A link clicked in another app: the running Reader opens it.
+    if launch.harness.is_none() && !launch.urls.is_empty() {
+        match instance::forward(&instance::socket_path(), &launch.urls) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => log::warn!("could not reach the running Reader: {error}"),
+        }
+    }
     // Scripted runs keep no preferences, so they cannot change the user's.
     // They get a file of their own, removed on exit: without a path eframe
     // falls back to a shared default file, and each run would start at the

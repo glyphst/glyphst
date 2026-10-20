@@ -148,6 +148,7 @@ in
           --set GLYPHST_FONTS_DIR $out/share/glyphst-reader/fonts \
           --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
         install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
+        install -Dm644 crates/reader/glyphst-reader-url.desktop $out/share/applications/glyphst-reader-url.desktop
       '';
 
       meta = {

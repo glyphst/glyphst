@@ -105,6 +105,8 @@ const SELECT_SCROLL: f64 = 14.0;
 /// How the app was started.
 pub struct Launch {
     pub files: Vec<PathBuf>,
+    /// `glyphst://` links to open once the library is up.
+    pub urls: Vec<String>,
     pub harness: Option<Harness>,
     pub background: Option<String>,
     /// Book switches' and page turns' transition.
@@ -306,6 +308,12 @@ pub struct ReaderApp {
     /// The animations over pages that are slow to load.
     pub(crate) generations: Generations,
     started: Instant,
+    /// Links other processes forward to this Reader (`instance.rs`), and
+    /// links waiting for the library's search to locate their passages.
+    instance: Option<crate::instance::Instance>,
+    pending_links: Vec<crate::links::OpenLink>,
+    /// Which app opens `glyphst://` links, asked once for Settings.
+    link_handler: Option<Option<String>>,
     pub(crate) pads: Pads,
     pad_router: Router,
     pub(crate) pad_keymap: crate::pad_keys::PadKeymap,
@@ -630,6 +638,19 @@ impl ReaderApp {
             switcher_click: None,
             generations: Generations::default(),
             started: Instant::now(),
+            instance: if persist {
+                crate::instance::Instance::listen(&crate::instance::socket_path(), &cc.egui_ctx)
+                    .map_err(|error| log::info!("links from other apps go elsewhere: {error}"))
+                    .ok()
+            } else {
+                None
+            },
+            pending_links: launch
+                .urls
+                .iter()
+                .filter_map(|url| crate::links::parse(url))
+                .collect(),
+            link_handler: None,
             pads,
             pad_router: Router::default(),
             pad_keymap: Default::default(),
@@ -3947,6 +3968,13 @@ impl ReaderApp {
                     crate::meaning::card(&self.meaning.state()),
                     &self.meaning_runtime.status(),
                 )),
+                link_handler: if self.persist {
+                    self.link_handler
+                        .get_or_insert_with(crate::instance::handler)
+                        .clone()
+                } else {
+                    None
+                },
                 rerank: Some(crate::meaning::with_engine(
                     crate::meaning::card(&self.rerank.state()),
                     &self.rerank_runtime.status(),
@@ -4004,6 +4032,18 @@ impl ReaderApp {
                         }
                         continue;
                     }
+                    LibraryAction::RegisterLinks => {
+                        match crate::instance::register() {
+                            Ok(()) => self.notices.push(
+                                "glyphst:// links from other apps open here now.".to_string(),
+                            ),
+                            Err(error) => self.notices.push(format!(
+                                "Could not register for glyphst:// links: {error:#}"
+                            )),
+                        }
+                        self.link_handler = None;
+                        continue;
+                    }
                     _ => {}
                 }
                 self.settings_window.open = false;
@@ -4011,7 +4051,8 @@ impl ReaderApp {
                     LibraryAction::Reindex
                     | LibraryAction::Meaning(_)
                     | LibraryAction::Rerank(_)
-                    | LibraryAction::ForgetOpened => {}
+                    | LibraryAction::ForgetOpened
+                    | LibraryAction::RegisterLinks => {}
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5700,7 +5741,27 @@ impl eframe::App for ReaderApp {
             self.last_position_save = now;
         }
 
-        // Links to the library (the assistant's citations) open here.
+        // Links to the library (the assistant's citations) open here, and
+        // those other apps forwarded, once the search can find passages.
+        let forwarded = self
+            .instance
+            .as_ref()
+            .map(|instance| instance.take())
+            .unwrap_or_default();
+        if !forwarded.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        self.pending_links
+            .extend(forwarded.iter().filter_map(|url| crate::links::parse(url)));
+        if !self.pending_links.is_empty()
+            && (self.library_search.is_some() || self.started.elapsed() > Duration::from_secs(3))
+        {
+            for link in std::mem::take(&mut self.pending_links) {
+                if let Err(error) = self.open_link(link, &ctx) {
+                    self.notices.push(error);
+                }
+            }
+        }
         for link in crate::links::take(&ctx) {
             if let Err(error) = self.open_link(link, &ctx) {
                 self.notices.push(error);

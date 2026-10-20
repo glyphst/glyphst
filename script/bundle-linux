@@ -162,6 +162,7 @@ while IFS= read -r line; do
 done <<<"$ldd_output"
 
 cp "$workspace_dir/crates/reader/glyphst-reader.desktop" "$desktop_dir/glyphst-reader.desktop"
+cp "$workspace_dir/crates/reader/glyphst-reader-url.desktop" "$desktop_dir/glyphst-reader-url.desktop"
 cp -R "$fonts_dir/fonts" "$fonts_dir/README.md" "$fonts_dir/ATTRIBUTION.md" "$share_dir/fonts/"
 cp -R "$workspace_dir/crates/pdf-translation/assets" "$share_dir/pdf-translation"
 cp "$workspace_dir/LICENSE" "$bundle_dir/LICENSE"
