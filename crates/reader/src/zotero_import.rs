@@ -1088,14 +1088,13 @@ impl ZoteroImport {
             .files_root()
             .map(home_relative)
             .unwrap_or_else(|| "the library".to_string());
-        let copy_label = format!("copy into {root}");
-        glyphst_ui::segmented::labels(
-            ui,
-            &mut self.options.mode,
-            &[
-                (ImportMode::Copy, copy_label.as_str()),
-                (ImportMode::Link, "link in place"),
-            ],
+        // The library is its folder: Zotero's files are copied in, its
+        // linked ones too.
+        self.options.mode = ImportMode::Copy;
+        ui.label(
+            egui::RichText::new(format!("copied into {root}"))
+                .font(theme::mono(11.0))
+                .color(tokens.text_2),
         );
         label(ui, tokens, "include");
         ui.scope(|ui| {

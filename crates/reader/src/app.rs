@@ -463,6 +463,8 @@ pub struct ReaderApp {
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
     library_sync: crate::library_sync::LibrarySync,
+    /// A scripted run shows the canned library (`--library-demo`).
+    demo_library: bool,
     /// The database was copied aside before syncing (once a run).
     sync_backed_up: bool,
     /// The sidebar's item card (its note, read once per item).
@@ -757,6 +759,7 @@ impl ReaderApp {
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
             library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
+            demo_library: false,
             sync_backed_up: false,
             sidebar_card: Default::default(),
             library_dialog: None,
@@ -772,7 +775,14 @@ impl ReaderApp {
         };
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
-            app.library = crate::library_demo::library(launch.files.first().map(PathBuf::as_path));
+            app.demo_library = true;
+            // `outside`: the document open is not one of the library's.
+            let document = launch
+                .files
+                .first()
+                .map(PathBuf::as_path)
+                .filter(|_| state != "outside");
+            app.library = crate::library_demo::library(document);
             // With a document the run shows it (its sidebar's item tab).
             if launch.files.is_empty() {
                 app.open_library();
@@ -1142,22 +1152,10 @@ impl ReaderApp {
                 tab.annotations = Annotations::load(&self.library, path);
                 self.next_tab_id += 1;
                 self.tabs.push(tab);
+                // A file from outside the library stays outside (it shows
+                // under history) until added.
                 if self.persist {
                     let _ = self.library.mark_library_item_opened(path);
-                    // Settings › Library › when a file is opened.
-                    if self.prefs.library.add_on_open == crate::prefs::AddOnOpen::InPlace
-                        && crate::import::is_library_document(path)
-                        && self.library.library_item_for_path(path).is_none()
-                    {
-                        self.importer.start(
-                            &self.library,
-                            vec![path.to_path_buf()],
-                            crate::prefs::ImportMode::Link,
-                            None,
-                            true,
-                            ctx,
-                        );
-                    }
                 }
                 self.activate(Some(self.tabs.len() - 1));
                 let tab = &self.tabs[self.tabs.len() - 1];
@@ -1394,6 +1392,38 @@ impl ReaderApp {
         }
     }
 
+    /// What was kept about a file brought into the library (its place,
+    /// highlights, notes) moves to its copy, and its open tabs show the
+    /// copy.
+    fn adopt_imported(&mut self, ctx: &egui::Context) {
+        for (source, id) in self.importer.take_adopted() {
+            let Some(copy) = self
+                .library
+                .primary_attachment(id)
+                .map(|attachment| attachment.path.clone())
+            else {
+                continue;
+            };
+            let source = glyphst_library::normalize_path(&source);
+            if source == copy {
+                continue;
+            }
+            // Closed first, so its last place is kept and then moves too.
+            let open = self.tabs.iter().position(|tab| tab.path == source);
+            if let Some(index) = open {
+                self.close(index);
+            }
+            if let Err(error) = self.library.adopt_document_path(&source, &copy) {
+                self.notices.push(format!(
+                    "Could not carry the file's highlights over: {error:#}"
+                ));
+            }
+            if open.is_some() {
+                self.open(&copy, ctx, None);
+            }
+        }
+    }
+
     /// Copies the database aside the first time the library syncs.
     fn sync_backup(&mut self) {
         if !self.persist {
@@ -1461,18 +1491,32 @@ impl ReaderApp {
                         self.library_dialog = Some(Dialog::Moving { done, total });
                     }
                     MoveEvent::Done(result) => {
-                        let outcome = result
-                            .map_err(anyhow::Error::msg)
-                            .and_then(|()| self.library.commit_files_move(&plan));
-                        match outcome {
-                            Ok(moved) => self.notices.push(format!(
-                                "The library is in {} ({} files).",
-                                plan.new_root().display(),
-                                moved.files
-                            )),
-                            Err(error) => self
-                                .notices
-                                .push(format!("The library stayed where it was: {error:#}")),
+                        if plan.copies_linked() {
+                            let outcome = result
+                                .map_err(anyhow::Error::msg)
+                                .and_then(|()| self.library.commit_copy_linked(&plan));
+                            match outcome {
+                                Ok(copied) => self.notices.push(format!(
+                                    "Copied {copied} linked files into the library folder; the originals are where they were."
+                                )),
+                                Err(error) => self.notices.push(format!(
+                                    "The linked files stay linked: {error:#}"
+                                )),
+                            }
+                        } else {
+                            let outcome = result
+                                .map_err(anyhow::Error::msg)
+                                .and_then(|()| self.library.commit_files_move(&plan));
+                            match outcome {
+                                Ok(moved) => self.notices.push(format!(
+                                    "The library is in {} ({} files).",
+                                    plan.new_root().display(),
+                                    moved.files
+                                )),
+                                Err(error) => self
+                                    .notices
+                                    .push(format!("The library stayed where it was: {error:#}")),
+                            }
                         }
                         self.prefs.library.folder_asked = true;
                         self.library_dialog = None;
@@ -1807,7 +1851,7 @@ impl ReaderApp {
                     self.importer.start(
                         &self.library,
                         paths,
-                        crate::prefs::ImportMode::Link,
+                        crate::prefs::ImportMode::Copy,
                         None,
                         false,
                         ctx,
@@ -4288,6 +4332,7 @@ impl ReaderApp {
                     )
                 }),
                 sync: self.library_sync.status().clone(),
+                linked: self.library.linked_files(),
                 note_copies: self
                     .vault_root()
                     .map(|root| {
@@ -4401,6 +4446,19 @@ impl ReaderApp {
                     | LibraryAction::SyncNow
                     | LibraryAction::TestSync
                     | LibraryAction::OpenFile(_) => {}
+                    LibraryAction::CopyLinked => match self.library.plan_copy_linked() {
+                        Ok(plan) => {
+                            self.library_dialog = Some(crate::library_dialogs::Dialog::Moving {
+                                done: 0,
+                                total: plan.files(),
+                            });
+                            self.folder_move =
+                                Some(crate::library_dialogs::FolderMove::start(plan, ctx));
+                        }
+                        Err(error) => self
+                            .notices
+                            .push(format!("Could not copy the linked files: {error:#}")),
+                    },
                     LibraryAction::ChooseFolder => {
                         self.library_dialog = Some(self.choose_folder_dialog());
                     }
@@ -5684,7 +5742,8 @@ impl eframe::App for ReaderApp {
             self.importer.start(
                 &self.library,
                 imports,
-                self.prefs.library.import_mode,
+                // Into the library folder: the library is that folder.
+                crate::prefs::ImportMode::Copy,
                 None,
                 false,
                 &ctx,
@@ -5715,6 +5774,7 @@ impl eframe::App for ReaderApp {
                 self.notices.push(notice);
             }
             self.importer.poll(&mut self.library);
+            self.adopt_imported(&ctx);
             // New items get their metadata looked up (and then the AI pass).
             let added = self.importer.take_added();
             if !added.is_empty()

@@ -2779,6 +2779,36 @@ mod tests {
     }
 
     #[test]
+    fn history_lists_only_files_outside_the_library() {
+        let dir = std::env::temp_dir().join(format!("glyphst-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut library = LibraryStore::open_for_test(dir.join("library.redb")).unwrap();
+        let inside = dir.join("inside.pdf");
+        let outside = dir.join("outside.pdf");
+        for path in [&inside, &outside] {
+            std::fs::write(path, format!("%PDF-1.4 {}", path.display())).unwrap();
+        }
+        library
+            .link_item(&inside, LibraryItemMetadata::for_path(&inside), None)
+            .unwrap();
+        let entry = |path: &Path, opened| glyphst_library::HistoryEntry {
+            path: glyphst_library::normalize_path(path),
+            opened,
+            position: glyphst_library::DocumentPosition::fixed(0.0, 0.0, 1.0, 1),
+        };
+        library
+            .replace_history_entries(vec![entry(&inside, 2), entry(&outside, 1)])
+            .unwrap();
+        let listed = history_outside(&library)
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(listed, vec![glyphst_library::normalize_path(&outside)]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn wide_tables_widen_the_title_authors_and_tags_together() {
         for width in [1000.0, 1600.0, 2400.0] {
             let x = columns(width);

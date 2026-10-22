@@ -229,6 +229,9 @@ pub struct LibraryFacts {
     pub sync: crate::library_sync::SyncStatus,
     /// Sync tools' copies of notes in the vault.
     pub note_copies: Vec<std::path::PathBuf>,
+    /// Items whose files are linked from outside the folder, and their
+    /// size.
+    pub linked: (usize, u64),
 }
 
 /// `path` from the home folder, cut at the front to `chars`.
@@ -264,6 +267,8 @@ pub enum LibraryAction {
     SyncNow,
     /// Keep the typed secret in the keychain and try the store.
     TestSync,
+    /// Copy linked files into the library folder.
+    CopyLinked,
     /// Open a note's copy in the system's editor.
     OpenFile(std::path::PathBuf),
 }
@@ -587,7 +592,6 @@ fn library(
     show_conflicts: &mut bool,
     sync_secret: &mut String,
 ) {
-    use crate::prefs::{AddOnOpen, ImportMode};
     let library = &mut prefs.library;
     ui_settings::group(ui, "folder", |group| {
         let folder = facts
@@ -637,6 +641,24 @@ fn library(
                 actions.push(LibraryAction::RegisterLinks);
             }
         });
+        // Items added before the library copied files in.
+        let (linked, bytes) = facts.linked;
+        if linked > 0 {
+            let caption = format!(
+                "{} point at files outside the folder · {} · the originals stay",
+                if linked == 1 {
+                    "1 item".to_string()
+                } else {
+                    format!("{linked} items")
+                },
+                crate::sidebar::format_size(bytes)
+            );
+            group.row("linked files", Some(&*caption), |ui| {
+                if ui.add(Button::bracket("copy into the folder…")).clicked() {
+                    actions.push(LibraryAction::CopyLinked);
+                }
+            });
+        }
     });
     ui.add_space(10.0);
     if scroll_to.as_deref() == Some("sync") {
@@ -647,30 +669,6 @@ fn library(
     sync_group(ui, library, facts, actions, show_conflicts, sync_secret);
     ui.add_space(10.0);
     ui_settings::group(ui, "adding", |group| {
-        group.row(
-            "when a file is opened",
-            Some("added in place, so its history and highlights stay with the file"),
-            |ui| {
-                glyphst_ui::segmented::labels(
-                    ui,
-                    &mut library.add_on_open,
-                    &[
-                        (AddOnOpen::Off, "don't add"),
-                        (AddOnOpen::InPlace, "add in place"),
-                    ],
-                );
-            },
-        );
-        group.row("imports and drops", None, |ui| {
-            glyphst_ui::segmented::labels(
-                ui,
-                &mut library.import_mode,
-                &[
-                    (ImportMode::Copy, "copy in"),
-                    (ImportMode::Link, "link in place"),
-                ],
-            );
-        });
         group.row(
             "look up metadata online",
             Some("arxiv · crossref · openalex · open library"),

@@ -367,9 +367,9 @@ impl ReaderApp {
     }
 
     /// The breadcrumb over the pages: the file and the outline path to the
-    /// current page, and at the right the render time and zoom (or the
-    /// find counts while finding). Returns whether the zoom was clicked,
-    /// which resets it.
+    /// current page, and at the right what the overview or find has to say.
+    /// Returns whether the zoom was clicked, which resets it (never, now
+    /// the zoom is the status bar's).
     fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) -> bool {
         let tokens = Tokens::get(ui.ctx());
         let painter = ui.painter_at(rect);
@@ -393,19 +393,14 @@ impl ReaderApp {
             let pages = tab.find.matched_pages();
             format!("{} matches · {pages} pages", tab.find.matches.len())
         } else {
-            format!("gpu · {:.1} ms · ", self.frames.percentile_ms(0.5))
+            // Nothing by default: the zoom is in the status bar, and frame
+            // times are the statistics overlay's.
+            String::new()
         };
         let font = theme::mono(11.0);
         let y = rect.center().y;
-        // The page zoom ends the meta, on its own to be clicked.
-        let zoomed = tab.overview.is_none() && !(tab.find.open && !tab.find.query.is_empty());
-        let mut reset = false;
-        let mut meta_right = rect.right() - 12.0;
-        if zoomed {
-            let zoom = zoom_label(ui, pos2(meta_right, y), Align2::RIGHT_CENTER, tab, &tokens);
-            reset = zoom.clicked();
-            meta_right = zoom.rect.left();
-        }
+        let reset = false;
+        let meta_right = rect.right() - 12.0;
         let meta_rect = ui_text::line(
             ui,
             pos2(meta_right, y),

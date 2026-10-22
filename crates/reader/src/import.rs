@@ -81,6 +81,9 @@ pub struct Importer {
     /// Items added since the caller last took them, to queue their
     /// metadata and AI passes.
     added: Vec<DocumentId>,
+    /// Each file brought in and the item it is now (added, or already
+    /// there), so what was kept about the file follows its copy.
+    adopted: Vec<(PathBuf, DocumentId)>,
 }
 
 impl Importer {
@@ -198,11 +201,15 @@ impl Importer {
                             Ok(LibraryImportOutcome::Added(id)) => {
                                 progress.added.push(id);
                                 self.added.push(id);
+                                self.adopted.push((source, id));
                             }
                             Ok(
                                 LibraryImportOutcome::Duplicate(id)
                                 | LibraryImportOutcome::DuplicateInTrash(id),
-                            ) => progress.duplicates.push((source, id)),
+                            ) => {
+                                self.adopted.push((source.clone(), id));
+                                progress.duplicates.push((source, id));
+                            }
                             Err(error) => progress.failed.push((source, format!("{error:#}"))),
                         }
                     }
@@ -256,6 +263,11 @@ impl Importer {
     /// The items added since the last call.
     pub fn take_added(&mut self) -> Vec<DocumentId> {
         std::mem::take(&mut self.added)
+    }
+
+    /// The files brought in since the last call, with their items.
+    pub fn take_adopted(&mut self) -> Vec<(PathBuf, DocumentId)> {
+        std::mem::take(&mut self.adopted)
     }
 }
 
