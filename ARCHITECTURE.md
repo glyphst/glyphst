@@ -453,6 +453,16 @@ to them:
   for a removal); and segments exported but not yet in the journal,
   committed with the registers in one transaction.
 
+The library is its folder: drops, imports and `add to library` copy files
+into `files/<key>/<name>` (linked items from before stay until copied in,
+`plan_copy_linked`), and a file opened from outside the library stays out
+of it, in history, until added; adding moves what was kept about the file
+(its place, highlights, notes) to the copy (`adopt_document_path`). A tag
+the AI added (an `Applied` assignment) is the AI's to change; the user's
+own (none, or `Accepted`) no AI changes (`tag_owner`,
+`set_item_tags_by_ai`); one the user removed (`Rejected`) is never added
+again.
+
 The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
 `library.redb` itself always stays in the data folder, out of a folder

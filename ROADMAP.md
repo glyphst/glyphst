@@ -57,15 +57,19 @@ and the abandoned Files app in M5). It has:
   pauses following; the locate button resumes it), its entries collapse
   and their parents stick at the top, and the thumbnails follow the page.
 - **Library (2026-10-19):** papers and books are managed as in Zotero:
-  - collections an item can share and linked files, in a folder the user
-    chooses;
+  - collections an item can share (virtual folders), in a library
+    folder the user chooses: the library is that folder, files are
+    copied in, and files opened from outside it are listed under history
+    with `+ add to library` (linked items from before can be copied in);
   - metadata from the DOI, arXiv id or ISBN on the first pages (arXiv,
     Crossref, OpenAlex, Open Library); duplicates found, then merged or
     kept apart, with undo;
   - coloured tags and related items, also from Zotero;
   - the library model's pass (summary, key points, tags, a collection),
-    run on new items and asked before the backfill, with every AI tag
-    reviewable;
+    run on new items and asked before the backfill; its tags apply on
+    their own, outlined apart from the user's, which no AI changes;
+  - right-click on rows, tags and collections, papers dragged onto
+    collections, new, renamed and deleted collections and tags;
   - a Markdown vault Obsidian can open, with tag edits flowing back;
   - adding by identifier and importing from Zotero (notes, PDF
     highlights);
@@ -170,8 +174,9 @@ Known gaps:
   effect file while the Reader runs (the reload) is also checked by hand.
 - Library: the Zotero import leaves out EPUB annotations, rotated pages'
   highlights and relations to other libraries (groups). A merged item's
-  note stays in the vault, unlinked. Tags cannot be renamed or deleted
-  from the library tab yet. The AI pass, the lookups, the import and
+  note stays in the vault, unlinked. The right-click menus are checked by
+  building them, not by screenshots (a scripted run cannot right-click),
+  and dragging papers onto collections only by hand. The AI pass, the lookups, the import and
   merging are checked by tests on fakes and by screenshots; a real Zotero
   library and real providers are not yet checked by hand.
 - Library search: pages with almost no text are marked for OCR or image
