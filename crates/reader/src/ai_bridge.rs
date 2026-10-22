@@ -416,7 +416,7 @@ static SPECS: &[Spec] = &[
         effect: ToolEffect::Read,
         properties: || {
             json!({
-                "view": {"type": "string", "enum": ["all", "recent", "needs_review", "unfiled", "missing", "trash"]},
+                "view": {"type": "string", "enum": ["all", "recent", "unfiled", "missing", "trash"]},
                 "collection": {"type": "string", "description": "A collection path such as Machine learning/LLMs"},
                 "query": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},

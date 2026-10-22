@@ -128,6 +128,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("ellipsis", include_bytes!("../assets/icons/ellipsis.svg")),
     ("eraser", include_bytes!("../assets/icons/eraser.svg")),
     ("expand", include_bytes!("../assets/icons/expand.svg")),
+    (
+        "external-link",
+        include_bytes!("../assets/icons/external-link.svg"),
+    ),
     ("eye", include_bytes!("../assets/icons/eye.svg")),
     ("eye-off", include_bytes!("../assets/icons/eye-off.svg")),
     ("file", include_bytes!("../assets/icons/file.svg")),
@@ -145,8 +149,16 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("file-up", include_bytes!("../assets/icons/file-up.svg")),
     ("folder", include_bytes!("../assets/icons/folder.svg")),
     (
+        "folder-minus",
+        include_bytes!("../assets/icons/folder-minus.svg"),
+    ),
+    (
         "folder-open",
         include_bytes!("../assets/icons/folder-open.svg"),
+    ),
+    (
+        "folder-plus",
+        include_bytes!("../assets/icons/folder-plus.svg"),
     ),
     (
         "folder-search",
@@ -184,6 +196,10 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/library-big.svg"),
     ),
     ("list", include_bytes!("../assets/icons/list.svg")),
+    (
+        "list-filter",
+        include_bytes!("../assets/icons/list-filter.svg"),
+    ),
     ("list-todo", include_bytes!("../assets/icons/list-todo.svg")),
     ("list-tree", include_bytes!("../assets/icons/list-tree.svg")),
     ("locate", include_bytes!("../assets/icons/locate.svg")),

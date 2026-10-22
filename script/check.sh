@@ -281,7 +281,7 @@ if [[ ${tier} == screens ]]; then
         "04p-library-pages --library-demo pages"
         "04q-library-page --library-demo page"
         "04s-library-write-page --ai-fake --library-demo page-cost"
-        "04i-library-review --library-demo review"
+        "04v-library-history --library-demo history"
         "04h-library-backfill --ai-fake --library-demo backfill"
         "04k-library-folder --library-demo folder"
         "04t-library-join --library-demo join"

@@ -913,6 +913,7 @@ impl ReaderApp {
             false,
             12.0,
         );
+        let action = self.sidebar_card.overlays(ctx, &self.library).or(action);
         if let Some(action) = action {
             self.library_tab_action(action, ctx);
         }

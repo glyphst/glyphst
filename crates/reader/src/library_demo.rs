@@ -23,7 +23,7 @@ pub const STATES: [&str; 22] = [
     "search-meaning",
     "search-downloading",
     "search-failed",
-    "review",
+    "history",
     "backfill",
     "folder",
     "identifier",

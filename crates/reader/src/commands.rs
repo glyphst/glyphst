@@ -39,7 +39,7 @@ pub enum Command {
     LibraryImport,
     LibraryAddByIdentifier,
     LibraryEnrichAll,
-    LibraryReviewAi,
+    LibraryHistory,
     LibraryImportZotero,
     LibraryMove,
     LibraryPauseJobs,
@@ -225,7 +225,7 @@ impl Command {
         Self::LibraryImport,
         Self::LibraryAddByIdentifier,
         Self::LibraryEnrichAll,
-        Self::LibraryReviewAi,
+        Self::LibraryHistory,
         Self::LibraryImportZotero,
         Self::LibraryMove,
         Self::LibraryPauseJobs,
@@ -323,7 +323,7 @@ impl Command {
             Self::LibraryImport => "library.import",
             Self::LibraryAddByIdentifier => "library.add_by_identifier",
             Self::LibraryEnrichAll => "library.enrich_all",
-            Self::LibraryReviewAi => "library.review_ai",
+            Self::LibraryHistory => "library.history",
             Self::LibraryImportZotero => "library.import_zotero",
             Self::LibraryMove => "library.move",
             Self::LibraryPauseJobs => "library.pause_jobs",
@@ -425,7 +425,7 @@ impl Command {
             Self::LibraryImport => "Add documents to the library…",
             Self::LibraryAddByIdentifier => "Add to the library by DOI, arXiv id or ISBN",
             Self::LibraryEnrichAll => "Run the AI pass over the library",
-            Self::LibraryReviewAi => "Review the AI's tags and collections",
+            Self::LibraryHistory => "Show the files opened from outside the library",
             Self::LibraryImportZotero => "Import from Zotero",
             Self::LibraryMove => "Move the library to another folder",
             Self::LibraryPauseJobs => "Pause or resume the library's AI pass",
@@ -523,7 +523,7 @@ impl Command {
             Self::LibraryImport => "folder-open",
             Self::LibraryAddByIdentifier => "file-plus",
             Self::LibraryEnrichAll => "sparkles",
-            Self::LibraryReviewAi => "inbox",
+            Self::LibraryHistory => "rotate-ccw-clock",
             Self::LibraryImportZotero => "download",
             Self::LibraryMove => "folder-open",
             Self::LibraryPauseJobs => "pause",
@@ -616,7 +616,7 @@ impl Command {
             | Self::LibraryImport
             | Self::LibraryAddByIdentifier
             | Self::LibraryEnrichAll
-            | Self::LibraryReviewAi
+            | Self::LibraryHistory
             | Self::LibraryImportZotero
             | Self::LibraryMove
             | Self::LibraryPauseJobs
@@ -776,7 +776,7 @@ impl Command {
             | Self::LibraryImport
             | Self::LibraryAddByIdentifier
             | Self::LibraryEnrichAll
-            | Self::LibraryReviewAi
+            | Self::LibraryHistory
             | Self::LibraryImportZotero
             | Self::LibraryMove
             | Self::LibraryPauseJobs
@@ -904,7 +904,7 @@ impl Command {
             | Self::LibraryImport
             | Self::LibraryAddByIdentifier
             | Self::LibraryEnrichAll
-            | Self::LibraryReviewAi
+            | Self::LibraryHistory
             | Self::LibraryImportZotero
             | Self::LibraryMove
             | Self::LibraryPauseJobs

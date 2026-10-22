@@ -341,7 +341,6 @@ pub fn list(library: &LibraryStore, arguments: &Value) -> Result<String, String>
     tab.view = match arguments["view"].as_str().unwrap_or("all") {
         "all" => View::All,
         "recent" => View::Recent,
-        "needs_review" => View::NeedsReview,
         "unfiled" => View::Unfiled,
         "missing" => View::Missing,
         "trash" => View::Trash,

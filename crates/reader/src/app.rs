@@ -800,7 +800,7 @@ impl ReaderApp {
                             .unwrap_or_default();
                         tab.selected = id;
                     }
-                    "review" => tab.view = crate::library_tab::View::NeedsReview,
+                    "history" => tab.view = crate::library_tab::View::History,
                     search if search.starts_with("search") => {
                         tab.filter = "multi-head attention".to_string();
                         tab.selected = crate::library_demo::first_item(&app.library);
@@ -934,6 +934,29 @@ impl ReaderApp {
                     _ => {}
                 }
                 app.library_sync.show_status(status);
+            }
+            // Files opened from outside the library (04v).
+            if state == "history" {
+                let home = dirs::home_dir().unwrap_or_default();
+                let now = glyphst_library::current_timestamp();
+                let entries = [
+                    ("Downloads/2026_q3_report.pdf", 0, 15),
+                    ("Books/kubernetes-up-and-running.epub", 1, 4),
+                    ("Documents/teaching/slides-week-6.pdf", 3, 9),
+                    ("Downloads/invoice-2026-10.pdf", 4, 1),
+                    ("Documents/thesis/thesis-draft-v7.pdf", 7, 3),
+                    ("Downloads/rust-async-book.pdf", 8, 0),
+                ]
+                .into_iter()
+                .map(|(path, days, page)| glyphst_library::HistoryEntry {
+                    path: home.join(path),
+                    opened: now - days * 86_400,
+                    position: glyphst_library::DocumentPosition::fixed(0.0, 0.0, 1.0, page),
+                })
+                .collect();
+                if let Err(error) = app.library.replace_history_entries(entries) {
+                    eprintln!("no demo history: {error:#}");
+                }
             }
             app.library_dialog = match state.as_str() {
                 "backfill" => app.backfill_dialog(None),
@@ -1836,8 +1859,71 @@ impl ReaderApp {
                 }
                 Ok(())
             }
-            Action::AcceptAll(ids) => self.review_all(&ids, true),
-            Action::RejectAll(ids) => self.review_all(&ids, false),
+            Action::AddTag(id, name) => {
+                let mut names = self
+                    .library
+                    .tags_for_item(id)
+                    .into_iter()
+                    .map(|known| known.name.clone())
+                    .collect::<Vec<_>>();
+                names.push(name);
+                self.library.set_item_tag_names(id, &names)
+            }
+            Action::RemoveTag(id, tag) => {
+                use glyphst_library::{AssignmentTarget, TagOwner};
+                if self.library.tag_owner(id, tag) == TagOwner::Ai {
+                    // Never added again.
+                    self.library
+                        .reject_assignment(id, &AssignmentTarget::Tag(tag))
+                } else {
+                    let names = self
+                        .library
+                        .tags_for_item(id)
+                        .into_iter()
+                        .filter(|known| known.id != tag)
+                        .map(|known| known.name.clone())
+                        .collect::<Vec<_>>();
+                    self.library.set_item_tag_names(id, &names)
+                }
+            }
+            Action::RenameTag(tag, name) => self.library.rename_library_tag(tag, &name).map(|_| ()),
+            Action::DeleteTag(tag) => self.library.delete_library_tag(tag).map(|_| ()),
+            Action::AddToCollection(ids, collection) => self
+                .library
+                .add_items_to_collection(&ids, collection)
+                .map(|_| ()),
+            Action::RemoveFromCollection(id, collection) => self
+                .library
+                .remove_items_from_collection(&[id], collection)
+                .map(|_| ()),
+            Action::NewCollection { parent, name, item } => self
+                .library
+                .create_library_collection(parent, &name)
+                .and_then(|collection| match item {
+                    Some(item) => self
+                        .library
+                        .add_items_to_collection(&[item], collection)
+                        .map(|_| ()),
+                    None => Ok(()),
+                }),
+            Action::RenameCollection(collection, name) => {
+                self.library.rename_library_collection(collection, &name)
+            }
+            Action::DeleteCollection(collection) => self
+                .library
+                .delete_library_collection(collection)
+                .map(|_| ()),
+            Action::Trash(id) => self.library.trash_library_items(&[id]).map(|_| ()),
+            Action::Restore(id) => self.library.restore_library_items(&[id]).map(|_| ()),
+            Action::DeleteForever(id) => self
+                .library
+                .permanently_delete_library_items(&[id])
+                .map(|_| ()),
+            Action::ShowFile(path) => {
+                let folder = path.parent().unwrap_or(&path).to_path_buf();
+                crate::effects_page::open_folder(&folder).map_err(anyhow::Error::from)
+            }
+            Action::ForgetOpened(path) => self.library.remove_history_entries(&[path]).map(|_| ()),
             Action::KeepBoth(a, b) => self.library.mark_distinct(a, b),
             Action::Merge { keep, absorb } => {
                 self.library.merge_library_items(keep, absorb).map(|edit| {
@@ -2075,31 +2161,6 @@ impl ReaderApp {
             ctx,
         );
         Ok(format!("Showing \"{title}\" at page {}.", page + 1))
-    }
-
-    /// Keeps (or rejects) every unreviewed AI change of these items.
-    fn review_all(
-        &mut self,
-        ids: &[glyphst_library::DocumentId],
-        keep: bool,
-    ) -> anyhow::Result<()> {
-        for id in ids {
-            let targets = self
-                .library
-                .ai_assignments(*id)
-                .iter()
-                .filter(|assignment| assignment.state.needs_review())
-                .map(|assignment| assignment.target.clone())
-                .collect::<Vec<_>>();
-            for target in targets {
-                if keep {
-                    self.library.accept_assignment(*id, &target)?;
-                } else {
-                    self.library.reject_assignment(*id, &target)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Focuses the pane showing tab `id`, without a transition.
@@ -3775,13 +3836,13 @@ impl ReaderApp {
                 self.library_tab_action(crate::library_tab::LibraryTabAction::ImportZotero, ctx);
                 None
             }
-            Command::LibraryReviewAi => {
+            Command::LibraryHistory => {
                 self.open_library();
                 if let Some(Page::Library(tab)) = self
                     .page_focused
                     .and_then(|index| self.pages.get_mut(index))
                 {
-                    tab.view = crate::library_tab::View::NeedsReview;
+                    tab.view = crate::library_tab::View::History;
                 }
                 None
             }

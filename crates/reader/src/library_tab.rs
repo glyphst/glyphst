@@ -20,6 +20,7 @@ use glyphst_ui::{
     text,
 };
 
+mod menus;
 mod pages_view;
 mod search_view;
 
@@ -41,7 +42,6 @@ pub enum View {
     #[default]
     All,
     Recent,
-    NeedsReview,
     Unfiled,
     Missing,
     Trash,
@@ -51,6 +51,8 @@ pub enum View {
     Pages,
     /// One concept page (04q).
     Page(u64),
+    /// Files opened from outside the library (frame 04v).
+    History,
 }
 
 /// A concept page's text read: the page, its file's time, the vault's notes.
@@ -83,9 +85,6 @@ pub enum LibraryTabAction {
     Backfill,
     /// Show the item in the library tab.
     ShowInLibrary(DocumentId),
-    /// Keep, or reject, everything the AI suggested for these items.
-    AcceptAll(Vec<DocumentId>),
-    RejectAll(Vec<DocumentId>),
     /// The item and the one it may duplicate are different works.
     KeepBoth(DocumentId, DocumentId),
     /// Merge `absorb` into `keep` (frames 04l and 04m).
@@ -122,6 +121,34 @@ pub enum LibraryTabAction {
     RejectRelated(DocumentId, DocumentId),
     AddRelated(DocumentId, DocumentId),
     RemoveRelated(DocumentId, DocumentId),
+    /// Tag an item (a tag of the user's); take a tag off (the AI's is then
+    /// never added again).
+    AddTag(DocumentId, String),
+    RemoveTag(DocumentId, LibraryTagId),
+    /// Rename a tag everywhere (into another of that name, the two are
+    /// one), or delete it everywhere.
+    RenameTag(LibraryTagId, String),
+    DeleteTag(LibraryTagId),
+    /// File items in a collection, or take one out.
+    AddToCollection(Vec<DocumentId>, LibraryCollectionId),
+    RemoveFromCollection(DocumentId, LibraryCollectionId),
+    /// Make a collection (inside `parent`), filing `item` there.
+    NewCollection {
+        parent: Option<LibraryCollectionId>,
+        name: String,
+        item: Option<DocumentId>,
+    },
+    RenameCollection(LibraryCollectionId, String),
+    /// Delete a collection (its items stay in the library).
+    DeleteCollection(LibraryCollectionId),
+    /// To the trash, back, or gone for good.
+    Trash(DocumentId),
+    Restore(DocumentId),
+    DeleteForever(DocumentId),
+    /// Show a file in the system's file manager.
+    ShowFile(PathBuf),
+    /// Forget a file opened from outside the library.
+    ForgetOpened(PathBuf),
 }
 
 /// What the tab needs from the app this frame.
@@ -165,6 +192,8 @@ pub struct LibraryTab {
     markdown: glyphst_markdown::MarkdownCache,
     /// Relating an item by hand: the item and the words to find the other.
     relating: Option<(DocumentId, String)>,
+    /// A right-click entry's prompt (a tag to add, a new name).
+    prompt: Option<menus::Prompt>,
 }
 
 impl LibraryTab {
@@ -215,6 +244,53 @@ impl LibraryTab {
                 action = Some(chosen);
             }
         }
+        if let Some(chosen) = self.overlays(ui.ctx(), context.library) {
+            action = Some(chosen);
+        }
+        action
+    }
+
+    /// What floats over the tab: a menu entry's prompt, and the paper
+    /// being dragged onto a collection. The sidebar's item card calls it
+    /// too.
+    pub fn overlays(
+        &mut self,
+        ctx: &egui::Context,
+        library: &LibraryStore,
+    ) -> Option<LibraryTabAction> {
+        let tokens = Tokens::get(ctx);
+        let mut action = None;
+        if let Some(prompt) = &mut self.prompt {
+            let (chosen, closed) = menus::show_prompt(ctx, &tokens, library, prompt);
+            action = chosen;
+            if closed {
+                self.prompt = None;
+            }
+        }
+        if let Some(dragged) = egui::DragAndDrop::payload::<DocumentId>(ctx)
+            && let Some(pointer) = ctx.pointer_interact_pos()
+            && let Some(item) = library.library_item(*dragged)
+        {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::unique("library-drag"),
+            ));
+            let galley =
+                painter.layout_no_wrap(clip(&item.title, 48), theme::regular(12.0), tokens.text);
+            let rect = Rect::from_min_size(
+                pointer + vec2(12.0, 8.0),
+                vec2(galley.size().x + 16.0, 22.0),
+            );
+            painter.rect_filled(rect, tokens.ctl_radius(), tokens.raised);
+            painter.rect_stroke(
+                rect,
+                tokens.ctl_radius(),
+                Stroke::new(1.0, tokens.accent),
+                egui::StrokeKind::Inside,
+            );
+            let top = rect.center().y - galley.size().y / 2.0;
+            painter.galley(pos2(rect.left() + 8.0, top), galley, tokens.text);
+        }
         action
     }
 
@@ -243,25 +319,33 @@ impl LibraryTab {
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 let counts = smart_counts(library);
+                let opened = history_outside(library).len();
                 for (view, icon, label) in [
                     (View::All, "library", "all items"),
                     (View::Recent, "clock", "recently added"),
-                    (View::NeedsReview, "sparkles", "needs review"),
                     (View::Unfiled, "inbox", "unfiled"),
                     (View::Missing, "file-question", "missing"),
                     (View::Trash, "trash-2", "trash"),
+                    (View::History, "rotate-ccw-clock", "history"),
                 ] {
-                    let count = counts.get(&view).copied().unwrap_or(0);
+                    let count = match view {
+                        View::History => opened,
+                        _ => counts.get(&view).copied().unwrap_or(0),
+                    };
                     let meta = count.to_string();
-                    let mut row = ListRow::new(label)
+                    let response = ListRow::new(label)
                         .icon(icon)
                         .meta(meta.as_str())
-                        .active(self.view == view);
-                    if view == View::NeedsReview && count > 0 && self.view != view {
-                        row = row.title_color(tokens.text_2);
-                    }
-                    if row.show(ui).clicked() {
+                        .active(self.view == view)
+                        .show(ui);
+                    if response.clicked() {
                         self.choose(view);
+                    }
+                    // A paper dropped on the trash goes there.
+                    if view == View::Trash
+                        && let Some(dropped) = response.dnd_release_payload::<DocumentId>()
+                    {
+                        action = Some(LibraryTabAction::Trash(*dropped));
                     }
                 }
                 let pages = library.pages().count().to_string();
@@ -277,11 +361,15 @@ impl LibraryTab {
                 ui.add_space(10.0);
                 let collections = library.library_collections().len();
                 rule(ui, "collections", Some(&collections.to_string()));
-                self.collection_tree(ui, library);
+                if let Some(chosen) = self.collection_tree(ui, tokens, library) {
+                    action = Some(chosen);
+                }
                 ui.add_space(10.0);
                 let tags = library.library_tags().len();
                 rule(ui, "tags", Some(&tags.to_string()));
-                action = self.tag_cloud(ui, tokens, library);
+                if let Some(chosen) = self.tag_cloud(ui, tokens, library) {
+                    action = Some(chosen);
+                }
             });
         // The folder at the foot.
         let foot = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 64.0), rect.max);
@@ -323,14 +411,18 @@ impl LibraryTab {
         }
     }
 
-    fn collection_tree(&mut self, ui: &mut Ui, library: &LibraryStore) {
+    /// The collections as a tree, each a place to drop papers on and with
+    /// its menu, then `+ new collection`.
+    fn collection_tree(
+        &mut self,
+        ui: &mut Ui,
+        tokens: &Tokens,
+        library: &LibraryStore,
+    ) -> Option<LibraryTabAction> {
+        let mut action = None;
         let counts = collection_counts(library);
         let mut rows = Vec::new();
         collect_tree(library, None, 0, &self.folded, &mut rows);
-        if rows.is_empty() {
-            empty_line(ui, "drop a folder to make one");
-            return;
-        }
         let depths = rows.iter().map(|(_, depth)| *depth).collect::<Vec<_>>();
         let shapes = motif::tree_shape(&depths);
         for ((id, _), (ancestors_last, last)) in rows.iter().zip(shapes) {
@@ -351,6 +443,62 @@ impl LibraryTab {
             }
             if response.double_clicked() && !self.folded.remove(id) {
                 self.folded.insert(*id);
+            }
+            // A paper dragged over it: outlined, and filed there on release.
+            if response.dnd_hover_payload::<DocumentId>().is_some() {
+                ui.painter().rect_stroke(
+                    response.rect.shrink(1.0),
+                    tokens.ctl_radius(),
+                    Stroke::new(1.0, tokens.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if let Some(dropped) = response.dnd_release_payload::<DocumentId>() {
+                action = Some(LibraryTabAction::AddToCollection(vec![*dropped], *id));
+            }
+            let mut choice = None;
+            response.context_menu(|ui| choice = menus::collection_menu(ui, *id));
+            if let Some(choice) = choice {
+                action = self.take_choice(choice, library, ui).or(action.take());
+            }
+        }
+        // A new collection, at the root.
+        let response = ListRow::new("new collection").icon("plus").show(ui);
+        if response.clicked() {
+            let at = response.rect.left_bottom();
+            self.prompt = Some(menus::Prompt::new(
+                menus::PromptKind::NewCollection {
+                    parent: None,
+                    item: None,
+                },
+                library,
+                at,
+            ));
+        }
+        action
+    }
+
+    /// What a menu entry asks: an action for the app, a prompt here, or
+    /// another view.
+    fn take_choice(
+        &mut self,
+        choice: menus::Choice,
+        library: &LibraryStore,
+        ui: &Ui,
+    ) -> Option<LibraryTabAction> {
+        match choice {
+            menus::Choice::Action(action) => Some(action),
+            menus::Choice::Prompt(kind) => {
+                let at = ui
+                    .ctx()
+                    .input(|input| input.pointer.latest_pos())
+                    .unwrap_or_else(|| ui.max_rect().center());
+                self.prompt = Some(menus::Prompt::new(kind, library, at));
+                None
+            }
+            menus::Choice::Show(view) => {
+                self.choose(view);
+                None
             }
         }
     }
@@ -405,13 +553,14 @@ impl LibraryTab {
                 if response.clicked() {
                     self.choose(View::Tag(tag.id));
                 }
-                // Right-click: the tag's colour (frame 04l).
+                // Right-click: its colour, a new name, gone (04l, 04u).
+                let mut choice = None;
                 response.context_menu(|ui| {
-                    if let Some(chosen) = tag_menu(ui, tokens, &label, color) {
-                        action = Some(LibraryTabAction::TagColor(tag.id, chosen));
-                        ui.close();
-                    }
+                    choice = menus::cloud_tag_menu(ui, tokens, library, tag.id, count);
                 });
+                if let Some(choice) = choice {
+                    action = self.take_choice(choice, library, ui).or(action.take());
+                }
             }
         });
         action
@@ -486,14 +635,14 @@ impl LibraryTab {
             tokens.text,
             width * 0.5,
         );
-        let review = ids
-            .iter()
-            .filter(|id| library.item_needs_review(**id))
-            .count();
-        let mut counts = format!("{} items", ids.len());
-        if review > 0 {
-            counts.push_str(&format!(" · {review} need review"));
-        }
+        let mut counts = if self.view == View::History {
+            format!(
+                "{} you opened · not in the library",
+                plural(history_outside(library).len(), "file")
+            )
+        } else {
+            format!("{} items", ids.len())
+        };
         if searching.is_some() {
             counts = context
                 .search
@@ -666,14 +815,14 @@ impl LibraryTab {
         if searching.is_some() {
             return self.search_part(ui, tokens, context, width).or(action);
         }
-        if self.view == View::NeedsReview {
-            return review_list(ui, tokens, library, &ids, width).or(action);
+        if self.view == View::History {
+            return self.history_list(ui, tokens, context, width).or(action);
         }
 
         // The table.
         let columns = columns(width);
         let (header, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
-        for (name, x) in ["title", "authors", "year", "tags", "ai", "read"]
+        for (name, x) in ["title", "authors", "year", "tags", "read"]
             .iter()
             .zip(&columns)
         {
@@ -709,6 +858,9 @@ impl LibraryTab {
                     };
                     let selected = self.selected == Some(*id);
                     let (row, response) = glyphst_ui::row::list_row(ui, ROW, selected);
+                    // Dragged onto a collection in the pane.
+                    let response = response.interact(Sense::click_and_drag());
+                    let mut chips = Vec::new();
                     let duplicate = possible_duplicate(library, item);
                     if ui.is_rect_visible(row) {
                         let path = library
@@ -723,9 +875,11 @@ impl LibraryTab {
                                 }
                                 paint_duplicate_row(ui, tokens, row, &columns, item, other);
                             }
-                            None => paint_item_row(
-                                ui, tokens, row, &columns, library, item, doc, selected,
-                            ),
+                            None => {
+                                chips = paint_item_row(
+                                    ui, tokens, row, &columns, library, item, doc, selected,
+                                );
+                            }
                         }
                     }
                     if let Some(other) = duplicate {
@@ -747,7 +901,24 @@ impl LibraryTab {
                             action = Some(LibraryTabAction::KeepBoth(item.id, other.id));
                         }
                     }
-                    if response.clicked() {
+                    // A tag's menu, on its chip.
+                    let mut on_chip = false;
+                    for (index, (rect, tag)) in chips.iter().enumerate() {
+                        let chip = ui.interact(
+                            *rect,
+                            ui.scope_id().with(("row-tag", id.0, index)),
+                            Sense::click(),
+                        );
+                        on_chip |= chip.contains_pointer();
+                        let mut choice = None;
+                        chip.context_menu(|ui| {
+                            choice = menus::item_tag_menu(ui, tokens, library, *id, *tag);
+                        });
+                        if let Some(choice) = choice {
+                            action = self.take_choice(choice, library, ui).or(action.take());
+                        }
+                    }
+                    if response.clicked() || response.secondary_clicked() {
                         self.selected = Some(*id);
                     }
                     if response.double_clicked()
@@ -755,6 +926,22 @@ impl LibraryTab {
                     {
                         action = Some(LibraryTabAction::Open(attachment.path.clone()));
                     }
+                    // The row's menu (frame 04u).
+                    if !on_chip {
+                        let note = context
+                            .vault
+                            .zip(library.vault_note(*id))
+                            .map(|(vault, note)| vault.join(&note.relative_path));
+                        let mut choice = None;
+                        response.context_menu(|ui| {
+                            choice = menus::row_menu(ui, library, item, self.view, note);
+                        });
+                        if let Some(choice) = choice {
+                            action = self.take_choice(choice, library, ui).or(action.take());
+                        }
+                    }
+                    // Dragged onto a collection (or the trash).
+                    response.dnd_set_drag_payload(*id);
                     if selected && response.has_focus() {
                         keyboard = Some(*id);
                     }
@@ -833,7 +1020,9 @@ impl LibraryTab {
         let mut sort = self.sort;
         match self.view {
             // Pages list no items; the views beside them are all items.
-            View::All | View::NeedsReview | View::Pages | View::Page(_) => {}
+            View::All | View::Pages | View::Page(_) => {}
+            // History lists files, not items (`history_list`).
+            View::History => return Vec::new(),
             View::Recent => {
                 sort = LibrarySort {
                     field: LibrarySortField::DateAdded,
@@ -847,19 +1036,159 @@ impl LibraryTab {
             View::Tag(id) => filter.tag_ids.push(id),
         }
         let mut ids = library.query_library_items(&filter, sort);
-        match self.view {
-            View::NeedsReview => ids.retain(|id| library.item_needs_review(*id)),
-            View::Recent => {
-                let since = glyphst_library::current_timestamp().saturating_sub(30 * 86_400);
-                ids.retain(|id| {
-                    library
-                        .library_item(*id)
-                        .is_some_and(|item| item.created >= since)
-                });
-            }
-            _ => {}
+        if self.view == View::Recent {
+            let since = glyphst_library::current_timestamp().saturating_sub(30 * 86_400);
+            ids.retain(|id| {
+                library
+                    .library_item(*id)
+                    .is_some_and(|item| item.created >= since)
+            });
         }
         ids
+    }
+
+    /// The files opened from outside the library (frame 04v): file,
+    /// folder, when, how far, and `[ add to library ]`.
+    fn history_list(
+        &mut self,
+        ui: &mut Ui,
+        tokens: &Tokens,
+        context: &mut TabContext<'_>,
+        width: f32,
+    ) -> Option<LibraryTabAction> {
+        let library = context.library;
+        let mut action = None;
+        let entries = history_outside(library);
+        let x = [0.0, width * 0.38, width * 0.68, width * 0.78];
+        let (header, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+        for (name, x) in ["file", "folder", "opened", "read"].iter().zip(&x) {
+            ui.painter().text(
+                pos2(header.left() + x + 8.0, header.center().y),
+                Align2::LEFT_CENTER,
+                *name,
+                theme::mono(10.0),
+                tokens.faint,
+            );
+        }
+        ui.painter()
+            .hline(header.x_range(), header.bottom() - 0.5, tokens.hairline());
+        if entries.is_empty() {
+            ui.add_space(16.0);
+            empty_line(ui, "every file you opened is in the library");
+            return None;
+        }
+        let progress = context
+            .docs
+            .iter()
+            .map(|doc| (doc.path.clone(), doc))
+            .collect::<HashMap<_, _>>();
+        egui::ScrollArea::vertical()
+            .id_salt("library-history")
+            .auto_shrink(false)
+            .show_rows(ui, ROW, entries.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for entry in &entries[range] {
+                    let (row, response) = glyphst_ui::row::list_row(ui, ROW, false);
+                    let y = row.center().y;
+                    let name = entry
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let folder = entry.path.parent().map(home_relative).unwrap_or_default();
+                    let cells = [
+                        (name.as_str(), theme::regular(13.0), tokens.text_2),
+                        (folder.as_str(), theme::mono(11.0), tokens.muted),
+                    ];
+                    for (index, (value, font, color)) in cells.into_iter().enumerate() {
+                        text::row(
+                            ui,
+                            pos2(row.left() + x[index] + 8.0, y),
+                            value,
+                            font,
+                            color,
+                            x[index + 1] - x[index] - 12.0,
+                        );
+                    }
+                    text::row(
+                        ui,
+                        pos2(row.left() + x[2] + 8.0, y),
+                        crate::sidebar::when(entry.opened),
+                        theme::mono(11.0),
+                        tokens.muted,
+                        x[3] - x[2] - 12.0,
+                    );
+                    match progress.get(&entry.path).and_then(|doc| doc.progress()) {
+                        Some(done) if done >= 0.999 => {
+                            text::row(
+                                ui,
+                                pos2(row.left() + x[3] + 8.0, y),
+                                "done ✓",
+                                theme::mono(11.0),
+                                tokens.ok,
+                                80.0,
+                            );
+                        }
+                        Some(done) if done > 0.0 => {
+                            let label = format!("{:.0}%", done * 100.0);
+                            Meter::new(done).bar().width(40.0).label(&label).paint(
+                                ui,
+                                Rect::from_min_size(
+                                    pos2(row.left() + x[3] + 8.0, y - 7.0),
+                                    vec2(84.0, 14.0),
+                                ),
+                            );
+                        }
+                        _ => {}
+                    }
+                    let buttons = Rect::from_min_max(
+                        pos2(row.left() + x[3] + 100.0, row.top()),
+                        pos2(row.right() - 8.0, row.bottom()),
+                    );
+                    let mut buttons_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(buttons)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    );
+                    if buttons_ui.add(Button::bracket("add to library")).clicked() {
+                        action = Some(LibraryTabAction::AddOpened(vec![entry.path.clone()]));
+                    }
+                    if response.double_clicked() {
+                        action = Some(LibraryTabAction::Open(entry.path.clone()));
+                    }
+                    response.context_menu(|ui| {
+                        glyphst_ui::menu::style(ui);
+                        let item = |ui: &mut Ui, icon: &str, label: &str| {
+                            let clicked = glyphst_ui::menu::Item::new(label)
+                                .icon(icon)
+                                .width(220.0)
+                                .show(ui)
+                                .clicked();
+                            if clicked {
+                                ui.close();
+                            }
+                            clicked
+                        };
+                        if item(ui, "external-link", "open") {
+                            action = Some(LibraryTabAction::Open(entry.path.clone()));
+                        }
+                        if item(ui, "library-big", "add to library") {
+                            action = Some(LibraryTabAction::AddOpened(vec![entry.path.clone()]));
+                        }
+                        if item(ui, "folder-open", "show file") {
+                            action = Some(LibraryTabAction::ShowFile(entry.path.clone()));
+                        }
+                        glyphst_ui::menu::separator(ui);
+                        if item(ui, "x", "remove from history") {
+                            action = Some(LibraryTabAction::ForgetOpened(entry.path.clone()));
+                        }
+                    });
+                    ui.painter()
+                        .hline(row.x_range(), row.bottom() - 0.5, tokens.hairline());
+                }
+            });
+        let _ = &mut self.selected;
+        action
     }
 
     /// `── library / …` and the heading.
@@ -868,7 +1197,7 @@ impl LibraryTab {
         match self.view {
             View::All => ("library".to_string(), "all items".to_string()),
             View::Recent => named("recently added"),
-            View::NeedsReview => named("needs review"),
+            View::History => named("history"),
             View::Unfiled => named("unfiled"),
             View::Missing => named("missing"),
             View::Trash => named("trash"),
@@ -1156,43 +1485,47 @@ impl LibraryTab {
             ui.add_space(10.0);
         }
 
-        // Tags: the user's filled, the AI's outlined with ✓ and ×.
+        // Tags: the user's filled, the AI's outlined; right-click for more.
         flush_rule(ui, "tags", None);
         let assignments = library.ai_assignments(id).to_vec();
-        let ai_tag = |tag: LibraryTagId| {
-            assignments.iter().find(|assignment| {
-                assignment.target == AssignmentTarget::Tag(tag) && assignment.state.needs_review()
-            })
-        };
         let tags = library.tags_for_item(id);
         if tags.is_empty() {
             mono_line(ui, "no tags yet", tokens.faint, 11.0);
         } else {
+            let mut choice = None;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                 for tag in &tags {
-                    match ai_tag(tag.id) {
-                        Some(assignment) => {
-                            let (accept, reject) = ai_chip(ui, tokens, &tag.name);
-                            if accept {
-                                action =
-                                    Some(LibraryTabAction::Accept(id, assignment.target.clone()));
-                            }
-                            if reject {
-                                action =
-                                    Some(LibraryTabAction::Reject(id, assignment.target.clone()));
-                            }
-                        }
-                        None => {
-                            let color = library.tag_color(tag.id).map(crate::annotations::color);
-                            tag_chip(ui, tokens, &format!("#{}", tag.name), None, false, color);
-                        }
-                    }
+                    let by_ai = library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai;
+                    let color = library.tag_color(tag.id).map(crate::annotations::color);
+                    let response = owned_tag_chip(ui, tokens, &tag.name, by_ai, color);
+                    response.context_menu(|ui| {
+                        choice = menus::item_tag_menu(ui, tokens, library, id, tag.id);
+                    });
                 }
             });
-            if tags.iter().any(|tag| ai_tag(tag.id).is_some()) {
-                mono_line(ui, "◆ added by ai · ✓ keep · × reject", tokens.faint, 10.0);
+            if let Some(choice) = choice {
+                action = self.take_choice(choice, library, ui).or(action.take());
             }
+            if tags
+                .iter()
+                .any(|tag| library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai)
+            {
+                mono_line(
+                    ui,
+                    "◆ added by the ai · right-click to keep or remove",
+                    tokens.faint,
+                    10.0,
+                );
+            }
+        }
+        if ui.add(Button::plain("+ tag").small()).clicked() {
+            let at = ui.min_rect().left_bottom();
+            self.prompt = Some(menus::Prompt::new(
+                menus::PromptKind::AddTag(id),
+                library,
+                at,
+            ));
         }
         ui.add_space(10.0);
 
@@ -1205,7 +1538,7 @@ impl LibraryTab {
         for collection in collections {
             let by_ai = assignments.iter().any(|assignment| {
                 assignment.target == AssignmentTarget::Collection(collection.id)
-                    && assignment.state.needs_review()
+                    && assignment.state == AssignmentState::Applied
             });
             let label = format!(
                 "■ {}",
@@ -1215,24 +1548,33 @@ impl LibraryTab {
                     .to_lowercase()
             );
             ui.horizontal(|ui| {
-                mono_line(ui, &label, tokens.text_2, 11.0);
-                if by_ai {
-                    let target = AssignmentTarget::Collection(collection.id);
-                    if ui
-                        .add(Button::plain("◆ ✓").small())
-                        .on_hover_text("keep (filed by ai)")
-                        .clicked()
-                    {
-                        action = Some(LibraryTabAction::Accept(id, target.clone()));
-                    }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(Button::plain("×").small())
-                        .on_hover_text("take it out")
+                        .on_hover_text("take it out of this collection")
                         .clicked()
                     {
-                        action = Some(LibraryTabAction::Reject(id, target));
+                        action = Some(if by_ai {
+                            LibraryTabAction::Reject(
+                                id,
+                                AssignmentTarget::Collection(collection.id),
+                            )
+                        } else {
+                            LibraryTabAction::RemoveFromCollection(id, collection.id)
+                        });
                     }
-                }
+                    if by_ai {
+                        ui.label(
+                            egui::RichText::new("◆")
+                                .font(theme::mono(11.0))
+                                .color(tokens.accent_text),
+                        )
+                        .on_hover_text("filed by the ai");
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        mono_line(ui, &label, tokens.text_2, 11.0);
+                    });
+                });
             });
         }
         for assignment in assignments.iter().filter(|assignment| {
@@ -1519,144 +1861,6 @@ fn import_strip(
     clicked
 }
 
-/// The AI's suggestions, item by item (frame 04i), with accept and reject
-/// for each and for all.
-fn review_list(
-    ui: &mut Ui,
-    tokens: &Tokens,
-    library: &LibraryStore,
-    ids: &[DocumentId],
-    width: f32,
-) -> Option<LibraryTabAction> {
-    let mut action = None;
-    if ids.is_empty() {
-        empty_line(ui, "nothing to review · the ai's changes are all looked at");
-        return None;
-    }
-    let (bar, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
-    let mut bar_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(bar)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-    );
-    bar_ui.spacing_mut().item_spacing.x = 8.0;
-    if bar_ui.add(Button::bracket_muted("× reject all")).clicked() {
-        action = Some(LibraryTabAction::RejectAll(ids.to_vec()));
-    }
-    if bar_ui.add(Button::bracket("✓ accept all")).clicked() {
-        action = Some(LibraryTabAction::AcceptAll(ids.to_vec()));
-    }
-    ui.add_space(6.0);
-    egui::ScrollArea::vertical()
-        .id_salt("library-review")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            for id in ids {
-                let Some(item) = library.library_item(*id) else {
-                    continue;
-                };
-                let pending = library
-                    .ai_assignments(*id)
-                    .iter()
-                    .filter(|assignment| assignment.state.needs_review())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(&item.title)
-                            .font(theme::regular(14.0))
-                            .color(tokens.text),
-                    );
-                    let mut meta = Vec::new();
-                    if let Some(year) = item.year {
-                        meta.push(year.to_string());
-                    }
-                    let authors = authors_short(item);
-                    if !authors.is_empty() {
-                        meta.push(authors);
-                    }
-                    if let Some(enrichment) = library.item_enrichment(*id) {
-                        meta.push(short_model(&enrichment.model).to_string());
-                    }
-                    ui.label(
-                        egui::RichText::new(meta.join(" · "))
-                            .font(theme::mono(11.0))
-                            .color(tokens.faint),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(path) = library.primary_attachment(*id).map(|a| a.path.clone())
-                            && ui.add(Button::bracket_muted("open")).clicked()
-                        {
-                            action = Some(LibraryTabAction::Open(path));
-                        }
-                        let label = format!("✓ accept {}", pending.len());
-                        if ui.add(Button::bracket(&label)).clicked() {
-                            action = Some(LibraryTabAction::AcceptAll(vec![*id]));
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                for (kind, targets) in [
-                    (
-                        "tags",
-                        pending
-                            .iter()
-                            .filter(|a| matches!(a.target, AssignmentTarget::Tag(_)))
-                            .collect::<Vec<_>>(),
-                    ),
-                    (
-                        "collection",
-                        pending
-                            .iter()
-                            .filter(|a| !matches!(a.target, AssignmentTarget::Tag(_)))
-                            .collect::<Vec<_>>(),
-                    ),
-                ] {
-                    if targets.is_empty() {
-                        continue;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        let (label, _) = ui.allocate_exact_size(vec2(90.0, 19.0), Sense::hover());
-                        ui.painter().text(
-                            label.left_center(),
-                            Align2::LEFT_CENTER,
-                            kind,
-                            theme::mono(11.0),
-                            tokens.muted,
-                        );
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        for assignment in targets {
-                            let name = match &assignment.target {
-                                AssignmentTarget::NewCollection(_) => {
-                                    format!("new: {}", assignment.label.to_lowercase())
-                                }
-                                _ => assignment.label.to_lowercase(),
-                            };
-                            let (accept, reject) = ai_chip(ui, tokens, &name);
-                            if accept {
-                                action =
-                                    Some(LibraryTabAction::Accept(*id, assignment.target.clone()));
-                            }
-                            if reject {
-                                action =
-                                    Some(LibraryTabAction::Reject(*id, assignment.target.clone()));
-                            }
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-                ui.add_space(8.0);
-                let bottom = ui.cursor().top();
-                ui.painter()
-                    .hline(ui.max_rect().x_range(), bottom - 0.5, tokens.hairline());
-            }
-        });
-    action
-}
-
 /// The items under each smart view.
 fn smart_counts(library: &LibraryStore) -> HashMap<View, usize> {
     let since = glyphst_library::current_timestamp().saturating_sub(30 * 86_400);
@@ -1669,9 +1873,6 @@ fn smart_counts(library: &LibraryStore) -> HashMap<View, usize> {
         *counts.entry(View::All).or_default() += 1;
         if item.created >= since {
             *counts.entry(View::Recent).or_default() += 1;
-        }
-        if library.item_needs_review(item.id) {
-            *counts.entry(View::NeedsReview).or_default() += 1;
         }
         if library.collections_for_item(item.id).is_empty() {
             *counts.entry(View::Unfiled).or_default() += 1;
@@ -1780,17 +1981,116 @@ fn sort_label(sort: LibrarySort) -> &'static str {
     }
 }
 
-/// The columns' left edges in a table `width` wide.
-fn columns(width: f32) -> [f32; 6] {
-    let fixed = [130.0, 44.0, 150.0, 28.0, 84.0];
-    let title = (width - fixed.iter().sum::<f32>() - 12.0 * 5.0).max(120.0);
-    let mut x = [0.0; 6];
-    let mut at = title + 12.0;
-    for (index, width) in fixed.iter().enumerate() {
+/// The columns' left edges in a table `width` wide: title, authors, year,
+/// tags, read. The year and read are fixed; the title, authors and tags
+/// share what is left 42 : 22 : 36, so a wide window widens all three
+/// rather than only the title.
+fn columns(width: f32) -> [f32; 5] {
+    const YEAR: f32 = 44.0;
+    const READ: f32 = 84.0;
+    const GAP: f32 = 12.0;
+    let shared = (width - YEAR - READ - GAP * 4.0).max(0.0);
+    let tags = (shared * 0.36).max(120.0);
+    let authors = shared * 0.22;
+    let title = (shared - tags - authors).max(200.0);
+    let mut x = [0.0; 5];
+    let mut at = 0.0;
+    for (index, width) in [title, authors, YEAR, tags].into_iter().enumerate() {
+        at += width + GAP;
         x[index + 1] = at;
-        at += width + 12.0;
     }
     x
+}
+
+/// A tag as a chip in a row or the item pane: the user's filled (`#name`,
+/// its colour as a dot), the AI's outlined in the accent (`◆ name`).
+/// Returns its rect.
+fn paint_tag_chip(
+    ui: &Ui,
+    tokens: &Tokens,
+    at: egui::Pos2,
+    name: &str,
+    by_ai: bool,
+    color: Option<egui::Color32>,
+) -> Rect {
+    let label = if by_ai {
+        format!("◆ {name}")
+    } else {
+        format!("#{name}")
+    };
+    let label_width = text::width(ui, &label, &theme::mono(11.0));
+    let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
+    let rect = Rect::from_min_size(pos2(at.x, at.y - 9.5), vec2(dot + label_width + 12.0, 19.0));
+    let painter = ui.painter();
+    if by_ai {
+        painter.rect_stroke(
+            rect,
+            tokens.ctl_radius(),
+            Stroke::new(1.0, tokens.accent),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        painter.rect_filled(rect, tokens.ctl_radius(), tokens.hover);
+        if let Some(color) = color {
+            painter.circle_filled(pos2(rect.left() + 9.5, rect.center().y), 3.5, color);
+        }
+    }
+    painter.text(
+        pos2(rect.left() + 6.0 + dot, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        theme::mono(11.0),
+        if by_ai {
+            tokens.accent_text
+        } else {
+            tokens.text_2
+        },
+    );
+    rect
+}
+
+/// An item's tags as chips from `left`, as many as fit before `right`,
+/// then `+n`: each chip's rect and tag.
+fn paint_tag_row(
+    ui: &Ui,
+    tokens: &Tokens,
+    library: &LibraryStore,
+    id: glyphst_library::DocumentId,
+    left: f32,
+    right: f32,
+    y: f32,
+) -> Vec<(Rect, LibraryTagId)> {
+    let tags = library.tags_for_item(id);
+    let mut chips = Vec::new();
+    let mut x = left;
+    for (index, tag) in tags.iter().enumerate() {
+        let by_ai = library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai;
+        let label = if by_ai {
+            format!("◆ {}", tag.name)
+        } else {
+            format!("#{}", tag.name)
+        };
+        let color = library.tag_color(tag.id).map(crate::annotations::color);
+        let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
+        let width = dot + text::width(ui, &label, &theme::mono(11.0)) + 12.0;
+        let left_over = tags.len() - index;
+        // Room for this chip, and for `+n` after it when more follow.
+        let more = if left_over > 1 { 28.0 } else { 0.0 };
+        if x + width + more > right {
+            ui.painter().text(
+                pos2(x, y),
+                Align2::LEFT_CENTER,
+                format!("+{left_over}"),
+                theme::mono(10.0),
+                tokens.faint,
+            );
+            break;
+        }
+        let rect = paint_tag_chip(ui, tokens, pos2(x, y), &tag.name, by_ai, color);
+        chips.push((rect, tag.id));
+        x = rect.right() + 4.0;
+    }
+    chips
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1798,12 +2098,12 @@ fn paint_item_row(
     ui: &Ui,
     tokens: &Tokens,
     rect: Rect,
-    columns: &[f32; 6],
+    columns: &[f32; 5],
     library: &LibraryStore,
     item: &LibraryItem,
     doc: Option<&Doc>,
     selected: bool,
-) {
+) -> Vec<(Rect, LibraryTagId)> {
     ui.painter()
         .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
     let y = rect.center().y;
@@ -1831,38 +2131,19 @@ fn paint_item_row(
         theme::mono(11.0),
         tokens.muted,
     );
-    let assignments = library.ai_assignments(item.id);
-    let tags = library
-        .tags_for_item(item.id)
-        .into_iter()
-        .map(|tag| {
-            let by_ai = assignments.iter().any(|assignment| {
-                assignment.target == AssignmentTarget::Tag(tag.id)
-                    && assignment.state.needs_review()
-            });
-            format!("{}{}", if by_ai { "◆" } else { "#" }, tag.name)
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    cell(3, &tags, theme::mono(11.0), tokens.muted);
-    let (glyph, color) = if library.item_needs_review(item.id) {
-        ("?", tokens.accent_text)
-    } else if library.item_enrichment(item.id).is_some() {
-        ("◆", tokens.accent)
-    } else if library
-        .library_jobs()
-        .iter()
-        .any(|job| job.item_id == item.id)
-    {
-        ("…", tokens.accent_text)
-    } else {
-        ("·", tokens.faint)
-    };
-    cell(4, glyph, theme::mono(11.0), color);
-    let read_x = rect.left() + columns[5] + 8.0;
+    let chips = paint_tag_row(
+        ui,
+        tokens,
+        library,
+        item.id,
+        rect.left() + columns[3] + 8.0,
+        rect.left() + columns[4] - 4.0,
+        y,
+    );
+    let read_x = rect.left() + columns[4] + 8.0;
     match doc.and_then(Doc::progress) {
         Some(progress) if progress >= 0.999 => {
-            cell(5, "done ✓", theme::mono(11.0), tokens.ok);
+            cell(4, "done ✓", theme::mono(11.0), tokens.ok);
         }
         Some(progress) if progress > 0.0 => {
             let label = format!("{:.0}%", progress * 100.0);
@@ -1871,8 +2152,9 @@ fn paint_item_row(
                 Rect::from_min_size(pos2(read_x, y - 7.0), vec2(84.0, 14.0)),
             );
         }
-        _ => cell(5, "—", theme::mono(11.0), tokens.faint),
+        _ => cell(4, "—", theme::mono(11.0), tokens.faint),
     }
+    chips
 }
 
 /// A possible duplicate's row: its file and what it shares with the other
@@ -1881,7 +2163,7 @@ fn paint_duplicate_row(
     ui: &Ui,
     tokens: &Tokens,
     rect: Rect,
-    columns: &[f32; 6],
+    columns: &[f32; 5],
     item: &LibraryItem,
     other: &LibraryItem,
 ) {
@@ -2152,19 +2434,15 @@ fn tag_chip(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The tag's menu: its name, then the five colours (the chosen one
-/// ringed) and `none`. Returns the colour picked.
-fn tag_menu(
+/// A tag's colours in its menu: the five (the chosen one ringed) and
+/// `none`. Returns the colour picked.
+fn colour_swatches(
     ui: &mut Ui,
     tokens: &Tokens,
-    label: &str,
     current: Option<HighlightColor>,
 ) -> Option<Option<HighlightColor>> {
     let mut chosen = None;
     ui.set_min_width(212.0);
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| mono_line(ui, label, tokens.muted, 11.0));
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
@@ -2426,50 +2704,47 @@ fn plural(count: usize, noun: &str) -> String {
     }
 }
 
-/// An AI tag (`◆ name ✓ ×`), outlined in the accent; returns whether ✓ or
-/// × was clicked.
-fn ai_chip(ui: &mut Ui, tokens: &Tokens, name: &str) -> (bool, bool) {
-    let label = format!("◆ {name}");
-    let label_width = text::width(ui, &label, &theme::mono(11.0));
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(label_width + 6.0 + 12.0 + 14.0 + 14.0, 19.0),
-        Sense::hover(),
-    );
-    ui.painter().rect_stroke(
-        rect,
-        tokens.ctl_radius(),
-        Stroke::new(1.0, tokens.accent),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        pos2(rect.left() + 6.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        theme::mono(11.0),
-        tokens.accent_text,
-    );
-    let mark = |offset: f32, glyph: &str, color: egui::Color32, tip: &str| {
-        let at = Rect::from_center_size(
-            pos2(rect.left() + 6.0 + label_width + offset, rect.center().y),
-            vec2(14.0, 17.0),
-        );
-        let clicked = ui
-            .interact(at, response.id.with(glyph), Sense::click())
-            .on_hover_text(tip)
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked();
-        ui.painter().text(
-            at.center(),
-            Align2::CENTER_CENTER,
-            glyph,
-            theme::mono(11.0),
-            color,
-        );
-        clicked
+/// A tag on an item, the user's filled and the AI's outlined; clickable,
+/// for its menu.
+fn owned_tag_chip(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    name: &str,
+    by_ai: bool,
+    color: Option<egui::Color32>,
+) -> egui::Response {
+    let label = if by_ai {
+        format!("◆ {name}")
+    } else {
+        format!("#{name}")
     };
-    let accept = mark(11.0, "✓", tokens.ok, "keep");
-    let reject = mark(25.0, "×", tokens.muted, "reject");
-    (accept, reject)
+    let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
+    let width = dot + text::width(ui, &label, &theme::mono(11.0)) + 12.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 19.0), Sense::click());
+    paint_tag_chip(ui, tokens, rect.left_center(), name, by_ai, color);
+    response
+        .on_hover_text(if by_ai {
+            "added by the ai · right-click to keep or remove"
+        } else {
+            "yours · right-click for more"
+        })
+        .on_hover_cursor(egui::CursorIcon::ContextMenu)
+}
+
+/// The files opened from outside the library, newest first.
+pub fn history_outside(library: &LibraryStore) -> Vec<&glyphst_library::HistoryEntry> {
+    let inside = library
+        .library_attachments()
+        .iter()
+        .map(|attachment| attachment.path.as_path())
+        .collect::<HashSet<_>>();
+    let mut entries = library
+        .history_entries()
+        .iter()
+        .filter(|entry| !inside.contains(entry.path.as_path()))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.opened));
+    entries
 }
 
 #[cfg(test)]
@@ -2504,10 +2779,17 @@ mod tests {
     }
 
     #[test]
-    fn the_title_column_takes_what_the_others_leave() {
-        let x = columns(1000.0);
-        assert!(x.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(x[5] + 84.0 <= 1000.0);
+    fn wide_tables_widen_the_title_authors_and_tags_together() {
+        for width in [1000.0, 1600.0, 2400.0] {
+            let x = columns(width);
+            assert!(x.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(x[4] + 84.0 <= width + 0.5, "{width}");
+            let title = x[1] - 12.0;
+            let tags = x[4] - x[3] - 12.0;
+            // The title never takes more than about half.
+            assert!(title / width < 0.5, "{width}: {title}");
+            assert!(tags >= 120.0);
+        }
         assert_eq!(notes_section("# T\n\n## Notes\n\nmine\n"), "mine");
     }
 }
