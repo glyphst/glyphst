@@ -3,7 +3,7 @@ mod library;
 pub use library::{
     ActivityEvent, ActivityKind, AiAssignment, AiMentionOccurrence, AiMentionReference, AiSession,
     AiSessionAgent, AiSessionAgentPart, AiSessionImage, AiSessionMention, AiSessionMessage,
-    AiSessionRole, AiSessionSummary, AiSessionToolResultPart, AiSessionToolStatus,
+    AiSessionRole, AiSessionSummary, AiSessionToolResultPart, AiSessionToolStatus, AiTagEdit,
     AssignmentOrigin, AssignmentState, AssignmentTarget, AttachmentStorage, Bookmark,
     BrowserPresentation, DocumentBrowserSize, DocumentEditRevision, DocumentFormat, DocumentId,
     DocumentPageLayout, DocumentPosition, DocumentPreferences, DocumentRotation, EnrichmentApplied,
@@ -24,7 +24,7 @@ pub use library::{
     ReaderTabSession, ReaderTranslationSession, ReaderWindowBounds, ReaderWindowSession,
     ReaderWindowState, ReadingSession, ReadingStatus, ReflowPosition, RegionImageReference,
     RelatedSuggestion, SemanticTextAnchor, SemanticTextRange, SidebarWidths, SyncApplyReport,
-    SyncExport, SyncIds, SyncKind, SyncReader, SyncSnapshot, VaultNoteRecord, copy_planned_files,
-    current_timestamp, is_edit_conflict, normalize_path, prepare_linked_import,
+    SyncExport, SyncIds, SyncKind, SyncReader, SyncSnapshot, TagOwner, VaultNoteRecord,
+    copy_planned_files, current_timestamp, is_edit_conflict, normalize_path, prepare_linked_import,
     prepare_managed_import, sync_kinds, sync_records,
 };

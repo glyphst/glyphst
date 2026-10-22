@@ -224,8 +224,9 @@ pub fn item_details(library: &LibraryStore, vault: Option<&Path>, id: DocumentId
             .find(|assignment| &assignment.target == target)?;
         Some(match (&assignment.origin, assignment.state) {
             (AssignmentOrigin::Import { source }, _) => format!(" (from {source})"),
-            (_, AssignmentState::Accepted) => " (ai, kept by the user)".to_string(),
-            (_, state) if state.needs_review() => " (ai, not reviewed)".to_string(),
+            (_, AssignmentState::Accepted) => " (the user's, first added by an ai)".to_string(),
+            (_, AssignmentState::Applied) => " (added by an ai)".to_string(),
+            (_, AssignmentState::Suggested) => " (an ai's suggestion)".to_string(),
             _ => String::new(),
         })
     };
@@ -556,13 +557,35 @@ pub fn set_tags(library: &mut LibraryStore, id: DocumentId, arguments: &Value) -
         .map(|tag| tag.trim().trim_start_matches('#').to_string())
         .filter(|tag| !tag.is_empty())
         .collect::<Vec<_>>();
-    let (result, edits) = library.record_edits(|library| library.set_item_tag_names(id, &tags));
-    result.map_err(|error| format!("could not save: {error:#}"))?;
+    // The user's own tags stay whatever the assistant asks.
+    let (result, edits) = library.record_edits(|library| {
+        library.set_item_tags_by_ai(
+            id,
+            &tags,
+            glyphst_library::AssignmentOrigin::Agent {
+                name: "assistant".to_string(),
+            },
+        )
+    });
+    let done = result.map_err(|error| format!("could not save: {error:#}"))?;
+    let mut text = match (done.added.as_slice(), done.removed.as_slice()) {
+        ([], []) => "Its tags were already so.".to_string(),
+        (added, []) => format!("Tagged it {}.", added.join(", ")),
+        ([], removed) => format!("Took off {}.", removed.join(", ")),
+        (added, removed) => format!(
+            "Tagged it {}; took off {}.",
+            added.join(", "),
+            removed.join(", ")
+        ),
+    };
+    if !done.kept.is_empty() {
+        text.push_str(&format!(
+            " Kept {}: the user's own tags, which only the user changes.",
+            done.kept.join(", ")
+        ));
+    }
     Ok(UiOutput {
-        text: match tags.as_slice() {
-            [] => "Took its tags off.".to_string(),
-            _ => format!("Tagged it {}.", tags.join(", ")),
-        },
+        text,
         edits,
         ..UiOutput::default()
     })
@@ -781,7 +804,7 @@ mod tests {
             "{details}"
         );
         assert!(
-            details.contains("Tags: attention (ai, not reviewed), transformers"),
+            details.contains("Tags: attention (added by an ai), transformers"),
             "{details}"
         );
         assert!(
@@ -896,14 +919,19 @@ mod tests {
         );
         assert_eq!(output.edits.len(), 1);
 
-        // Taking the AI's tag off rejects it.
-        set_tags(&mut library, attention, &json!({"tags": ["transformers"]})).unwrap();
-        assert!(
-            library
-                .ai_assignments(attention)
-                .iter()
-                .any(|assignment| assignment.state == AssignmentState::Rejected)
+        // The assistant takes an AI's tag off, and cannot take the
+        // user's.
+        let output = set_tags(&mut library, attention, &json!({"tags": []})).unwrap();
+        assert_eq!(
+            output.text,
+            "Took off attention. Kept transformers: the user's own tags, which only the user changes."
         );
+        let names = library
+            .tags_for_item(attention)
+            .into_iter()
+            .map(|tag| tag.normalized_name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["transformers".to_string()]);
 
         let output = set_collections(
             &mut library,

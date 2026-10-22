@@ -2129,6 +2129,7 @@ mod sidebar;
 mod storage;
 mod storage_helpers;
 mod syncing;
+mod tags;
 mod vault_notes;
 
 pub use agent_edits::{LibraryEdit, is_edit_conflict};
@@ -2147,6 +2148,7 @@ pub use syncing::{
     ApplyReport as SyncApplyReport, Export as SyncExport, SyncIds, SyncKind, SyncReader,
     SyncSnapshot, canonical as sync_records, kinds as sync_kinds,
 };
+pub use tags::{AiTagEdit, TagOwner};
 pub use vault_notes::VaultNoteRecord;
 
 pub fn normalize_path(path: &Path) -> PathBuf {

@@ -2101,7 +2101,9 @@ impl LibraryStore {
             .find(|tag| tag.id != id && tag.normalized_name == normalized)
             .map(|tag| tag.id);
         let display_name = clean_text(name);
-        self.persist_catalog_change(|library| {
+        let previous_ai = self.ai_catalog.clone();
+        let touched = self.retarget_tag_assignments(id, merge_target.unwrap_or(id), &display_name);
+        let renamed = self.persist_catalog_change(|library| {
             if let Some(target_id) = merge_target {
                 for relation in &mut library.library_item_tags {
                     if relation.tag_id == id {
@@ -2138,11 +2140,20 @@ impl LibraryStore {
             tag.name = display_name;
             tag.normalized_name = normalized;
             Ok(id)
-        })
+        });
+        let target = match renamed {
+            Ok(target) => target,
+            Err(error) => {
+                self.ai_catalog = previous_ai;
+                return Err(error);
+            }
+        };
+        self.write_ai_rows(&touched)?;
+        Ok(target)
     }
 
     pub fn delete_library_tag(&mut self, id: LibraryTagId) -> Result<bool> {
-        self.persist_catalog_change(|library| {
+        let deleted = self.persist_catalog_change(|library| {
             let before = library.library_tags.len();
             library.library_tags.retain(|tag| tag.id != id);
             library
@@ -2151,8 +2162,13 @@ impl LibraryStore {
             for view in &mut library.library_saved_views {
                 view.filter.tag_ids.retain(|tag_id| *tag_id != id);
             }
+            library
+                .library_tag_colors
+                .retain(|color| color.tag_id != id);
             Ok(before != library.library_tags.len())
-        })
+        })?;
+        self.forget_tag_assignments(id)?;
+        Ok(deleted)
     }
 
     pub fn create_library_collection(

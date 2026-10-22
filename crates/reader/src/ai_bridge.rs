@@ -474,7 +474,7 @@ static SPECS: &[Spec] = &[
     },
     Spec {
         name: "set_item_tags",
-        description: "Replace a library item's tags (names; missing ones are created). Prefer the spellings list_library_vocabulary returns. The user can undo it.",
+        description: "Set a library item's tags (names; missing ones are created). Tags the user added stay whatever you pass; only tags an AI added are removed when left out. Prefer the spellings list_library_vocabulary returns. The user can undo it.",
         effect: ToolEffect::Mutate,
         properties: || {
             json!({

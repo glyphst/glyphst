@@ -223,6 +223,8 @@ pub struct EnrichmentApply {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EnrichmentApplied {
     pub tags_applied: Vec<String>,
+    /// The AI's own tags it no longer suggests, taken off.
+    pub tags_removed: Vec<String>,
     pub collections_applied: Vec<String>,
     pub suggested: Vec<String>,
     pub fields_filled: Vec<MetadataField>,
@@ -640,6 +642,32 @@ impl LibraryStore {
             }
         }
 
+        // The AI's own tags this run no longer suggests come off; the
+        // user's never do.
+        let suggested = apply
+            .tags
+            .iter()
+            .map(|name| normalize_label(name))
+            .collect::<HashSet<_>>();
+        let stale = if apply.tags.is_empty() {
+            Vec::new()
+        } else {
+            self.ai_assignments(id)
+                .iter()
+                .filter(|assignment| {
+                    assignment.state == AssignmentState::Applied
+                        && matches!(assignment.origin, AssignmentOrigin::Enrichment { .. })
+                        && !suggested.contains(&normalize_label(&assignment.label))
+                })
+                .filter_map(|assignment| match assignment.target {
+                    AssignmentTarget::Tag(tag) => Some((tag, assignment.label.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let stale_ids = stale.iter().map(|(tag, _)| *tag).collect::<HashSet<_>>();
+        applied.tags_removed = stale.iter().map(|(_, label)| label.clone()).collect();
+
         let tag_ids = tag_names
             .iter()
             .map(|name| self.ensure_library_tag(name))
@@ -648,6 +676,9 @@ impl LibraryStore {
         let new_collection_ids = collection_ids.clone();
         let fields_filled = applied.fields_filled.clone();
         self.persist_catalog_change(|library| {
+            library
+                .library_item_tags
+                .retain(|row| row.item_id != id || !stale_ids.contains(&row.tag_id));
             for tag_id in new_tag_ids {
                 library.library_item_tags.push(LibraryItemTag {
                     item_id: id,
@@ -674,6 +705,10 @@ impl LibraryStore {
         })?;
 
         let entries = self.ai_catalog.assignments.entry(id).or_default();
+        entries.retain(|assignment| {
+            !matches!(assignment.target, AssignmentTarget::Tag(tag) if stale_ids.contains(&tag))
+                || assignment.state != AssignmentState::Applied
+        });
         for (tag_id, name) in tag_ids.into_iter().zip(&tag_names) {
             entries.push(AiAssignment {
                 target: AssignmentTarget::Tag(tag_id),

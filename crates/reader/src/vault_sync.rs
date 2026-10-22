@@ -313,10 +313,7 @@ fn snapshot(library: &LibraryStore, id: DocumentId) -> Option<NoteSnapshot> {
         .iter()
         .filter(|assignment| {
             matches!(assignment.target, AssignmentTarget::Tag(_))
-                && matches!(
-                    assignment.state,
-                    AssignmentState::Applied | AssignmentState::Accepted
-                )
+                && matches!(assignment.state, AssignmentState::Applied)
         })
         .map(|assignment| assignment.label.clone())
         .collect::<Vec<_>>();
