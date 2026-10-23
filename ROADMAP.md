@@ -157,7 +157,18 @@ Known gaps:
   Presenting's ink lives while its tab is open (never saved), and it has
   no spotlight, zoom to a region or presenter view on a second screen.
 - A relayout of a large EPUB blocks the window while MuPDF lays it out.
-- Translation sessions are not restored from the cache on reopening.
+- Translation sessions are not restored from the cache on reopening;
+  cached units come back at once, but OCR'd pages are recognised again
+  until the whole document is (`document.v1.json` and the per-page OCR
+  results are written only then). A session following the reader keeps
+  its window when Reduce motion is on, but its reveal is a fade.
+- The block reveal hides not-yet-settled glyphs with paper-coloured
+  patches, which show on pages with coloured backgrounds; side by side has
+  no text selection on the translation face, and its export keeps no
+  links or outline. Local OCR finds lines, not formulas, tables or
+  figures (those pages read better through PaddleOCR-VL); it has run by
+  hand on this Linux machine only. The OCR path has no end-to-end test
+  against a fake provider.
 - A region is one page's; the overview selects no pages for it.
   The change log of agents' edits lives while the app runs (saved chats
   keep their trace, not their undo list), and picture pasting needs
