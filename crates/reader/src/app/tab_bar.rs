@@ -8,7 +8,6 @@
 use egui::{Rect, Sense, pos2, vec2};
 use glyphst_ui::{
     Tip,
-    button::Button,
     field::SearchButton,
     key, menu as ui_menu,
     tab::{self as ui_tab, DocTab},
@@ -100,20 +99,9 @@ impl ReaderApp {
             28.0
         };
         let page_widths: Vec<f32> = pages.iter().map(|page| page.natural_width(ui)).collect();
-        // The document shown is from outside the library (frame 02h).
-        let outside = self
-            .active
-            .and_then(|index| self.tabs.get(index))
-            .map(|tab| tab.path.clone())
-            .filter(|path| {
-                (self.persist || self.demo_library)
-                    && crate::import::is_library_document(path)
-                    && self.library.library_item_for_path(path).is_none()
-            });
         let controls = ui_tab::BAR_HEIGHT // logo
             + 36.0 // +
             + search_width
-            + if outside.is_some() { 136.0 } else { 0.0 }
             + 3.0 * 30.0
             + 24.0
             + page_widths.iter().sum::<f32>();
@@ -126,7 +114,6 @@ impl ReaderApp {
         );
         let mut select = None;
         let mut close = None;
-        let mut add_outside: Option<std::path::PathBuf> = None;
         let mut run = None;
         let mut tab_menu = None;
         let mut drag = None;
@@ -258,16 +245,6 @@ impl ReaderApp {
                 }
             });
             ui.add_space(6.0);
-            if let Some(path) = &outside
-                && ui
-                    .add(Button::bracket("+ add to library"))
-                    .on_hover_text(
-                        "copy it into the library folder; its highlights and place come along",
-                    )
-                    .clicked()
-            {
-                add_outside = Some(path.clone());
-            }
             let palette_key = self
                 .keymap
                 .label(Command::Palette)
@@ -296,12 +273,6 @@ impl ReaderApp {
         }
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
-        }
-        if let Some(path) = add_outside {
-            self.library_tab_action(
-                crate::library_tab::LibraryTabAction::AddOpened(vec![path]),
-                &ctx,
-            );
         }
         if let Some(index) = close_page {
             self.close_page(index);

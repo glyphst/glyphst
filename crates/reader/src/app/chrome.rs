@@ -231,9 +231,13 @@ impl ReaderApp {
         }
         if !split
             && let Some(breadcrumb) = layout.breadcrumb
-            && self.breadcrumb(ui, breadcrumb, active)
+            && let Some(path) = self.breadcrumb(ui, breadcrumb, active)
         {
-            self.tabs[active].apply(ViewAction::FitMargins, false);
+            let ctx = ui.ctx().clone();
+            self.library_tab_action(
+                crate::library_tab::LibraryTabAction::AddOpened(vec![path]),
+                &ctx,
+            );
         }
         if split {
             self.pane_dividers(ui, &dividers);
@@ -367,10 +371,10 @@ impl ReaderApp {
     }
 
     /// The breadcrumb over the pages: the file and the outline path to the
-    /// current page, and at the right what the overview or find has to say.
-    /// Returns whether the zoom was clicked, which resets it (never, now
-    /// the zoom is the status bar's).
-    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) -> bool {
+    /// current page, at the right what the overview or find has to say, and
+    /// `[ + add to library ]` for a document from outside the library
+    /// (frame 02h), whose path it returns when clicked.
+    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) -> Option<PathBuf> {
         let tokens = Tokens::get(ui.ctx());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
@@ -399,8 +403,27 @@ impl ReaderApp {
         };
         let font = theme::mono(11.0);
         let y = rect.center().y;
-        let reset = false;
-        let meta_right = rect.right() - 12.0;
+        let outside = (self.persist || self.demo_library)
+            && crate::import::is_library_document(&tab.path)
+            && self.library.library_item_for_path(&tab.path).is_none();
+        let mut add = None;
+        let mut meta_right = rect.right() - 12.0;
+        if outside {
+            let mut button_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect.shrink2(vec2(8.0, 0.0)))
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let response = button_ui
+                .add(glyphst_ui::button::Button::bracket("+ add to library"))
+                .on_hover_text(
+                    "copy it into the library folder; its highlights and place come along",
+                );
+            if response.clicked() {
+                add = Some(tab.path.clone());
+            }
+            meta_right = response.rect.left() - 16.0;
+        }
         let meta_rect = ui_text::line(
             ui,
             pos2(meta_right, y),
@@ -464,7 +487,7 @@ impl ReaderApp {
             );
             x = part_rect.right() + 8.0;
         }
-        reset
+        add
     }
 
     /// A split pane's header: `▌ file — p.4 / 15 — 100%` and a close
