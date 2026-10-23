@@ -39,7 +39,9 @@ const ITEM: f32 = 380.0;
 const ROW: f32 = 30.0;
 
 /// What the library shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum View {
     #[default]
     All,
@@ -206,6 +208,27 @@ pub struct LibraryTab {
 }
 
 impl LibraryTab {
+    /// The tab as a session left it: a collection, tag or item that is gone
+    /// since falls back to all items, or to no item.
+    pub fn restored(
+        library: &LibraryStore,
+        view: View,
+        filter: String,
+        selected: Option<DocumentId>,
+    ) -> Self {
+        let view = match view {
+            View::Collection(id) if library.library_collection(id).is_none() => View::All,
+            View::Tag(id) if !library.library_tags().iter().any(|tag| tag.id == id) => View::All,
+            view => view,
+        };
+        LibraryTab {
+            view,
+            filter,
+            selected: selected.filter(|id| library.library_item(*id).is_some()),
+            ..LibraryTab::default()
+        }
+    }
+
     /// The tab in `ui`'s whole rect.
     pub fn ui(&mut self, ui: &mut Ui, mut context: TabContext<'_>) -> Option<LibraryTabAction> {
         let tokens = Tokens::get(ui.ctx());
@@ -2874,6 +2897,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(listed, vec![glyphst_library::normalize_path(&outside)]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restored_tab_forgets_what_is_gone() {
+        let mut library = LibraryStore::memory();
+        let tag = library.ensure_library_tag("kept").unwrap();
+        let tab = LibraryTab::restored(&library, View::Tag(tag), "x".into(), Some(DocumentId(99)));
+        assert_eq!(tab.view, View::Tag(tag));
+        assert_eq!(tab.filter, "x");
+        assert_eq!(tab.selected, None);
+        let gone =
+            LibraryTab::restored(&library, View::Tag(LibraryTagId(4242)), String::new(), None);
+        assert_eq!(gone.view, View::All);
+        let gone = LibraryTab::restored(
+            &library,
+            View::Collection(LibraryCollectionId(4242)),
+            String::new(),
+            None,
+        );
+        assert_eq!(gone.view, View::All);
     }
 
     #[test]

@@ -47,7 +47,7 @@ use crate::{
     palette::{self, Item, Palette},
     panes::{self, Panes},
     pickers::{Pickers, is_document},
-    prefs::{Colours, LastSession, Prefs, SessionFile},
+    prefs::{Colours, LastSession, Prefs, SessionFile, SessionPage},
     quick_ask::{self, QuickAsk},
     region::{self, Region},
     settings_window::{Section, SettingsContext, SettingsWindow},
@@ -1079,6 +1079,7 @@ impl ReaderApp {
             if let Some(active) = app.active {
                 app.panes.show(ids[active]);
             }
+            app.restore_pages(&session);
         } else {
             let page = launch
                 .select_pages
@@ -3387,6 +3388,48 @@ impl ReaderApp {
             panes: panes::map_layout(self.panes.layout(), |id| {
                 self.tabs.iter().position(|tab| tab.id == *id)
             }),
+            pages: self
+                .pages
+                .iter()
+                .map(|page| match page {
+                    Page::Library(tab) => SessionPage::Library {
+                        view: tab.view,
+                        filter: tab.filter.clone(),
+                        selected: tab.selected,
+                    },
+                    Page::Keymap(_) => SessionPage::Keymap,
+                    Page::Activity(_) => SessionPage::Activity,
+                    Page::NewTab(_) => SessionPage::NewTab,
+                })
+                .collect(),
+            page_focused: self.page_focused.filter(|_| self.active.is_none()),
+        }
+    }
+
+    /// The tabs that are not documents, as `session` left them.
+    fn restore_pages(&mut self, session: &LastSession) {
+        for page in &session.pages {
+            self.pages.push(match page {
+                SessionPage::Library {
+                    view,
+                    filter,
+                    selected,
+                } => Page::Library(Box::new(crate::library_tab::LibraryTab::restored(
+                    &self.library,
+                    *view,
+                    filter.clone(),
+                    *selected,
+                ))),
+                SessionPage::Keymap => Page::Keymap(KeymapPage::default()),
+                SessionPage::Activity => Page::Activity(ActivityView::at(None)),
+                SessionPage::NewTab => Page::NewTab(Launcher::default()),
+            });
+        }
+        if let Some(index) = session
+            .page_focused
+            .filter(|&index| index < self.pages.len())
+        {
+            self.focus_page(index);
         }
     }
 

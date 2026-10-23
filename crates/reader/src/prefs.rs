@@ -380,6 +380,23 @@ pub struct LastSession {
     /// The split panes, with indices into `files`.
     #[serde(default)]
     pub panes: Option<glyphst_ui::craft::docking::Layout<usize>>,
+    /// The tabs that are not documents, in the bar's order.
+    pub pages: Vec<SessionPage>,
+    /// Index into `pages` of the one shown, when one was.
+    pub page_focused: Option<usize>,
+}
+
+/// A tab that is not a document, as it was left.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SessionPage {
+    Library {
+        view: crate::library_tab::View,
+        filter: String,
+        selected: Option<glyphst_library::DocumentId>,
+    },
+    Keymap,
+    Activity,
+    NewTab,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -527,6 +544,15 @@ mod tests {
     }
 
     #[test]
+    fn a_session_from_before_page_tabs_still_loads() {
+        let session: LastSession =
+            serde_json::from_str(r#"{"files":[{"path":"/a.pdf","page":3}],"active":0}"#).unwrap();
+        assert_eq!(session.files.len(), 1);
+        assert!(session.pages.is_empty());
+        assert_eq!(session.page_focused, None);
+    }
+
+    #[test]
     fn preferences_round_trip_with_the_last_session() {
         let mut storage = MemoryStorage::default();
         let prefs = Prefs {
@@ -580,6 +606,15 @@ mod tests {
                     }),
                     floating: Vec::new(),
                 }),
+                pages: vec![
+                    SessionPage::Library {
+                        view: crate::library_tab::View::Tag(glyphst_library::LibraryTagId(7)),
+                        filter: "year:>2020".into(),
+                        selected: Some(glyphst_library::DocumentId(3)),
+                    },
+                    SessionPage::Keymap,
+                ],
+                page_focused: Some(0),
             },
             ..Prefs::default()
         };
