@@ -266,6 +266,9 @@ pub struct DocumentTab {
     pub annotations: Annotations,
     back: Vec<Place>,
     forward: Vec<Place>,
+    /// A jump happened since the app last looked, for its back and forward
+    /// across tabs (`nav`).
+    pub jumped: bool,
     /// A reflowed position waiting for the text it points into, and the
     /// view origin when it was set: moving the view cancels it.
     pending_anchor: Option<(SemanticTextAnchor, f32, [f64; 2])>,
@@ -352,6 +355,7 @@ impl DocumentTab {
             annotations: Annotations::default(),
             back: Vec::new(),
             forward: Vec::new(),
+            jumped: false,
             pending_anchor: None,
             reflow_mismatch: None,
             translation: None,
@@ -945,6 +949,7 @@ impl DocumentTab {
             if self.back.len() > MAX_HISTORY {
                 self.back.remove(0);
             }
+            self.jumped = true;
         }
         self.forward.clear();
     }
@@ -1744,6 +1749,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         annotations: Annotations::default(),
         back: Vec::new(),
         forward: Vec::new(),
+        jumped: false,
         pending_anchor: None,
         reflow_mismatch: None,
         translation: None,

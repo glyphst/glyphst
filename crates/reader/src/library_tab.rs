@@ -216,17 +216,26 @@ impl LibraryTab {
         filter: String,
         selected: Option<DocumentId>,
     ) -> Self {
-        let view = match view {
+        let mut tab = LibraryTab::default();
+        tab.show(library, view, filter, selected);
+        tab
+    }
+
+    /// Shows `view` with its filter and item, as `restored` does.
+    pub fn show(
+        &mut self,
+        library: &LibraryStore,
+        view: View,
+        filter: String,
+        selected: Option<DocumentId>,
+    ) {
+        self.view = match view {
             View::Collection(id) if library.library_collection(id).is_none() => View::All,
             View::Tag(id) if !library.library_tags().iter().any(|tag| tag.id == id) => View::All,
             view => view,
         };
-        LibraryTab {
-            view,
-            filter,
-            selected: selected.filter(|id| library.library_item(*id).is_some()),
-            ..LibraryTab::default()
-        }
+        self.filter = filter;
+        self.selected = selected.filter(|id| library.library_item(*id).is_some());
     }
 
     /// The tab in `ui`'s whole rect.

@@ -463,6 +463,8 @@ pub struct ReaderApp {
     /// Item notes in the Markdown vault.
     vault_sync: crate::vault_sync::VaultSync,
     library_sync: crate::library_sync::LibrarySync,
+    /// Back and forward across tabs, library views and jumps.
+    pub(crate) nav: crate::nav::NavHistory,
     /// A scripted run shows the canned library (`--library-demo`).
     demo_library: bool,
     /// The database was copied aside before syncing (once a run).
@@ -759,6 +761,7 @@ impl ReaderApp {
             library_jobs_settings: None,
             vault_sync: crate::vault_sync::VaultSync::new(&cc.egui_ctx),
             library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
+            nav: crate::nav::NavHistory::default(),
             demo_library: false,
             sync_backed_up: false,
             sidebar_card: Default::default(),
@@ -3316,6 +3319,7 @@ impl ReaderApp {
         let shown_alone = self.active == Some(index) && self.panes.count() == 1;
         let closed_background = self.background_for(Some(index));
         let mut tab = self.tabs.remove(index);
+        self.nav.closed(tab.id);
         self.free_textures(&tab.take_freed_textures(true));
         self.drop_card(tab.id);
         self.saved_positions.remove(&tab.id);
@@ -3403,6 +3407,155 @@ impl ReaderApp {
                 })
                 .collect(),
             page_focused: self.page_focused.filter(|_| self.active.is_none()),
+        }
+    }
+
+    /// Where the user is: the document, library view or page shown.
+    fn location(&self) -> crate::nav::Location {
+        use crate::nav::{Location, PageKind};
+        if let Some(active) = self.active {
+            let tab = &self.tabs[active];
+            return Location::Document {
+                tab: tab.id,
+                path: tab.path.clone(),
+            };
+        }
+        match self.page_focused.and_then(|index| self.pages.get(index)) {
+            Some(Page::Library(tab)) => Location::Library {
+                view: tab.view,
+                filter: tab.filter.clone(),
+                selected: tab.selected,
+            },
+            Some(Page::Keymap(_)) => Location::Page(PageKind::Keymap),
+            Some(Page::Activity(_)) => Location::Page(PageKind::Activity),
+            Some(Page::NewTab(_)) => Location::Page(PageKind::NewTab),
+            None => Location::Home,
+        }
+    }
+
+    /// Notes this frame's jumps and the place shown, for back and forward.
+    fn track_navigation(&mut self) {
+        self.nav.observe(self.location());
+        for tab in &mut self.tabs {
+            if std::mem::take(&mut tab.jumped) {
+                self.nav.jumped(tab.id, tab.path.clone());
+            }
+        }
+    }
+
+    /// Goes back (or forward) a step: to a place left, or a jump inside a
+    /// document retraced. A step whose place is gone is passed over.
+    pub(crate) fn navigate(&mut self, back: bool, ctx: &egui::Context) {
+        use crate::nav::Entry;
+        loop {
+            let now = self.location();
+            let entry = if back {
+                self.nav.back(now)
+            } else {
+                self.nav.forward(now)
+            };
+            let arrived = match entry {
+                None => break,
+                Some(Entry::Jump { tab, path }) => {
+                    match self.tabs.iter().position(|shown| shown.id == tab) {
+                        Some(index) => {
+                            let can = if back {
+                                self.tabs[index].can_go_back()
+                            } else {
+                                self.tabs[index].can_go_forward()
+                            };
+                            if can {
+                                self.gallery = None;
+                                self.activate(Some(index));
+                                let action = if back {
+                                    ViewAction::Back
+                                } else {
+                                    ViewAction::Forward
+                                };
+                                self.tabs[index].apply(action, false);
+                            }
+                            can
+                        }
+                        None => {
+                            self.go_to_location(crate::nav::Location::Document { tab, path }, ctx)
+                        }
+                    }
+                }
+                Some(Entry::At(location)) => self.go_to_location(location, ctx),
+            };
+            if arrived {
+                break;
+            }
+        }
+        // The jumps a step back made are not new steps.
+        for tab in &mut self.tabs {
+            tab.jumped = false;
+        }
+        self.nav.arrived(self.location());
+    }
+
+    /// Shows `location`; false when it is gone.
+    fn go_to_location(&mut self, location: crate::nav::Location, ctx: &egui::Context) -> bool {
+        use crate::nav::{Location, PageKind};
+        self.gallery = None;
+        match location {
+            Location::Home => {
+                self.activate(None);
+                true
+            }
+            Location::Document { tab, path } => {
+                if let Some(index) = self.tabs.iter().position(|shown| shown.id == tab) {
+                    self.activate(Some(index));
+                    true
+                } else if let Some(index) = self.tabs.iter().position(|shown| shown.path == path) {
+                    self.activate(Some(index));
+                    true
+                } else if path.exists() {
+                    self.open(&path, ctx, None);
+                    true
+                } else {
+                    false
+                }
+            }
+            Location::Library {
+                view,
+                filter,
+                selected,
+            } => {
+                let index = match self
+                    .pages
+                    .iter()
+                    .position(|page| matches!(page, Page::Library(_)))
+                {
+                    Some(index) => index,
+                    None => self.open_page(Page::Library(Box::default())),
+                };
+                if let Some(Page::Library(tab)) = self.pages.get_mut(index) {
+                    tab.show(&self.library, view, filter, selected);
+                }
+                self.focus_page(index);
+                true
+            }
+            Location::Page(kind) => {
+                let found = self.pages.iter().position(|page| {
+                    matches!(
+                        (page, kind),
+                        (Page::Keymap(_), PageKind::Keymap)
+                            | (Page::Activity(_), PageKind::Activity)
+                            | (Page::NewTab(_), PageKind::NewTab)
+                    )
+                });
+                let index = match found {
+                    Some(index) => index,
+                    None => self.open_page(match kind {
+                        PageKind::Keymap => Page::Keymap(KeymapPage::default()),
+                        PageKind::Activity => Page::Activity(ActivityView::at(None)),
+                        PageKind::NewTab => Page::NewTab(Launcher::default()),
+                    }),
+                };
+                self.focus_page(index);
+                true
+            }
         }
     }
 
@@ -3693,19 +3846,18 @@ impl ReaderApp {
 
     fn global_actions(&mut self, ctx: &egui::Context) -> Vec<ViewAction> {
         let mut actions = Vec::new();
-        if self.active.is_some() {
-            let (back, forward) = ctx.input(|i| {
-                (
-                    i.pointer.button_pressed(egui::PointerButton::Extra1),
-                    i.pointer.button_pressed(egui::PointerButton::Extra2),
-                )
-            });
-            if back {
-                actions.push(ViewAction::Back);
-            }
-            if forward {
-                actions.push(ViewAction::Forward);
-            }
+        // The mouse's side buttons, wherever the pointer is.
+        let (back, forward) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Extra1),
+                i.pointer.button_pressed(egui::PointerButton::Extra2),
+            )
+        });
+        if back {
+            let _ = self.run(Command::Back, ctx);
+        }
+        if forward {
+            let _ = self.run(Command::Forward, ctx);
         }
         // Key presses go to a shortcut being recorded, and the settings
         // window and prompts stand in front of the document.
@@ -4141,8 +4293,23 @@ impl ReaderApp {
             Command::PreviousHalfPage => view(ViewAction::HalfPage(-1)),
             Command::FirstPage => view(ViewAction::GoToPage(0)),
             Command::LastPage => view(ViewAction::GoToPage(usize::MAX)),
-            Command::Back => view(ViewAction::Back),
-            Command::Forward => view(ViewAction::Forward),
+            // The overview and presenting keep their own back and forward.
+            Command::Back | Command::Forward
+                if self.active.is_some_and(|active| {
+                    let tab = &self.tabs[active];
+                    tab.present.is_some() || tab.overview.is_some()
+                }) =>
+            {
+                view(if command == Command::Back {
+                    ViewAction::Back
+                } else {
+                    ViewAction::Forward
+                })
+            }
+            Command::Back | Command::Forward => {
+                self.navigate(command == Command::Back, ctx);
+                None
+            }
             Command::ZoomIn => view(ViewAction::ZoomIn),
             Command::ZoomOut => view(ViewAction::ZoomOut),
             // Gamepad mode fits the width in one step, without the second
@@ -5263,7 +5430,7 @@ impl ReaderApp {
         let menu_at = response.interact_pointer_pos().unwrap_or(rect.center());
         response.context_menu(|ui| {
             glyphst_ui::menu::style(ui);
-            self.context_menu(ui, ctx, active, menu_at, actions)
+            self.context_menu(ui, ctx, active, menu_at)
         });
         autoscroll
     }
@@ -5274,7 +5441,6 @@ impl ReaderApp {
         ctx: &egui::Context,
         active: usize,
         at: egui::Pos2,
-        actions: &mut Vec<ViewAction>,
     ) {
         let selected = self.tabs[active].selected_text();
         let translated = self.tabs[active]
@@ -5366,13 +5532,12 @@ impl ReaderApp {
             self.menu_button(ui, "Back", Command::Back),
             self.menu_button(ui, "Forward", Command::Forward),
         );
-        let tab = &self.tabs[active];
-        if ui.add_enabled(tab.can_go_back(), back).clicked() {
-            actions.push(ViewAction::Back);
+        if ui.add_enabled(self.nav.can_go_back(), back).clicked() {
+            self.navigate(true, ctx);
             ui.close();
         }
-        if ui.add_enabled(tab.can_go_forward(), forward).clicked() {
-            actions.push(ViewAction::Forward);
+        if ui.add_enabled(self.nav.can_go_forward(), forward).clicked() {
+            self.navigate(false, ctx);
             ui.close();
         }
     }
@@ -6251,6 +6416,7 @@ impl eframe::App for ReaderApp {
             self.follow_link(link, &ctx);
         }
         self.settle_switcher();
+        self.track_navigation();
         // A pending overview advances one tile per frame, so keep drawing.
         let overviews = self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(false);
         let continuous = animating

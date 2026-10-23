@@ -237,7 +237,6 @@ impl ReaderApp {
             .collect();
         let zoom = tab.view.scale / tab.fit_scale() * 100.0;
         let fraction = shell::read_fraction(current, pages);
-        let (can_back, can_forward) = (tab.can_go_back(), tab.can_go_forward());
         let reflow = match tab.document_layout {
             DocumentLayout::Reflow(layout) => Some(layout.font_size),
             _ => None,
@@ -267,8 +266,6 @@ impl ReaderApp {
         let assistant_open = self.assistant.open;
         let keymap = &self.keymap;
         let tips: Vec<(&str, String)> = [
-            ("back", keymap.tip("back", Command::Back)),
-            ("forward", keymap.tip("forward", Command::Forward)),
             ("find", keymap.tip("find", Command::Find)),
             ("zoom-out", keymap.tip("zoom out", Command::ZoomOut)),
             ("zoom-in", keymap.tip("zoom in", Command::ZoomIn)),
@@ -309,38 +306,6 @@ impl ReaderApp {
         let page_input = &mut self.page_input;
         let scrubbing = &mut self.chrome.scrub;
         let mut segments = Vec::new();
-        let (back_tip, forward_tip) = (tip("back"), tip("forward"));
-        let nav = Segment::custom("nav", Side::Left, 48.0, move |ui, rect| {
-            let step = |ui: &mut egui::Ui, x: f32, icon: &str, enabled: bool, tip: &str| {
-                let cell = Rect::from_center_size(pos2(x, rect.center().y), vec2(18.0, 20.0));
-                let response = ui
-                    .interact(cell, ui.scope_id().with(icon), Sense::click())
-                    .tip(tip);
-                let color = if !enabled {
-                    tokens.rule_strong
-                } else if response.hovered() {
-                    tokens.text
-                } else {
-                    tokens.faint
-                };
-                icons::paint(ui, cell, icon, 12.0, color);
-                enabled && response.clicked()
-            };
-            if step(ui, rect.left() + 14.0, "arrow-left", can_back, &back_tip) {
-                report.borrow_mut().actions.push(ViewAction::Back);
-            }
-            if step(
-                ui,
-                rect.left() + 32.0,
-                "arrow-right",
-                can_forward,
-                &forward_tip,
-            ) {
-                report.borrow_mut().actions.push(ViewAction::Forward);
-            }
-        })
-        .priority(4);
-        segments.push(nav);
         // `p 23 / 623`: the field as wide as its digits, the segment as
         // wide as the longest page number needs.
         let page_label = format!("/ {pages}");

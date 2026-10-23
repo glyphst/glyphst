@@ -908,6 +908,8 @@ impl Command {
             | Self::LibraryImportZotero
             | Self::LibraryMove
             | Self::LibraryPauseJobs
+            | Self::Back
+            | Self::Forward
             | Self::Home
             | Self::GamepadMode
             | Self::GamepadMenu

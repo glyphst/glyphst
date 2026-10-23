@@ -20,6 +20,8 @@ use crate::translation::SessionStatus;
 const SEARCH_WIDTH: f32 = 300.0;
 /// The bar shows the search field from this width.
 const SEARCH_FROM: f32 = 900.0;
+/// Back and forward after the mark.
+const NAV_WIDTH: f32 = 64.0;
 
 /// A tab in the bar: a document or a page.
 #[derive(Clone, Copy, PartialEq)]
@@ -100,6 +102,7 @@ impl ReaderApp {
         };
         let page_widths: Vec<f32> = pages.iter().map(|page| page.natural_width(ui)).collect();
         let controls = ui_tab::BAR_HEIGHT // logo
+            + NAV_WIDTH
             + 36.0 // +
             + search_width
             + 3.0 * 30.0
@@ -125,6 +128,36 @@ impl ReaderApp {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
             if ui_tab::logo(&mut child, home_active).tip("home").clicked() {
                 select = Some(None);
+            }
+            x = rect.right();
+        }
+        // Back and forward through everywhere the user has been.
+        {
+            let rect = Rect::from_min_size(pos2(x, bar.top()), vec2(NAV_WIDTH, bar.height()));
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect.shrink2(vec2(4.0, 0.0)))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            child.spacing_mut().item_spacing.x = 0.0;
+            let steps = [
+                (Command::Back, "arrow-left", "back", self.nav.can_go_back()),
+                (
+                    Command::Forward,
+                    "arrow-right",
+                    "forward",
+                    self.nav.can_go_forward(),
+                ),
+            ];
+            for (command, icon, label, can) in steps {
+                let tip = self.keymap.tip(label, command);
+                let clicked = child
+                    .add_enabled_ui(can, |ui| icons::button(ui, icon, 28.0, false, &tip))
+                    .inner
+                    .clicked();
+                if clicked {
+                    run = Some(command);
+                }
             }
             x = rect.right();
         }
