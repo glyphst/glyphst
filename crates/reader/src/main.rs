@@ -71,6 +71,7 @@ mod pages;
 mod palette;
 mod panes;
 mod pickers;
+mod pointer_demo;
 mod prefs;
 mod present;
 mod prompts;
@@ -149,6 +150,7 @@ fn parse_args() -> Result<Launch> {
         commands: Vec::new(),
         select_region: None,
         pad_demo: None,
+        pointer_demo: None,
         pad_family: pad::Family::Generic,
         gamepad_mode: false,
         fixed_clock: false,
@@ -314,6 +316,7 @@ fn parse_args() -> Result<Launch> {
                 launch.select_region = Some((page.max(1), [x0, y0, x1, y1]));
             }
             "--pad-demo" => launch.pad_demo = Some(value()?),
+            "--pointer-demo" => launch.pointer_demo = Some(value()?),
             "--gamepad-mode" => launch.gamepad_mode = true,
             "--fixed-clock" => launch.fixed_clock = true,
             "--pad-family" => {

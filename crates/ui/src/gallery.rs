@@ -139,6 +139,7 @@ impl Gallery {
                     active,
                     dirty,
                     closable: true,
+                    pinned: false,
                 };
                 let width = tab.natural_width(ui);
                 let (rect, response) =

@@ -26,6 +26,8 @@ pub(super) struct StageChrome {
     pub panes: Vec<(u64, Rect)>,
     /// The tab being dragged from the tab bar.
     pub tab_drag: Option<u64>,
+    /// Where each document tab shown in the bar was drawn last frame.
+    pub tab_rects: Vec<(usize, Rect)>,
     /// Tabs whose file is being copied into the library.
     pub adding: std::collections::HashSet<u64>,
     /// When a tab's file came into the library (egui time), so its check
@@ -516,11 +518,18 @@ impl ReaderApp {
             } else {
                 tokens.muted
             };
+            // The file's name as it is written; the outline's headings in
+            // lower case, as the design writes them.
+            let part = if index == 0 {
+                part.to_string()
+            } else {
+                part.to_lowercase()
+            };
             let part_rect = ui_text::line(
                 ui,
                 pos2(x, y),
                 Align2::LEFT_CENTER,
-                part.to_lowercase(),
+                part,
                 font.clone(),
                 color,
                 right - x,

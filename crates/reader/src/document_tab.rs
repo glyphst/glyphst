@@ -191,6 +191,8 @@ pub struct DocumentTab {
     pub id: u64,
     pub path: PathBuf,
     pub title: String,
+    /// Kept at the left of the bar as its icon (frame 02l).
+    pub pinned: bool,
     /// Fixed, or the reflowed layout of an EPUB.
     pub document_layout: DocumentLayout,
     pub layout: Layout,
@@ -313,6 +315,7 @@ impl DocumentTab {
             id,
             path: path.to_path_buf(),
             title: info.title.unwrap_or(file_name),
+            pinned: false,
             document_layout: info.layout,
             layout: match info.layout {
                 DocumentLayout::Fixed => Layout::arranged(info.bounds, arrangement),
@@ -1758,6 +1761,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         id: 1,
         path: path.clone(),
         title: "t".into(),
+        pinned: false,
         document_layout: DocumentLayout::Fixed,
         layout: Layout::new(vec![[0.0, 0.0, 600.0, 800.0]; pages]),
         view: View::new(1.0),

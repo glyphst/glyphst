@@ -174,8 +174,9 @@ impl ReaderApp {
     /// Starts the search and selection a screenshot asked for; returns
     /// whether they are still waiting for text.
     fn prepare_text_shot(&mut self, ctx: &egui::Context, now: Instant) -> bool {
-        // A scripted pad plays once the pages are drawn.
+        // A scripted pad and pointer play once the pages are drawn.
         self.pads.play();
+        self.pointer_demo.play();
         let Some(active) = self.active else {
             // Without a document, commands for the app's own tabs (a new
             // tab, the reading activity) run straight away.
@@ -496,7 +497,12 @@ impl ReaderApp {
             .active
             .is_some_and(|active| self.tabs[active].layers_pending());
         let text_pending = self.prepare_text_shot(ctx, now);
-        if !pages_drawn || layers_pending || text_pending || shot.requested {
+        if !pages_drawn
+            || layers_pending
+            || text_pending
+            || shot.requested
+            || self.pointer_demo.is_busy()
+        {
             shot.ready_frames = shot.ready_frames.min(SETTLE_FRAMES / 2);
             return false;
         }

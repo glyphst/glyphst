@@ -71,14 +71,19 @@ impl ReaderApp {
             .collect();
         let ids: Vec<u64> = self.tabs.iter().map(|tab| tab.id).collect();
         let full_titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
+        let pinned_flags: Vec<bool> = self.tabs.iter().map(|tab| tab.pinned).collect();
         let doc_tab = |index: usize, active: bool| DocTab {
             title: &titles[index],
             icon: Some(looks[index].0),
             active,
             dirty: looks[index].1,
             closable: true,
+            pinned: pinned_flags[index],
         };
-        let natural: Vec<f32> = (0..self.tabs.len())
+        // Pinned tabs keep their place at the left; the others share the
+        // rest of the bar.
+        let pinned = self.pinned_count();
+        let natural: Vec<f32> = (pinned..self.tabs.len())
             .map(|index| doc_tab(index, self.active == Some(index)).natural_width(ui))
             .collect();
         let home_active =
@@ -93,6 +98,7 @@ impl ReaderApp {
                 active: self.page_focused == Some(index) && self.active.is_none(),
                 dirty: false,
                 closable: true,
+                pinned: false,
             })
             .collect();
         let search_width = if bar.width() > SEARCH_FROM {
@@ -107,19 +113,43 @@ impl ReaderApp {
             + search_width
             + 3.0 * 30.0
             + 24.0
-            + page_widths.iter().sum::<f32>();
+            + page_widths.iter().sum::<f32>()
+            + pinned as f32 * ui_tab::PINNED_WIDTH;
         let fit = glyphst_ui::craft::tabs::fit(
             &natural,
-            self.active.unwrap_or(0),
+            self.active
+                .and_then(|active| active.checked_sub(pinned))
+                .unwrap_or(0),
             (bar.width() - controls).max(0.0),
             TAB_MIN_WIDTH,
             TAB_OVERFLOW_WIDTH,
         );
+        let shown: Vec<(usize, f32)> = (0..pinned)
+            .map(|index| (index, ui_tab::PINNED_WIDTH))
+            .chain(
+                fit.shown
+                    .iter()
+                    .map(|&(index, width)| (index + pinned, width)),
+            )
+            .collect();
+        let overflow: Vec<usize> = fit.overflow.iter().map(|index| index + pinned).collect();
         let mut select = None;
         let mut close = None;
         let mut run = None;
         let mut tab_menu = None;
+        let mut page_menu = None;
         let mut drag = None;
+        // A tab dragged along the bar: where it is, and where it would land.
+        let mut reorder = None;
+        let mut page_reorder = None;
+        let pointer = ctx.pointer_latest_pos();
+        // Within this of the bar a drag reorders; farther, it is over the
+        // pages (and opens beside a pane).
+        let on_bar = |pos: Option<egui::Pos2>| {
+            pos.is_some_and(|pos| bar.expand2(vec2(0.0, 24.0)).contains(pos))
+        };
+        let (mut doc_rects, mut page_rects) = (Vec::new(), Vec::new());
+        let mut lifted = None;
         let (mut open_page, mut close_page) = (None, None);
         let mut x = bar.left();
         // The mark; it goes home.
@@ -180,27 +210,47 @@ impl ReaderApp {
             let closed = close_response.is_some_and(|close| close.tip("close").clicked());
             (response, closed)
         };
-        for &(index, width) in &fit.shown {
+        let can_reopen = self.can_reopen_tab();
+        for &(index, width) in &shown {
             let tab = doc_tab(index, self.active == Some(index));
             let (response, closed) = cell(ui, BarTab::Document(index), &tab, width, &mut x);
+            doc_rects.push((index, response.rect));
             let response = response.tip(&full_titles[index]);
             if closed || response.middle_clicked() {
                 close = Some(index);
             } else if response.clicked() {
                 select = Some(Some(index));
             }
-            // Dragged onto the pages, it opens beside a pane.
+            // Dragged along the bar it moves; onto the pages, it opens
+            // beside a pane.
             if response.drag_started() {
                 drag = Some(ids[index]);
             }
             if response.dragged() {
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                if on_bar(pointer) {
+                    lifted = Some((BarTab::Document(index), response.clone()));
+                }
             }
-            let shown = self.panes.contains(ids[index]);
-            let count = ids.len();
+            if response.drag_stopped()
+                && on_bar(pointer)
+                && let Some(pointer) = pointer
+            {
+                reorder = Some((index, pointer.x));
+            }
+            let facts = TabMenuFacts {
+                count: ids.len(),
+                pinned: pinned_flags[index],
+                others: tabs_to_close(&pinned_flags, index, TabMenu::CloseOthers).len(),
+                left: tabs_to_close(&pinned_flags, index, TabMenu::CloseToTheLeft).len(),
+                right: tabs_to_close(&pinned_flags, index, TabMenu::CloseToTheRight).len(),
+                shown: self.panes.contains(ids[index]),
+                can_reopen,
+            };
+            let keymap = &self.keymap;
             response.context_menu(|ui| {
                 ui_menu::style(ui);
-                if let Some(action) = tab_menu_entries(ui, index, count, shown) {
+                if let Some(action) = tab_menu_entries(ui, facts, keymap) {
                     tab_menu = Some((index, action));
                     ui.close();
                 }
@@ -208,11 +258,109 @@ impl ReaderApp {
         }
         for (index, (page, &width)) in pages.iter().zip(&page_widths).enumerate() {
             let (response, closed) = cell(ui, BarTab::Page(index), page, width, &mut x);
+            page_rects.push((index, response.rect));
             if closed || response.middle_clicked() {
                 close_page = Some(index);
             } else if response.clicked() {
                 open_page = Some(index);
             }
+            if response.dragged() && on_bar(pointer) {
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                lifted = Some((BarTab::Page(index), response.clone()));
+            }
+            if response.drag_stopped()
+                && on_bar(pointer)
+                && let Some(pointer) = pointer
+            {
+                page_reorder = Some((index, pointer.x));
+            }
+            let count = pages.len();
+            response.context_menu(|ui| {
+                ui_menu::style(ui);
+                if ui.add(ui_menu::Item::new("Close").icon("x")).clicked() {
+                    page_menu = Some((index, false));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(count > 1, ui_menu::Item::new("Close other tabs").icon("x"))
+                    .clicked()
+                {
+                    page_menu = Some((index, true));
+                    ui.close();
+                }
+            });
+        }
+        // The tab being moved lifts off the bar and follows the pointer; a
+        // line marks where it lands, and its own place fades (frame 02l).
+        if let Some((which, response)) = &lifted
+            && let Some(pointer) = pointer
+        {
+            let (rects, tab) = match *which {
+                BarTab::Document(index) => (&doc_rects, doc_tab(index, self.active == Some(index))),
+                BarTab::Page(index) => (
+                    &page_rects,
+                    DocTab {
+                        active: false,
+                        ..pages[index]
+                    },
+                ),
+            };
+            let index = match *which {
+                BarTab::Document(index) | BarTab::Page(index) => index,
+            };
+            let rects: Vec<(usize, Rect)> = match *which {
+                BarTab::Document(_) => rects
+                    .iter()
+                    .copied()
+                    .filter(|&(other, _)| pinned_flags[other] == pinned_flags[index])
+                    .collect(),
+                BarTab::Page(_) => rects.clone(),
+            };
+            let rect = response.rect;
+            ui.painter()
+                .rect_filled(rect, 0, tokens.bg.gamma_multiply(0.65));
+            let slot = drop_slot(&rects, pointer.x);
+            let line_x = rects.iter().find(|&&(other, _)| other == slot).map_or_else(
+                || rects.last().map_or(rect.right(), |(_, last)| last.right()),
+                |(_, other)| other.left(),
+            );
+            let line = Rect::from_center_size(pos2(line_x, bar.center().y), vec2(2.0, 24.0));
+            let origin = ctx.input(|i| i.pointer.press_origin());
+            let offset = pointer.x - origin.map_or(pointer.x, |origin| origin.x);
+            let ghost = rect.translate(vec2(offset, 0.0)).shrink2(vec2(0.0, 6.0));
+            egui::Area::new(egui::Id::unique("tab-lifted"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(ghost.min)
+                .interactable(false)
+                .show(&ctx, |ui| {
+                    let (ghost, _) = ui.allocate_exact_size(ghost.size(), Sense::hover());
+                    ui.painter().add(
+                        egui::epaint::Shadow {
+                            offset: [0, 4],
+                            blur: 12,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(100),
+                        }
+                        .as_shape(ghost, tokens.ctl_radius()),
+                    );
+                    ui.painter().rect(
+                        ghost,
+                        tokens.ctl_radius(),
+                        tokens.raised,
+                        egui::Stroke::new(1.0, tokens.rule_strong),
+                        egui::StrokeKind::Inside,
+                    );
+                    let tab = DocTab {
+                        closable: false,
+                        ..tab
+                    };
+                    tab.paint(ui, ghost, response, false);
+                    // Over the lifted tab, so it shows where the tab lands
+                    // even under it.
+                    ui.ctx()
+                        .layer_painter(ui.layer_id())
+                        .rect_filled(line, 1.0, tokens.accent);
+                });
         }
         let rest = Rect::from_min_max(pos2(x, bar.top()), bar.max);
         let mut rest_ui = ui.new_child(
@@ -222,12 +370,12 @@ impl ReaderApp {
         );
         let ui = &mut rest_ui;
         ui.spacing_mut().item_spacing.x = 2.0;
-        if !fit.overflow.is_empty() {
+        if !overflow.is_empty() {
             let response =
                 icons::button(ui, "chevron-down", TAB_OVERFLOW_WIDTH, false, "more tabs");
             egui::Popup::menu(&response).show(|ui| {
                 ui_menu::style(ui);
-                for &index in &fit.overflow {
+                for &index in &overflow {
                     if ui_menu::Item::new(&titles[index])
                         .icon("file-text")
                         .show(ui)
@@ -304,6 +452,7 @@ impl ReaderApp {
         if let Some(id) = drag {
             self.chrome.tab_drag = Some(id);
         }
+        self.chrome.tab_rects = doc_rects.clone();
         if let Some(command) = run {
             self.run_or_notify(command, &ctx);
         }
@@ -311,6 +460,26 @@ impl ReaderApp {
             self.close_page(index);
         } else if let Some(index) = open_page {
             self.focus_page(index);
+        }
+        if let Some((from, x)) = reorder {
+            let rects: Vec<(usize, Rect)> = doc_rects
+                .iter()
+                .copied()
+                .filter(|&(other, _)| pinned_flags[other] == pinned_flags[from])
+                .collect();
+            self.move_tab(from, drop_slot(&rects, x));
+        }
+        if let Some((from, x)) = page_reorder {
+            self.move_page(from, drop_slot(&page_rects, x));
+        }
+        if let Some((index, others)) = page_menu {
+            if others {
+                for other in (0..self.pages.len()).rev().filter(|&other| other != index) {
+                    self.close_page(other);
+                }
+            } else {
+                self.close_page(index);
+            }
         }
         if let Some((index, action)) = tab_menu {
             self.tab_menu_action(index, action, &ctx);
@@ -320,5 +489,37 @@ impl ReaderApp {
             self.gallery = None;
             self.activate(index);
         }
+    }
+}
+
+/// The slot a tab dropped at `x` goes before: the first of `placed` (each
+/// tab's index and rect, in order) whose middle is past `x`, else after
+/// the last.
+fn drop_slot(placed: &[(usize, Rect)], x: f32) -> usize {
+    match placed.iter().find(|(_, rect)| rect.center().x >= x) {
+        Some(&(index, _)) => index,
+        None => placed.last().map_or(0, |&(index, _)| index + 1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_drop_goes_before_the_first_tab_past_its_middle() {
+        let tab = |index: usize| {
+            let left = index as f32 * 100.0;
+            (
+                index,
+                Rect::from_min_max(pos2(left, 0.0), pos2(left + 100.0, 36.0)),
+            )
+        };
+        let placed = [tab(2), tab(3), tab(4)];
+        assert_eq!(drop_slot(&placed, 120.0), 2, "before the first");
+        assert_eq!(drop_slot(&placed, 260.0), 3);
+        assert_eq!(drop_slot(&placed, 380.0), 4);
+        assert_eq!(drop_slot(&placed, 460.0), 5, "after the last");
+        assert_eq!(drop_slot(&[], 10.0), 0);
     }
 }

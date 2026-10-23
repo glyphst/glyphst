@@ -25,11 +25,20 @@ pub struct DocTab<'a> {
     /// Unsaved or running: a small accent dot after the title.
     pub dirty: bool,
     pub closable: bool,
+    /// Pinned (pen component `tab/pinned`): its icon only, 40pt wide,
+    /// with no close button.
+    pub pinned: bool,
 }
+
+/// A pinned tab's width.
+pub const PINNED_WIDTH: f32 = 40.0;
 
 impl DocTab<'_> {
     /// The width the tab wants for its title.
     pub fn natural_width(&self, ui: &Ui) -> f32 {
+        if self.pinned {
+            return PINNED_WIDTH;
+        }
         let mut width = 12.0 + text::width(ui, self.title, &theme::mono(12.0)) + 10.0;
         width += if self.has_slot() { ICON_SLOT } else { 0.0 };
         width += if self.dirty { 14.0 } else { 0.0 };
@@ -44,7 +53,7 @@ impl DocTab<'_> {
 
     /// The close button's rect in a tab at `rect`.
     pub fn close_rect(&self, rect: Rect) -> Option<Rect> {
-        self.closable.then(|| {
+        (self.closable && !self.pinned).then(|| {
             Rect::from_center_size(
                 egui::pos2(rect.right() - 16.0, rect.center().y),
                 Vec2::splat(16.0),
@@ -73,6 +82,31 @@ impl DocTab<'_> {
                 .hline(rect.x_range(), rect.bottom() - 0.5, t.hairline());
         }
         let y = rect.center().y;
+        if self.pinned {
+            let icon = self.icon.unwrap_or("file-text");
+            let color = if self.active {
+                t.accent_text
+            } else if hovered {
+                t.text
+            } else {
+                t.muted
+            };
+            icons::paint(
+                ui,
+                Rect::from_center_size(rect.center(), Vec2::splat(13.0)),
+                icon,
+                13.0,
+                color,
+            );
+            if self.dirty {
+                ui.painter().circle_filled(
+                    egui::pos2(rect.right() - 8.0, rect.top() + 9.0),
+                    2.5,
+                    t.accent_text,
+                );
+            }
+            return;
+        }
         let mut x = rect.left() + 12.0;
         if self.active {
             ui.painter().rect_filled(
@@ -185,6 +219,7 @@ mod tests {
                 active,
                 dirty: false,
                 closable: true,
+                pinned: false,
             };
             assert_eq!(tab(true).natural_width(ui), tab(false).natural_width(ui));
         });

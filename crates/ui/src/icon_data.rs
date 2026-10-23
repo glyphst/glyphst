@@ -28,8 +28,16 @@ pub static ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/arrow-left-right.svg"),
     ),
     (
+        "arrow-left-to-line",
+        include_bytes!("../assets/icons/arrow-left-to-line.svg"),
+    ),
+    (
         "arrow-right",
         include_bytes!("../assets/icons/arrow-right.svg"),
+    ),
+    (
+        "arrow-right-to-line",
+        include_bytes!("../assets/icons/arrow-right-to-line.svg"),
     ),
     ("arrow-up", include_bytes!("../assets/icons/arrow-up.svg")),
     (
@@ -113,6 +121,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("command", include_bytes!("../assets/icons/command.svg")),
     ("contrast", include_bytes!("../assets/icons/contrast.svg")),
     ("copy", include_bytes!("../assets/icons/copy.svg")),
+    ("copy-plus", include_bytes!("../assets/icons/copy-plus.svg")),
     (
         "corner-down-left",
         include_bytes!("../assets/icons/corner-down-left.svg"),
@@ -245,6 +254,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("pen-line", include_bytes!("../assets/icons/pen-line.svg")),
     ("pencil", include_bytes!("../assets/icons/pencil.svg")),
     ("pin", include_bytes!("../assets/icons/pin.svg")),
+    ("pin-off", include_bytes!("../assets/icons/pin-off.svg")),
     ("play", include_bytes!("../assets/icons/play.svg")),
     ("plus", include_bytes!("../assets/icons/plus.svg")),
     (

@@ -17,6 +17,14 @@ pub enum Command {
     /// Opens documents through the system's file dialog.
     OpenWithDialog,
     CloseTab,
+    /// Opens the tab closed last again, where it was.
+    ReopenClosedTab,
+    /// A second tab on the active document, at its place.
+    DuplicateTab,
+    /// Keeps the active tab at the left of the bar, as its icon.
+    TogglePinTab,
+    MoveTabLeft,
+    MoveTabRight,
     NextTab,
     PreviousTab,
     /// The book switcher held open (Ctrl+Tab): the books in recent order,
@@ -207,10 +215,15 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 93] = [
+    pub const ALL: [Self; 98] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
+        Self::ReopenClosedTab,
+        Self::DuplicateTab,
+        Self::TogglePinTab,
+        Self::MoveTabLeft,
+        Self::MoveTabRight,
         Self::NextTab,
         Self::PreviousTab,
         Self::SwitchBook,
@@ -309,6 +322,11 @@ impl Command {
             Self::Open => "app.open",
             Self::OpenWithDialog => "app.open_with_dialog",
             Self::CloseTab => "app.close_tab",
+            Self::ReopenClosedTab => "app.reopen_closed_tab",
+            Self::DuplicateTab => "app.duplicate_tab",
+            Self::TogglePinTab => "app.pin_tab",
+            Self::MoveTabLeft => "app.move_tab_left",
+            Self::MoveTabRight => "app.move_tab_right",
             Self::NextTab => "app.next_tab",
             Self::PreviousTab => "app.previous_tab",
             Self::SwitchBook => "app.switch_book",
@@ -411,6 +429,11 @@ impl Command {
             Self::Open => "Open document…",
             Self::OpenWithDialog => "Open with system dialog…",
             Self::CloseTab => "Close tab",
+            Self::ReopenClosedTab => "Reopen closed tab",
+            Self::DuplicateTab => "Duplicate tab",
+            Self::TogglePinTab => "Pin tab",
+            Self::MoveTabLeft => "Move tab left",
+            Self::MoveTabRight => "Move tab right",
             Self::NextTab => "Next tab",
             Self::PreviousTab => "Previous tab",
             Self::SwitchBook => "Switch book",
@@ -510,6 +533,11 @@ impl Command {
             Self::Open => "file-search",
             Self::OpenWithDialog => "folder-open",
             Self::CloseTab => "x",
+            Self::ReopenClosedTab => "rotate-ccw-clock",
+            Self::DuplicateTab => "copy-plus",
+            Self::TogglePinTab => "pin",
+            Self::MoveTabLeft => "arrow-left",
+            Self::MoveTabRight => "arrow-right",
             Self::NextTab => "chevron-right",
             Self::PreviousTab => "chevron-left",
             Self::SwitchBook | Self::SwitchBookBack => "arrow-left-right",
@@ -602,6 +630,11 @@ impl Command {
             Self::Open
             | Self::OpenWithDialog
             | Self::CloseTab
+            | Self::ReopenClosedTab
+            | Self::DuplicateTab
+            | Self::TogglePinTab
+            | Self::MoveTabLeft
+            | Self::MoveTabRight
             | Self::NextTab
             | Self::PreviousTab
             | Self::SwitchBook
@@ -709,6 +742,10 @@ impl Command {
             // Ctrl+T translates the selection.
             Self::NewTab => &["Ctrl+N"],
             Self::CloseTab => &["Ctrl+W"],
+            Self::DuplicateTab | Self::TogglePinTab => &[],
+            Self::ReopenClosedTab => &["Ctrl+Shift+T"],
+            Self::MoveTabLeft => &["Ctrl+Shift+PageUp"],
+            Self::MoveTabRight => &["Ctrl+Shift+PageDown"],
             Self::NextTab => &["Ctrl+PageDown"],
             Self::PreviousTab => &["Ctrl+PageUp"],
             Self::SwitchBook => &["Ctrl+Tab"],
@@ -811,6 +848,9 @@ impl Command {
             Self::Open => &["O"],
             Self::OpenWithDialog => &["Shift+O"],
             Self::CloseTab => &["Q"],
+            Self::ReopenClosedTab => &["Ctrl+Shift+T"],
+            Self::MoveTabLeft => &["Ctrl+Shift+PageUp"],
+            Self::MoveTabRight => &["Ctrl+Shift+PageDown"],
             Self::NextTab => &["G T", "Ctrl+PageDown"],
             Self::PreviousTab => &["G Shift+T", "Ctrl+PageUp"],
             Self::SwitchBook => &["Ctrl+Tab"],
@@ -890,6 +930,7 @@ impl Command {
         match self {
             Self::Open
             | Self::OpenWithDialog
+            | Self::ReopenClosedTab
             | Self::NextTab
             | Self::PreviousTab
             | Self::SwitchBook

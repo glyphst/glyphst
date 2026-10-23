@@ -412,6 +412,8 @@ pub struct SessionFile {
     pub path: String,
     /// The page shown at the top of the view (0-based).
     pub page: usize,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Prefs {
@@ -592,10 +594,12 @@ mod tests {
                     SessionFile {
                         path: "/books/a.pdf".into(),
                         page: 12,
+                        pinned: true,
                     },
                     SessionFile {
                         path: "/books/b.epub".into(),
                         page: 0,
+                        pinned: false,
                     },
                 ],
                 active: Some(1),

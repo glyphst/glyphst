@@ -73,6 +73,7 @@ mod switcher;
 
 pub(crate) use ring::fits_reading_ring;
 mod tab_bar;
+mod tabs;
 
 /// How often the effects folder is looked at for changes.
 const EFFECTS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -179,6 +180,8 @@ pub struct Launch {
     /// the real pads, as this family (`--pad-family`).
     pub pad_demo: Option<String>,
     pub pad_family: crate::pad::Family,
+    /// Scripted runs: a pointer playing these steps (`--pointer-demo`).
+    pub pointer_demo: Option<String>,
     /// Scripted runs: start in gamepad mode, with the clock at 21:30.
     pub gamepad_mode: bool,
     pub fixed_clock: bool,
@@ -288,6 +291,10 @@ pub struct ReaderApp {
     pub(crate) transition: Option<ViewTransition>,
     /// Picks random transitions, their varied parameters and seeds.
     transition_rng: Rng,
+    /// Documents closed this session, the last at the end, for reopening.
+    closed_tabs: Vec<PathBuf>,
+    /// A scripted pointer for screens (`--pointer-demo`).
+    pub(crate) pointer_demo: crate::pointer_demo::PointerScript,
     /// The last transition Random picked, so the next one differs.
     last_random: Option<String>,
     /// Where the next switch comes from, in points (a card picked); else
@@ -642,6 +649,12 @@ impl ReaderApp {
             pickers: Pickers::default(),
             render_state,
             transition: None,
+            closed_tabs: Vec::new(),
+            pointer_demo: match &launch.pointer_demo {
+                Some(script) => crate::pointer_demo::PointerScript::parse(script)
+                    .map_err(|error| anyhow::anyhow!("--pointer-demo: {error}"))?,
+                None => Default::default(),
+            },
             // Screenshots repeat their random picks.
             transition_rng: if launch.harness.is_some() {
                 Rng::new(1)
@@ -1080,7 +1093,15 @@ impl ReaderApp {
         if launch.files.is_empty() && app.prefs.reopen_last_session && persist {
             let session = app.prefs.last_session.clone();
             for file in &session.files {
-                app.open_quietly(Path::new(&file.path), &ctx, Some(file.page));
+                // Each file gets its tab, a duplicate too, so the indices
+                // below still match.
+                let count = app.tabs.len();
+                app.open_new(Path::new(&file.path), &ctx, Some(file.page), None);
+                if app.tabs.len() > count
+                    && let Some(tab) = app.tabs.last_mut()
+                {
+                    tab.pinned = file.pinned;
+                }
             }
             app.active = session.active.filter(|&active| active < app.tabs.len());
             // Panes only when every document opened again, so the indices
@@ -1154,11 +1175,24 @@ impl ReaderApp {
             self.activate(Some(index));
             return;
         }
+        self.open_new(path, ctx, page, None);
+    }
+
+    /// Opens `path` in a new tab even when another has it, at `at` (else
+    /// where it was left, `page` overriding the page), and makes it active.
+    pub(crate) fn open_new(
+        &mut self,
+        path: &Path,
+        ctx: &egui::Context,
+        page: Option<usize>,
+        at: Option<DocumentPosition>,
+    ) {
         let remember_zoom = self.prefs.remember_zoom;
-        let mut restore = self
-            .library
-            .history_position(path)
-            .map(|position| opening_zoom(position, remember_zoom));
+        let mut restore = at.or_else(|| {
+            self.library
+                .history_position(path)
+                .map(|position| opening_zoom(position, remember_zoom))
+        });
         if let Some(page) = page {
             let mut position =
                 restore.unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, 1.0, page + 1));
@@ -3388,6 +3422,7 @@ impl ReaderApp {
         let shown_alone = self.active == Some(index) && self.panes.count() == 1;
         let closed_background = self.background_for(Some(index));
         let mut tab = self.tabs.remove(index);
+        self.remember_closed(&tab.path);
         self.nav.closed(tab.id);
         self.free_textures(&tab.take_freed_textures(true));
         self.drop_card(tab.id);
@@ -3455,6 +3490,7 @@ impl ReaderApp {
                 .map(|tab| SessionFile {
                     path: tab.path.display().to_string(),
                     page: tab.current_page(),
+                    pinned: tab.pinned,
                 })
                 .collect(),
             active: self.active,
@@ -4115,6 +4151,33 @@ impl ReaderApp {
             Command::CloseTab => {
                 if let Some(active) = self.active {
                     self.close(active);
+                }
+                None
+            }
+            Command::ReopenClosedTab => {
+                self.reopen_closed_tab(ctx);
+                None
+            }
+            Command::DuplicateTab => {
+                if let Some(active) = self.active {
+                    self.duplicate_tab(active, ctx);
+                }
+                None
+            }
+            Command::TogglePinTab => {
+                if let Some(active) = self.active {
+                    self.toggle_pin(active);
+                }
+                None
+            }
+            Command::MoveTabLeft | Command::MoveTabRight => {
+                if let Some(active) = self.active {
+                    let slot = if command == Command::MoveTabLeft {
+                        active.saturating_sub(1)
+                    } else {
+                        active + 2
+                    };
+                    self.move_tab(active, slot.min(self.tabs.len()));
                 }
                 None
             }
@@ -4936,11 +4999,18 @@ impl ReaderApp {
     fn tab_menu_action(&mut self, index: usize, action: TabMenu, ctx: &egui::Context) {
         let id = self.tabs[index].id;
         match action {
-            TabMenu::Close | TabMenu::CloseOthers | TabMenu::CloseToTheRight => {
-                for other in tabs_to_close(self.tabs.len(), index, action) {
+            TabMenu::Close
+            | TabMenu::CloseOthers
+            | TabMenu::CloseToTheLeft
+            | TabMenu::CloseToTheRight => {
+                let pinned: Vec<bool> = self.tabs.iter().map(|tab| tab.pinned).collect();
+                for other in tabs_to_close(&pinned, index, action) {
                     self.close(other);
                 }
             }
+            TabMenu::Duplicate => self.duplicate_tab(index, ctx),
+            TabMenu::TogglePin => self.toggle_pin(index),
+            TabMenu::ReopenClosed => self.reopen_closed_tab(ctx),
             TabMenu::Open(zone) => match self.panes.focused() {
                 Some(pane) if self.active.is_some() => self.drop_tab(id, pane, zone),
                 _ => self.activate(Some(index)),
@@ -5888,6 +5958,21 @@ impl eframe::App for ReaderApp {
     /// Routes the pads before the frame reads its input, so the keys they
     /// press reach every widget as typed ones do.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let tabs = self.chrome.tab_rects.clone();
+        let page = self.chrome.panes.first().map(|(_, rect)| rect.center());
+        raw_input.events.extend(self.pointer_demo.frame(|target| {
+            match target {
+                crate::pointer_demo::Target::Tab(index) => tabs
+                    .iter()
+                    .find(|(tab, _)| tab == index)
+                    .map(|(_, rect)| rect.center()),
+                crate::pointer_demo::Target::Page => page,
+                _ => None,
+            }
+        }));
+        if self.pointer_demo.is_busy() {
+            ctx.request_repaint();
+        }
         self.note_input_device(&raw_input.events);
         // Pads reach every app (they aren't Wayland input); the window
         // takes them only while it has focus, and lets go when it loses it.
@@ -6696,7 +6781,11 @@ fn menu_entry<'a>(
 enum TabMenu {
     Close,
     CloseOthers,
+    CloseToTheLeft,
     CloseToTheRight,
+    Duplicate,
+    TogglePin,
+    ReopenClosed,
     /// Shows the tab beside the focused pane.
     Open(Zone),
     Reload,
@@ -6704,34 +6793,110 @@ enum TabMenu {
     ShowInFolder,
 }
 
-/// The context menu of tab `index` of `count`; `shown` when it is on the
-/// stage already. Returns the entry chosen.
-fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) -> Option<TabMenu> {
+/// What a tab's context menu needs to know about the bar.
+#[derive(Clone, Copy)]
+struct TabMenuFacts {
+    /// Tabs in the bar.
+    count: usize,
+    pinned: bool,
+    /// Tabs that close entries would close, per entry.
+    others: usize,
+    left: usize,
+    right: usize,
+    /// The tab is on the stage already.
+    shown: bool,
+    can_reopen: bool,
+}
+
+/// The context menu of a tab (frame 02l). Returns the entry chosen.
+fn tab_menu_entries(
+    ui: &mut egui::Ui,
+    facts: TabMenuFacts,
+    keymap: &crate::keys::Keymap,
+) -> Option<TabMenu> {
     let mut chosen = None;
-    let mut entry = |ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str, action| {
-        if ui
-            .add_enabled(enabled, menu_entry(ui, icon, text, ""))
-            .clicked()
-        {
-            chosen = Some(action);
-        }
-    };
-    entry(ui, true, "x", "Close", TabMenu::Close);
-    entry(ui, count > 1, "x", "Close other tabs", TabMenu::CloseOthers);
+    let mut entry =
+        |ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str, key: &str, action| {
+            if ui
+                .add_enabled(enabled, menu_entry(ui, icon, text, key))
+                .clicked()
+            {
+                chosen = Some(action);
+            }
+        };
+    let key = |command| keymap.label(command).unwrap_or_default();
+    entry(ui, true, "refresh-cw", "Reload", "", TabMenu::Reload);
     entry(
         ui,
-        index + 1 < count,
+        true,
+        "copy-plus",
+        "Duplicate",
+        &key(Command::DuplicateTab),
+        TabMenu::Duplicate,
+    );
+    let (pin_icon, pin_text) = if facts.pinned {
+        ("pin-off", "Unpin tab")
+    } else {
+        ("pin", "Pin tab")
+    };
+    entry(
+        ui,
+        true,
+        pin_icon,
+        pin_text,
+        &key(Command::TogglePinTab),
+        TabMenu::TogglePin,
+    );
+    glyphst_ui::menu::separator(ui);
+    entry(
+        ui,
+        true,
         "x",
+        "Close",
+        &key(Command::CloseTab),
+        TabMenu::Close,
+    );
+    entry(
+        ui,
+        facts.others > 0,
+        "x",
+        "Close other tabs",
+        "",
+        TabMenu::CloseOthers,
+    );
+    entry(
+        ui,
+        facts.left > 0,
+        "arrow-left-to-line",
+        "Close tabs to the left",
+        "",
+        TabMenu::CloseToTheLeft,
+    );
+    entry(
+        ui,
+        facts.right > 0,
+        "arrow-right-to-line",
         "Close tabs to the right",
+        "",
         TabMenu::CloseToTheRight,
     );
     glyphst_ui::menu::separator(ui);
-    if !shown {
+    entry(
+        ui,
+        facts.can_reopen,
+        "rotate-ccw-clock",
+        "Reopen closed tab",
+        &key(Command::ReopenClosedTab),
+        TabMenu::ReopenClosed,
+    );
+    glyphst_ui::menu::separator(ui);
+    if !facts.shown && facts.count > 1 {
         entry(
             ui,
             true,
             "columns-2",
             "Open to the right",
+            "",
             TabMenu::Open(Zone::Right),
         );
         entry(
@@ -6739,17 +6904,17 @@ fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) 
             true,
             "rows-2",
             "Open below",
+            "",
             TabMenu::Open(Zone::Bottom),
         );
     }
-    entry(ui, true, "refresh-cw", "Reload", TabMenu::Reload);
-    glyphst_ui::menu::separator(ui);
-    entry(ui, true, "copy", "Copy path", TabMenu::CopyPath);
+    entry(ui, true, "copy", "Copy path", "", TabMenu::CopyPath);
     entry(
         ui,
         true,
         "folder-open",
         "Show in folder",
+        "",
         TabMenu::ShowInFolder,
     );
     chosen
@@ -6757,11 +6922,13 @@ fn tab_menu_entries(ui: &mut egui::Ui, index: usize, count: usize, shown: bool) 
 
 /// The tabs a close entry of tab `index`'s menu closes, last first so each
 /// index stays valid as the ones after it go.
-fn tabs_to_close(count: usize, index: usize, action: TabMenu) -> Vec<usize> {
-    let all = (0..count).rev();
+/// Pinned tabs (`pinned`, by index) stay unless closed themselves.
+fn tabs_to_close(pinned: &[bool], index: usize, action: TabMenu) -> Vec<usize> {
+    let all = (0..pinned.len()).rev().filter(|&other| !pinned[other]);
     match action {
         TabMenu::Close => vec![index],
         TabMenu::CloseOthers => all.filter(|&other| other != index).collect(),
+        TabMenu::CloseToTheLeft => all.filter(|&other| other < index).collect(),
         TabMenu::CloseToTheRight => all.filter(|&other| other > index).collect(),
         _ => Vec::new(),
     }
@@ -6811,10 +6978,17 @@ mod tests {
 
     #[test]
     fn tab_menus_close_the_tabs_they_name_last_first() {
-        assert_eq!(tabs_to_close(4, 1, TabMenu::Close), [1]);
-        assert_eq!(tabs_to_close(4, 1, TabMenu::CloseOthers), [3, 2, 0]);
-        assert_eq!(tabs_to_close(4, 1, TabMenu::CloseToTheRight), [3, 2]);
-        assert!(tabs_to_close(4, 3, TabMenu::CloseToTheRight).is_empty());
+        let none = [false; 4];
+        assert_eq!(tabs_to_close(&none, 1, TabMenu::Close), [1]);
+        assert_eq!(tabs_to_close(&none, 1, TabMenu::CloseOthers), [3, 2, 0]);
+        assert_eq!(tabs_to_close(&none, 1, TabMenu::CloseToTheRight), [3, 2]);
+        assert_eq!(tabs_to_close(&none, 2, TabMenu::CloseToTheLeft), [1, 0]);
+        assert!(tabs_to_close(&none, 3, TabMenu::CloseToTheRight).is_empty());
+        // Pinned tabs stay, unless closed themselves.
+        let pinned = [true, false, false, false];
+        assert_eq!(tabs_to_close(&pinned, 2, TabMenu::CloseOthers), [3, 1]);
+        assert_eq!(tabs_to_close(&pinned, 2, TabMenu::CloseToTheLeft), [1]);
+        assert_eq!(tabs_to_close(&pinned, 0, TabMenu::Close), [0]);
     }
 
     #[test]
