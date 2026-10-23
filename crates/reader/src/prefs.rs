@@ -235,6 +235,9 @@ pub struct Prefs {
     pub smooth_scrolling: bool,
     /// Motion becomes short fades: slides and glides jump, pages fade in.
     pub reduce_motion: bool,
+    /// A ring closes on where a jump lands (back, a link, the outline, a
+    /// search hit).
+    pub jump_ring: bool,
     /// Effect id of the page turn's transition (presenting), or `None` for
     /// a cut.
     pub transition: Option<String>,
@@ -331,6 +334,7 @@ impl Default for Prefs {
             reopen_last_session: true,
             smooth_scrolling: true,
             reduce_motion: false,
+            jump_ring: true,
             transition: Some(glyphst_effects::SLIDE_OVER.into()),
             switch_transition: Some(glyphst_effects::RANDOM.into()),
             switcher_layout: crate::switcher::layout::Layout::Fan,

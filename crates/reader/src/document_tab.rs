@@ -269,6 +269,9 @@ pub struct DocumentTab {
     /// A jump happened since the app last looked, for its back and forward
     /// across tabs (`nav`).
     pub jumped: bool,
+    /// Where the last jump landed, for a ring that closes on it: the page,
+    /// a point on it (page coordinates) and when.
+    pub beacon: Option<(usize, [f32; 2], Instant)>,
     /// A reflowed position waiting for the text it points into, and the
     /// view origin when it was set: moving the view cancels it.
     pending_anchor: Option<(SemanticTextAnchor, f32, [f64; 2])>,
@@ -356,6 +359,7 @@ impl DocumentTab {
             back: Vec::new(),
             forward: Vec::new(),
             jumped: false,
+            beacon: None,
             pending_anchor: None,
             reflow_mismatch: None,
             translation: None,
@@ -954,6 +958,37 @@ impl DocumentTab {
         self.forward.clear();
     }
 
+    /// Marks where the view landed after a jump: the reading line near
+    /// the top of the view, a little in from the page's left edge.
+    fn land(&mut self) {
+        if self.present.is_some() || self.layout.len() == 0 {
+            return;
+        }
+        let y = self.view.origin[1] + TARGET_MARGIN / self.view.scale;
+        let pages = self.layout.len();
+        let page = (0..pages)
+            .find(|&page| {
+                let top = self.layout.offsets[page][1];
+                (top..top + self.layout.page_size(page)[1]).contains(&y)
+            })
+            .unwrap_or_else(|| {
+                (0..pages)
+                    .rev()
+                    .find(|&page| self.layout.offsets[page][1] <= y)
+                    .unwrap_or(0)
+            });
+        let x = self.layout.offsets[page][0] + self.layout.page_size(page)[0] * 0.08;
+        self.beacon = Some((page, self.layout.to_page(page, [x, y]), Instant::now()));
+    }
+
+    /// Marks a page rectangle (a search hit) as where the view landed.
+    fn land_on(&mut self, page: usize, rect: PageRect) {
+        if self.present.is_none() {
+            let center = [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
+            self.beacon = Some((page, center, Instant::now()));
+        }
+    }
+
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }
@@ -1011,6 +1046,7 @@ impl DocumentTab {
             self.pending_anchor = Some((semantic.anchor.clone(), 0.0, self.view.origin));
             self.resolve_pending_anchor();
         }
+        self.land();
     }
 
     /// Goes to a passage the library's search found: its page and, in a
@@ -1026,6 +1062,7 @@ impl DocumentTab {
             self.pending_anchor = Some((anchor, 0.2, self.view.origin));
             self.resolve_pending_anchor();
         }
+        self.land();
     }
 
     /// The first words at the top of the view, to name a bookmark.
@@ -1457,10 +1494,12 @@ impl DocumentTab {
             ViewAction::GoToPage(page) => {
                 self.remember();
                 self.go_to_page(page);
+                self.land();
             }
             ViewAction::GoTo { page, y } => {
                 self.remember();
                 self.go_to_point(page, y);
+                self.land();
             }
             ViewAction::GoToEntry(index) => {
                 if let Some(entry) = self.outline.get(index)
@@ -1469,6 +1508,7 @@ impl DocumentTab {
                     let y = entry.y;
                     self.remember();
                     self.go_to_point(page, y);
+                    self.land();
                     self.outline_pick = Some((index, None));
                 }
             }
@@ -1476,15 +1516,20 @@ impl DocumentTab {
                 if let Some(place) = self.back.pop() {
                     self.forward.push(self.place());
                     self.go_to_place(place);
+                    self.land();
                 }
             }
             ViewAction::Forward => {
                 if let Some(place) = self.forward.pop() {
                     self.back.push(self.place());
                     self.go_to_place(place);
+                    self.land();
                 }
             }
-            ViewAction::Reveal { page, rect } => self.reveal(page, rect),
+            ViewAction::Reveal { page, rect } => {
+                self.reveal(page, rect);
+                self.land_on(page, rect);
+            }
         }
         None
     }
@@ -1497,6 +1542,12 @@ impl DocumentTab {
         let at_strict = self.fitted && self.at_strict_fit();
         let width = (f64::from(viewport[0]) - self.inset - self.inset_right).max(1.0);
         let resized = width != self.viewport[0];
+        if self
+            .beacon
+            .is_some_and(|(_, _, at)| at.elapsed() > Duration::from_secs(1))
+        {
+            self.beacon = None;
+        }
         self.viewport = [width, f64::from(viewport[1])];
         if (at_fit || at_strict) && resized {
             let fit = if at_strict {
@@ -1750,6 +1801,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         back: Vec::new(),
         forward: Vec::new(),
         jumped: false,
+        beacon: None,
         pending_anchor: None,
         reflow_mismatch: None,
         translation: None,
@@ -2080,6 +2132,38 @@ mod tests {
         tab.apply(ViewAction::Back, false);
         tab.apply(ViewAction::GoToPage(1), false);
         assert!(!tab.can_go_forward());
+    }
+
+    #[test]
+    fn jumps_mark_where_they_land_and_scrolling_does_not() {
+        let mut tab = tab(20);
+        settle(&mut tab);
+        tab.apply(ViewAction::Step(3), false);
+        assert!(tab.beacon.is_none(), "scrolling is not a jump");
+        tab.apply(
+            ViewAction::GoTo {
+                page: 9,
+                y: Some(200.0),
+            },
+            false,
+        );
+        let (page, point, _) = tab.beacon.expect("a link marks where it lands");
+        assert_eq!(page, 9);
+        assert!((point[1] - 200.0).abs() < 1.0, "{point:?}");
+        tab.beacon = None;
+        tab.apply(ViewAction::Back, false);
+        assert!(tab.beacon.is_some(), "back marks where it lands");
+        tab.apply(
+            ViewAction::Reveal {
+                page: 2,
+                rect: [100.0, 100.0, 140.0, 112.0],
+            },
+            false,
+        );
+        assert_eq!(
+            tab.beacon.map(|(page, point, _)| (page, point)),
+            Some((2, [120.0, 106.0]))
+        );
     }
 
     #[test]

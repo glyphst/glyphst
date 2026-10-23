@@ -5661,6 +5661,21 @@ impl ReaderApp {
                 );
             }
         }
+        // Where the last jump landed: a ring closing on it.
+        if self.prefs.jump_ring
+            && let Some((page, point, at)) = tab.beacon
+            && let Some(map) = maps.iter().find(|map| map.page == page)
+        {
+            let elapsed = at.elapsed().as_secs_f32();
+            if let Some((radius, alpha)) = beacon_ring(elapsed, self.prefs.reduce_motion) {
+                painter.circle_stroke(
+                    map.screen_pos(point),
+                    radius,
+                    egui::Stroke::new(2.0, tokens.accent.gamma_multiply(alpha)),
+                );
+                painter.ctx().request_repaint();
+            }
+        }
     }
 
     /// The popover of a highlight or note clicked on the page: colour,
@@ -6764,5 +6779,37 @@ mod tests {
         assert_eq!(truncate("short", 8), "short");
         assert_eq!(truncate("a rather long title", 8), "a rathe…");
         assert_eq!(truncate("中文标题很长很长很长", 4), "中文标…");
+    }
+}
+
+/// The ring where a jump landed, `elapsed` seconds after: its radius and
+/// opacity, closing from 32 to 4 points in 0.55 s (still at 14 points for
+/// 0.4 s with reduced motion); none once it is over.
+pub(crate) fn beacon_ring(elapsed: f32, reduced: bool) -> Option<(f32, f32)> {
+    if reduced {
+        return (elapsed < 0.4).then_some((14.0, 0.8));
+    }
+    const DURATION: f32 = 0.55;
+    if !(0.0..DURATION).contains(&elapsed) {
+        return None;
+    }
+    let t = elapsed / DURATION;
+    let eased = 1.0 - (1.0 - t).powi(3);
+    Some((32.0 + (4.0 - 32.0) * eased, 0.9 * (1.0 - eased)))
+}
+
+#[cfg(test)]
+mod beacon_tests {
+    use super::beacon_ring;
+
+    #[test]
+    fn the_ring_closes_and_fades_then_is_gone() {
+        let (start, start_alpha) = beacon_ring(0.0, false).unwrap();
+        let (mid, mid_alpha) = beacon_ring(0.25, false).unwrap();
+        assert!(start > mid && mid > 4.0);
+        assert!(start_alpha > mid_alpha);
+        assert!(beacon_ring(0.6, false).is_none());
+        assert_eq!(beacon_ring(0.2, true), Some((14.0, 0.8)));
+        assert!(beacon_ring(0.5, true).is_none());
     }
 }

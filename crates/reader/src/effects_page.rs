@@ -406,6 +406,13 @@ pub fn settings_page(ui: &mut egui::Ui, page: SettingsPage<'_>) {
                 ui.add(Switch(&mut prefs.reduce_motion));
             },
         );
+        group.row(
+            "mark where a jump lands",
+            Some("a ring closes on the place back, a link or a search hit goes to"),
+            |ui| {
+                ui.add(Switch(&mut prefs.jump_ring));
+            },
+        );
     });
 
     glyphst_ui::settings::group(ui, "Your effects", |group| {
