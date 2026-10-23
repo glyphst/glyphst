@@ -15,6 +15,7 @@ use glyphst_core::{
 use glyphst_effects::EffectDef;
 use glyphst_library::{ActivityKind, DocumentPosition, HighlightColor, LibraryStore};
 use glyphst_pdf::text::LinkTarget;
+use glyphst_pdf_translation_service::ExportLayout;
 use glyphst_ui::Tip;
 use glyphst_ui::craft::docking::Zone;
 
@@ -55,7 +56,7 @@ use crate::{
     text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
     theme::{self, ThemeKind, ThemePreference, Tokens},
     transition::{Capture, Rng, ViewTransition},
-    translation::{CardState, Translator},
+    translation::{CardState, FOLLOW_AHEAD, Translator},
     user_settings::UserSettings,
     window_blur::WindowBlur,
 };
@@ -152,6 +153,8 @@ pub struct Launch {
     pub translate_fake: bool,
     /// Scripted runs: translate the first document, or the selection.
     pub translate_document: bool,
+    /// Scripted runs: translate the first document as it is read.
+    pub translate_follow: bool,
     pub translate_selection: bool,
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
@@ -381,6 +384,9 @@ pub struct ReaderApp {
     pub(crate) launch_find: Option<String>,
     pub(crate) launch_select: Option<(usize, usize)>,
     pub(crate) launch_translate_document: bool,
+    pub(crate) launch_translate_follow: bool,
+    /// Scripted runs: the time translated blocks' reveals are held at.
+    pub(crate) reveal_clock: Option<f64>,
     pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
     pub(crate) translator: Translator,
@@ -723,6 +729,8 @@ impl ReaderApp {
             launch_find: launch.find,
             launch_select: launch.select_pages,
             launch_translate_document: launch.translate_document,
+            launch_translate_follow: launch.translate_follow,
+            reveal_clock: None,
             launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
             translator,
@@ -1223,7 +1231,7 @@ impl ReaderApp {
                     .extension()
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
                 if self.prefs.translate_as_read && is_pdf && self.user_settings.get().is_some() {
-                    self.start_document_translation(ctx);
+                    self.start_following_translation(ctx);
                 }
             }
             Err(error) => self
@@ -2744,6 +2752,7 @@ impl ReaderApp {
                 self.after_edit(result);
             }
             SidebarAction::StartTranslation => self.start_document_translation(ctx),
+            SidebarAction::TranslateRest => self.start_document_translation(ctx),
             SidebarAction::CancelTranslation => {
                 if let Some(session) = self
                     .active
@@ -2752,8 +2761,11 @@ impl ReaderApp {
                     session.cancel();
                 }
             }
-            SidebarAction::ExportTranslation => {
+            SidebarAction::ExportTranslation(layout) => {
                 if let Some(active) = self.active {
+                    if let Some(session) = self.tabs[active].translation.as_mut() {
+                        session.export_layout = layout;
+                    }
                     let tab = &self.tabs[active];
                     let stem = tab
                         .path
@@ -2765,7 +2777,10 @@ impl ReaderApp {
                         .as_ref()
                         .map(|session| session.target.clone())
                         .unwrap_or_default();
-                    let name = format!("{stem}.{target}.pdf");
+                    let name = match layout {
+                        ExportLayout::Translated => format!("{stem}.{target}.pdf"),
+                        ExportLayout::SideBySide => format!("{stem}.{target}.side-by-side.pdf"),
+                    };
                     self.pickers.save_pdf(ctx, &name, tab.id);
                 }
             }
@@ -2834,7 +2849,7 @@ impl ReaderApp {
                         .active
                         .is_some_and(|active| self.tabs[active].translation.is_none())
                 {
-                    self.start_document_translation(ctx);
+                    self.start_following_translation(ctx);
                 }
             }
         }
@@ -2932,15 +2947,49 @@ impl ReaderApp {
             .translate_selection(text, target.as_deref(), at, ctx);
     }
 
-    /// Starts translating the active document.
+    /// Translates the whole active document: a session following the
+    /// reader takes in every page from now on, otherwise one starts.
     pub(crate) fn start_document_translation(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        if let Some(session) = &self.tabs[active].translation
+            && session.is_running()
+        {
+            session.translate_rest();
+            return;
+        }
+        self.start_translation(
+            ctx,
+            glyphst_pdf_translation_service::TranslationScope::whole(),
+        );
+    }
+
+    /// Translates the page being read and the next ones, following the
+    /// reader through the document (Translate as I read).
+    pub(crate) fn start_following_translation(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let page = self.tabs[active].current_page();
+        self.start_translation(
+            ctx,
+            glyphst_pdf_translation_service::TranslationScope::following(page, FOLLOW_AHEAD),
+        );
+    }
+
+    fn start_translation(
+        &mut self,
+        ctx: &egui::Context,
+        scope: std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>,
+    ) {
         let Some(active) = self.active else {
             return;
         };
         let target = self.prefs.target_language.clone();
         let started =
             self.translator
-                .start_session(&self.tabs[active].path, target.as_deref(), ctx);
+                .start_session(&self.tabs[active].path, target.as_deref(), scope, ctx);
         match started {
             Ok(session) => {
                 let detail = format!("→ {}", session.target.to_lowercase());
@@ -3755,7 +3804,9 @@ impl ReaderApp {
                 Some((key, ready))
             });
             if let Some((key, ready)) = next {
-                self.with_gpu(|gpu| gpu.begin_upload(&device, key, ready.prepared, ready.layers));
+                self.with_gpu(|gpu| {
+                    gpu.begin_upload(&device, key, ready.version, ready.prepared, ready.layers)
+                });
             }
         }
         let times = self.with_gpu(|gpu| gpu.step_upload(&device, &queue, UPLOAD_BYTES_PER_FRAME));
@@ -5258,6 +5309,51 @@ impl ReaderApp {
         for draw in &mut draws {
             draw.camera.viewport = target;
         }
+        // Translated blocks sweep in as their page's new version is drawn,
+        // over the drawing it replaces (kept by the GPU meanwhile).
+        let reveal_seconds = self
+            .reveal_clock
+            .unwrap_or_else(|| self.started.elapsed().as_secs_f64());
+        let reduce_motion = self.prefs.reduce_motion;
+        let reveals = if self.tabs[active].reveals.is_active() {
+            let visible: std::collections::HashSet<usize> =
+                frame.draws.iter().map(|draw| draw.page).collect();
+            let watched = self.tabs[active].reveals.watch();
+            let pages = self.tabs[active].reveals.pages();
+            let drawn: HashMap<usize, u64> = self
+                .with_gpu(|gpu| {
+                    if !reduce_motion {
+                        for page in watched {
+                            gpu.keep_replaced(PageKey { tab: tab_id, page });
+                        }
+                    }
+                    pages
+                        .iter()
+                        .filter_map(|&page| {
+                            gpu.resident_version(PageKey { tab: tab_id, page })
+                                .map(|version| (page, version))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let done = self.tabs[active].reveals.step(
+                reveal_seconds,
+                reduce_motion,
+                |page| drawn.get(&page).copied(),
+                |page| visible.contains(&page),
+            );
+            self.with_gpu(|gpu| {
+                for page in done {
+                    gpu.release_retired(PageKey { tab: tab_id, page });
+                }
+            });
+            ctx.request_repaint();
+            self.tabs[active]
+                .reveals
+                .clips(reveal_seconds, reduce_motion)
+        } else {
+            Vec::new()
+        };
         // Pages sit flat on the base layer: the design has no shadows.
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -5271,6 +5367,7 @@ impl ReaderApp {
                 overlay: self.effects_for(Some(active)).overlay,
                 time: self.started.elapsed().as_secs_f32(),
                 pointer: pointer.map(|[x, y]| [x as f32, y as f32]),
+                reveals,
             },
         ));
         let painter = ui.painter_at(rect);
@@ -5280,6 +5377,7 @@ impl ReaderApp {
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
         self.paint_text_overlays(&painter, &maps, active, &tokens);
+        self.paint_translation_progress(&painter, &maps, active, &tokens, reveal_seconds);
         if presenting {
             self.paint_ink(&painter, &maps, active);
         }
@@ -5713,6 +5811,35 @@ impl ReaderApp {
     }
 
     /// Library highlights, search matches and the selection over the pages.
+    /// Blocks still waiting for their translation shimmer faintly, and
+    /// arriving ones sweep in (frame 02m).
+    fn paint_translation_progress(
+        &self,
+        painter: &egui::Painter,
+        maps: &[PageMap],
+        active: usize,
+        tokens: &Tokens,
+        seconds: f64,
+    ) {
+        let tab = &self.tabs[active];
+        let Some(session) = tab.translation.as_ref().filter(|s| s.show_translated) else {
+            return;
+        };
+        for map in maps {
+            for block in session.waiting_blocks(map.page) {
+                glyphst_ui::paint::shimmer_band(painter, map.rect_to_screen(block), tokens.accent);
+            }
+        }
+        tab.reveals.paint(
+            painter,
+            maps,
+            seconds,
+            self.prefs.reduce_motion,
+            tokens.accent,
+            tokens.page,
+        );
+    }
+
     fn paint_text_overlays(
         &self,
         painter: &egui::Painter,
@@ -6352,7 +6479,9 @@ impl eframe::App for ReaderApp {
         if let Some((tab_id, path)) = self.pickers.take_saved()
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
             && let Some(session) = tab.translation.as_mut()
-            && let Err(error) = self.translator.export(session, path, &ctx)
+            && let Err(error) = self
+                .translator
+                .export(session, path, session.export_layout, &ctx)
         {
             self.notices.push(format!("Could not export: {error}"));
         }
@@ -6360,6 +6489,20 @@ impl eframe::App for ReaderApp {
             tab.receive(&ctx);
             tab.sync_translation();
             tab.update_text(now);
+            let page = tab.current_page();
+            if let Some(session) = tab.translation.as_mut() {
+                if let Some(wait) = session.follow(page, now) {
+                    ctx.request_repaint_after(wait);
+                }
+                let shown = session.show_translated;
+                let seconds = self.started.elapsed().as_secs_f64();
+                for (page, revision, blocks) in session.take_reveals() {
+                    if shown {
+                        // The page's source version for the revision.
+                        tab.reveals.add(page, revision + 1, blocks, seconds);
+                    }
+                }
+            }
         }
         self.upload_ready_page();
         self.draw_gpu_thumbnails();

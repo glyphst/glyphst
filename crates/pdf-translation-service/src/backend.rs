@@ -500,6 +500,7 @@ mod tests {
         TranslationUnit {
             id: "unit".to_string(),
             page_index: 0,
+            member_pages: vec![0],
             member_block_ids: vec!["block".to_string()],
             role: BlockRole::Body,
             source_text: source.to_string(),

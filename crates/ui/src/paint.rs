@@ -148,6 +148,39 @@ pub fn shimmer_rect(ui: &egui::Ui, rect: Rect, base: Color32, peak: Color32) {
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
+/// [`shimmer_rect`]'s moving band alone, faint, over something left
+/// visible under it: a block of a page waiting for its translation.
+pub fn shimmer_band(painter: &egui::Painter, rect: Rect, peak: Color32) {
+    let ctx = painter.ctx();
+    if motion::is_reduced(ctx) {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let band = 140.0;
+    let time = ctx.input(|i| i.time);
+    let phase = (time % motion::SHIMMER_PERIOD / motion::SHIMMER_PERIOD) as f32;
+    let center = screen.left() - band + phase * (screen.width() + 2.0 * band);
+    const STRIP: f32 = 3.0;
+    let clipped = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let mut x = (center - band).max(rect.left());
+    while x < (center + band).min(rect.right()) {
+        let distance = ((x + STRIP / 2.0 - center) / band).abs();
+        let strength = (1.0 - distance).clamp(0.0, 1.0).powi(2) * 0.16;
+        if strength > 0.005 {
+            clipped.rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(x, rect.top()),
+                    egui::pos2(x + STRIP, rect.bottom()),
+                ),
+                0,
+                peak.gamma_multiply(strength),
+            );
+        }
+        x += STRIP;
+    }
+    ctx.request_repaint_after(Duration::from_millis(33));
+}
+
 /// Three dots pulsing in turn, centred in `rect`: something is loading.
 pub fn loading_dots(ui: &egui::Ui, rect: Rect, color: Color32) {
     let time = ui.input(|i| i.time);

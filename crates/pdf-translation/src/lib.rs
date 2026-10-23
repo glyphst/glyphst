@@ -7,6 +7,7 @@ mod paddle;
 mod policy;
 mod progress;
 mod reference;
+mod scope;
 mod toc;
 mod translate;
 mod typst;
@@ -14,7 +15,8 @@ mod unlimited;
 
 pub use cancellation::{CancellationToken, TranslationCancelled};
 pub use composition::{
-    PdfComposer, PdfCompositionError, PdfCompositionReport, sanitize_source_pdf,
+    PdfComposer, PdfCompositionError, PdfCompositionReport, compose_side_by_side,
+    sanitize_source_pdf,
 };
 pub use document::{
     BaselinePosition, Block, BlockContent, BlockKind, BlockRole, BlockStructure, BoundingBox,
@@ -47,13 +49,15 @@ pub use progress::{
     PdfTranslationProgress, PdfTranslationStage, ProgressTracker, TranslationProgressSink,
 };
 pub use reference::{ReferenceClassification, annotate_reference_sections};
+pub use scope::{ScopeView, TranslationScope};
 pub use translate::{
-    ProtectedText, ProtectedToken, ProtectedTokenKind, StyleDefinition, StyledRun,
+    ProtectedText, ProtectedToken, ProtectedTokenKind, ScopedRun, StyleDefinition, StyledRun,
     TranslatedDocument, TranslatedUnit, TranslationBackend, TranslationBackendError,
     TranslationDocumentError, TranslationErrorCategory, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunOutcome, TranslationRunProgress,
     TranslationRunSnapshot, TranslationUnit, TranslationUnitOutput, protect_text,
     translate_document, translate_document_partial_resuming, translate_document_resuming,
+    translate_document_scoped,
 };
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,

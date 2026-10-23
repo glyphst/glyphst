@@ -4,7 +4,7 @@
 //! glyphst-reader [documents…] [--background ID] [--book-background N:ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
-//!     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
+//!     [--translate-fake] [--translate-document] [--translate-follow] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
 //!     [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts]
 //!     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH]
 //! glyphst-reader --eval-search [SET]   measures the library's search and exits
@@ -79,6 +79,7 @@ mod quick_ask;
 mod reading_clock;
 mod reading_days;
 mod region;
+mod reveal;
 mod search_tools;
 mod settings_providers;
 mod settings_window;
@@ -104,10 +105,10 @@ use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
 const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--background-params A,B,C,D] [--opacity O] [--colours preset|background|custom] \
-                     [--translate-fake] [--translate-document] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
+                     [--translate-fake] [--translate-document] [--translate-follow] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--library-demo all|item|duplicate|merged|review|backfill|folder|identifier|zotero|zotero-done] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-translating PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -136,6 +137,7 @@ fn parse_args() -> Result<Launch> {
         font_size: None,
         translate_fake: false,
         translate_document: false,
+        translate_follow: false,
         translate_selection: false,
         ai_fake: false,
         ask: None,
@@ -190,6 +192,7 @@ fn parse_args() -> Result<Launch> {
             "--reduce-motion" => launch.reduce_motion = true,
             "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
             "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),
+            "--screenshot-translating" => launch.harness = shot(ShotKind::Translating, value()?),
             "--screenshot-present-tools" => launch.harness = shot(ShotKind::PresentTools, value()?),
             "--screenshot-slide" => launch.harness = shot(ShotKind::SidebarSlide, value()?),
             "--background" => launch.background = Some(value()?),
@@ -267,6 +270,7 @@ fn parse_args() -> Result<Launch> {
             "--find" => launch.find = Some(value()?),
             "--translate-fake" => launch.translate_fake = true,
             "--translate-document" => launch.translate_document = true,
+            "--translate-follow" => launch.translate_follow = true,
             "--translate-selection" => launch.translate_selection = true,
             "--ai-fake" => launch.ai_fake = true,
             "--ask" => launch.ask = Some(value()?),

@@ -31,14 +31,14 @@ use glyphst_pdf_translation::{
     PdfComposer, PdfInspection, PdfTranslationStage, ProgressTracker, ProtectedRegionKind,
     TranslatedDocument, TranslationProgressSink, TypstCompiler, TypstCompilerConfig,
     UnlimitedClient, UnlimitedClientConfig, annotate_reference_sections, build_layout_with_options,
-    extract_native_document, fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
-    normalize_unlimited_payload, reconcile_provider_continuations, review_translation_policies,
-    sanitize_source_pdf, source_text_regions,
+    compose_side_by_side, extract_native_document, fuse_native_with_ocr_report, inspect_pdf,
+    normalize_paddle_payload, normalize_unlimited_payload, reconcile_provider_continuations,
+    review_translation_policies, sanitize_source_pdf, source_text_regions,
 };
 use glyphst_pdf_translation::{
-    TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
+    ScopedRun, TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot,
-    translate_document_partial_resuming,
+    TranslationScope, translate_document_partial_resuming, translate_document_scoped,
 };
 
 use crate::PdfTranslationConfig;
@@ -380,6 +380,7 @@ impl PdfTranslationService {
             &settings,
             session_request,
             source_snapshot,
+            &TranslationScope::whole(),
             &cancellation,
             &mut progress,
             &mut ignore_update,
@@ -390,6 +391,7 @@ impl PdfTranslationService {
             PdfTranslationExportRequest {
                 output_path: request.output_path,
                 original_unit_ids: Vec::new(),
+                layout: ExportLayout::Translated,
             },
             &cancellation,
             &mut progress,
@@ -408,6 +410,7 @@ impl PdfTranslationService {
             settings,
             request,
             None,
+            &TranslationScope::whole(),
             cancellation,
             progress_sink,
             update_sink,
@@ -423,21 +426,49 @@ impl PdfTranslationService {
         progress_sink: impl TranslationProgressSink + 'static,
         update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
     ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
-        self.run_session_with_snapshot(
+        self.run_scoped_session_from_snapshot(
             settings,
             request,
-            Some(source_snapshot.as_ref()),
+            source_snapshot,
+            &TranslationScope::whole(),
             cancellation,
             progress_sink,
             update_sink,
         )
     }
 
+    /// A session that translates only what `scope` covers, following it as
+    /// it moves; it finishes once the scope is whole and translated, or is
+    /// cancelled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_scoped_session_from_snapshot(
+        &self,
+        settings: PdfTranslationConfig,
+        request: PdfTranslationSessionRequest,
+        source_snapshot: Arc<DocumentSnapshot>,
+        scope: &TranslationScope,
+        cancellation: CancellationToken,
+        progress_sink: impl TranslationProgressSink + 'static,
+        update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
+    ) -> Result<PdfTranslationSessionResult, PdfTranslationError> {
+        self.run_session_with_snapshot(
+            settings,
+            request,
+            Some(source_snapshot.as_ref()),
+            scope,
+            cancellation,
+            progress_sink,
+            update_sink,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn run_session_with_snapshot(
         &self,
         settings: PdfTranslationConfig,
         request: PdfTranslationSessionRequest,
         source_snapshot: Option<&DocumentSnapshot>,
+        scope: &TranslationScope,
         cancellation: CancellationToken,
         progress_sink: impl TranslationProgressSink + 'static,
         mut update_sink: impl FnMut(PdfTranslationSessionUpdate) + Send,
@@ -448,6 +479,7 @@ impl PdfTranslationService {
             &settings,
             request,
             source_snapshot,
+            scope,
             &cancellation,
             &mut progress,
             &mut update_sink,
@@ -735,11 +767,13 @@ impl PdfTranslationService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_session_inner(
         &self,
         settings: &PdfTranslationConfig,
         session_request: PdfTranslationSessionRequest,
         source_snapshot: Option<&DocumentSnapshot>,
+        scope: &TranslationScope,
         cancellation: &CancellationToken,
         progress: &mut ProgressTracker,
         update_sink: &mut (impl FnMut(PdfTranslationSessionUpdate) + Send),
@@ -1061,15 +1095,16 @@ impl PdfTranslationService {
             .collect::<HashMap<_, _>>();
         let mut final_reconciliation_emitted = false;
         let update_sink = Mutex::new(&mut publish_update);
-        let translation_result = std::thread::scope(|scope| {
+        let translation_result = std::thread::scope(|threads| {
             let (preview_tx, preview_rx) = sync_mpsc::channel();
-            scope.spawn(|| {
+            threads.spawn(|| {
                 stream_page_previews(
                     self,
                     &document,
                     &pipeline_request.source_path,
                     &inspection,
                     &job_directory,
+                    scope,
                     cancellation,
                     streamed_preview_units.clone(),
                     streamed_preview_revisions.clone(),
@@ -1077,11 +1112,15 @@ impl PdfTranslationService {
                     &update_sink,
                 );
             });
-            let result = translate_document_partial_resuming(
+            let result = translate_document_scoped(
                 document.clone(),
                 &backend,
                 cancellation,
                 resumed_units,
+                ScopedRun {
+                    park_when_idle: true,
+                    ..ScopedRun::whole(scope)
+                },
                 |snapshot| {
                     let counts = &snapshot.progress;
                     final_translation_counts = counts.clone();
@@ -1325,6 +1364,25 @@ impl PdfTranslationService {
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
+        let composed_path = match request.layout {
+            ExportLayout::Translated => composed_path,
+            ExportLayout::SideBySide => {
+                let side_by_side = job_directory.join("side-by-side.pdf");
+                compose_side_by_side(
+                    source_snapshot_path,
+                    &composed_path,
+                    &side_by_side,
+                    cancellation,
+                )
+                .map_err(|error| {
+                    PdfTranslationError::message(
+                        PdfTranslationStage::Composing,
+                        format!("Could not put the pages side by side: {}", error.message),
+                    )
+                })?;
+                side_by_side
+            }
+        };
         publish_atomically(&composed_path, &request.output_path)?;
         let artifact_request = PdfTranslationRequest {
             source_path: session.request.source_path.clone(),
@@ -2262,6 +2320,7 @@ fn stream_page_previews<U>(
     source_path: &Path,
     inspection: &PdfInspection,
     job_directory: &Path,
+    scope: &TranslationScope,
     cancellation: &CancellationToken,
     mut known_units: HashMap<String, (u64, Vec<usize>)>,
     mut revisions: HashMap<usize, u64>,
@@ -2280,7 +2339,11 @@ fn stream_page_previews<U>(
     let mut last_change_at = None::<Instant>;
 
     loop {
+        // A page's first preview goes out at once; later revisions wait for
+        // the burst of results to settle.
+        let first_preview = dirty_pages.iter().any(|page| !revisions.contains_key(page));
         let wait = match (first_dirty_at, last_change_at) {
+            _ if first_preview => Duration::ZERO,
             (Some(first), Some(last)) => {
                 let now = Instant::now();
                 let debounce_deadline = last.checked_add(PAGE_PREVIEW_DEBOUNCE).unwrap_or(last);
@@ -2312,6 +2375,7 @@ fn stream_page_previews<U>(
                     source_path,
                     inspection,
                     job_directory,
+                    scope,
                     cancellation,
                     latest.as_ref(),
                     &mut dirty_pages,
@@ -2328,6 +2392,7 @@ fn stream_page_previews<U>(
                     source_path,
                     inspection,
                     job_directory,
+                    scope,
                     cancellation,
                     latest.as_ref(),
                     &mut dirty_pages,
@@ -2347,6 +2412,7 @@ fn compile_dirty_page_previews<U>(
     source_path: &Path,
     inspection: &PdfInspection,
     job_directory: &Path,
+    scope: &TranslationScope,
     cancellation: &CancellationToken,
     snapshot: Option<&TranslationRunSnapshot>,
     dirty_pages: &mut BTreeSet<usize>,
@@ -2363,7 +2429,8 @@ fn compile_dirty_page_previews<U>(
         document: document.clone(),
         units: snapshot.resolved_units.clone(),
     };
-    let pages = std::mem::take(dirty_pages);
+    let view = scope.view();
+    let pages = preview_order(std::mem::take(dirty_pages), &view);
     for page_index in pages {
         if cancellation.is_cancelled() {
             break;
@@ -2397,6 +2464,13 @@ fn compile_dirty_page_previews<U>(
         };
         (*sink)(update);
     }
+}
+
+/// Dirty pages, the reader's first.
+fn preview_order(pages: BTreeSet<usize>, view: &glyphst_pdf_translation::ScopeView) -> Vec<usize> {
+    let mut pages = pages.into_iter().collect::<Vec<_>>();
+    pages.sort_by_key(|&page| (view.rank(page).unwrap_or(u32::MAX), page));
+    pages
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2449,6 +2523,7 @@ fn build_page_hover_regions(
             .iter()
             .map(|item| PdfTranslationHoverRegion {
                 id: hover_region_id(layout_page.page_index, "block", &item.block_id),
+                translated: true,
                 kind: PdfTranslationHoverRegionKind::Text,
                 unit_id: Some(item.unit_id.clone()),
                 block_id: Some(item.block_id.clone()),
@@ -2501,6 +2576,7 @@ fn build_page_hover_regions(
             .unwrap_or_else(|| source_text_regions(block));
         regions.push(PdfTranslationHoverRegion {
             id: hover_region_id(layout_page.page_index, "block", &block.id),
+            translated: layout_item.is_some(),
             kind: hover_region_kind_for_block(block.kind),
             unit_id: layout_item
                 .map(|item| item.unit_id.clone())
@@ -2519,6 +2595,7 @@ fn build_page_hover_regions(
         }
         regions.push(PdfTranslationHoverRegion {
             id: hover_region_id(layout_page.page_index, "block", &item.block_id),
+            translated: true,
             kind: PdfTranslationHoverRegionKind::Text,
             unit_id: Some(item.unit_id.clone()),
             block_id: Some(item.block_id.clone()),
@@ -2537,6 +2614,7 @@ fn build_page_hover_regions(
             .iter()
             .map(|region| PdfTranslationHoverRegion {
                 id: hover_region_id(layout_page.page_index, "protected", &region.id),
+                translated: false,
                 kind: hover_region_kind_for_protected(region.kind),
                 unit_id: None,
                 block_id: None,
@@ -2819,6 +2897,8 @@ pub enum PdfTranslationHoverRegionKind {
 pub struct PdfTranslationHoverRegion {
     pub id: String,
     pub kind: PdfTranslationHoverRegionKind,
+    /// The region's block is shown translated on this page.
+    pub translated: bool,
     pub unit_id: Option<String>,
     pub block_id: Option<String>,
     pub target_bounds: BoundingBox,
@@ -2874,6 +2954,17 @@ pub struct PdfTranslationRestoredSession {
 pub struct PdfTranslationExportRequest {
     pub output_path: PathBuf,
     pub original_unit_ids: Vec<String>,
+    pub layout: ExportLayout,
+}
+
+/// What an exported PDF holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExportLayout {
+    /// The translated pages only.
+    #[default]
+    Translated,
+    /// Each original page with its translation to its right.
+    SideBySide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4121,6 +4212,7 @@ mod tests {
         };
         let mut regions = vec![PdfTranslationHoverRegion {
             id: "title".to_string(),
+            translated: true,
             kind: PdfTranslationHoverRegionKind::Text,
             unit_id: Some("title-unit".to_string()),
             block_id: Some("title".to_string()),
@@ -4148,6 +4240,7 @@ mod tests {
         let mut regions = vec![
             PdfTranslationHoverRegion {
                 id: "title".to_string(),
+                translated: true,
                 kind: PdfTranslationHoverRegionKind::Text,
                 unit_id: Some("title-unit".to_string()),
                 block_id: Some("title".to_string()),
@@ -4156,6 +4249,7 @@ mod tests {
             },
             PdfTranslationHoverRegion {
                 id: "image".to_string(),
+                translated: false,
                 kind: PdfTranslationHoverRegionKind::Image,
                 unit_id: None,
                 block_id: None,
@@ -4559,6 +4653,7 @@ mod tests {
                 retrying: 0,
                 failed: 1,
                 total: 329,
+                in_scope: 329,
             },
             queue: TranslationQueueStats {
                 planned_requests: 1,
@@ -4638,6 +4733,7 @@ mod tests {
                 retrying: 0,
                 failed: 0,
                 total: 2,
+                in_scope: 2,
             },
             queue: TranslationQueueStats {
                 planned_requests: 2,

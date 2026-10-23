@@ -7,8 +7,8 @@ use mupdf::pdf::{
     Encryption, PdfAnnotationType, PdfDocument, PdfGraftMap, PdfLink, PdfObject, PdfWriteOptions,
 };
 use mupdf::{
-    BlendMode, ColorParams, Colorspace, Device, Document, Function, Image, Matrix, NativeDevice,
-    Path as MuPath, Rect, Shade, StrokeState, Text,
+    BlendMode, Buffer, ColorParams, Colorspace, Device, Document, Function, Image, Matrix,
+    NativeDevice, Path as MuPath, Rect, Shade, StrokeState, Text,
 };
 use serde::{Deserialize, Serialize};
 
@@ -641,6 +641,175 @@ fn restore_pdf_structure(
         .map_err(PdfCompositionError::mupdf)
 }
 
+/// Writes `output`: each page of `original` with the same page of
+/// `translated` to its right, on one page as wide as both and as tall as
+/// the taller, top-aligned. Each side is the page itself drawn as a form, so
+/// text and drawings stay vectors; rotated pages are turned upright.
+/// Returns the number of pages.
+pub fn compose_side_by_side(
+    original: &Path,
+    translated: &Path,
+    output: &Path,
+    cancellation: &CancellationToken,
+) -> Result<usize, PdfCompositionError> {
+    let left = PdfDocument::open(original.to_string_lossy().as_ref())
+        .map_err(PdfCompositionError::mupdf)?;
+    let right = PdfDocument::open(translated.to_string_lossy().as_ref())
+        .map_err(PdfCompositionError::mupdf)?;
+    let pages = left.page_count().map_err(PdfCompositionError::mupdf)?;
+    let translated_pages = right.page_count().map_err(PdfCompositionError::mupdf)?;
+    if pages != translated_pages {
+        return Err(PdfCompositionError::invalid(format!(
+            "page count mismatch: original={pages}, translated={translated_pages}"
+        )));
+    }
+    let mut out = PdfDocument::new();
+    let mut left_graft = out.new_graft_map().map_err(PdfCompositionError::mupdf)?;
+    let mut right_graft = out.new_graft_map().map_err(PdfCompositionError::mupdf)?;
+    for page in 0..pages {
+        cancellation
+            .check()
+            .map_err(|_| PdfCompositionError::cancelled())?;
+        let (left_form, left_width, left_height) =
+            page_as_form(&mut out, &mut left_graft, &left, page)?;
+        let (right_form, right_width, right_height) =
+            page_as_form(&mut out, &mut right_graft, &right, page)?;
+        let width = left_width + right_width;
+        let height = left_height.max(right_height);
+        let content = format!(
+            "q 1 0 0 1 0 {} cm /L Do Q q 1 0 0 1 {left_width} {} cm /R Do Q",
+            height - left_height,
+            height - right_height,
+        );
+        let contents = out
+            .add_stream(
+                &Buffer::from_bytes(content.as_bytes()).map_err(PdfCompositionError::mupdf)?,
+                None,
+                true,
+            )
+            .map_err(PdfCompositionError::mupdf)?;
+        let mut forms = out.new_dict().map_err(PdfCompositionError::mupdf)?;
+        forms
+            .dict_put("L", left_form)
+            .map_err(PdfCompositionError::mupdf)?;
+        forms
+            .dict_put("R", right_form)
+            .map_err(PdfCompositionError::mupdf)?;
+        let mut resources = out.new_dict().map_err(PdfCompositionError::mupdf)?;
+        resources
+            .dict_put("XObject", forms)
+            .map_err(PdfCompositionError::mupdf)?;
+        let mut page_object = out
+            .new_object_from_str(&format!(
+                "<< /Type /Page /MediaBox [0 0 {width} {height}] >>"
+            ))
+            .map_err(PdfCompositionError::mupdf)?;
+        page_object
+            .dict_put("Resources", resources)
+            .map_err(PdfCompositionError::mupdf)?;
+        page_object
+            .dict_put("Contents", contents)
+            .map_err(PdfCompositionError::mupdf)?;
+        let page_object = out
+            .add_object(&page_object)
+            .map_err(PdfCompositionError::mupdf)?;
+        out.insert_page(page, &page_object)
+            .map_err(PdfCompositionError::mupdf)?;
+    }
+    out.save_with_options(&output.to_string_lossy(), final_pdf_write_options())
+        .map_err(PdfCompositionError::mupdf)?;
+    Ok(usize::try_from(pages).unwrap_or_default())
+}
+
+/// Page `index` of `source` as a form in `out`, upright with its crop box
+/// at the origin, and its width and height.
+fn page_as_form(
+    out: &mut PdfDocument,
+    graft: &mut PdfGraftMap,
+    source: &PdfDocument,
+    index: i32,
+) -> Result<(PdfObject, f32, f32), PdfCompositionError> {
+    let page = source
+        .find_page(index)
+        .map_err(PdfCompositionError::mupdf)?;
+    let crop = match page
+        .get_dict_inheritable("CropBox")
+        .map_err(PdfCompositionError::mupdf)?
+    {
+        Some(crop) => crop,
+        None => page
+            .get_dict_inheritable("MediaBox")
+            .map_err(PdfCompositionError::mupdf)?
+            .ok_or_else(|| PdfCompositionError::invalid(format!("page {index} has no box")))?,
+    };
+    let number = |i: i32| -> Result<f32, PdfCompositionError> {
+        crop.get_array(i)
+            .map_err(PdfCompositionError::mupdf)?
+            .ok_or_else(|| PdfCompositionError::invalid("a page box needs four numbers"))?
+            .as_float()
+            .map_err(PdfCompositionError::mupdf)
+    };
+    let (a, b, c, d) = (number(0)?, number(1)?, number(2)?, number(3)?);
+    let crop = Rect::new(a.min(c), b.min(d), a.max(c), b.max(d));
+    let ctm = page.page_ctm().map_err(PdfCompositionError::mupdf)?;
+    let upright = crop.transform(&ctm);
+    let (width, height) = (upright.x1 - upright.x0, upright.y1 - upright.y0);
+    // The page's own transform turns it upright with y down; move it to the
+    // origin and flip y back for PDF space.
+    let mut matrix = ctm;
+    matrix
+        .concat(Matrix::new(1.0, 0.0, 0.0, 1.0, -upright.x0, -upright.y0))
+        .concat(Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, height));
+    let mut content = Vec::new();
+    if let Some(contents) = page
+        .get_dict("Contents")
+        .map_err(PdfCompositionError::mupdf)?
+    {
+        if contents.is_array().map_err(PdfCompositionError::mupdf)? {
+            for part in contents.array_iter().map_err(PdfCompositionError::mupdf)? {
+                let part = part.map_err(PdfCompositionError::mupdf)?;
+                content.extend(part.read_stream().map_err(PdfCompositionError::mupdf)?);
+                content.push(b'\n');
+            }
+        } else {
+            content = contents.read_stream().map_err(PdfCompositionError::mupdf)?;
+        }
+    }
+    let mut form = out
+        .new_object_from_str(&format!(
+            "<< /Type /XObject /Subtype /Form /BBox [{} {} {} {}] /Matrix [{} {} {} {} {} {}] >>",
+            crop.x0,
+            crop.y0,
+            crop.x1,
+            crop.y1,
+            matrix.a,
+            matrix.b,
+            matrix.c,
+            matrix.d,
+            matrix.e,
+            matrix.f
+        ))
+        .map_err(PdfCompositionError::mupdf)?;
+    if let Some(resources) = page
+        .get_dict_inheritable("Resources")
+        .map_err(PdfCompositionError::mupdf)?
+    {
+        let resources = graft
+            .graft_object(&resources)
+            .map_err(PdfCompositionError::mupdf)?;
+        form.dict_put("Resources", resources)
+            .map_err(PdfCompositionError::mupdf)?;
+    }
+    let form = out
+        .add_stream(
+            &Buffer::from_bytes(&content).map_err(PdfCompositionError::mupdf)?,
+            Some(&form),
+            true,
+        )
+        .map_err(PdfCompositionError::mupdf)?;
+    Ok((form, width, height))
+}
+
 fn final_pdf_write_options() -> PdfWriteOptions {
     let mut options = PdfWriteOptions::default();
     options
@@ -746,6 +915,108 @@ mod tests {
         stream.extend_from_slice(bytes);
         stream.extend_from_slice(b"endstream");
         stream
+    }
+
+    /// One page of `width` × `height` saying `text` near its top left,
+    /// turned by `rotate` degrees.
+    fn text_page_pdf(text: &str, width: u32, height: u32, rotate: u32) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Rotate {rotate} \
+                 /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            )
+            .as_bytes(),
+        );
+        let content = format!("BT /F1 12 Tf 20 {} Td ({text}) Tj ET", height - 40);
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            &pdf_stream("", content.as_bytes()),
+        );
+        append_pdf_object(
+            &mut pdf,
+            &mut offsets,
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        );
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for offset in &offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                offsets.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    /// Where `word` is on page 1 of `path`.
+    fn word_bounds(path: &Path, word: &str) -> Rect {
+        let document = Document::open(path.to_str().unwrap()).unwrap();
+        let page = document.load_page(0).unwrap();
+        let text = page.to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+        for block in text.blocks() {
+            for line in block.lines() {
+                let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
+                if line_text.contains(word) {
+                    return line.bounds();
+                }
+            }
+        }
+        panic!("{word} is not on the page");
+    }
+
+    #[test]
+    fn side_by_side_puts_each_original_beside_its_translation() {
+        let directory = TempDirectory::new("side-by-side");
+        let original = directory.path().join("original.pdf");
+        let translated = directory.path().join("translated.pdf");
+        let output = directory.path().join("side-by-side.pdf");
+        fs::write(&original, text_page_pdf("Original", 300, 400, 0)).unwrap();
+        // The translation is a landscape page stored turned: upright it is
+        // 500 wide and 200 tall.
+        fs::write(&translated, text_page_pdf("Translated", 200, 500, 90)).unwrap();
+
+        let pages =
+            compose_side_by_side(&original, &translated, &output, &CancellationToken::new())
+                .unwrap();
+
+        assert_eq!(pages, 1);
+        let document = Document::open(output.to_str().unwrap()).unwrap();
+        let bounds = document.load_page(0).unwrap().bounds().unwrap();
+        assert_eq!((bounds.width(), bounds.height()), (800.0, 400.0));
+        let left = word_bounds(&output, "Original");
+        let right = word_bounds(&output, "Translated");
+        assert!(left.x1 <= 300.0, "the original is on the left: {left:?}");
+        assert!(
+            right.x0 >= 300.0,
+            "the translation is on the right: {right:?}"
+        );
+        assert!(left.y0 < 60.0, "pages sit at the top: {left:?}");
     }
 
     fn nested_type3_pdf() -> Vec<u8> {

@@ -172,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             PdfTranslationExportRequest {
                                 output_path: output_path.clone(),
                                 original_unit_ids: Vec::new(),
+                                layout: Default::default(),
                             },
                             CancellationToken::new(),
                             progress_logger(sample_for_progress.clone()),

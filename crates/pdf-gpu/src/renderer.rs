@@ -156,7 +156,7 @@ impl Camera {
     }
 
     /// Page-space rectangle to a pixel scissor clamped to the viewport.
-    fn scissor(&self, rect: PageRect) -> Option<[u32; 4]> {
+    pub fn scissor(&self, rect: PageRect) -> Option<[u32; 4]> {
         // An empty rectangle (a clip beside the page) stays empty.
         if rect[2] <= rect[0] || rect[3] <= rect[1] {
             return None;
@@ -1034,7 +1034,14 @@ impl Renderer {
             let mut encoder = device.create_command_encoder(&Default::default());
             {
                 let mut pass = job.tile.begin_pass(&mut encoder, wgpu::Color::TRANSPARENT);
-                self.draw_vectors(queue, page, &camera, &mut pass, &mut DrawStats::default());
+                self.draw_vectors(
+                    queue,
+                    page,
+                    &camera,
+                    page.bounds,
+                    &mut pass,
+                    &mut DrawStats::default(),
+                );
             }
             encoder.copy_texture_to_texture(
                 job.tile.texture().as_image_copy(),
@@ -1149,12 +1156,26 @@ impl Renderer {
         camera: &Camera,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> DrawStats {
+        self.draw_clipped(queue, page, camera, page.bounds, pass)
+    }
+
+    /// [`Renderer::draw`] showing only the part of the page inside `clip`
+    /// (page points): one drawing of a page revealing another.
+    pub fn draw_clipped(
+        &self,
+        queue: &wgpu::Queue,
+        page: &GpuPage,
+        camera: &Camera,
+        clip: PageRect,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> DrawStats {
         let mut stats = DrawStats::default();
+        let bounds = clip_to(page.bounds, clip);
         match &page.overview {
             Some(overview) if camera.scale <= overview.scale => {
                 self.write_camera(queue, page, camera);
                 stats.used_overview = true;
-                if let Some([x, y, width, height]) = camera.scissor(page.bounds) {
+                if let Some([x, y, width, height]) = camera.scissor(bounds) {
                     pass.set_bind_group(0, &page.camera_bind_group, &[]);
                     pass.set_scissor_rect(x, y, width, height);
                     pass.set_stencil_reference(0);
@@ -1162,7 +1183,7 @@ impl Renderer {
                     stats.draw_calls += 1;
                 }
             }
-            _ => self.draw_vectors(queue, page, camera, pass, &mut stats),
+            _ => self.draw_vectors(queue, page, camera, bounds, pass, &mut stats),
         }
         stats
     }
@@ -1194,6 +1215,7 @@ impl Renderer {
         queue: &wgpu::Queue,
         page: &GpuPage,
         camera: &Camera,
+        bounds: PageRect,
         pass: &mut wgpu::RenderPass<'_>,
         stats: &mut DrawStats,
     ) {
@@ -1203,7 +1225,7 @@ impl Renderer {
         self.write_camera(queue, page, camera);
         // Nothing shows outside the page box, as in MuPDF's pixmaps: EPUB
         // chapter backgrounds, for one, run past the pages they start on.
-        let Some(full) = camera.scissor(page.bounds) else {
+        let Some(full) = camera.scissor(bounds) else {
             return;
         };
         let level_index = page.level_for_scale(camera.scale);
@@ -1227,7 +1249,7 @@ impl Renderer {
             .zip(&selection.ranges)
             .map(|(batch, selected)| {
                 let scissor = match batch.clip {
-                    Some(clip) => camera.scissor(clip_to(clip, page.bounds))?,
+                    Some(clip) => camera.scissor(clip_to(clip, bounds))?,
                     None => full,
                 };
                 let ranges: &[Range<u32>] = match &batch.kind {
@@ -1954,6 +1976,18 @@ mod tests {
         );
         assert_eq!(
             camera.scissor(clip_to([120.0, 0.0, 150.0, 10.0], page)),
+            None
+        );
+        // A drawing clipped to the lower half of the page keeps its batches
+        // there too.
+        let lower = clip_to(page, [0.0, 50.0, 100.0, 100.0]);
+        assert_eq!(camera.scissor(lower), Some([20, 120, 200, 100]));
+        assert_eq!(
+            camera.scissor(clip_to(wide_clip, lower)),
+            Some([20, 120, 200, 20])
+        );
+        assert_eq!(
+            camera.scissor(clip_to([0.0, 0.0, 100.0, 40.0], lower)),
             None
         );
     }

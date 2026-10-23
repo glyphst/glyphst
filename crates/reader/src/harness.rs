@@ -57,6 +57,9 @@ pub enum ShotKind {
     Generating,
     /// The loading animation's reveal, halfway down the page.
     Revealing,
+    /// A translation's blocks sweeping in (frame 02m), held shortly after
+    /// the first one starts.
+    Translating,
     /// Presenting's tools (frame 02h): ink on the page, the laser's
     /// toolbox with the pen's colours, and the ring open.
     PresentTools,
@@ -68,6 +71,8 @@ pub enum ShotKind {
 /// Progress of a replayed loading animation at which `Generating` is
 /// taken, and at which the pages of `Revealing` become ready.
 const GENERATING_AT: f32 = 0.6;
+/// Seconds into the first block's sweep at which `Translating` is taken.
+const TRANSLATING_AT: f64 = 0.3;
 /// Frames into the sidebar's slide at which `SidebarSlide` is taken.
 const SLIDE_SHOT_FRAMES: u32 = 4;
 /// The reveal's progress (in the animation's ending) at which
@@ -255,12 +260,18 @@ impl ReaderApp {
         }
         if self.translator.settings().is_none() {
             return self.launch_translate_document
+                || self.launch_translate_follow
                 || self.launch_translate_selection
                 || self.launch_ask.is_some();
         }
         if self.launch_translate_document {
             self.launch_translate_document = false;
             self.start_document_translation(ctx);
+        }
+        if self.launch_translate_follow {
+            self.launch_translate_follow = false;
+            self.prefs.translate_as_read = true;
+            self.start_following_translation(ctx);
         }
         if self.launch_translate_selection && self.launch_select.is_none() {
             if self.tabs[active].selection.is_none() {
@@ -286,7 +297,7 @@ impl ReaderApp {
         let document = self.tabs[active]
             .translation
             .as_ref()
-            .is_some_and(|session| session.is_running());
+            .is_some_and(|session| session.is_busy());
         let selection = self
             .translator
             .card
@@ -485,6 +496,25 @@ impl ReaderApp {
             }
             return true;
         }
+        // Held a moment into the first block's sweep, whatever is still
+        // translating.
+        if shot.kind == ShotKind::Translating {
+            if self.reveal_clock.is_none() {
+                self.prepare_text_shot(ctx, now);
+                let start = self
+                    .active
+                    .and_then(|active| self.tabs[active].reveals.first_start());
+                if let Some(start) = start {
+                    self.reveal_clock = Some(start + TRANSLATING_AT);
+                }
+                return false;
+            }
+            shot.ready_frames += 1;
+            if shot.ready_frames == 3 {
+                shot.request(ctx);
+            }
+            return false;
+        }
         // Partway through the slide, whatever is still loading.
         if shot.kind == ShotKind::SidebarSlide && shot.started {
             shot.slide_frames += 1;
@@ -516,7 +546,8 @@ impl ReaderApp {
                 .is_some_and(|t| t.progress(now) >= 0.5)
         };
         shot.requested = match shot.kind {
-            ShotKind::View => true,
+            // Taken above, while the translation runs.
+            ShotKind::View | ShotKind::Translating => true,
             ShotKind::PageTurn => {
                 if !shot.started {
                     self.pending_actions

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::policy::enforce_unmapped_glyph_policy;
+use crate::scope::{ScopeView, TranslationScope};
 use crate::{
     Block, BlockRole, BoundingBox, CancellationToken, DocumentV1, Line, SegmentKind, TextFlow,
     TextStyle,
@@ -22,12 +23,17 @@ const MAX_BATCHABLE_UNIT_PLACEHOLDERS: usize = 8;
 const MAX_ACTIVE_REQUESTS: usize = 6;
 const MAX_ACTIVE_COMPLEX_REQUESTS: usize = 2;
 const MAX_UNIT_ATTEMPTS: usize = 3;
+/// How often a scheduler with work out of scope looks at the scope again.
+const SCOPE_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationUnit {
     pub id: String,
     #[serde(default)]
     pub page_index: usize,
+    /// Every page the unit's blocks are on (a paragraph may run on).
+    #[serde(default)]
+    pub member_pages: Vec<usize>,
     pub member_block_ids: Vec<String>,
     pub role: BlockRole,
     pub source_text: String,
@@ -426,6 +432,9 @@ pub struct TranslationRunProgress {
     pub retrying: usize,
     pub failed: usize,
     pub total: usize,
+    /// Units on pages the scope covers; `total` for a whole document.
+    #[serde(default)]
+    pub in_scope: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -498,10 +507,58 @@ pub fn translate_document_resuming(
 }
 
 pub fn translate_document_partial_resuming(
+    document: DocumentV1,
+    backend: &dyn TranslationBackend,
+    cancellation: &CancellationToken,
+    resumed_units: Vec<TranslatedUnit>,
+    on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
+) -> Result<TranslationRunOutcome, TranslationDocumentError> {
+    let scope = TranslationScope::whole();
+    translate_document_scoped(
+        document,
+        backend,
+        cancellation,
+        resumed_units,
+        ScopedRun::whole(&scope),
+        on_update,
+    )
+}
+
+/// What a scoped run may translate and when it stops.
+pub struct ScopedRun<'a> {
+    /// The pages in scope and their order.
+    pub scope: &'a TranslationScope,
+    /// Whether a page's text is final (its OCR is done); work touching a
+    /// page that is not waits.
+    pub ready: &'a (dyn Fn(usize) -> bool + Sync),
+    /// Wait for the scope to grow when everything left is out of it,
+    /// instead of returning with that work undone.
+    pub park_when_idle: bool,
+    /// Asked between dispatches: once it answers yes, nothing more is sent,
+    /// the requests in flight finish and the run returns.
+    pub stop: Option<&'a (dyn Fn() -> bool + Sync)>,
+}
+
+impl<'a> ScopedRun<'a> {
+    /// Every page, all ready, returning when done.
+    pub fn whole(scope: &'a TranslationScope) -> Self {
+        Self {
+            scope,
+            ready: &|_| true,
+            park_when_idle: false,
+            stop: None,
+        }
+    }
+}
+
+/// Translates the units the scope covers, most urgent first; units out of
+/// scope are left out of the outcome unless the scope grows to them.
+pub fn translate_document_scoped(
     mut document: DocumentV1,
     backend: &dyn TranslationBackend,
     cancellation: &CancellationToken,
     resumed_units: Vec<TranslatedUnit>,
+    run: ScopedRun<'_>,
     mut on_update: impl FnMut(&TranslationRunSnapshot) -> Result<(), String>,
 ) -> Result<TranslationRunOutcome, TranslationDocumentError> {
     let started_at = Instant::now();
@@ -563,6 +620,7 @@ pub fn translate_document_partial_resuming(
             attempt: 1,
             ready_at: Instant::now(),
             final_recovery: false,
+            slot_page: 0,
         })
         .collect::<VecDeque<_>>();
     let mut queue = TranslationQueueStats {
@@ -573,6 +631,7 @@ pub fn translate_document_partial_resuming(
     let mut retrying_ids = HashSet::<String>::new();
     let mut cached_ids = resolved.keys().cloned().collect::<HashSet<_>>();
 
+    let mut view = run.scope.view();
     let initial = translation_snapshot(
         &units,
         &resolved,
@@ -580,6 +639,7 @@ pub fn translate_document_partial_resuming(
         &retrying_ids,
         &cached_ids,
         queue_snapshot(&queue, started_at),
+        &view,
     );
     on_update(&initial).map_err(|message| TranslationDocumentError {
         message,
@@ -593,21 +653,32 @@ pub fn translate_document_partial_resuming(
         let mut active_complex = 0usize;
         let mut active_by_page = HashMap::<usize, usize>::new();
         let mut cancelled = false;
+        let mut stopping = false;
 
         while !pending.is_empty() || active > 0 {
             if cancellation.is_cancelled() {
                 cancelled = true;
                 pending.clear();
             }
-            while !cancelled && active < MAX_ACTIVE_REQUESTS {
-                let Some(index) =
-                    next_dispatchable_request(&pending, &active_by_page, active, active_complex)
-                else {
+            if !stopping && run.stop.is_some_and(|stop| stop()) {
+                stopping = true;
+            }
+            view = run.scope.view();
+            while !cancelled && !stopping && active < MAX_ACTIVE_REQUESTS {
+                let Some(index) = next_dispatchable_request(
+                    &pending,
+                    &active_by_page,
+                    active,
+                    active_complex,
+                    &view,
+                    run.ready,
+                ) else {
                     break;
                 };
-                let request = pending.remove(index).expect("pending request exists");
+                let mut request = pending.remove(index).expect("pending request exists");
                 let is_complex = request.plan.complex;
-                let page_index = request.plan.page_index();
+                let page_index = request.plan.slot_page(&view);
+                request.slot_page = page_index;
                 active += 1;
                 active_complex += usize::from(is_complex);
                 *active_by_page.entry(page_index).or_default() += 1;
@@ -639,8 +710,17 @@ pub fn translate_document_partial_resuming(
             }
 
             if active == 0 {
-                if let Some(delay) = next_ready_delay(&pending, active_complex) {
+                if stopping {
+                    break;
+                }
+                if let Some(delay) = next_ready_delay(&pending, active_complex, &view, run.ready) {
                     let _ = sleep_cancellable(delay, cancellation);
+                    continue;
+                }
+                if run.park_when_idle && !pending.is_empty() {
+                    // Everything left is out of scope or waits for its text:
+                    // sleep until the reader moves or a page becomes ready.
+                    run.scope.wait_changed(view.generation(), SCOPE_POLL * 2);
                     continue;
                 }
                 break;
@@ -654,9 +734,17 @@ pub fn translate_document_partial_resuming(
                     .collect(),
                 retryable: true,
             };
-            let completed = if active < MAX_ACTIVE_REQUESTS
-                && let Some(delay) = next_ready_delay(&pending, active_complex)
-            {
+            let parked = pending
+                .iter()
+                .any(|request| !request_eligible(request, &view, run.ready));
+            let delay = next_ready_delay(&pending, active_complex, &view, run.ready)
+                .filter(|_| active < MAX_ACTIVE_REQUESTS);
+            let delay = match (delay, parked || run.stop.is_some()) {
+                (Some(delay), true) => Some(delay.min(SCOPE_POLL)),
+                (None, true) => Some(SCOPE_POLL),
+                (delay, false) => delay,
+            };
+            let completed = if let Some(delay) = delay {
                 match receiver.recv_timeout(delay) {
                     Ok(completed) => completed,
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -667,7 +755,7 @@ pub fn translate_document_partial_resuming(
             };
             active -= 1;
             active_complex -= usize::from(completed.request.plan.complex);
-            let completed_page = completed.request.plan.page_index();
+            let completed_page = completed.request.slot_page;
             if let Some(count) = active_by_page.get_mut(&completed_page) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -693,6 +781,7 @@ pub fn translate_document_partial_resuming(
                 &retrying_ids,
                 &cached_ids,
                 queue_snapshot(&queue, started_at),
+                &view,
             );
             on_update(&snapshot).map_err(|message| TranslationDocumentError {
                 message,
@@ -723,6 +812,7 @@ pub fn translate_document_partial_resuming(
         &retrying_ids,
         &cached_ids,
         queue_snapshot(&queue, started_at),
+        &run.scope.view(),
     );
     let translated = units
         .iter()
@@ -746,12 +836,28 @@ struct PlannedRequest {
 }
 
 impl PlannedRequest {
-    fn page_index(&self) -> usize {
-        self.units
-            .iter()
-            .map(|unit| unit.page_index)
-            .min()
-            .unwrap_or_default()
+    /// Every page the request's units are on.
+    fn pages(&self) -> impl Iterator<Item = usize> + '_ {
+        self.units.iter().flat_map(|unit| {
+            let pages: &[usize] = if unit.member_pages.is_empty() {
+                std::slice::from_ref(&unit.page_index)
+            } else {
+                &unit.member_pages
+            };
+            pages.iter().copied()
+        })
+    }
+
+    /// How urgent the request is and the page that makes it so.
+    fn rank(&self, view: &ScopeView) -> Option<(u32, usize)> {
+        view.rank_pages(self.pages())
+    }
+
+    /// The page the request is counted against while in flight.
+    fn slot_page(&self, view: &ScopeView) -> usize {
+        self.rank(view)
+            .map(|(_, page)| page)
+            .unwrap_or_else(|| self.pages().min().unwrap_or_default())
     }
 }
 
@@ -760,6 +866,8 @@ struct PendingRequest {
     attempt: usize,
     ready_at: Instant,
     final_recovery: bool,
+    /// The page it counts against while in flight, fixed at dispatch.
+    slot_page: usize,
 }
 
 struct CompletedRequest {
@@ -939,6 +1047,7 @@ fn process_completed_request(
                         },
                         attempt: attempt + 1,
                         ready_at: now.checked_add(delay).unwrap_or(now),
+                        slot_page: 0,
                         final_recovery: backend.supports_final_single_recovery()
                             && attempt + 1 == MAX_UNIT_ATTEMPTS,
                     });
@@ -1057,6 +1166,7 @@ fn translation_snapshot(
     retrying_ids: &HashSet<String>,
     cached_ids: &HashSet<String>,
     queue: TranslationQueueStats,
+    view: &ScopeView,
 ) -> TranslationRunSnapshot {
     let resolved_units = units
         .iter()
@@ -1083,6 +1193,17 @@ fn translation_snapshot(
                 .filter(|failure| !retrying_ids.contains(&failure.id))
                 .count(),
             total: units.len(),
+            in_scope: units
+                .iter()
+                .filter(|unit| {
+                    let pages: &[usize] = if unit.member_pages.is_empty() {
+                        std::slice::from_ref(&unit.page_index)
+                    } else {
+                        &unit.member_pages
+                    };
+                    view.rank_pages(pages.iter().copied()).is_some()
+                })
+                .count(),
         },
         resolved_units,
         failures: failure_list,
@@ -1096,36 +1217,63 @@ fn retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
         .min(Duration::from_secs(15 * 60))
 }
 
+/// Whether a request may go now as far as the scope and its pages go.
+fn request_eligible(
+    request: &PendingRequest,
+    view: &ScopeView,
+    ready: &(dyn Fn(usize) -> bool + Sync),
+) -> bool {
+    request.plan.rank(view).is_some() && request.plan.pages().all(ready)
+}
+
 fn next_dispatchable_request(
     pending: &VecDeque<PendingRequest>,
     active_by_page: &HashMap<usize, usize>,
     active: usize,
     active_complex: usize,
+    view: &ScopeView,
+    ready: &(dyn Fn(usize) -> bool + Sync),
 ) -> Option<usize> {
     let now = Instant::now();
     let dispatchable = |request: &PendingRequest| {
         request.ready_at <= now
             && (!request.plan.complex || active_complex < MAX_ACTIVE_COMPLEX_REQUESTS)
+            && request_eligible(request, view, ready)
     };
-    let earliest_page = pending
+    // The most urgent page with work, waiting or in flight, gets the larger
+    // reservation; with a whole scope from the start that is the earliest.
+    let urgent_page = pending
         .iter()
-        .map(|request| request.plan.page_index())
-        .chain(active_by_page.keys().copied())
-        .min()?;
-    let earliest_active = active_by_page
-        .get(&earliest_page)
+        .filter_map(|request| request.plan.rank(view))
+        .chain(
+            active_by_page
+                .keys()
+                .map(|&page| (view.rank(page).unwrap_or(u32::MAX), page)),
+        )
+        .min()?
+        .1;
+    let urgent_active = active_by_page
+        .get(&urgent_page)
         .copied()
         .unwrap_or_default();
-    let later_active = active.saturating_sub(earliest_active);
-    let earliest = pending
-        .iter()
-        .position(|request| request.plan.page_index() == earliest_page && dispatchable(request));
-    let later = pending
-        .iter()
-        .position(|request| request.plan.page_index() != earliest_page && dispatchable(request));
+    let later_active = active.saturating_sub(urgent_active);
+    let best = |on_urgent: bool| {
+        pending
+            .iter()
+            .enumerate()
+            .filter(|(_, request)| dispatchable(request))
+            .filter_map(|(index, request)| {
+                let (rank, page) = request.plan.rank(view)?;
+                ((page == urgent_page) == on_urgent).then_some((rank, index))
+            })
+            .min()
+            .map(|(_, index)| index)
+    };
+    let urgent = best(true);
+    let later = best(false);
 
-    if earliest_active < 4 && earliest.is_some() {
-        return earliest;
+    if urgent_active < 4 && urgent.is_some() {
+        return urgent;
     }
     if later_active < 2 && later.is_some() {
         return later;
@@ -1133,7 +1281,7 @@ fn next_dispatchable_request(
 
     // Keep the queue work-conserving when one reservation has no ready work,
     // including while a page-priority retry is waiting for its backoff.
-    earliest.or(later)
+    urgent.or(later)
 }
 
 fn update_page_allocation_peaks(
@@ -1157,11 +1305,17 @@ fn update_page_allocation_peaks(
     queue.peak_active_later_page_requests = queue.peak_active_later_page_requests.max(later);
 }
 
-fn next_ready_delay(pending: &VecDeque<PendingRequest>, active_complex: usize) -> Option<Duration> {
+fn next_ready_delay(
+    pending: &VecDeque<PendingRequest>,
+    active_complex: usize,
+    view: &ScopeView,
+    ready: &(dyn Fn(usize) -> bool + Sync),
+) -> Option<Duration> {
     let now = Instant::now();
     pending
         .iter()
         .filter(|request| !request.plan.complex || active_complex < MAX_ACTIVE_COMPLEX_REQUESTS)
+        .filter(|request| request_eligible(request, view, ready))
         .map(|request| request.ready_at.saturating_duration_since(now))
         .min()
 }

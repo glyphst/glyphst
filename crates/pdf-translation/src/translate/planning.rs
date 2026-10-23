@@ -28,6 +28,9 @@ pub(super) fn build_translation_units(document: &DocumentV1) -> Vec<TranslationU
             {
                 let unit = &mut units[unit_index];
                 unit.page_index = unit.page_index.min(page.page_index);
+                if !unit.member_pages.contains(&page.page_index) {
+                    unit.member_pages.push(page.page_index);
+                }
                 append_continuation_text(
                     &mut unit.source_text,
                     &normalize_pdf_hard_wraps(&block.content.text, block.role),
@@ -45,6 +48,7 @@ pub(super) fn build_translation_units(document: &DocumentV1) -> Vec<TranslationU
             units.push(TranslationUnit {
                 id,
                 page_index: page.page_index,
+                member_pages: vec![page.page_index],
                 member_block_ids: vec![block.id.clone()],
                 role: block.role,
                 protected,

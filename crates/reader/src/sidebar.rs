@@ -8,6 +8,7 @@ use std::{
 };
 
 use glyphst_library::HighlightColor;
+use glyphst_pdf_translation_service::ExportLayout;
 use glyphst_settings::TranslationProvider;
 use glyphst_ui::{
     Tip,
@@ -28,7 +29,7 @@ use crate::{
     find, icons,
     prefs::PageColumns,
     theme::{self, Tokens},
-    translation::{Export, SessionStatus},
+    translation::{Export, PageProgress, SessionStatus},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,8 +104,10 @@ pub enum SidebarAction {
     SetBody(AnnotationId, String),
     Remove(AnnotationId),
     StartTranslation,
+    /// Translate every page of a session that follows the reader.
+    TranslateRest,
     CancelTranslation,
-    ExportTranslation,
+    ExportTranslation(ExportLayout),
     ShowTranslated(bool),
     Unpin(usize),
     /// Follow the section being read again and show it.
@@ -435,19 +438,6 @@ fn translation_panel(
         });
     }
     ui.add_space(10.0);
-    let shown = tab
-        .translation
-        .as_ref()
-        .is_some_and(|session| session.show_translated);
-    let mut replace = shown;
-    if switch_row(
-        ui,
-        "replace pages in place",
-        &mut replace,
-        tab.translation.is_some(),
-    ) {
-        actions.push(SidebarAction::ShowTranslated(replace));
-    }
     let mut hover = info.original_on_hover;
     if switch_row(ui, "original on hover", &mut hover, true) {
         actions.push(SidebarAction::SetOriginalOnHover(hover));
@@ -459,69 +449,45 @@ fn translation_panel(
     for warning in info.warnings {
         muted(ui, warning);
     }
+    if !is_pdf {
+        ui.add_space(8.0);
+        muted(ui, "only PDFs translate as documents.");
+        return;
+    }
+    ui.add_space(10.0);
+    scope_slot(ui, tab, info, actions);
     let footer = 44.0;
-    match &tab.translation {
-        None if !is_pdf => {
-            ui.add_space(8.0);
-            muted(ui, "only PDFs translate as documents.");
-        }
-        None => {
-            ui.add_space(8.0);
-            muted(
-                ui,
-                &format!("translated pages replace the originals as they are ready, in {target}."),
-            );
-            ui.add_space(8.0);
-            let start = ui.add_enabled(info.ready, Button::primary("translate document"));
-            if start.clicked() {
-                actions.push(SidebarAction::StartTranslation);
-            }
-            if !info.ready {
-                muted(ui, "reading the translation settings…");
-            }
-        }
-        Some(session) => {
-            ui.add_space(8.0);
-            let total = session.page_count.max(tab.layout.len());
-            motif::rule_title(
-                ui,
-                "pages",
-                Some(&format!("{}/{total}", session.previews.len())),
-            );
-            let current = tab.current_page();
-            let failed: HashSet<usize> = session
-                .failures
-                .iter()
-                .map(|failure| failure.page_index)
-                .collect();
-            let status = |page: usize| {
-                if session.previews.contains_key(&page) {
-                    PageStatus::Done
-                } else if failed.contains(&page) {
-                    PageStatus::Failed
-                } else if session.is_running() {
-                    PageStatus::Waiting
-                } else {
-                    PageStatus::Skipped
+    if let Some(session) = &tab.translation {
+        ui.add_space(8.0);
+        let total = session.page_count.max(tab.layout.len());
+        let done = (0..total)
+            .filter(|page| session.page_progress(*page) == PageProgress::Done)
+            .count();
+        let count = if session.is_following() && session.is_running() {
+            format!("following · {done}/{total}")
+        } else {
+            format!("{done}/{total}")
+        };
+        motif::rule_title(ui, "pages", Some(&count));
+        let current = tab.current_page();
+        let height = (ui.available_height() - footer).max(60.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("translation-pages", tab.id))
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (first, last, state) in
+                    page_runs(total, current, |page| session.page_progress(page))
+                {
+                    page_status_row(ui, first, last, state, first == current);
                 }
-            };
-            let height = (ui.available_height() - footer).max(60.0);
-            egui::ScrollArea::vertical()
-                .id_salt(("translation-pages", tab.id))
-                .max_height(height)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for (first, last, state) in page_runs(total, current, status) {
-                        page_status_row(ui, first, last, state, first == current);
-                    }
-                });
-            match &session.export {
-                Some(Export::Running(_)) => muted(ui, "exporting…"),
-                Some(Export::Done(Ok(path))) => muted(ui, &format!("saved {}", path.display())),
-                Some(Export::Done(Err(error))) => muted(ui, &format!("export failed: {error}")),
-                None => {}
-            }
+            });
+        match &session.export {
+            Some(Export::Running(_)) => muted(ui, "exporting…"),
+            Some(Export::Done(Ok(path))) => muted(ui, &format!("saved {}", path.display())),
+            Some(Export::Done(Err(error))) => muted(ui, &format!("export failed: {error}")),
+            None => {}
         }
     }
     // The pinned translations of selections.
@@ -549,7 +515,8 @@ fn translation_panel(
             });
         }
     }
-    // The actions at the foot of the pane.
+    // The foot of the pane: what is shown, and the export. Its controls keep
+    // their size whatever the session does.
     if let Some(session) = &tab.translation {
         let bottom = ui.max_rect().bottom();
         let foot = egui::Rect::from_min_max(
@@ -561,38 +528,149 @@ fn translation_panel(
                 .max_rect(foot)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        if session.is_running() {
-            if foot_ui.add(Button::ghost("cancel")).clicked() {
-                actions.push(SidebarAction::CancelTranslation);
-            }
-        } else {
-            let label = if session.show_translated {
-                "show original"
-            } else {
-                "show translated"
-            };
-            if foot_ui.add(Button::ghost(label)).clicked() {
-                actions.push(SidebarAction::ShowTranslated(!session.show_translated));
-            }
+        let mut shown = session.show_translated;
+        if segmented::labels(
+            &mut foot_ui,
+            &mut shown,
+            &[(true, "translated"), (false, "original")],
+        ) {
+            actions.push(SidebarAction::ShowTranslated(shown));
         }
+        foot_ui.add_space(8.0);
         let can_export = session.status == SessionStatus::Finished
             && !matches!(session.export, Some(Export::Running(_)));
-        if foot_ui
-            .add_enabled(can_export, Button::primary("export bilingual"))
-            .clicked()
-        {
-            actions.push(SidebarAction::ExportTranslation);
-        }
+        let width = foot_ui.available_width();
+        let export = foot_ui.add_enabled(
+            can_export,
+            Button::primary("export")
+                .trailing_icon("chevron-down")
+                .min_width(width),
+        );
+        egui::Popup::menu(&export).show(|ui| {
+            ui_menu::style(ui);
+            if ui_menu::Item::new("side by side")
+                .icon("columns-2")
+                .detail("original | translation on one wide page")
+                .key("pdf")
+                .show(ui)
+                .clicked()
+            {
+                actions.push(SidebarAction::ExportTranslation(ExportLayout::SideBySide));
+            }
+            if ui_menu::Item::new("translated only")
+                .icon("file-text")
+                .key("pdf")
+                .show(ui)
+                .clicked()
+            {
+                actions.push(SidebarAction::ExportTranslation(ExportLayout::Translated));
+            }
+        });
     }
 }
 
-/// A page's translation state in the Translation tab.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PageStatus {
-    Done,
-    Failed,
-    Waiting,
-    Skipped,
+/// The one action that fits the session, in a slot as wide as the pane so
+/// changing one's mind never moves anything: start, take in the rest of
+/// the document, cancel, or a line saying it is done.
+fn scope_slot(
+    ui: &mut egui::Ui,
+    tab: &DocumentTab,
+    info: &SidebarInfo<'_>,
+    actions: &mut Vec<SidebarAction>,
+) {
+    let tokens = Tokens::get(ui.ctx());
+    let width = ui.available_width();
+    let target = info
+        .target
+        .as_deref()
+        .map(language_label)
+        .unwrap_or("the settings' language");
+    let (button, note) = match &tab.translation {
+        None => {
+            let start = ui.add_enabled(
+                info.ready,
+                Button::primary("translate document").min_width(width),
+            );
+            if start.clicked() {
+                actions.push(SidebarAction::StartTranslation);
+            }
+            let note = if info.ready {
+                format!(
+                    "or switch on translate as I read: it translates the page you are on and the next two, into {target}."
+                )
+            } else {
+                "reading the translation settings…".to_owned()
+            };
+            (None, note)
+        }
+        Some(session) if session.is_running() && session.is_following() => {
+            let rest = session.untranslated_pages();
+            let label = format!("translate the rest · {rest} pages");
+            let note = match session.window() {
+                Some((first, last)) => format!(
+                    "following your page: p.{}–{} now, more as you read.",
+                    first + 1,
+                    last + 1
+                ),
+                None => "following your page.".to_owned(),
+            };
+            (Some((label, SidebarAction::TranslateRest)), note)
+        }
+        Some(session) if session.is_running() => (
+            Some(("cancel".to_owned(), SidebarAction::CancelTranslation)),
+            format!(
+                "translating the whole document · {}",
+                session.status_line().to_lowercase()
+            ),
+        ),
+        Some(session) => {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, tokens.row(28.0)), egui::Sense::hover());
+            ui.painter().rect_stroke(
+                rect,
+                tokens.ctl_radius(),
+                tokens.edge(),
+                egui::StrokeKind::Inside,
+            );
+            let (line, color, note) = match &session.status {
+                SessionStatus::Failed(error) => {
+                    ("✕ stopped".to_owned(), tokens.err, error.to_lowercase())
+                }
+                _ => {
+                    let total = session.page_count.max(tab.layout.len());
+                    let left = session.untranslated_pages();
+                    if left == 0 {
+                        (
+                            format!("✓ all {total} pages translated"),
+                            tokens.ok,
+                            "kept in the cache: reopening shows them at once.".to_owned(),
+                        )
+                    } else {
+                        (
+                            format!("✓ {} of {total} pages translated", total - left),
+                            tokens.ok,
+                            "the rest stay in the original.".to_owned(),
+                        )
+                    }
+                }
+            };
+            ui.painter().text(
+                egui::pos2(rect.left() + 8.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                line,
+                theme::mono(12.0),
+                color,
+            );
+            (None, note)
+        }
+    };
+    if let Some((label, action)) = button
+        && ui.add(Button::ghost(&label).min_width(width)).clicked()
+    {
+        actions.push(action);
+    }
+    ui.add_space(6.0);
+    muted(ui, &note);
 }
 
 /// The pages as rows: runs of three or more pages in the same state, away
@@ -600,9 +678,9 @@ enum PageStatus {
 fn page_runs(
     count: usize,
     current: usize,
-    status: impl Fn(usize) -> PageStatus,
-) -> Vec<(usize, usize, PageStatus)> {
-    let mut runs: Vec<(usize, usize, PageStatus)> = Vec::new();
+    status: impl Fn(usize) -> PageProgress,
+) -> Vec<(usize, usize, PageProgress)> {
+    let mut runs: Vec<(usize, usize, PageProgress)> = Vec::new();
     for page in 0..count {
         let state = status(page);
         let near = page.abs_diff(current) <= 2;
@@ -627,7 +705,13 @@ fn page_runs(
         .collect()
 }
 
-fn page_status_row(ui: &mut egui::Ui, first: usize, last: usize, state: PageStatus, current: bool) {
+fn page_status_row(
+    ui: &mut egui::Ui,
+    first: usize,
+    last: usize,
+    state: PageProgress,
+    current: bool,
+) {
     let tokens = Tokens::get(ui.ctx());
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), egui::Sense::hover());
@@ -652,11 +736,16 @@ fn page_status_row(ui: &mut egui::Ui, first: usize, last: usize, state: PageStat
             tokens.text_2
         },
     );
+    let partial;
     let (glyph, label, color) = match state {
-        PageStatus::Done => ("✓", "translated", tokens.ok),
-        PageStatus::Failed => ("✕", "failed", tokens.err),
-        PageStatus::Waiting => ("◐", "waiting", tokens.accent),
-        PageStatus::Skipped => ("·", "not translated", tokens.faint),
+        PageProgress::Done => ("✓", "translated", tokens.ok),
+        PageProgress::Partial { done, total } => {
+            partial = format!("translating · {done}/{total} blocks");
+            ("◌", partial.as_str(), tokens.accent_text)
+        }
+        PageProgress::Failed => ("✕", "failed", tokens.err),
+        PageProgress::Waiting => ("·", "waiting", tokens.muted),
+        PageProgress::NotTranslated => ("·", "not translated", tokens.faint),
     };
     let x = rect.left() + rect.width() * 0.45;
     ui.painter().text(
@@ -671,7 +760,12 @@ fn page_status_row(ui: &mut egui::Ui, first: usize, last: usize, state: PageStat
         egui::Align2::LEFT_CENTER,
         label,
         font,
-        if current { tokens.ok } else { tokens.faint },
+        match state {
+            PageProgress::Done if current => tokens.ok,
+            PageProgress::Partial { .. } => tokens.accent_text,
+            PageProgress::Waiting => tokens.muted,
+            _ => tokens.faint,
+        },
     );
 }
 

@@ -121,6 +121,7 @@ fn style_boundaries_do_not_force_adjacent_structural_markers() {
     let unit = TranslationUnit {
         id: "unit".to_string(),
         page_index: 0,
+        member_pages: vec![0],
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Prompt,
         source_text: "•Who is running for the election?".to_string(),
@@ -1327,6 +1328,7 @@ fn resumed_styled_units_do_not_require_internal_style_markers() {
     let unit = TranslationUnit {
         id: "styled".to_string(),
         page_index: 0,
+        member_pages: vec![0],
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Body,
         source_text: "Styled source text".to_string(),
@@ -1371,6 +1373,7 @@ fn resumed_inline_objects_must_still_exist_in_styled_runs() {
     let unit = TranslationUnit {
         id: "inline".to_string(),
         page_index: 0,
+        member_pages: vec![0],
         member_block_ids: vec!["block".to_string()],
         role: BlockRole::Body,
         source_text: format!("Before {marker} after"),
@@ -1493,6 +1496,269 @@ fn cancellation_stops_queued_translation_work() {
 
     assert_eq!(error.message, "PDF translation was cancelled");
     assert!(backend.calls.load(Ordering::SeqCst) <= MAX_ACTIVE_REQUESTS);
+}
+
+/// Records the pages it is asked to translate, each request taking `delay`.
+struct PageRecorder {
+    pages: Mutex<Vec<usize>>,
+    delay: Duration,
+}
+
+impl PageRecorder {
+    fn new(delay: Duration) -> Self {
+        Self {
+            pages: Mutex::new(Vec::new()),
+            delay,
+        }
+    }
+
+    fn pages(&self) -> Vec<usize> {
+        self.pages.lock().unwrap().clone()
+    }
+
+    fn wait_for(&self, page: usize) {
+        for _ in 0..400 {
+            if self.pages().contains(&page) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!(
+            "page {page} was never translated; asked for {:?}",
+            self.pages()
+        );
+    }
+}
+
+impl TranslationBackend for PageRecorder {
+    fn translate_batch(
+        &self,
+        units: &[TranslationUnit],
+    ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+        self.pages
+            .lock()
+            .unwrap()
+            .extend(units.iter().map(|unit| unit.page_index));
+        thread::sleep(self.delay);
+        Ok(valid_outputs(units))
+    }
+}
+
+/// One paragraph on each of `count` pages.
+fn paged_document(count: usize) -> DocumentV1 {
+    let pages = (0..count)
+        .map(|index| {
+            let mut page = test_document(&format!("Paragraph on page {index}."))
+                .pages
+                .remove(0);
+            page.page_index = index;
+            for block in &mut page.blocks {
+                block.page_index = index;
+                block.id = format!("p{index:03}-b0000");
+            }
+            page
+        })
+        .collect();
+    let mut document = test_document("unused");
+    document.pages = pages;
+    document
+}
+
+fn translated_pages(outcome: &TranslationRunOutcome) -> Vec<usize> {
+    let mut pages = outcome
+        .document
+        .units
+        .iter()
+        .map(|unit| {
+            outcome
+                .document
+                .document
+                .pages
+                .iter()
+                .find(|page| {
+                    page.blocks
+                        .iter()
+                        .any(|block| block.id == unit.member_block_ids[0])
+                })
+                .unwrap()
+                .page_index
+        })
+        .collect::<Vec<_>>();
+    pages.sort_unstable();
+    pages
+}
+
+#[test]
+fn a_following_scope_translates_its_window_and_never_unvisited_pages() {
+    let backend = PageRecorder::new(Duration::ZERO);
+    let scope = TranslationScope::following(2, 1);
+    let outcome = translate_document_scoped(
+        paged_document(6),
+        &backend,
+        &CancellationToken::new(),
+        Vec::new(),
+        ScopedRun {
+            park_when_idle: false,
+            ..ScopedRun::whole(&scope)
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(translated_pages(&outcome), vec![2, 3]);
+    let mut asked = backend.pages();
+    asked.sort_unstable();
+    assert_eq!(asked, vec![2, 3]);
+    assert_eq!(outcome.progress.in_scope, 2);
+    assert_eq!(outcome.progress.total, 6);
+    assert!(outcome.failures.is_empty());
+}
+
+#[test]
+fn parked_work_follows_the_reader_and_finishes_once_whole() {
+    let backend = PageRecorder::new(Duration::from_millis(5));
+    let scope = TranslationScope::following(0, 0);
+    let outcome = thread::scope(|threads| {
+        let run = threads.spawn(|| {
+            translate_document_scoped(
+                paged_document(6),
+                &backend,
+                &CancellationToken::new(),
+                Vec::new(),
+                ScopedRun {
+                    park_when_idle: true,
+                    ..ScopedRun::whole(&scope)
+                },
+                |_| Ok(()),
+            )
+        });
+        backend.wait_for(0);
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            backend.pages(),
+            vec![0],
+            "nothing outside the scope is sent"
+        );
+        scope.set_focus(3);
+        backend.wait_for(3);
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(backend.pages(), vec![0, 3]);
+        assert!(
+            !run.is_finished(),
+            "the run waits while the scope is partial"
+        );
+        scope.expand_to_whole();
+        run.join().unwrap()
+    })
+    .unwrap();
+
+    assert_eq!(translated_pages(&outcome), vec![0, 1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn a_whole_scope_dispatches_forward_from_the_reader_then_back() {
+    let units = build_translation_units(&paged_document(6));
+    let mut pending = plan_translation_requests(&units[1..3])
+        .into_iter()
+        .chain(plan_translation_requests(&units[4..]))
+        .map(|plan| PendingRequest {
+            plan,
+            attempt: 1,
+            ready_at: Instant::now(),
+            final_recovery: false,
+            slot_page: 0,
+        })
+        .collect::<VecDeque<_>>();
+    let scope = TranslationScope::following(3, 0);
+    scope.expand_to_whole();
+    let view = scope.view();
+    let mut active_by_page = HashMap::new();
+    let mut order = Vec::new();
+    while let Some(index) =
+        next_dispatchable_request(&pending, &active_by_page, order.len(), 0, &view, &|_| true)
+    {
+        let request = pending.remove(index).unwrap();
+        let page = request.plan.slot_page(&view);
+        *active_by_page.entry(page).or_insert(0) += 1;
+        order.push(page);
+    }
+    assert_eq!(order, vec![4, 5, 2, 1]);
+}
+
+#[test]
+fn work_on_a_page_waits_until_its_text_is_ready() {
+    let backend = PageRecorder::new(Duration::ZERO);
+    let scope = TranslationScope::whole();
+    let page_one_ready = std::sync::atomic::AtomicBool::new(false);
+    let ready = |page: usize| page != 1 || page_one_ready.load(Ordering::SeqCst);
+    let outcome = thread::scope(|threads| {
+        let run = threads.spawn(|| {
+            translate_document_scoped(
+                paged_document(3),
+                &backend,
+                &CancellationToken::new(),
+                Vec::new(),
+                ScopedRun {
+                    scope: &scope,
+                    ready: &ready,
+                    park_when_idle: true,
+                    stop: None,
+                },
+                |_| Ok(()),
+            )
+        });
+        backend.wait_for(2);
+        thread::sleep(Duration::from_millis(40));
+        assert!(!backend.pages().contains(&1));
+        page_one_ready.store(true, Ordering::SeqCst);
+        scope.notify();
+        run.join().unwrap()
+    })
+    .unwrap();
+
+    assert_eq!(translated_pages(&outcome), vec![0, 1, 2]);
+}
+
+#[test]
+fn a_paragraph_running_onto_the_page_in_view_is_in_scope() {
+    let document = paged_document(3);
+    let mut unit = build_translation_units(&document).remove(1);
+    unit.member_pages = vec![1, 2];
+    let request = PlannedRequest {
+        units: vec![unit],
+        complex: false,
+    };
+    let view = TranslationScope::following(2, 0).view();
+    assert_eq!(request.rank(&view), Some((0, 2)));
+    assert_eq!(request.slot_page(&view), 2);
+    assert_eq!(
+        request.rank(&TranslationScope::following(0, 0).view()),
+        None
+    );
+}
+
+#[test]
+fn a_stopped_run_sends_nothing_more_and_returns_what_finished() {
+    let backend = PageRecorder::new(Duration::from_millis(20));
+    let scope = TranslationScope::whole();
+    let stop = || !backend.pages().is_empty();
+    let outcome = translate_document_scoped(
+        paged_document(24),
+        &backend,
+        &CancellationToken::new(),
+        Vec::new(),
+        ScopedRun {
+            stop: Some(&stop),
+            ..ScopedRun::whole(&scope)
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    let asked = backend.pages().len();
+    assert!(asked <= MAX_ACTIVE_REQUESTS, "asked for {asked} pages");
+    assert_eq!(outcome.document.units.len(), asked);
+    assert!(outcome.failures.is_empty());
 }
 
 fn update_peak(peak: &AtomicUsize, value: usize) {

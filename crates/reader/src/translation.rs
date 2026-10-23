@@ -8,21 +8,23 @@
 //! Providers and keys are the user's settings, shared with the GPUI Reader.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender},
     },
     thread,
+    time::{Duration, Instant},
 };
 
-use glyphst_pdf::DocumentSnapshot;
+use crate::reveal::RevealBlock;
+use glyphst_pdf::{DocumentSnapshot, vector::PageRect};
 use glyphst_pdf_translation_service::{
-    CancellationToken, PdfTranslationConfig, PdfTranslationExportRequest,
-    PdfTranslationHoverRegion, PdfTranslationPageFailure, PdfTranslationProgress,
-    PdfTranslationService, PdfTranslationSessionRequest, PdfTranslationSessionResult,
-    PdfTranslationSessionUpdate,
+    CancellationToken, ExportLayout, PdfTranslationConfig, PdfTranslationExportRequest,
+    PdfTranslationHoverRegion, PdfTranslationPageFailure, PdfTranslationPagePreview,
+    PdfTranslationProgress, PdfTranslationService, PdfTranslationSessionRequest,
+    PdfTranslationSessionResult, PdfTranslationSessionUpdate, TranslationScope,
 };
 use glyphst_settings::Settings;
 use glyphst_translation::{
@@ -31,6 +33,13 @@ use glyphst_translation::{
 
 /// Translations pinned to the Translation panel.
 const MAX_PINNED: usize = 20;
+
+/// Pages after the one being read that translate with it.
+pub const FOLLOW_AHEAD: usize = 2;
+
+/// How long the reader stays on a page before translation follows, so
+/// paging or dragging through the document does not pull every page in.
+const FOLLOW_DWELL: Duration = Duration::from_millis(350);
 
 /// A selection translation shown as a card.
 #[derive(Clone, Debug, PartialEq)]
@@ -209,11 +218,12 @@ impl Translator {
         }
     }
 
-    /// Starts translating a PDF into `target`.
+    /// Starts translating a PDF into `target`, the pages `scope` covers.
     pub fn start_session(
         &self,
         path: &Path,
         target: Option<&str>,
+        scope: Arc<TranslationScope>,
         ctx: &egui::Context,
     ) -> Result<DocSession, String> {
         let settings = self
@@ -239,6 +249,7 @@ impl Translator {
         let cancel = CancellationToken::new();
         let (events_tx, events) = mpsc::channel();
         let (service, worker_cancel, ctx) = (self.pdf.clone(), cancel.clone(), ctx.clone());
+        let worker_scope = scope.clone();
         let spawned = thread::Builder::new()
             .name("pdf-translation".into())
             .spawn(move || {
@@ -246,10 +257,11 @@ impl Translator {
                 let progress_ctx = ctx.clone();
                 let update_tx = events_tx.clone();
                 let update_ctx = ctx.clone();
-                let result = service.run_session_from_snapshot(
+                let result = service.run_scoped_session_from_snapshot(
                     config,
                     request,
                     snapshot,
+                    &worker_scope,
                     worker_cancel,
                     move |progress| {
                         let _ = progress_tx.send(SessionEvent::Progress(progress));
@@ -272,6 +284,8 @@ impl Translator {
             progress: None,
             page_count: 0,
             ready_pages: 0,
+            translatable: BTreeMap::new(),
+            settled: HashSet::new(),
             previews: HashMap::new(),
             failures: Vec::new(),
             result: None,
@@ -279,14 +293,20 @@ impl Translator {
             cancel,
             events,
             export: None,
+            export_layout: ExportLayout::default(),
+            reveals: Vec::new(),
+            scope,
+            dwell: None,
         })
     }
 
-    /// Writes a finished session's translated PDF to `output`.
+    /// Writes a finished session's PDF to `output`: the translated pages,
+    /// or each original beside its translation.
     pub fn export(
         &self,
         session: &mut DocSession,
         output: PathBuf,
+        layout: ExportLayout,
         ctx: &egui::Context,
     ) -> Result<(), String> {
         let settings = self.settings.clone().ok_or("settings are not loaded")?;
@@ -304,6 +324,7 @@ impl Translator {
                     PdfTranslationExportRequest {
                         output_path: output,
                         original_unit_ids: Vec::new(),
+                        layout,
                     },
                     CancellationToken::new(),
                     |_| {},
@@ -347,6 +368,23 @@ pub struct Preview {
     pub hover: Vec<PdfTranslationHoverRegion>,
 }
 
+/// How far a page's translation has come, for the Translation panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageProgress {
+    /// Every block to translate is translated.
+    Done,
+    /// Some blocks are in; `done` of `total`.
+    Partial {
+        done: usize,
+        total: usize,
+    },
+    Failed,
+    /// In scope and on its way.
+    Waiting,
+    /// Out of scope, or the session ended without it.
+    NotTranslated,
+}
+
 pub enum Export {
     Running(Receiver<Result<PathBuf, String>>),
     Done(Result<PathBuf, String>),
@@ -360,6 +398,10 @@ pub struct DocSession {
     pub page_count: usize,
     /// Pages ready from the start of the document.
     pub ready_pages: usize,
+    /// The blocks to translate on each prepared page, with their boxes.
+    pub translatable: BTreeMap<usize, Vec<(String, PageRect)>>,
+    /// Blocks whose translation is in, or has failed.
+    settled: HashSet<String>,
     pub previews: HashMap<usize, Preview>,
     pub failures: Vec<PdfTranslationPageFailure>,
     pub result: Option<PdfTranslationSessionResult>,
@@ -368,6 +410,16 @@ pub struct DocSession {
     cancel: CancellationToken,
     events: Receiver<SessionEvent>,
     pub export: Option<Export>,
+    /// What the next export writes.
+    pub export_layout: ExportLayout,
+    /// Blocks newly translated by a page's revision, for the page to
+    /// reveal (see `take_reveals`).
+    reveals: Vec<(usize, u64, Vec<RevealBlock>)>,
+    /// The pages the session may translate; it follows the reader until
+    /// it is made whole.
+    scope: Arc<TranslationScope>,
+    /// A page the reader moved to and since when, before the scope follows.
+    dwell: Option<(usize, Instant)>,
 }
 
 impl DocSession {
@@ -380,12 +432,25 @@ impl DocSession {
                 SessionEvent::Progress(progress) => self.progress = Some(progress),
                 SessionEvent::Update(update) => match *update {
                     PdfTranslationSessionUpdate::PagePrepared {
+                        page,
                         page_count,
                         ready_prefix,
                         ..
                     } => {
                         self.page_count = page_count;
                         self.ready_pages = self.ready_pages.max(ready_prefix);
+                        let blocks = page
+                            .blocks
+                            .iter()
+                            .filter(|block| {
+                                block.policy.translate && !block.content.text.trim().is_empty()
+                            })
+                            .map(|block| {
+                                let b = block.bbox;
+                                (block.id.clone(), [b.x0, b.y0, b.x1, b.y1])
+                            })
+                            .collect();
+                        self.translatable.insert(page.page_index, blocks);
                     }
                     PdfTranslationSessionUpdate::PagePreviewReady(preview) => {
                         let newer = self
@@ -393,6 +458,12 @@ impl DocSession {
                             .get(&preview.page_index)
                             .is_none_or(|current| current.revision < preview.revision);
                         if newer {
+                            let blocks =
+                                reveal_blocks(self.previews.get(&preview.page_index), &preview);
+                            if !blocks.is_empty() {
+                                self.reveals
+                                    .push((preview.page_index, preview.revision, blocks));
+                            }
                             self.previews.insert(
                                 preview.page_index,
                                 Preview {
@@ -412,8 +483,23 @@ impl DocSession {
                     PdfTranslationSessionUpdate::Reconciled { ready_prefix, .. } => {
                         self.ready_pages = self.ready_pages.max(ready_prefix);
                     }
+                    PdfTranslationSessionUpdate::UnitsChanged(snapshot) => {
+                        self.settled = snapshot
+                            .resolved_units
+                            .iter()
+                            .flat_map(|unit| unit.member_block_ids.iter())
+                            .chain(
+                                // A failed block shows the original; one being
+                                // retried may come in later.
+                                snapshot
+                                    .failures
+                                    .iter()
+                                    .flat_map(|failure| failure.member_block_ids.iter()),
+                            )
+                            .cloned()
+                            .collect();
+                    }
                     PdfTranslationSessionUpdate::CacheReady(_)
-                    | PdfTranslationSessionUpdate::UnitsChanged(_)
                     | PdfTranslationSessionUpdate::Finished => {}
                 },
                 SessionEvent::Done(result) => match *result {
@@ -437,6 +523,129 @@ impl DocSession {
         self.status == SessionStatus::Running
     }
 
+    /// Whether the session is still working on what the reader asked for:
+    /// a session following the reader rests once its window is in.
+    pub fn is_busy(&self) -> bool {
+        match self.window() {
+            _ if !self.is_running() => false,
+            Some((first, last)) => {
+                self.page_count == 0
+                    || (first..=last).any(|page| self.page_progress(page) != PageProgress::Done)
+            }
+            None => true,
+        }
+    }
+
+    /// The newly translated blocks of each page's latest revisions: the
+    /// page, the revision showing them, and the blocks.
+    pub fn take_reveals(&mut self) -> Vec<(usize, u64, Vec<RevealBlock>)> {
+        std::mem::take(&mut self.reveals)
+    }
+
+    /// Boxes of the blocks on `page` still waiting for their translation,
+    /// while the session is on its way to them.
+    pub fn waiting_blocks(&self, page: usize) -> Vec<PageRect> {
+        if !self.is_running() || self.scope.view().rank(page).is_none() {
+            return Vec::new();
+        }
+        self.translatable
+            .get(&page)
+            .into_iter()
+            .flatten()
+            .filter(|(block, _)| !self.settled.contains(block))
+            .map(|(_, area)| *area)
+            .collect()
+    }
+
+    /// Whether the session translates only around the page being read.
+    pub fn is_following(&self) -> bool {
+        !self.scope.is_whole()
+    }
+
+    /// The first and last page of the reader's window while following.
+    pub fn window(&self) -> Option<(usize, usize)> {
+        let (focus, last) = self.scope.window();
+        let last = match self.page_count {
+            0 => last,
+            count => last.min(count - 1).max(focus),
+        };
+        self.is_following().then_some((focus, last))
+    }
+
+    /// Tells a following session the reader is on `page`; once they have
+    /// stayed there a moment the translation moves with them. Returns when
+    /// to look again, while the reader's stay is still too short.
+    pub fn follow(&mut self, page: usize, now: Instant) -> Option<Duration> {
+        if !self.is_running() || !self.is_following() || self.scope.focus() == page {
+            self.dwell = None;
+            return None;
+        }
+        let since = match self.dwell {
+            Some((dwelt, since)) if dwelt == page => since,
+            _ => {
+                self.dwell = Some((page, now));
+                now
+            }
+        };
+        let stayed = now.saturating_duration_since(since);
+        if stayed >= FOLLOW_DWELL {
+            self.scope.set_focus(page);
+            self.dwell = None;
+            None
+        } else {
+            Some(FOLLOW_DWELL - stayed)
+        }
+    }
+
+    /// Translates every page from now on, starting from the reader's.
+    pub fn translate_rest(&self) {
+        self.scope.expand_to_whole();
+    }
+
+    /// Pages left untranslated: out of scope, or not yet in.
+    pub fn untranslated_pages(&self) -> usize {
+        let total = self.page_count;
+        total.saturating_sub(
+            (0..total)
+                .filter(|page| self.page_progress(*page) == PageProgress::Done)
+                .count(),
+        )
+    }
+
+    /// How far `page` has come.
+    pub fn page_progress(&self, page: usize) -> PageProgress {
+        if self
+            .failures
+            .iter()
+            .any(|failure| failure.page_index == page)
+        {
+            return PageProgress::Failed;
+        }
+        let blocks = self.translatable.get(&page);
+        let total = blocks.map_or(0, Vec::len);
+        let done = blocks.map_or(0, |blocks| {
+            blocks
+                .iter()
+                .filter(|(block, _)| self.settled.contains(block))
+                .count()
+        });
+        let previewed = self.previews.contains_key(&page);
+        // Once the session ends, what it shows is what there is.
+        if (blocks.is_some() && done == total && (previewed || total == 0))
+            || (!self.is_running() && previewed)
+        {
+            return PageProgress::Done;
+        }
+        if done > 0 || previewed {
+            return PageProgress::Partial { done, total };
+        }
+        if self.is_running() && self.scope.view().rank(page).is_some() {
+            PageProgress::Waiting
+        } else {
+            PageProgress::NotTranslated
+        }
+    }
+
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -453,16 +662,22 @@ impl DocSession {
         match &self.status {
             SessionStatus::Finished => format!("Translated {} pages", self.previews.len()),
             SessionStatus::Failed(error) => format!("Stopped: {error}"),
-            SessionStatus::Running => match &self.progress {
-                Some(progress) => {
-                    let count = match (progress.completed, progress.total) {
-                        (Some(done), Some(total)) => format!(" {done}/{total}"),
-                        _ => String::new(),
-                    };
-                    format!("{}{count}", stage_label(progress))
+            SessionStatus::Running => {
+                let line = match &self.progress {
+                    Some(progress) => {
+                        let count = match (progress.completed, progress.total) {
+                            (Some(done), Some(total)) => format!(" {done}/{total}"),
+                            _ => String::new(),
+                        };
+                        format!("{}{count}", stage_label(progress))
+                    }
+                    None => "Starting…".into(),
+                };
+                match self.window() {
+                    Some((first, last)) => format!("{line} · p.{}–{}", first + 1, last + 1),
+                    None => line,
                 }
-                None => "Starting…".into(),
-            },
+            }
         }
     }
 }
@@ -471,6 +686,88 @@ impl Drop for DocSession {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// The blocks `preview` shows translated that `previous` did not, with the
+/// translated glyphs inside each, top to bottom.
+fn reveal_blocks(
+    previous: Option<&Preview>,
+    preview: &PdfTranslationPagePreview,
+) -> Vec<RevealBlock> {
+    let before: HashSet<&str> = previous
+        .into_iter()
+        .flat_map(|previous| &previous.hover)
+        .filter(|region| region.translated)
+        .map(|region| region.id.as_str())
+        .collect();
+    let lines: Vec<Vec<PageRect>> = preview
+        .text_layer
+        .blocks
+        .iter()
+        .flat_map(|block| &block.lines)
+        .map(|line| {
+            line.glyphs
+                .iter()
+                .filter(|glyph| !glyph.character.is_whitespace())
+                .map(|glyph| {
+                    let q = &glyph.quad;
+                    let xs = [
+                        q.upper_left.x,
+                        q.upper_right.x,
+                        q.lower_left.x,
+                        q.lower_right.x,
+                    ];
+                    let ys = [
+                        q.upper_left.y,
+                        q.upper_right.y,
+                        q.lower_left.y,
+                        q.lower_right.y,
+                    ];
+                    [
+                        xs.into_iter().fold(f32::INFINITY, f32::min),
+                        ys.into_iter().fold(f32::INFINITY, f32::min),
+                        xs.into_iter().fold(f32::NEG_INFINITY, f32::max),
+                        ys.into_iter().fold(f32::NEG_INFINITY, f32::max),
+                    ]
+                })
+                .collect()
+        })
+        .collect();
+    let mut blocks: Vec<RevealBlock> = preview
+        .hover_regions
+        .iter()
+        .filter(|region| region.translated && !before.contains(region.id.as_str()))
+        .map(|region| {
+            let t = region.target_bounds;
+            let inside = |g: &PageRect| {
+                let (x, y) = ((g[0] + g[2]) / 2.0, (g[1] + g[3]) / 2.0);
+                x >= t.x0 - 1.0 && x <= t.x1 + 1.0 && y >= t.y0 - 1.0 && y <= t.y1 + 1.0
+            };
+            let mut area = [t.x0, t.y0, t.x1, t.y1];
+            for source in &region.source_regions {
+                area = [
+                    area[0].min(source.x0),
+                    area[1].min(source.y0),
+                    area[2].max(source.x1),
+                    area[3].max(source.y1),
+                ];
+            }
+            let mut glyphs = Vec::new();
+            let mut count = 0;
+            for line in &lines {
+                let before = glyphs.len();
+                glyphs.extend(line.iter().filter(|glyph| inside(glyph)).copied());
+                count += usize::from(glyphs.len() > before);
+            }
+            RevealBlock {
+                area,
+                glyphs,
+                lines: count.max(1),
+            }
+        })
+        .collect();
+    blocks.sort_by(|a, b| a.area[1].total_cmp(&b.area[1]));
+    blocks
 }
 
 fn stage_label(progress: &PdfTranslationProgress) -> &'static str {
@@ -539,8 +836,75 @@ mod tests {
     }
 
     #[test]
+    fn a_following_session_translates_its_window_then_the_rest() {
+        let directory = scratch_artifacts().join("following");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("source.pdf");
+        let pages: Vec<String> = (0..6)
+            .map(|page| format!("Page {page} says hello."))
+            .collect();
+        let pages: Vec<[&str; 1]> = pages.iter().map(|text| [text.as_str()]).collect();
+        let pages: Vec<&[&str]> = pages.iter().map(|page| page.as_slice()).collect();
+        std::fs::write(&path, glyphst_pdf::test_pdf::text_pages_pdf(&pages)).unwrap();
+        let ctx = egui::Context::default();
+        let translator = translator(&ctx);
+        let mut session = translator
+            .start_session(&path, None, TranslationScope::following(1, 1), &ctx)
+            .unwrap();
+        wait_until(|| {
+            session.poll();
+            session.previews.contains_key(&1) && session.previews.contains_key(&2)
+        });
+        thread::sleep(Duration::from_millis(300));
+        session.poll();
+        assert!(
+            session.is_running(),
+            "a following session waits for the reader"
+        );
+        assert_eq!(session.window(), Some((1, 2)));
+        assert_eq!(session.page_progress(1), PageProgress::Done);
+        assert_eq!(session.page_progress(4), PageProgress::NotTranslated);
+        let mut shown: Vec<usize> = session.previews.keys().copied().collect();
+        shown.sort_unstable();
+        assert_eq!(shown, vec![1, 2], "only the window is translated");
+
+        // The reader stays on page 4 long enough: it follows.
+        let start = Instant::now();
+        assert!(
+            session.follow(4, start).is_some(),
+            "a short stay is not enough"
+        );
+        assert_eq!(session.follow(4, start + FOLLOW_DWELL), None);
+        assert_eq!(session.window(), Some((4, 5)));
+        wait_until(|| {
+            session.poll();
+            session.previews.contains_key(&4) && session.previews.contains_key(&5)
+        });
+        assert_eq!(
+            session.untranslated_pages(),
+            2,
+            "the first and fourth pages are left"
+        );
+
+        session.translate_rest();
+        wait_until(|| {
+            session.poll();
+            !session.is_running()
+        });
+        assert_eq!(
+            session.status,
+            SessionStatus::Finished,
+            "{}",
+            session.status_line()
+        );
+        assert_eq!(session.untranslated_pages(), 0);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn documents_translate_into_typeset_pages() {
-        let directory = scratch_artifacts();
+        // Its own folder: the artifacts beside it serve the other tests' sessions.
+        let directory = scratch_artifacts().join("typeset");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("source.pdf");
         std::fs::write(
@@ -550,7 +914,9 @@ mod tests {
         .unwrap();
         let ctx = egui::Context::default();
         let translator = translator(&ctx);
-        let mut session = translator.start_session(&path, None, &ctx).unwrap();
+        let mut session = translator
+            .start_session(&path, None, TranslationScope::whole(), &ctx)
+            .unwrap();
         assert_eq!(session.target, "fr");
         wait_until(|| {
             session.poll();

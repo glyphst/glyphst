@@ -153,6 +153,8 @@ pub struct ViewInput<'a> {
 /// A loaded page waiting for the GPU.
 pub struct ReadyPage {
     pub page: usize,
+    /// The version of the page's source it was drawn from.
+    pub version: u64,
     pub prepared: Box<PreparedPage>,
     pub layers: Vec<(usize, LayerImage)>,
 }
@@ -281,6 +283,8 @@ pub struct DocumentTab {
     pub reflow_mismatch: Option<Instant>,
     /// The document's translation, when one was started.
     pub translation: Option<DocSession>,
+    /// Its blocks revealing themselves as they arrive.
+    pub reveals: crate::reveal::Reveals,
     /// The source version of each page's loaded drawing and of its text.
     loaded_version: HashMap<usize, u64>,
     text_version: Vec<u64>,
@@ -366,6 +370,7 @@ impl DocumentTab {
             pending_anchor: None,
             reflow_mismatch: None,
             translation: None,
+            reveals: Default::default(),
             loaded_version: HashMap::new(),
             text_version: vec![0; pages],
             original_text: HashMap::new(),
@@ -512,6 +517,7 @@ impl DocumentTab {
                     self.layers.insert(page, states);
                     self.ready.push_back(ReadyPage {
                         page,
+                        version,
                         prepared,
                         layers,
                     });
@@ -1809,6 +1815,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         pending_anchor: None,
         reflow_mismatch: None,
         translation: None,
+        reveals: Default::default(),
         loaded_version: HashMap::new(),
         text_version: vec![0; pages],
         original_text: HashMap::new(),

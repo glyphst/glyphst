@@ -15,13 +15,13 @@
 //!    tab's last image, or the page before a turn) to the new image.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Instant,
 };
 
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
 use glyphst_effects::{EffectInputs, EffectRegistry, PRESENT, PreparedEffect, SOLID};
-use glyphst_pdf::vector::LayerImage;
+use glyphst_pdf::vector::{LayerImage, PageRect};
 use glyphst_pdf_gpu::{
     Camera, DrawStats, GpuPage, LayerUpload, OffscreenTarget, OverviewJob, PageUpload,
     PreparedPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT,
@@ -120,7 +120,18 @@ pub struct FrameStats {
 
 struct Resident {
     page: GpuPage,
+    /// The version of its source it was drawn from.
+    version: u64,
     last_drawn: u64,
+}
+
+/// Part of a page revealing its new version: below the scan line, paper
+/// covers the new drawing and the version it replaced shows through
+/// (`below`, in page points).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RevealClip {
+    pub page: usize,
+    pub below: PageRect,
 }
 
 /// Something being written to the GPU a chunk per frame: a page (with its
@@ -128,6 +139,7 @@ struct Resident {
 enum Upload {
     Page {
         key: PageKey,
+        version: u64,
         upload: Box<PageUpload<Box<PreparedPage>>>,
         /// Milliseconds spent on it so far.
         ms: f64,
@@ -222,6 +234,10 @@ pub struct ReaderGpu {
     format: wgpu::TextureFormat,
     effects: EffectRegistry,
     pages: HashMap<PageKey, Resident>,
+    /// Pages whose drawing, once replaced, is kept for a reveal…
+    keep_replaced: HashSet<PageKey>,
+    /// …and the drawings kept, until the reveal ends.
+    retired: HashMap<PageKey, GpuPage>,
     /// Preview parts of pages still loading, drawn in order until the page
     /// itself is written.
     parts: HashMap<PageKey, Vec<GpuPage>>,
@@ -355,6 +371,8 @@ impl ReaderGpu {
             format,
             effects,
             pages: HashMap::new(),
+            keep_replaced: HashSet::new(),
+            retired: HashMap::new(),
             parts: HashMap::new(),
             overviews: HashMap::new(),
             uploads: VecDeque::new(),
@@ -441,6 +459,23 @@ impl ReaderGpu {
         });
     }
 
+    /// The source version `key` is drawn from, once wholly on the GPU.
+    pub fn resident_version(&self, key: PageKey) -> Option<u64> {
+        self.pages.get(&key).map(|resident| resident.version)
+    }
+
+    /// Keeps `key`'s drawing when the next version replaces it, for a
+    /// reveal (see [`RevealClip`]).
+    pub fn keep_replaced(&mut self, key: PageKey) {
+        self.keep_replaced.insert(key);
+    }
+
+    /// Lets `key`'s replaced drawing go once its reveal is over.
+    pub fn release_retired(&mut self, key: PageKey) {
+        self.retired.remove(&key);
+        self.keep_replaced.remove(&key);
+    }
+
     /// Whether `key` is on the GPU or being written to it.
     pub fn is_resident(&self, key: PageKey) -> bool {
         self.pages.contains_key(&key)
@@ -519,6 +554,7 @@ impl ReaderGpu {
         &mut self,
         device: &wgpu::Device,
         key: PageKey,
+        version: u64,
         prepared: Box<PreparedPage>,
         layers: Vec<(usize, LayerImage)>,
     ) {
@@ -532,6 +568,7 @@ impl ReaderGpu {
         }
         self.uploads.push_back(Upload::Page {
             key,
+            version,
             upload: Box::new(upload),
             ms: started.elapsed().as_secs_f64() * 1000.0,
             begun: started,
@@ -613,6 +650,7 @@ impl ReaderGpu {
             }
             Upload::Page {
                 key,
+                version,
                 upload,
                 ms,
                 begun,
@@ -633,13 +671,21 @@ impl ReaderGpu {
                         self.overviews.insert(key, job);
                     }
                 }
-                self.pages.insert(
+                let replaced = self.pages.insert(
                     key,
                     Resident {
                         page,
+                        version,
                         last_drawn: self.frame,
                     },
                 );
+                // A reveal already running keeps the oldest drawing: it
+                // still shows every block not yet revealed.
+                if let Some(replaced) = replaced
+                    && self.keep_replaced.remove(&key)
+                {
+                    self.retired.entry(key).or_insert(replaced.page);
+                }
                 Some(UploadTimes {
                     cpu_ms: ms + started.elapsed().as_secs_f64() * 1000.0,
                     visible_ms: visible_ms.unwrap_or_default(),
@@ -688,6 +734,7 @@ impl ReaderGpu {
             };
             self.pages.remove(&key);
             self.overviews.remove(&key);
+            self.retired.remove(&key);
             dropped.push(key);
         }
         dropped
@@ -696,6 +743,8 @@ impl ReaderGpu {
     /// Drops every page of a closed tab.
     pub fn drop_tab(&mut self, tab: u64) {
         self.pages.retain(|key, _| key.tab != tab);
+        self.retired.retain(|key, _| key.tab != tab);
+        self.keep_replaced.retain(|key| key.tab != tab);
         self.parts.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
         self.uploads.retain(|upload| upload.key().tab != tab);
@@ -764,6 +813,7 @@ impl ReaderGpu {
         self.pages
             .values()
             .map(|resident| resident.page.gpu_bytes)
+            .chain(self.retired.values().map(|page| page.gpu_bytes))
             .sum()
     }
 
@@ -874,6 +924,8 @@ pub struct ViewCallback {
     /// Seconds for animated effects.
     pub time: f32,
     pub pointer: Option<[f32; 2]>,
+    /// Blocks revealing their translation over the page they replace.
+    pub reveals: Vec<RevealClip>,
 }
 
 impl ViewCallback {
@@ -892,6 +944,31 @@ impl ViewCallback {
                 let (a, b, c, d) = (clip(x0, y0), clip(x1, y0), clip(x0, y1), clip(x1, y1));
                 [a, b, c, c, b, d]
             })
+            .flat_map(|[x, y]| x.to_ne_bytes().into_iter().chain(y.to_ne_bytes()))
+            .collect()
+    }
+}
+
+impl ViewCallback {
+    /// Paper quads over the revealing blocks, from each page's camera.
+    fn cover_vertices(&self, size: [u32; 2]) -> Vec<u8> {
+        let clip = |x: f32, y: f32| {
+            [
+                x / size[0] as f32 * 2.0 - 1.0,
+                1.0 - y / size[1] as f32 * 2.0,
+            ]
+        };
+        self.reveals
+            .iter()
+            .filter_map(|reveal| {
+                let draw = self.draws.iter().find(|draw| draw.page == reveal.page)?;
+                let [x, y, width, height] = draw.camera.scissor(reveal.below)?;
+                let (x0, y0) = (x as f32, y as f32);
+                let (x1, y1) = (x0 + width as f32, y0 + height as f32);
+                let (a, b, c, d) = (clip(x0, y0), clip(x1, y0), clip(x0, y1), clip(x1, y1));
+                Some([a, b, c, c, b, d])
+            })
+            .flatten()
             .flat_map(|[x, y]| x.to_ne_bytes().into_iter().chain(y.to_ne_bytes()))
             .collect()
     }
@@ -1043,10 +1120,20 @@ impl CallbackTrait for ViewCallback {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+        let covers = self.cover_vertices(target);
+        let cover_vertices = (covers.len() / 8) as u32;
+        let covers = (!covers.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("reveal covers"),
+                contents: &covers,
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
         let mut stats = DrawStats::default();
         let ReaderGpu {
             views,
             pages,
+            retired,
             parts,
             uploads,
             renderer,
@@ -1093,6 +1180,30 @@ impl CallbackTrait for ViewCallback {
                     stats.segments += page_stats.segments;
                     stats.used_overview |= page_stats.used_overview;
                 }
+            }
+            // Revealing blocks: paper over the block from the scramble band
+            // down, then the replaced drawing below the scan line.
+            if let Some(covers) = &covers {
+                pass.set_pipeline(paper_pipeline);
+                pass.set_bind_group(0, &*paper_bind_group, &[]);
+                pass.set_vertex_buffer(0, covers.slice(..));
+                pass.draw(0..cover_vertices, 0..1);
+            }
+            for reveal in &self.reveals {
+                let key = PageKey {
+                    tab: self.tab,
+                    page: reveal.page,
+                };
+                let (Some(old), Some(draw)) = (
+                    retired.get(&key),
+                    self.draws.iter().find(|draw| draw.page == reveal.page),
+                ) else {
+                    continue;
+                };
+                let page_stats =
+                    renderer.draw_clipped(queue, old, &draw.camera, reveal.below, &mut pass);
+                stats.draw_calls += page_stats.draw_calls;
+                stats.triangles += page_stats.triangles;
             }
         }
 
