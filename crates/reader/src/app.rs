@@ -226,7 +226,7 @@ struct PaneView<'a> {
     now: Instant,
 }
 
-/// What a primary-button drag on the document does.
+/// What a drag on the document does (the middle button only pans).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     Pan,
@@ -5264,6 +5264,9 @@ impl ReaderApp {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             }
         }
+        if matches!(own(self.drag), Some(Drag::Pan)) {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
 
         // Over a translated block: its outline, and the original text.
         if self.drag.is_none()
@@ -5319,6 +5322,10 @@ impl ReaderApp {
             });
         }
 
+        // The middle button only pans, wherever it is pressed.
+        if response.drag_started_by(egui::PointerButton::Middle) {
+            self.drag = Some((tab_id, Drag::Pan));
+        }
         if response.drag_started_by(egui::PointerButton::Primary) {
             self.drag = Some((tab_id, Drag::Pan));
             let origin = ctx
