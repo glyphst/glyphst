@@ -184,6 +184,38 @@ pub(super) fn show_prompt(
     result
 }
 
+/// The table header's menu: a tick per column but the title. Returns the
+/// columns to leave out once one is ticked or unticked.
+pub(super) fn column_menu(ui: &mut Ui, hidden: &[Column]) -> Option<Vec<Column>> {
+    ui_menu::style(ui);
+    ui_menu::group(ui, "columns");
+    let mut chosen = None;
+    for column in Column::ALL
+        .into_iter()
+        .filter(|column| *column != Column::Title)
+    {
+        let shown = !hidden.contains(&column);
+        if ui_menu::Item::new(column.label())
+            .checked(shown)
+            .width(200.0)
+            .show(ui)
+            .clicked()
+        {
+            let mut next = hidden.to_vec();
+            if shown {
+                next.push(column);
+            } else {
+                next.retain(|other| *other != column);
+            }
+            chosen = Some(next);
+        }
+    }
+    if hidden.is_empty() {
+        ui_menu::group(ui, "venue and added show when there is room");
+    }
+    chosen
+}
+
 fn entry(ui: &mut Ui, icon: &str, label: &str) -> bool {
     let clicked = ui_menu::Item::new(label)
         .icon(icon)

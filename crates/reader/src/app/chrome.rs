@@ -902,6 +902,7 @@ impl ReaderApp {
                 vault_index: Some(&self.vault_sync.index()),
                 topics: &[],
                 writing: &[],
+                hidden_columns: &[],
             },
             card,
             id,

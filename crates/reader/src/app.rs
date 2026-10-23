@@ -1749,6 +1749,7 @@ impl ReaderApp {
             }
             Page::Library(tab) => {
                 let docs = docs();
+                let hidden_columns = self.prefs.library.hidden_columns.clone();
                 let vault = self
                     .prefs
                     .library
@@ -1773,6 +1774,7 @@ impl ReaderApp {
                         vault_index: Some(&vault_index),
                         topics: &self.page_topics,
                         writing: &self.page_writing,
+                        hidden_columns: &hidden_columns,
                     },
                 );
                 if let Some(action) = action {
@@ -1968,6 +1970,10 @@ impl ReaderApp {
                 crate::effects_page::open_folder(&folder).map_err(anyhow::Error::from)
             }
             Action::ForgetOpened(path) => self.library.remove_history_entries(&[path]).map(|_| ()),
+            Action::HideColumns(hidden) => {
+                self.prefs.library.hidden_columns = hidden;
+                Ok(())
+            }
             Action::KeepBoth(a, b) => self.library.mark_distinct(a, b),
             Action::Merge { keep, absorb } => {
                 self.library.merge_library_items(keep, absorb).map(|edit| {

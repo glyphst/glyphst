@@ -125,6 +125,8 @@ pub struct LibraryPrefs {
     /// The WebDAV server or S3 bucket it syncs through (the secret is in
     /// the keychain).
     pub sync_remote: SyncRemotePrefs,
+    /// The library table's columns the user turned off.
+    pub hidden_columns: Vec<crate::library_tab::columns::Column>,
 }
 
 /// Where the library syncs when it is not through a sync tool.
@@ -191,6 +193,7 @@ impl Default for LibraryPrefs {
             folder_asked: false,
             sync: SyncMode::Off,
             sync_remote: SyncRemotePrefs::default(),
+            hidden_columns: Vec::new(),
         }
     }
 }

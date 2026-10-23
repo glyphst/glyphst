@@ -20,10 +20,12 @@ use glyphst_ui::{
     text,
 };
 
+pub mod columns;
 mod menus;
 mod pages_view;
 mod search_view;
 
+use columns::{Column, Layout, Natural};
 use search_view::{filter_words, search_words};
 
 use crate::{
@@ -149,6 +151,8 @@ pub enum LibraryTabAction {
     ShowFile(PathBuf),
     /// Forget a file opened from outside the library.
     ForgetOpened(PathBuf),
+    /// The table's columns to leave out.
+    HideColumns(Vec<Column>),
 }
 
 /// What the tab needs from the app this frame.
@@ -172,6 +176,8 @@ pub struct TabContext<'a> {
     pub topics: &'a [crate::knowledge::TopicSuggestion],
     /// Pages being written: id and title.
     pub writing: &'a [(u64, String)],
+    /// The table's columns the user turned off.
+    pub hidden_columns: &'a [Column],
 }
 
 #[derive(Default)]
@@ -194,6 +200,9 @@ pub struct LibraryTab {
     relating: Option<(DocumentId, String)>,
     /// A right-click entry's prompt (a tag to add, a new name).
     prompt: Option<menus::Prompt>,
+    /// The widest text of each column over the rows seen in this view and
+    /// filter, so the columns hold still while scrolling.
+    fit: Option<((View, String), Natural)>,
 }
 
 impl LibraryTab {
@@ -821,23 +830,42 @@ impl LibraryTab {
             return self.history_list(ui, tokens, context, width).or(action);
         }
 
-        // The table.
-        let columns = columns(width);
-        let (header, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
-        for (name, x) in ["title", "authors", "year", "tags", "read"]
-            .iter()
-            .zip(&columns)
-        {
+        // The table: columns as wide as their text in the rows seen so far.
+        let key = (self.view, self.filter.clone());
+        if self.fit.as_ref().is_none_or(|(seen, _)| *seen != key) {
+            let natural = ids
+                .iter()
+                .take(60)
+                .filter_map(|id| library.library_item(*id))
+                .fold(Natural::default(), |natural, item| {
+                    natural.max(natural_widths(ui, library, item))
+                });
+            self.fit = Some((key, natural));
+        }
+        let natural = self
+            .fit
+            .as_ref()
+            .map(|(_, natural)| *natural)
+            .unwrap_or_default();
+        let columns = columns::layout(width, natural, context.hidden_columns);
+        let (header, header_response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+        for &(column, x, _) in &columns.columns {
             ui.painter().text(
                 pos2(header.left() + x + 8.0, header.center().y),
                 Align2::LEFT_CENTER,
-                *name,
+                column.label(),
                 theme::mono(10.0),
                 tokens.faint,
             );
         }
         ui.painter()
             .hline(header.x_range(), header.bottom() - 0.5, tokens.hairline());
+        // Its menu: the columns to show (04u).
+        header_response.context_menu(|ui| {
+            if let Some(hidden) = menus::column_menu(ui, context.hidden_columns) {
+                action = Some(LibraryTabAction::HideColumns(hidden));
+            }
+        });
         if ids.is_empty() {
             ui.add_space(16.0);
             empty_line(ui, "nothing here");
@@ -850,6 +878,7 @@ impl LibraryTab {
             .collect::<HashMap<_, _>>();
         let mut keyboard = None;
         let mut show_tag = None;
+        let mut seen = natural;
         egui::ScrollArea::vertical()
             .id_salt("library-rows")
             .auto_shrink(false)
@@ -866,6 +895,7 @@ impl LibraryTab {
                     let mut chips = Vec::new();
                     let duplicate = possible_duplicate(library, item);
                     if ui.is_rect_visible(row) {
+                        seen = seen.max(natural_widths(ui, library, item));
                         let path = library
                             .primary_attachment(*id)
                             .map(|attachment| attachment.path.clone());
@@ -887,10 +917,12 @@ impl LibraryTab {
                     }
                     if let Some(other) = duplicate {
                         let right = row.right() - 8.0;
-                        let buttons = Rect::from_min_max(
-                            pos2(row.left() + columns[3], row.top()),
-                            pos2(right, row.bottom()),
-                        );
+                        let from = columns
+                            .get(Column::Tags)
+                            .or(columns.get(Column::Read))
+                            .map_or(row.center().x, |(x, _)| row.left() + x);
+                        let buttons =
+                            Rect::from_min_max(pos2(from, row.top()), pos2(right, row.bottom()));
                         let mut buttons_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(buttons)
@@ -954,6 +986,13 @@ impl LibraryTab {
                     }
                 }
             });
+        // Wider text came into view: the columns follow from the next frame.
+        if let Some((_, natural)) = &mut self.fit
+            && seen != *natural
+        {
+            *natural = seen;
+            ui.ctx().request_repaint();
+        }
         if let Some(tag) = show_tag {
             self.choose(View::Tag(tag));
         }
@@ -1966,25 +2005,31 @@ fn sort_label(sort: LibrarySort) -> &'static str {
     }
 }
 
-/// The columns' left edges in a table `width` wide: title, authors, year,
-/// tags, read. The year and read are fixed; the title, authors and tags
-/// share what is left 42 : 22 : 36, so a wide window widens all three
-/// rather than only the title.
-fn columns(width: f32) -> [f32; 5] {
-    const YEAR: f32 = 44.0;
-    const READ: f32 = 84.0;
-    const GAP: f32 = 12.0;
-    let shared = (width - YEAR - READ - GAP * 4.0).max(0.0);
-    let tags = (shared * 0.36).max(120.0);
-    let authors = shared * 0.22;
-    let title = (shared - tags - authors).max(200.0);
-    let mut x = [0.0; 5];
-    let mut at = 0.0;
-    for (index, width) in [title, authors, YEAR, tags].into_iter().enumerate() {
-        at += width + GAP;
-        x[index + 1] = at;
+/// The widest each of an item's cells would be with nothing cut.
+fn natural_widths(ui: &Ui, library: &LibraryStore, item: &LibraryItem) -> Natural {
+    let mono = theme::mono(11.0);
+    let tags = library.tags_for_item(item.id);
+    let tags_width = tags
+        .iter()
+        .map(|tag| {
+            let color = library.tag_color(tag.id).map(crate::annotations::color);
+            tag_chip_width(ui, &tag.name, color) + 4.0
+        })
+        .sum::<f32>();
+    Natural {
+        title: text::width(ui, &item.title, &theme::regular(13.0)) + 12.0,
+        authors: text::width(
+            ui,
+            &columns::authors_fit(&surnames(item), f32::INFINITY, |_| 0.0),
+            &mono,
+        ) + 12.0,
+        venue: if item.publication.is_empty() {
+            0.0
+        } else {
+            text::width(ui, &item.publication, &mono) + 12.0
+        },
+        tags: tags_width + 12.0,
     }
-    x
 }
 
 /// A tag's chip, `#name` filled with its colour as a dot, whoever added it.
@@ -2071,7 +2116,7 @@ fn paint_item_row(
     ui: &Ui,
     tokens: &Tokens,
     rect: Rect,
-    columns: &[f32; 5],
+    columns: &Layout,
     library: &LibraryStore,
     item: &LibraryItem,
     doc: Option<&Doc>,
@@ -2080,52 +2125,76 @@ fn paint_item_row(
     ui.painter()
         .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
     let y = rect.center().y;
-    let cell = |column: usize, value: &str, font: egui::FontId, color: egui::Color32| {
-        let right = columns.get(column + 1).copied().unwrap_or(rect.width());
+    let mono = theme::mono(11.0);
+    let cell = |x: f32, width: f32, value: &str, font: egui::FontId, color: egui::Color32| {
         text::row(
             ui,
-            pos2(rect.left() + columns[column] + 8.0, y),
+            pos2(rect.left() + x + 8.0, y),
             value,
             font,
             color,
-            right - columns[column] - 12.0,
+            width - 4.0,
         );
     };
-    cell(
-        0,
-        &item.title,
-        theme::regular(13.0),
-        if selected { tokens.text } else { tokens.text_2 },
-    );
-    cell(1, &authors_short(item), theme::mono(11.0), tokens.muted);
-    cell(
-        2,
-        &item.year.map(|year| year.to_string()).unwrap_or_default(),
-        theme::mono(11.0),
-        tokens.muted,
-    );
-    let chips = paint_tag_row(
-        ui,
-        tokens,
-        library,
-        item.id,
-        rect.left() + columns[3] + 8.0,
-        rect.left() + columns[4] - 4.0,
-        y,
-    );
-    let read_x = rect.left() + columns[4] + 8.0;
-    match doc.and_then(Doc::progress) {
-        Some(progress) if progress >= 0.999 => {
-            cell(4, "done ✓", theme::mono(11.0), tokens.ok);
+    let mut chips = Vec::new();
+    for &(column, x, width) in &columns.columns {
+        match column {
+            Column::Title => cell(
+                x,
+                width,
+                &item.title,
+                theme::regular(13.0),
+                if selected { tokens.text } else { tokens.text_2 },
+            ),
+            Column::Authors => {
+                let names = columns::authors_fit(&surnames(item), width - 12.0, |line| {
+                    text::width(ui, line, &mono)
+                });
+                cell(x, width, &names, mono.clone(), tokens.muted);
+            }
+            Column::Venue => cell(x, width, &item.publication, mono.clone(), tokens.muted),
+            Column::Year => cell(
+                x,
+                width,
+                &item.year.map(|year| year.to_string()).unwrap_or_default(),
+                mono.clone(),
+                tokens.muted,
+            ),
+            Column::Added => cell(
+                x,
+                width,
+                &short_date(item.created),
+                mono.clone(),
+                tokens.faint,
+            ),
+            Column::Tags => {
+                chips = paint_tag_row(
+                    ui,
+                    tokens,
+                    library,
+                    item.id,
+                    rect.left() + x + 8.0,
+                    rect.left() + x + width - 4.0,
+                    y,
+                );
+            }
+            Column::Read => match doc.and_then(Doc::progress) {
+                Some(progress) if progress >= 0.999 => {
+                    cell(x, width, "done ✓", mono.clone(), tokens.ok);
+                }
+                Some(progress) if progress > 0.0 => {
+                    let label = format!("{:.0}%", progress * 100.0);
+                    Meter::new(progress).bar().width(40.0).label(&label).paint(
+                        ui,
+                        Rect::from_min_size(
+                            pos2(rect.left() + x + 8.0, y - 7.0),
+                            vec2(width.min(84.0), 14.0),
+                        ),
+                    );
+                }
+                _ => cell(x, width, "—", mono.clone(), tokens.faint),
+            },
         }
-        Some(progress) if progress > 0.0 => {
-            let label = format!("{:.0}%", progress * 100.0);
-            Meter::new(progress).bar().width(40.0).label(&label).paint(
-                ui,
-                Rect::from_min_size(pos2(read_x, y - 7.0), vec2(84.0, 14.0)),
-            );
-        }
-        _ => cell(4, "—", theme::mono(11.0), tokens.faint),
     }
     chips
 }
@@ -2136,15 +2205,21 @@ fn paint_duplicate_row(
     ui: &Ui,
     tokens: &Tokens,
     rect: Rect,
-    columns: &[f32; 5],
+    columns: &Layout,
     item: &LibraryItem,
     other: &LibraryItem,
 ) {
     ui.painter()
         .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
     let y = rect.center().y;
-    let left = rect.left() + columns[0] + 8.0;
-    let width = columns[2] - columns[0] - 12.0;
+    let left = rect.left() + 8.0;
+    // Across the title, authors and venue, up to the year or the tags.
+    let end = columns
+        .get(Column::Year)
+        .or(columns.get(Column::Tags))
+        .or(columns.get(Column::Read))
+        .map_or(rect.width(), |(x, _)| x);
+    let width = end - 12.0;
     let title = text::line(
         ui,
         pos2(left, y),
@@ -2162,21 +2237,34 @@ fn paint_duplicate_row(
         tokens.accent_text,
         (left + width - title.right() - 12.0).max(0.0),
     );
-    text::row(
-        ui,
-        pos2(rect.left() + columns[2] + 8.0, y),
-        item.year.map(|year| year.to_string()).unwrap_or_default(),
-        theme::mono(11.0),
-        tokens.muted,
-        columns[3] - columns[2] - 12.0,
-    );
+    if let Some((x, year_width)) = columns.get(Column::Year) {
+        text::row(
+            ui,
+            pos2(rect.left() + x + 8.0, y),
+            item.year.map(|year| year.to_string()).unwrap_or_default(),
+            theme::mono(11.0),
+            tokens.muted,
+            year_width - 4.0,
+        );
+    }
+}
+
+/// The item's authors' surnames.
+fn surnames(item: &LibraryItem) -> Vec<String> {
+    item.creators
+        .iter()
+        .map(|creator| surname(&creator.name))
+        .collect()
+}
+
+fn surname(name: &str) -> String {
+    match name.split_once(',') {
+        Some((last, _)) => last.trim().to_string(),
+        None => name.split_whitespace().last().unwrap_or(name).to_string(),
+    }
 }
 
 fn authors_short(item: &LibraryItem) -> String {
-    let surname = |name: &str| match name.split_once(',') {
-        Some((last, _)) => last.trim().to_string(),
-        None => name.split_whitespace().last().unwrap_or(name).to_string(),
-    };
     match item.creators.as_slice() {
         [] => String::new(),
         [one] => surname(&one.name),
@@ -2789,17 +2877,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_tables_widen_the_title_authors_and_tags_together() {
-        for width in [1000.0, 1600.0, 2400.0] {
-            let x = columns(width);
-            assert!(x.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(x[4] + 84.0 <= width + 0.5, "{width}");
-            let title = x[1] - 12.0;
-            let tags = x[4] - x[3] - 12.0;
-            // The title never takes more than about half.
-            assert!(title / width < 0.5, "{width}: {title}");
-            assert!(tags >= 120.0);
-        }
+    fn a_pages_notes_are_its_notes_section() {
         assert_eq!(notes_section("# T\n\n## Notes\n\nmine\n"), "mine");
     }
 }
