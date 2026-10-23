@@ -6250,7 +6250,9 @@ impl eframe::App for ReaderApp {
         self.update_wallpaper(&ctx);
         let pad = std::mem::take(&mut self.pad_input);
         let pad_events = std::mem::take(&mut self.pad_events);
-        if !pad_events.is_empty() {
+        // While a question is up, also when nothing happened: it goes
+        // with its pad.
+        if !pad_events.is_empty() || self.prompts.is_open() {
             let connected = self.pads.connected();
             self.prompts.note(
                 &pad_events,

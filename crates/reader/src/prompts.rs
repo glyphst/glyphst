@@ -82,6 +82,11 @@ impl Prompts {
                 _ => {}
             }
         }
+        // A question about a pad that has gone since is not asked.
+        if connected.is_empty() {
+            self.queue
+                .retain(|q| !matches!(q, Question::Connected { .. }));
+        }
     }
 
     /// Shows the first question; the answer given this frame.
@@ -190,6 +195,19 @@ mod tests {
         prompts.declined = true;
         prompts.note(&[connected()], &[pad()], false, true);
         assert!(!prompts.is_open(), "not now holds for the session");
+    }
+
+    /// The bug where "Controller connected" stayed up after its pad went:
+    /// a frame with no pads left drops the question, even when the
+    /// disconnect itself was seen while the pad was still listed.
+    #[test]
+    fn a_question_about_a_pad_that_went_is_dropped() {
+        let mut prompts = Prompts::default();
+        prompts.note(&[connected()], &[pad()], false, true);
+        prompts.note(&[PadEvent::Disconnected(0)], &[pad()], false, true);
+        assert!(prompts.is_open(), "the pad was still listed");
+        prompts.note(&[], &[], false, true);
+        assert!(!prompts.is_open());
     }
 
     #[test]
