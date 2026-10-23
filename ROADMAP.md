@@ -312,3 +312,30 @@ remove the corresponding exceptions. Handle remaining warnings by owner/path.
 **Done when:** An audit without the removed exceptions confirms the fix, locked
 workspace checks pass, and any remaining warnings retain accurate dispositions.
 Do not add ignores merely to obtain a clean summary.
+
+## 4. Layout analysis on MuPDF text
+
+**Owner:** `pdf` (with `pdf-translation` and `search` as users).
+
+**Current evidence:** Translation and the library index keep MuPDF's block
+order as-is (`pdf-translation/src/native/extraction.rs` sets
+`reading_order` from the block index; `pdf/src/text.rs` flattens lines), so
+two-column papers can interleave. Running heads, footers and page numbers
+are classed by fixed page fractions (`native.rs` `classify_native_role`) and
+go into FTS5 and the embeddings unfiltered. Firecrawl's
+[pdf-inspector](https://github.com/firecrawl/pdf-inspector) (MIT) solves
+these on positioned text: column gutters from an occupancy histogram with
+relative valleys, XY-cut and Y-bands (`src/extractor/layout.rs`),
+newspaper-or-tabular order, header/footer removal by repetition across
+pages (`src/markdown/furniture.rs`), document-wide heading tiers
+(`src/markdown/heading.rs`) and tables from drawn rectangles and lines
+(`src/tables/`).
+
+**Next step:** Port column detection and header/footer stripping onto
+MuPDF lines in `crates/pdf`, used by the translation extractor's reading
+order and by `PageText` for search chunks; then heading tiers for chunk
+sections when the outline is missing.
+
+**Done when:** Two-column samples in `pdf-samples/` translate and index in
+column order, running heads leave the index, and the corpus and search
+tests still pass.
