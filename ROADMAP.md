@@ -67,15 +67,25 @@ and the abandoned Files app in M5). It has:
   - coloured tags and related items, also from Zotero;
   - the library model's pass (summary, key points, tags, a collection),
     run on new items and asked before the backfill; its tags apply on
-    their own, outlined apart from the user's, which no AI changes;
-  - right-click on rows, tags and collections, papers dragged onto
-    collections, new, renamed and deleted collections and tags;
+    their own and look like the user's, which no AI changes;
+  - each paper's stages shown as it is processed (details, text, meaning,
+    summary): shimmering placeholders in its row and item pane, failures
+    with `[ try again ]`;
+  - a table whose columns fit their text (venue and date added when
+    wide, chosen from the header's menu);
+  - right-click on rows, tags and collections, a click on a tag for its
+    papers, papers dragged onto collections, new, renamed and deleted
+    collections and tags;
   - a Markdown vault Obsidian can open, with tag edits flowing back;
   - adding by identifier and importing from Zotero (notes, PDF
     highlights);
   - the agents' library tools, including metadata lookups, merges and
-    their own blocks in vault notes. Frames 04d-04m, 06d, 03b and
-    07-library.
+    their own blocks in vault notes. Frames 04d-04m, 04u-04w, 06d, 03b
+    and 07-library.
+- **Navigation (2026-10-23):** back and forward across the whole app
+  (tabs, library views, jumps in documents) from `←` `→` in the title
+  bar, keys and the mouse's side buttons; a ring marks where a jump lands;
+  every tab, the library included, comes back after a restart.
 - **Library search (2026-10-19):** every item's text is indexed (SQLite
   FTS5; trigrams for Chinese, Japanese and Korean) in resumable steps, and
   the library tab's field searches it, grouped by item with page passages
@@ -176,9 +186,12 @@ Known gaps:
   highlights and relations to other libraries (groups). A merged item's
   note stays in the vault, unlinked. The right-click menus are checked by
   building them, not by screenshots (a scripted run cannot right-click),
-  and dragging papers onto collections only by hand. The AI pass, the lookups, the import and
-  merging are checked by tests on fakes and by screenshots; a real Zotero
-  library and real providers are not yet checked by hand.
+  and dragging papers onto collections only by hand. The AI pass, the
+  lookups, the import and merging are checked by tests on fakes and by
+  screenshots; a real Zotero library and real providers are not yet
+  checked by hand. Going back and forward to each kind of place, a
+  restart that brings the library back, and the jump ring are checked by
+  hand only (scripted runs keep no session and wait for still frames).
 - Library search: pages with almost no text are marked for OCR or image
   embedding but not searched. The engine has run by hand only on this
   Linux machine: macOS (Metal) and Windows (Vulkan) are untried, and an

@@ -179,7 +179,16 @@ the page being read gets corner ticks and a meta line, and each pane a
 column of page ticks at its right edge.
 Split panes (`panes.rs`) divide the reading column with craft-ui's
 docking model, one document per pane, each with its own header: its tree has tab ids as panels and
-one panel per group, and the last session keeps it. The focused pane's tab
+one panel per group, and the last session keeps it, with the tabs that
+are not documents (the library on its view, filter and item; keys;
+activity; new tabs) and which was shown (`LastSession.pages`). Back and
+forward (`nav.rs`) go through one history for the whole app, in the
+order things happened: a place left (a tab, a library view, home) is
+noted when the place shown changes, and a jump inside a document is a
+step of that document's own back and forward (`DocumentTab` keeps those
+places); a closed tab's steps reopen its file. The overview and
+presenting keep their own back. A jump marks where it landed
+(`DocumentTab.beacon`) for a ring that closes on it. The focused pane's tab
 is the active tab, so commands, the status bar and the sidebar follow it; keys
 and the gamepad reach only it, and pressing in another pane focuses that
 one. Each tab has its own GPU view (target, transition snapshot, prepared
@@ -461,7 +470,14 @@ of it, in history, until added; adding moves what was kept about the file
 the AI added (an `Applied` assignment) is the AI's to change; the user's
 own (none, or `Accepted`) no AI changes (`tag_owner`,
 `set_item_tags_by_ai`); one the user removed (`Rejected`) is never added
-again.
+again. Both look the same in the UI.
+
+How far the library is with each paper (`library_tab/progress.rs`) is put
+together once a frame from the job queue (details looked up, the summary),
+`metadata_record` and `item_enrichment`, and the search index's report
+(`ItemTextState`: queued, reading, embedding, done, failed), which the
+index thread publishes after each step from `Store::item_text_states`;
+the UI never queries the index database.
 
 The folder the user chose for the files is the `library_files_root` key of
 `ui_state_v1`; until one is chosen the files stay in the data folder.
