@@ -132,6 +132,35 @@ pub fn needle(query: &str) -> String {
         .to_lowercase()
 }
 
+/// Whether `item`'s label is a file or folder name, shown as written.
+fn names_a_file(item: &Item) -> bool {
+    matches!(item, Item::Tab(_) | Item::Open(_) | Item::Browse(_))
+}
+
+/// The byte range of `hay` where `needle` (lower case) first matches,
+/// ignoring case.
+fn find_ignoring_case(hay: &str, needle: &str) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+    hay.char_indices().find_map(|(start, _)| {
+        let mut wanted = needle.chars();
+        let mut end = start;
+        let mut rest = hay[start..].char_indices();
+        loop {
+            let Some(want) = wanted.next() else {
+                return Some((start, end));
+            };
+            let (offset, c) = rest.next()?;
+            let mut lower = c.to_lowercase();
+            if lower.next() != Some(want) || lower.next().is_some() {
+                return None;
+            }
+            end = start + offset + c.len_utf8();
+        }
+    })
+}
+
 /// Where `needle` (lower case) matches `hay`: lower is better.
 fn score(hay: &str, needle: &str) -> Option<usize> {
     if needle.is_empty() {
@@ -624,6 +653,12 @@ impl Palette {
                             .hline(line.x_range(), line.top(), tokens.hairline());
                         ui.add_space(4.0);
                         let typed = needle(&self.query);
+                        // A path's rows match only the name after its folder.
+                        let marked = if self.mode == Mode::OpenPath {
+                            typed.rsplit('/').next().unwrap_or_default().to_owned()
+                        } else {
+                            typed.clone()
+                        };
                         // The room under the field and over the foot. A new
                         // query starts at the top, with its first hit.
                         let room = screen.bottom() - ui.cursor().top() - 28.0 - 32.0;
@@ -743,14 +778,17 @@ impl Palette {
                                         }
                                     }
                                     let left = rect.left() + 38.0;
-                                    let label = hit.label.to_lowercase();
+                                    // Commands are written in lower case, as the design
+                                    // does; names of files and folders keep theirs.
+                                    let label = if names_a_file(&hit.item) {
+                                        hit.label.clone()
+                                    } else {
+                                        hit.label.to_lowercase()
+                                    };
                                     let mut job = egui::text::LayoutJob::default();
                                     let font = theme::mono(13.0);
-                                    let found =
-                                        (!typed.is_empty()).then(|| label.find(&typed)).flatten();
-                                    match found {
-                                        Some(start) => {
-                                            let end = start + typed.len();
+                                    match find_ignoring_case(&label, &marked) {
+                                        Some((start, end)) => {
                                             let plain =
                                                 egui::TextFormat::simple(font.clone(), color);
                                             let strong =
@@ -1043,6 +1081,26 @@ mod tests {
             ["Novel.epub"]
         );
         assert_eq!(labels(&path_hits("~/.c", home, &entries())), [".cache/"]);
+    }
+
+    /// The bug where `~/Downloads` was listed as `downloads/`: file and
+    /// folder names keep their case, and the typed part is marked in them
+    /// whatever its case.
+    #[test]
+    fn names_keep_their_case_and_mark_what_was_typed() {
+        let found = path_hits(
+            "~/dow",
+            Path::new("/home/reader"),
+            &[("Downloads".into(), true)],
+        );
+        assert!(names_a_file(&found[0].item));
+        assert_eq!(found[0].label, "Downloads/");
+        assert_eq!(find_ignoring_case("Downloads/", "dow"), Some((0, 3)));
+        assert_eq!(find_ignoring_case("My Downloads", "down"), Some((3, 7)));
+        assert_eq!(find_ignoring_case("Ärger.pdf", "är"), Some((0, 3)));
+        assert_eq!(find_ignoring_case("papers.pdf", "x"), None);
+        assert_eq!(find_ignoring_case("papers.pdf", ""), None);
+        assert!(!names_a_file(&Item::Command(Command::Open)));
     }
 
     #[test]
