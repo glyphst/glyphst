@@ -687,10 +687,15 @@ fn library(
         );
     });
     ui.add_space(10.0);
+    if scroll_to.as_deref() == Some("ai") {
+        let at = egui::Rect::from_min_size(ui.cursor().min, vec2(1.0, 1.0));
+        ui.scroll_to_rect(at, Some(egui::Align::Min));
+        *scroll_to = None;
+    }
     ui_settings::group(ui, "ai", |group| {
         group.row(
             "enrich new items",
-            Some("a summary, tags and a collection for each item added"),
+            Some("a summary and tags for each item added, and a collection when one fits"),
             |ui| {
                 ui.add(Switch(&mut library.enrich_new));
             },
@@ -707,6 +712,17 @@ fn library(
             Some("the ai only proposes them; your tree changes when you create one"),
             |ui| {
                 ui.add(Switch(&mut library.suggest_collections));
+            },
+        );
+        group.row(
+            "existing collections",
+            Some("file only when the ai is sure; none is required"),
+            |ui| {
+                glyphst_ui::segmented::labels(
+                    ui,
+                    &mut library.auto_file_collections,
+                    &[(false, "suggest"), (true, "file")],
+                );
             },
         );
         let model = facts

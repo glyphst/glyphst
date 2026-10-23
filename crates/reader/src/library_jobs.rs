@@ -14,7 +14,7 @@ use std::{
 
 use glyphst_ai::{
     agent::{AgentCancellationToken, AgentUsage},
-    enrichment::{self, CollectionChoice, EnrichInput, EnrichOutput, ItemFacts},
+    enrichment::{self, CollectionChoice, CollectionFacts, EnrichInput, EnrichOutput, ItemFacts},
     settings::ResolvedAiConfig,
 };
 use glyphst_library::{
@@ -262,17 +262,7 @@ impl LibraryJobs {
             .iter()
             .map(|tag| tag.name.clone())
             .collect::<Vec<_>>();
-        let collections = library
-            .library_collections()
-            .iter()
-            .map(|collection| {
-                library
-                    .collection_ancestors(collection.id)
-                    .into_iter()
-                    .map(|ancestor| ancestor.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let collections = collection_facts(library);
         for job in jobs {
             let Some(item) = library.library_item(job.item_id).cloned() else {
                 let _ = library.finish_library_job(job.id, None);
@@ -474,6 +464,31 @@ pub fn input_hash(model: &str, input: &EnrichInput) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The library's collections with a few titles each, so the model can
+/// tell what a collection holds and not only what it is called.
+fn collection_facts(library: &LibraryStore) -> Vec<CollectionFacts> {
+    library
+        .library_collections()
+        .iter()
+        .map(|collection| CollectionFacts {
+            path: library
+                .collection_ancestors(collection.id)
+                .into_iter()
+                .map(|ancestor| ancestor.name.clone())
+                .collect(),
+            titles: library
+                .library_item_collections()
+                .iter()
+                .filter(|row| row.collection_id == collection.id)
+                .filter_map(|row| library.library_item(row.item_id))
+                .map(|item| item.title.clone())
+                .filter(|title| !title.is_empty())
+                .take(enrichment::COLLECTION_SAMPLES)
+                .collect(),
+        })
+        .collect()
+}
+
 fn item_facts(item: &LibraryItem) -> ItemFacts {
     ItemFacts {
         title: item.title.clone(),
@@ -609,8 +624,13 @@ pub fn apply_enrichment(
     let Some(item) = library.library_item(id).cloned() else {
         return Ok(());
     };
+    // An existing collection is filed only when the user lets the AI;
+    // else it waits as a proposal, as a new one does.
     let (collections, suggested_collection) = match &output.collection {
-        CollectionChoice::Existing(path) => (vec![path.clone()], None),
+        CollectionChoice::Existing(path) if prefs.auto_file_collections => {
+            (vec![path.clone()], None)
+        }
+        CollectionChoice::Existing(path) => (Vec::new(), Some(path.clone())),
         CollectionChoice::New(path) if prefs.suggest_collections => {
             (Vec::new(), Some(path.clone()))
         }
@@ -820,6 +840,44 @@ mod tests {
         );
         assert!(library.library_jobs().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The bug where every new paper went into the library's only
+    /// collection: an existing collection the model picks is proposed,
+    /// and filed straight away only when the user lets the AI.
+    #[test]
+    fn an_existing_collection_is_proposed_unless_filing_is_allowed() {
+        for auto_file in [false, true] {
+            let mut library = LibraryStore::memory();
+            let (id, path) = linked(&mut library, &format!("propose-{auto_file}"));
+            library.create_library_collection(None, "test0").unwrap();
+            let output = EnrichOutput {
+                tldr: "t".to_string(),
+                collection: CollectionChoice::Existing(vec!["test0".to_string()]),
+                ..EnrichOutput::default()
+            };
+            let done = EnrichDone {
+                output: None,
+                usage: AgentUsage::default(),
+                model: "fake".to_string(),
+                input_sha256: [0; 32],
+            };
+            let prefs = LibraryPrefs {
+                auto_file_collections: auto_file,
+                ..LibraryPrefs::default()
+            };
+            apply_enrichment(&mut library, id, &output, &done, &prefs).unwrap();
+            let filed = !library.item_collection_paths(id).is_empty();
+            let state = library.ai_assignments(id).first().map(|a| a.state);
+            if auto_file {
+                assert!(filed);
+                assert_eq!(state, Some(AssignmentState::Applied));
+            } else {
+                assert!(!filed, "only proposed");
+                assert_eq!(state, Some(AssignmentState::Suggested));
+            }
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

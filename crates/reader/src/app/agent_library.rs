@@ -269,10 +269,17 @@ pub fn item_details(library: &LibraryStore, vault: Option<&Path>, id: DocumentId
         }
     ));
     for assignment in assignments {
-        if let AssignmentTarget::NewCollection(path) = &assignment.target
-            && assignment.state == AssignmentState::Suggested
-        {
-            lines.push(format!("Suggested new collection: {}", path.join("/")));
+        if assignment.state != AssignmentState::Suggested {
+            continue;
+        }
+        match &assignment.target {
+            AssignmentTarget::NewCollection(path) => {
+                lines.push(format!("Suggested new collection: {}", path.join("/")));
+            }
+            AssignmentTarget::Collection(_) => {
+                lines.push(format!("Suggested collection: {}", assignment.label));
+            }
+            AssignmentTarget::Tag(_) => {}
         }
     }
     if let Some(enrichment) = library.item_enrichment(id)

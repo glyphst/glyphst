@@ -212,7 +212,8 @@ pub struct EnrichmentApply {
     pub create_tags: bool,
     /// Existing collections to file the item into, by path.
     pub collections: Vec<Vec<String>>,
-    /// A collection to propose, by path; it is created only when accepted.
+    /// A collection to propose, by path: an existing one gets the item
+    /// when accepted, a new one is created then.
     pub suggested_collection: Option<Vec<String>>,
     /// Metadata to fill into fields that are empty and not locked.
     pub metadata: Option<LibraryItem>,
@@ -604,15 +605,25 @@ impl LibraryStore {
                 applied.collections_applied.push(label);
             }
         }
+        // A collection to propose: an existing one the item is not in,
+        // or a new one, unless it was proposed or turned down before.
         let suggestion = apply.suggested_collection.as_ref().and_then(|path| {
             let label = path_label(path);
-            (!path.is_empty()
-                && !rejected.contains(&normalize_label(&label))
-                && self.collection_at_path(path).is_none()
-                && !self.ai_assignments(id).iter().any(|assignment| {
-                    assignment.target == AssignmentTarget::NewCollection(path.clone())
-                }))
-            .then(|| (path.clone(), label))
+            if path.is_empty() || rejected.contains(&normalize_label(&label)) {
+                return None;
+            }
+            let target = match self.collection_at_path(path) {
+                Some(collection_id) if current_collections.contains(&collection_id) => {
+                    return None;
+                }
+                Some(collection_id) => AssignmentTarget::Collection(collection_id),
+                None => AssignmentTarget::NewCollection(path.clone()),
+            };
+            (!self
+                .ai_assignments(id)
+                .iter()
+                .any(|assignment| assignment.target == target))
+            .then_some((target, label))
         });
 
         // Metadata, into empty fields the user has not locked.
@@ -731,9 +742,9 @@ impl LibraryStore {
                 at: now,
             });
         }
-        if let Some((path, label)) = suggestion {
+        if let Some((target, label)) = suggestion {
             entries.push(AiAssignment {
-                target: AssignmentTarget::NewCollection(path),
+                target,
                 label: label.clone(),
                 origin: origin.clone(),
                 state: AssignmentState::Suggested,
@@ -768,6 +779,12 @@ impl LibraryStore {
             .cloned()
             .ok_or_else(|| anyhow!("no such suggestion for item {}", id.0))?;
         let mut accepted_target = assignment.target.clone();
+        // A proposed existing collection: the item goes into it now.
+        if let AssignmentTarget::Collection(collection_id) = assignment.target
+            && assignment.state == AssignmentState::Suggested
+        {
+            self.add_items_to_collection(&[id], collection_id)?;
+        }
         if let AssignmentTarget::NewCollection(path) = &assignment.target {
             let collection_id = self
                 .ensure_library_collection_path(None, path)?

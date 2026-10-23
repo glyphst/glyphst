@@ -316,6 +316,7 @@ if [[ ${tier} == screens ]]; then
         "07-presenting @ --settings presenting"
         "07-library @ --settings library"
         "07-library-search @ --settings library:search --library-demo search"
+        "07-library-ai @ --settings library:ai"
         "07s-library-sync @ --settings library:sync --library-demo sync"
         "07s-library-sync-conflicts @ --settings library:sync --library-demo sync-conflicts"
         "07s-library-sync-s3 @ --settings library:sync --library-demo sync-s3"

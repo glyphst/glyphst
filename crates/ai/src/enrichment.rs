@@ -15,13 +15,17 @@ use crate::{
 };
 
 /// Bumped when the prompt changes, so items are enriched again on request.
-pub const PROMPT_VERSION: u32 = 1;
+pub const PROMPT_VERSION: u32 = 2;
 /// Characters of the item's text the model reads.
 pub const EXCERPT_CHARS: usize = 6_000;
 const TLDR_CHARS: usize = 280;
 const MAX_KEY_POINTS: usize = 5;
 const MAX_TAGS: usize = 5;
 const MAX_NEW_TAGS: usize = 2;
+/// Titles shown from each collection, so the model sees what it holds.
+pub const COLLECTION_SAMPLES: usize = 3;
+/// A collection is kept only when the model is at least this sure of it.
+pub const MIN_COLLECTION_CONFIDENCE: f32 = 0.75;
 /// Tokens an answer takes, for estimates.
 pub const ANSWER_TOKENS: u64 = 350;
 
@@ -40,6 +44,14 @@ pub struct ItemFacts {
     pub isbn: Option<String>,
 }
 
+/// A collection of the library, as the model sees it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CollectionFacts {
+    pub path: Vec<String>,
+    /// A few titles of items in it.
+    pub titles: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnrichInput {
     pub item: ItemFacts,
@@ -47,8 +59,8 @@ pub struct EnrichInput {
     pub excerpt: String,
     /// The library's tags.
     pub tags: Vec<String>,
-    /// The library's collections, as paths.
-    pub collections: Vec<Vec<String>>,
+    /// The library's collections.
+    pub collections: Vec<CollectionFacts>,
     /// Ask for the title, authors and year printed in the text.
     pub metadata_needed: bool,
     pub create_tags: bool,
@@ -84,6 +96,9 @@ pub struct EnrichOutput {
     pub language: Option<String>,
     pub metadata: Option<ExtractedMetadata>,
     pub confidence: Option<f32>,
+    /// How sure the model is of the collection; below
+    /// [`MIN_COLLECTION_CONFIDENCE`] the collection is dropped.
+    pub collection_confidence: Option<f32>,
 }
 
 /// Asks the model about one item.
@@ -118,11 +133,16 @@ pub fn request(input: &EnrichInput) -> String {
     } else {
         format!("up to {MAX_TAGS} tags, only from <existing_tags>.")
     };
-    let collection_rule = if input.suggest_collections {
-        "{\"existing\": \"A / B\"} with the best path from <collections>, or {\"new\": \"A / B\"} for a new one (at most three levels, reusing existing parents) when none fits, or null."
-    } else {
-        "{\"existing\": \"A / B\"} with the best path from <collections>, or null when none fits."
-    };
+    // Filing is optional, so a library with one odd collection doesn't
+    // get every new item.
+    let collection_rule = format!(
+        "null unless the item clearly belongs in one. A collection is never required: a paper or book may stay outside every collection, and null is the usual answer. Give {{\"existing\": \"A / B\"}} only when the item is plainly about the subject a collection in <collections> names and holds; never pick one whose name says nothing about a subject (\"test0\", \"misc\", \"todo\", \"new\"), however few collections there are.{}",
+        if input.suggest_collections {
+            " Give {\"new\": \"A / B\"} (at most three levels, reusing existing parents) only for a clear subject no collection covers."
+        } else {
+            ""
+        }
+    );
     let metadata_rule = if input.metadata_needed {
         "{\"title\": …, \"authors\": […], \"year\": …, \"abstract\": …, \"doi\": …} as printed in the text; null for what is not printed."
     } else {
@@ -132,7 +152,14 @@ pub fn request(input: &EnrichInput) -> String {
     let collections = input
         .collections
         .iter()
-        .map(|path| path.join(" / "))
+        .map(|collection| {
+            let path = collection.path.join(" / ");
+            if collection.titles.is_empty() {
+                format!("{path} (empty)")
+            } else {
+                format!("{path} (holds: {})", collection.titles.join("; "))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let item = serde_json::to_string_pretty(&input.item).unwrap_or_default();
@@ -143,15 +170,16 @@ pub fn request(input: &EnrichInput) -> String {
         .collect::<String>();
     format!(
         "You catalogue documents in a personal research library. Reply with one JSON object and nothing else:\n\
-{{\"tldr\": string, \"key_points\": [string], \"tags\": [string], \"collection\": object or null, \"kind\": \"paper\" | \"book\" | \"other\", \"language\": string, \"metadata\": object or null, \"confidence\": number}}\n\n\
+{{\"tldr\": string, \"key_points\": [string], \"tags\": [string], \"collection\": object or null, \"collection_confidence\": number, \"kind\": \"paper\" | \"book\" | \"other\", \"language\": string, \"metadata\": object or null, \"confidence\": number}}\n\n\
 - tldr: at most {TLDR_CHARS} characters in English: what the item is and its main contribution or argument.\n\
 - key_points: 3 to {MAX_KEY_POINTS} short phrases.\n\
 - tags: {tag_rule}\n\
 - collection: {collection_rule}\n\
+- collection_confidence: 0 to 1, how sure you are that the item belongs in that collection; 0 when collection is null.\n\
 - kind: a paper (article, preprint, thesis, report), a book, or other.\n\
 - language: the item's language as an ISO 639-1 code.\n\
 - metadata: {metadata_rule}\n\
-- confidence: 0 to 1, how sure you are of the tags and collection.\n\n\
+- confidence: 0 to 1, how sure you are of the tags.\n\n\
 <existing_tags>\n{tags}\n</existing_tags>\n<collections>\n{collections}\n</collections>\n\n\
 <item>\n{item}\n</item>\n<text>\n{excerpt}\n</text>"
     )
@@ -226,11 +254,21 @@ pub fn parse(answer: &str, input: &EnrichInput) -> Result<EnrichOutput> {
                 .collect::<Vec<_>>()
         })
     };
+    let collection_confidence = value["collection_confidence"]
+        .as_f64()
+        .map(|confidence| confidence.clamp(0.0, 1.0) as f32);
+    let sure = collection_confidence.is_some_and(|c| c >= MIN_COLLECTION_CONFIDENCE);
     let collection = match (
         path(&value["collection"]["existing"]),
         path(&value["collection"]["new"]),
     ) {
-        (Some(existing), _) if input.collections.contains(&existing) => {
+        _ if !sure => CollectionChoice::None,
+        (Some(existing), _)
+            if input
+                .collections
+                .iter()
+                .any(|collection| collection.path == existing) =>
+        {
             CollectionChoice::Existing(existing)
         }
         (Some(other), _) | (None, Some(other))
@@ -271,6 +309,7 @@ pub fn parse(answer: &str, input: &EnrichInput) -> Result<EnrichOutput> {
         confidence: value["confidence"]
             .as_f64()
             .map(|confidence| confidence.clamp(0.0, 1.0) as f32),
+        collection_confidence,
     })
 }
 
@@ -288,8 +327,14 @@ mod tests {
             excerpt: "Attention Is All You Need …".to_string(),
             tags: vec!["Transformers".to_string(), "nlp".to_string()],
             collections: vec![
-                vec!["Machine learning".to_string()],
-                vec!["Machine learning".to_string(), "LLMs".to_string()],
+                CollectionFacts {
+                    path: vec!["Machine learning".to_string()],
+                    titles: Vec::new(),
+                },
+                CollectionFacts {
+                    path: vec!["Machine learning".to_string(), "LLMs".to_string()],
+                    titles: vec!["Language Models are Few-Shot Learners".to_string()],
+                },
             ],
             metadata_needed: true,
             create_tags: true,
@@ -301,7 +346,12 @@ mod tests {
     fn the_request_holds_the_vocabulary_and_the_item() {
         let request = request(&input());
         assert!(request.contains("<existing_tags>\nTransformers\nnlp\n</existing_tags>"));
-        assert!(request.contains("Machine learning / LLMs"));
+        assert!(
+            request
+                .contains("Machine learning / LLMs (holds: Language Models are Few-Shot Learners)")
+        );
+        assert!(request.contains("Machine learning (empty)"));
+        assert!(request.contains("A collection is never required"));
         assert!(request.contains("\"title\": \"1706.03762v7\""));
         assert!(request.contains("as printed in the text"));
         let (tokens_in, tokens_out) = estimate_tokens(&input());
@@ -318,6 +368,7 @@ mod tests {
                 "key_points": ["a", "b", "c", "d", "e", "f"],
                 "tags": ["transformers", "#attention", "seq2seq", "translation", "NLP", "more"],
                 "collection": {"existing": "Machine learning / LLMs"},
+                "collection_confidence": 0.9,
                 "kind": "Paper",
                 "language": "EN",
                 "metadata": {"title": "Attention Is All You Need", "authors": ["A. Vaswani"], "year": "2017", "doi": null},
@@ -350,7 +401,7 @@ mod tests {
         input.create_tags = false;
         input.suggest_collections = false;
         input.metadata_needed = false;
-        let answer = r#"{"tldr":"t","tags":["nlp","brand-new"],"collection":{"new":"Physics"},"metadata":{"title":"x"}}"#;
+        let answer = r#"{"tldr":"t","tags":["nlp","brand-new"],"collection":{"new":"Physics"},"collection_confidence":0.9,"metadata":{"title":"x"}}"#;
         let output = parse(answer, &input).unwrap();
         assert_eq!(output.tags, vec!["nlp"]);
         assert_eq!(output.collection, CollectionChoice::None);
@@ -359,7 +410,7 @@ mod tests {
         let mut input = self::input();
         input.metadata_needed = false;
         let output = parse(
-            r#"{"tldr":"t","collection":{"existing":"Physics / Optics"}}"#,
+            r#"{"tldr":"t","collection":{"existing":"Physics / Optics"},"collection_confidence":0.9}"#,
             &input,
         )
         .unwrap();
@@ -368,5 +419,31 @@ mod tests {
             CollectionChoice::New(vec!["Physics".to_string(), "Optics".to_string()])
         );
         assert!(parse("not json", &input).is_err());
+    }
+
+    /// The bug where every new paper went into a collection named
+    /// `test0`: a collection the model is not sure of, or gave no
+    /// confidence for, is dropped.
+    #[test]
+    fn an_unsure_collection_is_dropped() {
+        let input = input();
+        for answer in [
+            r#"{"tldr":"t","collection":{"existing":"Machine learning"},"collection_confidence":0.6}"#,
+            r#"{"tldr":"t","collection":{"existing":"Machine learning"}}"#,
+            r#"{"tldr":"t","collection":{"new":"Physics"},"collection_confidence":0.2}"#,
+        ] {
+            let output = parse(answer, &input).unwrap();
+            assert_eq!(output.collection, CollectionChoice::None, "{answer}");
+        }
+        let output = parse(
+            r#"{"tldr":"t","collection":{"existing":"Machine learning"},"collection_confidence":0.8}"#,
+            &input,
+        )
+        .unwrap();
+        assert_eq!(
+            output.collection,
+            CollectionChoice::Existing(vec!["Machine learning".to_string()])
+        );
+        assert_eq!(output.collection_confidence, Some(0.8));
     }
 }

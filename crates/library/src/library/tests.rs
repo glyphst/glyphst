@@ -3239,6 +3239,64 @@ fn enrichment_applies_known_tags_and_collections_and_only_proposes_new_collectio
     let _ = fs::remove_dir_all(database_path.with_extension("managed-library"));
 }
 
+/// The bug where every new paper went into the library's one collection:
+/// a proposed existing collection waits for the user, and accepting it
+/// files the item.
+#[test]
+fn a_proposed_existing_collection_waits_to_be_accepted() {
+    let mut store = LibraryStore::memory();
+    let path = temp_library_path("enrichment-propose-existing").with_extension("pdf");
+    let item_id = linked_test_item(&mut store, &path);
+    let collection = store.create_library_collection(None, "Physics").unwrap();
+    let run = store.next_enrichment_run();
+    let applied = store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                suggested_collection: Some(vec!["Physics".to_string()]),
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(applied.suggested, vec!["Physics".to_string()]);
+    assert!(applied.collections_applied.is_empty());
+    assert!(
+        store.item_collection_paths(item_id).is_empty(),
+        "not filed yet"
+    );
+    let target = AssignmentTarget::Collection(collection);
+    let state = |store: &LibraryStore| {
+        store
+            .ai_assignments(item_id)
+            .iter()
+            .find(|assignment| assignment.target == target)
+            .map(|assignment| assignment.state)
+    };
+    assert_eq!(state(&store), Some(AssignmentState::Suggested));
+    assert!(store.item_needs_review(item_id));
+    // Proposed again, it isn't doubled.
+    let run = store.next_enrichment_run();
+    store
+        .apply_enrichment(
+            item_id,
+            EnrichmentApply {
+                run,
+                suggested_collection: Some(vec!["Physics".to_string()]),
+                ..EnrichmentApply::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(store.ai_assignments(item_id).len(), 1);
+    store.accept_assignment(item_id, &target).unwrap();
+    assert_eq!(
+        store.item_collection_paths(item_id),
+        vec![vec!["Physics".to_string()]]
+    );
+    assert_eq!(state(&store), Some(AssignmentState::Accepted));
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn enrichment_fills_guessed_and_empty_fields_but_never_locked_ones() {
     let mut store = LibraryStore::memory();

@@ -1698,10 +1698,15 @@ impl LibraryTab {
                 });
             });
         }
+        // A collection the AI proposes: a new one to create, or one the
+        // library has to add the item to.
         for assignment in assignments.iter().filter(|assignment| {
-            matches!(assignment.target, AssignmentTarget::NewCollection(_))
-                && assignment.state == AssignmentState::Suggested
+            matches!(
+                assignment.target,
+                AssignmentTarget::NewCollection(_) | AssignmentTarget::Collection(_)
+            ) && assignment.state == AssignmentState::Suggested
         }) {
+            let new = matches!(assignment.target, AssignmentTarget::NewCollection(_));
             egui::Frame::new()
                 .fill(tokens.accent_soft)
                 .corner_radius(tokens.ctl_radius())
@@ -1713,7 +1718,9 @@ impl LibraryTab {
                         let mut dismiss = false;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             dismiss = ui.add(Button::plain("×").small()).clicked();
-                            create = ui.add(Button::bracket("create")).clicked();
+                            create = ui
+                                .add(Button::bracket(if new { "create" } else { "add" }))
+                                .clicked();
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {

@@ -89,7 +89,7 @@ pub const FAKE_TITLE: &str = "Where the story ends";
 /// The fake model's summary of any conversation.
 pub const FAKE_SUMMARY: &str = "We discussed where the story ends.";
 /// The fake library model's answer to any item.
-pub const FAKE_ENRICHMENT: &str = r#"{"tldr":"A fake summary of the item.","key_points":["first point","second point","third point"],"tags":["fake topic"],"collection":{"new":"Fake / Collection"},"kind":"paper","language":"en","metadata":null,"confidence":0.8}"#;
+pub const FAKE_ENRICHMENT: &str = r#"{"tldr":"A fake summary of the item.","key_points":["first point","second point","third point"],"tags":["fake topic"],"collection":{"new":"Fake / Collection"},"collection_confidence":0.9,"kind":"paper","language":"en","metadata":null,"confidence":0.8}"#;
 /// The fake assistant's answer.
 pub const FAKE_ANSWER: &str = "## In short\n\nThe document **mentions** this in two places:\n\n\
 1. on the first page\n2. near the end\n\nSee `search_document` above.";

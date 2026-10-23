@@ -102,6 +102,9 @@ pub struct LibraryPrefs {
     pub ai_create_tags: bool,
     /// The AI may propose new collections (never makes them itself).
     pub suggest_collections: bool,
+    /// The AI files an item into an existing collection it is sure of;
+    /// otherwise it only proposes it. No item has to be in one.
+    pub auto_file_collections: bool,
     /// The vault's folder when it is not the library folder's `notes/`
     /// (an existing Obsidian vault, say).
     pub vault: Option<String>,
@@ -189,6 +192,7 @@ impl Default for LibraryPrefs {
             learn_from_opened: true,
             ai_create_tags: true,
             suggest_collections: true,
+            auto_file_collections: false,
             vault: None,
             folder_asked: false,
             sync: SyncMode::Off,
