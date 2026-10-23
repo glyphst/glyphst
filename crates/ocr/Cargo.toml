@@ -1,0 +1,21 @@
+[package]
+name = "glyphst-ocr"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glyphst-core = { path = "../core" }
+# The pinned, resumable downloads meaning search uses.
+glyphst-embed = { path = "../embed" }
+image.workspace = true
+log.workspace = true
+# PP-OCRv6 Small on ONNX Runtime, as Firecrawl's pdf-inspector runs it;
+# Apache-2.0. The runtime is loaded at run time from the downloaded
+# release (or ORT_DYLIB_PATH), never linked; no models are downloaded by
+# oar-ocr itself.
+oar-ocr = { version = "0.9.1", default-features = false, features = ["simd"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }

@@ -20,7 +20,7 @@ pub fn root() -> PathBuf {
 
 pub fn engine_dir(root: &Path, engine: &Engine) -> PathBuf {
     root.join("engines")
-        .join(format!("llama.cpp-{}", engine.build))
+        .join(format!("{}-{}", engine.name, engine.build))
 }
 
 pub fn engine_archive(root: &Path, engine: &Engine) -> PathBuf {
@@ -110,6 +110,7 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let engine = Engine {
+            name: "llama.cpp",
             build: "b1",
             archive: Asset {
                 name: "engine.tar.gz",

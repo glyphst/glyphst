@@ -1,6 +1,6 @@
 //! Setting meaning search up: the engine (unless one is given or already
 //! there), then a model (EmbeddingGemma, or the reranker), under one
-//! progress bar. Network failures are retried after 5 s,
+//! progress bar; local OCR sets up its runtime and models the same way. Network failures are retried after 5 s,
 //! 30 s and 2 min before the setup stops and says so; what came is kept,
 //! so a later run (or the next launch) goes on from there. Nothing starts
 //! until asked.
@@ -105,7 +105,7 @@ struct Plan {
     root: PathBuf,
     /// None when the user names their own server, or none is built here.
     engine: Option<Engine>,
-    model: Asset,
+    models: Vec<Asset>,
 }
 
 impl Plan {
@@ -121,7 +121,13 @@ impl Plan {
             .as_ref()
             .filter(|_| self.engine_needed())
             .map_or(0, |engine| engine.archive.size);
-        engine + self.model.size
+        engine + self.models.iter().map(|model| model.size).sum::<u64>()
+    }
+
+    fn models_ready(&self) -> bool {
+        self.models
+            .iter()
+            .all(|model| install::model_ready(&self.root, model))
     }
 
     /// Bytes on disk already: installed parts whole, partial ones as far as
@@ -135,13 +141,18 @@ impl Plan {
             .unwrap_or(0),
             _ => 0,
         };
-        let model = if install::model_ready(&self.root, &self.model) {
-            self.model.size
-        } else {
-            download::resumable(&install::model_path(&self.root, &self.model), &self.model)
-                .unwrap_or(0)
-        };
-        engine + model
+        let models: u64 = self
+            .models
+            .iter()
+            .map(|model| {
+                if install::model_ready(&self.root, model) {
+                    model.size
+                } else {
+                    download::resumable(&install::model_path(&self.root, model), model).unwrap_or(0)
+                }
+            })
+            .sum();
+        engine + models
     }
 }
 
@@ -169,10 +180,21 @@ impl Setup {
         } else {
             manifest::engine()
         };
+        Self::with(root, engine, custom_engine, vec![model])
+    }
+
+    /// Any `engine` archive (its `exe` may be a library) and `models`,
+    /// kept in `root`.
+    pub fn with(
+        root: PathBuf,
+        engine: Option<Engine>,
+        custom_engine: Option<PathBuf>,
+        models: Vec<Asset>,
+    ) -> Self {
         let plan = Plan {
             root,
             engine,
-            model,
+            models,
         };
         let state = Self::state_on_disk(&plan, custom_engine.as_deref());
         Self {
@@ -191,7 +213,7 @@ impl Setup {
             plan: Plan {
                 root: std::env::temp_dir().join("glyphst-meaning-demo"),
                 engine: None,
-                model: MODEL,
+                models: vec![MODEL],
             },
             custom_engine: None,
             state: Arc::new(Mutex::new(state)),
@@ -213,7 +235,7 @@ impl Setup {
                 .engine
                 .as_ref()
                 .is_some_and(|engine| install::engine_exe(&plan.root, engine).is_some());
-        if engine_ok && install::model_ready(&plan.root, &plan.model) {
+        if engine_ok && plan.models_ready() {
             SetupState::Ready
         } else {
             SetupState::Offer {
@@ -243,7 +265,20 @@ impl Setup {
             Some(exe) => exe.clone(),
             None => install::engine_exe(&self.plan.root, self.plan.engine.as_ref()?)?,
         };
-        Some((exe, install::model_path(&self.plan.root, &self.plan.model)))
+        let model = install::model_path(&self.plan.root, self.plan.models.first()?);
+        Some((exe, model))
+    }
+
+    /// The engine and every model, once ready.
+    pub fn all_paths(&self) -> Option<(PathBuf, Vec<PathBuf>)> {
+        let (exe, _) = self.paths()?;
+        let models = self
+            .plan
+            .models
+            .iter()
+            .map(|model| install::model_path(&self.plan.root, model))
+            .collect();
+        Some((exe, models))
     }
 
     /// Downloads (or resumes) on a thread; `notify` is called as it goes.
@@ -286,7 +321,9 @@ impl Setup {
         if let Some(engine) = &self.plan.engine {
             download::discard(&install::engine_archive(&self.plan.root, engine));
         }
-        download::discard(&install::model_path(&self.plan.root, &self.plan.model));
+        for model in &self.plan.models {
+            download::discard(&install::model_path(&self.plan.root, model));
+        }
         let state = Self::state_on_disk(&self.plan, self.custom_engine.as_deref());
         self.set(state);
     }
@@ -346,21 +383,18 @@ fn run(plan: &Plan, state: &Mutex<SetupState>, cancel: &AtomicBool, notify: &dyn
         install::remove_old_engines(&plan.root, engine);
         base = engine.archive.size;
     }
-    // The model.
-    if !install::model_ready(&plan.root, &plan.model) {
-        let target = install::model_path(&plan.root, &plan.model);
-        if let Err(stop) = with_retries(
-            &plan.model,
-            &target,
-            Phase::Model,
-            base,
-            total,
-            cancel,
-            &set,
-        ) {
+    // The models, one after another under the same bar.
+    for model in &plan.models {
+        if install::model_ready(&plan.root, model) {
+            base += model.size;
+            continue;
+        }
+        let target = install::model_path(&plan.root, model);
+        if let Err(stop) = with_retries(model, &target, Phase::Model, base, total, cancel, &set) {
             set(stop);
             return;
         }
+        base += model.size;
     }
     set(SetupState::Ready);
 }

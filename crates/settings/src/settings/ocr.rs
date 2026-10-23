@@ -32,16 +32,19 @@ impl OcrMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OcrProvider {
+    /// PP-OCRv6 on this computer (glyphst-ocr), once downloaded.
     #[default]
+    Local,
     Unlimited,
     Paddle,
 }
 
 impl OcrProvider {
-    pub const ALL: [Self; 2] = [Self::Unlimited, Self::Paddle];
+    pub const ALL: [Self; 3] = [Self::Local, Self::Unlimited, Self::Paddle];
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Local => "local",
             Self::Unlimited => "unlimited",
             Self::Paddle => "paddle",
         }
@@ -49,6 +52,7 @@ impl OcrProvider {
 
     pub(super) fn from_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "local" | "this-computer" | "pp-ocrv6" => Some(Self::Local),
             "unlimited" | "unlimited-ocr" | "baidu-unlimited" => Some(Self::Unlimited),
             "paddle" | "paddleocr" | "paddle-ocr" => Some(Self::Paddle),
             _ => None,
@@ -161,7 +165,7 @@ impl Default for OcrSettings {
     fn default() -> Self {
         Self {
             mode: OcrMode::Auto,
-            provider: OcrProvider::Unlimited,
+            provider: OcrProvider::Local,
             paddle: PaddleOcrSettings::default(),
             unlimited: UnlimitedOcrSettings::default(),
         }

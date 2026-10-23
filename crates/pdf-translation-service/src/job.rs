@@ -1689,7 +1689,30 @@ impl PdfTranslationService {
             Some(0),
             Some(selected_pages.len() as u32),
         );
-        let client = PageOcrClient::from_config(settings)?;
+        let client = match PageOcrClient::from_config(settings) {
+            Ok(client) => client,
+            // Without local OCR set up, the pages keep their own text and
+            // say what they need; nothing is sent elsewhere.
+            Err(error) if settings.ocr.provider == OcrProvider::Local => {
+                for &page_index in &selected_pages {
+                    update_sink(PdfTranslationSessionUpdate::PageFailed(
+                        PdfTranslationPageFailure {
+                            page_index,
+                            phase: TranslationFailurePhase::Ocr,
+                            message: error.message.clone(),
+                            retryable: false,
+                        },
+                    ));
+                }
+                progress.finish_stage(PdfTranslationStage::Ocr, "Native PDF text extracted");
+                progress.finish_stage(
+                    PdfTranslationStage::Normalizing,
+                    "Native document normalized",
+                );
+                return Ok(native);
+            }
+            Err(error) => return Err(error),
+        };
         let tasks = selected_pages
             .iter()
             .map(|page_index| PageOcrTask {
@@ -1922,6 +1945,7 @@ fn bounded_ocr_worker_count(task_count: usize) -> usize {
 enum PageOcrClient {
     Paddle { client: PaddleClient, model: String },
     Unlimited(UnlimitedClient),
+    Local(Arc<glyphst_ocr::LocalOcr>),
 }
 
 impl PageOcrClient {
@@ -1953,6 +1977,17 @@ impl PageOcrClient {
             .map_err(|error| {
                 PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
             }),
+            OcrProvider::Local => match glyphst_ocr::LocalOcr::installed() {
+                Ok(Some(ocr)) => Ok(Self::Local(ocr)),
+                Ok(None) => Err(PdfTranslationError::message(
+                    PdfTranslationStage::Ocr,
+                    LOCAL_OCR_MISSING,
+                )),
+                Err(error) => Err(PdfTranslationError::message(
+                    PdfTranslationStage::Ocr,
+                    format!("Local OCR could not start: {error:#}"),
+                )),
+            },
         }
     }
 
@@ -1960,9 +1995,14 @@ impl PageOcrClient {
         match self {
             Self::Paddle { .. } => "paddle",
             Self::Unlimited(_) => "unlimited",
+            Self::Local(_) => "local",
         }
     }
 }
+
+/// Why a page was not recognised while local OCR is not set up.
+const LOCAL_OCR_MISSING: &str =
+    "This page needs text recognition: install local OCR in Settings · OCR.";
 
 struct PageOcrTask {
     page_index: usize,
@@ -2035,6 +2075,9 @@ fn run_ocr_page(
                     ),
                 )
             }),
+        PageOcrClient::Local(ocr) => {
+            crate::local_ocr::recognize_page(ocr, bytes).map_err(|error| (error, false))
+        }
     };
     let payload = match payload {
         Ok(payload) => payload,
@@ -2053,6 +2096,13 @@ fn run_ocr_page(
         PageOcrClient::Unlimited(_) => {
             normalize_unlimited_payload(&payload, source_path, document_id, &[geometry])
         }
+        PageOcrClient::Local(_) => normalize_paddle_payload(
+            &payload,
+            source_path,
+            document_id,
+            crate::local_ocr::MODEL,
+            &[geometry],
+        ),
     };
     let mut normalized = match normalized {
         Ok(document) => document,
@@ -3634,7 +3684,7 @@ fn prepare_translation_layout(
     }
 }
 
-fn extract_single_pdf_page(
+pub(crate) fn extract_single_pdf_page(
     source_path: &Path,
     page_index: usize,
 ) -> Result<Vec<u8>, PdfTranslationError> {
@@ -3797,6 +3847,7 @@ fn source_preparation_fingerprint(settings: &PdfTranslationConfig, source_bytes:
             settings.ocr.paddle.endpoint.hash(&mut hasher);
             settings.ocr.paddle.model.hash(&mut hasher);
         }
+        OcrProvider::Local => crate::local_ocr::MODEL.hash(&mut hasher),
     }
     settings.content_review.mode.as_str().hash(&mut hasher);
     if settings.content_review.mode == PdfContentReviewMode::Ambiguous

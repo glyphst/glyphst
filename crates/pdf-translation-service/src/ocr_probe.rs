@@ -21,6 +21,12 @@ pub enum OcrProbeError {
 pub fn test_ocr_connection(settings: OcrSettings) -> Result<(), OcrProbeError> {
     let cancellation = CancellationToken::new();
     match settings.provider {
+        // Loading the models is the test.
+        OcrProvider::Local => match glyphst_ocr::LocalOcr::installed() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(OcrProbeError::Provider(Some("not installed".to_string()))),
+            Err(error) => Err(OcrProbeError::Provider(Some(format!("{error:#}")))),
+        },
         OcrProvider::Paddle => PaddleClient::new(
             PaddleClientConfig {
                 base_url: settings.paddle.endpoint,

@@ -1,5 +1,6 @@
 mod backend;
 mod job;
+mod local_ocr;
 mod ocr_probe;
 mod reviewer;
 

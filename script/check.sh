@@ -331,6 +331,7 @@ if [[ ${tier} == screens ]]; then
         "07s-library-sync-webdav @ --settings library:sync --library-demo sync-webdav"
         "07-effects @ --settings effects"
         "07-translation @ --settings translation"
+        "07-ocr @ --settings ocr"
         "07-ai @ --settings ai"
         "07-shortcuts --settings shortcuts"
         "07-shortcuts-glass --settings shortcuts --opacity 0.5"

@@ -14,6 +14,8 @@ pub struct Asset {
 /// llama.cpp's archive for this machine, and the server inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Engine {
+    /// What it is (`llama.cpp`), naming its folder with the build.
+    pub name: &'static str,
     pub build: &'static str,
     pub archive: Asset,
     /// The server's path inside the archive.
@@ -56,6 +58,7 @@ pub const DIMENSIONS: usize = 256;
 pub fn engine() -> Option<Engine> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some(Engine {
+            name: "llama.cpp",
             build: ENGINE_BUILD,
             archive: Asset {
                 name: "llama-b11724-bin-ubuntu-vulkan-x64.tar.gz",
@@ -67,6 +70,7 @@ pub fn engine() -> Option<Engine> {
         })
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         Some(Engine {
+            name: "llama.cpp",
             build: ENGINE_BUILD,
             archive: Asset {
                 name: "llama-b11724-bin-ubuntu-vulkan-arm64.tar.gz",
@@ -78,6 +82,7 @@ pub fn engine() -> Option<Engine> {
         })
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         Some(Engine {
+            name: "llama.cpp",
             build: ENGINE_BUILD,
             archive: Asset {
                 name: "llama-b11724-bin-win-vulkan-x64.zip",
@@ -89,6 +94,7 @@ pub fn engine() -> Option<Engine> {
         })
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some(Engine {
+            name: "llama.cpp",
             build: ENGINE_BUILD,
             archive: Asset {
                 name: "llama-b11724-bin-macos-arm64.tar.gz",

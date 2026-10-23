@@ -10,10 +10,12 @@ workspace = true
 anyhow.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
+glyphst-ocr = { path = "../ocr" }
 glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-translation = { path = "../pdf-translation" }
 glyphst-settings = { path = "../settings" }
 glyphst-translation = { path = "../translation" }
+image.workspace = true
 mupdf.workspace = true
 serde.workspace = true
 serde_json.workspace = true
