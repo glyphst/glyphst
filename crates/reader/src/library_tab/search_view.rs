@@ -263,7 +263,7 @@ fn meaning_card(
             "◇ search by meaning is on · on the CPU".to_string(),
             tokens.text_2,
         ),
-        MeaningCard::Ready => ("◆ search by meaning is on".to_string(), tokens.accent_text),
+        MeaningCard::Ready => ("search by meaning is on".to_string(), tokens.accent_text),
     };
     egui::Frame::new()
         .fill(tokens.surface)

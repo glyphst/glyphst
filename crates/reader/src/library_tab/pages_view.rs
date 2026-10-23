@@ -67,7 +67,7 @@ impl LibraryTab {
                 .max_rect(line)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        if buttons.add(Button::bracket("◆ write a page…")).clicked() {
+        if buttons.add(Button::bracket("write a page…")).clicked() {
             action = Some(LibraryTabAction::WritePage(PageAsk::Asked(String::new())));
         }
         caption(
@@ -97,7 +97,7 @@ impl LibraryTab {
                     let mark = if context.writing.iter().any(|(id, _)| *id == page.id) {
                         "◌ writing again…"
                     } else if page.unreviewed {
-                        "◆ new · keep or undo"
+                        "new · keep or undo"
                     } else {
                         ""
                     };
@@ -214,7 +214,7 @@ impl LibraryTab {
                                 tokens.text_2,
                                 inner,
                             );
-                            if card.add(Button::bracket("◆ write…")).clicked() {
+                            if card.add(Button::bracket("write…")).clicked() {
                                 action = Some(LibraryTabAction::WritePage(PageAsk::Topic(
                                     topic.clone(),
                                 )));
@@ -260,7 +260,7 @@ impl LibraryTab {
                 "◌ writing it again · the page stays as it is until then".to_string()
             } else {
                 format!(
-                    "◆ written from {} sources · {} in · {} out",
+                    "written from {} sources · {} in · {} out",
                     page.sources.len(),
                     crate::library_dialogs::short_count(page.tokens_in),
                     crate::library_dialogs::short_count(page.tokens_out)
@@ -360,7 +360,7 @@ impl LibraryTab {
             }
         }
         ui.add_space(14.0);
-        if !writing && ui.add(Button::bracket("◆ write again…")).clicked() {
+        if !writing && ui.add(Button::bracket("write again…")).clicked() {
             action = Some(LibraryTabAction::WritePage(PageAsk::Again(page.id)));
         }
         action

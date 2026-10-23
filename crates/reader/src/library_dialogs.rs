@@ -625,9 +625,9 @@ impl Dialog {
                         None => ("✓", "not in your library", tokens.ok),
                     },
                     (
-                        "◆",
-                        "the ai files and tags it after adding",
-                        tokens.accent_text,
+                        "·",
+                        "it is summarised, tagged and filed after adding",
+                        tokens.muted,
                     ),
                 ];
                 for (glyph, line, color) in lines {

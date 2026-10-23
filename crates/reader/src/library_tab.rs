@@ -678,7 +678,7 @@ impl LibraryTab {
         );
         buttons.spacing_mut().item_spacing.x = 8.0;
         if let Some(words) = &searching {
-            if buttons.add(Button::bracket("◆ ask the library")).clicked() {
+            if buttons.add(Button::bracket("ask the library")).clicked() {
                 action = Some(LibraryTabAction::AskLibrary(words.clone()));
             }
         } else if buttons
@@ -695,8 +695,10 @@ impl LibraryTab {
         if unenriched > 0
             && searching.is_none()
             && buttons
-                .add(Button::bracket_muted(&format!("◆ enrich {unenriched}")))
-                .on_hover_text("summarise, tag and file the items without an ai pass")
+                .add(Button::bracket_muted(&format!(
+                    "summarise {unenriched} new"
+                )))
+                .on_hover_text("summarise, tag and file the papers that have no summary yet")
                 .clicked()
         {
             action = Some(LibraryTabAction::Backfill);
@@ -847,6 +849,7 @@ impl LibraryTab {
             .map(|doc| (doc.path.clone(), doc))
             .collect::<HashMap<_, _>>();
         let mut keyboard = None;
+        let mut show_tag = None;
         egui::ScrollArea::vertical()
             .id_salt("library-rows")
             .auto_shrink(false)
@@ -901,7 +904,8 @@ impl LibraryTab {
                             action = Some(LibraryTabAction::KeepBoth(item.id, other.id));
                         }
                     }
-                    // A tag's menu, on its chip.
+                    // A tag's chip: a click shows its items, a right-click
+                    // its menu.
                     let mut on_chip = false;
                     for (index, (rect, tag)) in chips.iter().enumerate() {
                         let chip = ui.interact(
@@ -910,6 +914,9 @@ impl LibraryTab {
                             Sense::click(),
                         );
                         on_chip |= chip.contains_pointer();
+                        if chip.clicked() {
+                            show_tag = Some(*tag);
+                        }
                         let mut choice = None;
                         chip.context_menu(|ui| {
                             choice = menus::item_tag_menu(ui, tokens, library, *id, *tag);
@@ -918,7 +925,7 @@ impl LibraryTab {
                             action = self.take_choice(choice, library, ui).or(action.take());
                         }
                     }
-                    if response.clicked() || response.secondary_clicked() {
+                    if !on_chip && (response.clicked() || response.secondary_clicked()) {
                         self.selected = Some(*id);
                     }
                     if response.double_clicked()
@@ -947,6 +954,9 @@ impl LibraryTab {
                     }
                 }
             });
+        if let Some(tag) = show_tag {
+            self.choose(View::Tag(tag));
+        }
         // Enter opens the chosen item; Escape lets it go.
         if ui.ctx().memory(|memory| memory.focused().is_none()) {
             if ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -1349,11 +1359,6 @@ impl LibraryTab {
                 path: path.clone(),
             });
         }
-        foot_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(Button::bracket_muted("◆ re-run")).clicked() {
-                action = Some(LibraryTabAction::Enrich(id));
-            }
-        });
         action
     }
 
@@ -1438,12 +1443,9 @@ impl LibraryTab {
             let date = chrono::DateTime::from_timestamp(enrichment.finished_at as i64, 0)
                 .map(|time| time.format("%b %d").to_string().to_lowercase())
                 .unwrap_or_default();
-            accent_rule(
-                ui,
-                tokens,
-                "◆ summary",
-                &format!("{} · {date}", short_model(&enrichment.model)),
-            );
+            if summary_rule(ui, tokens, &date, short_model(&enrichment.model)) {
+                action = Some(LibraryTabAction::Enrich(id));
+            }
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(&enrichment.tldr)
@@ -1485,7 +1487,7 @@ impl LibraryTab {
             ui.add_space(10.0);
         }
 
-        // Tags: the user's filled, the AI's outlined; right-click for more.
+        // Tags: a click shows a tag's items, a right-click its menu.
         flush_rule(ui, "tags", None);
         let assignments = library.ai_assignments(id).to_vec();
         let tags = library.tags_for_item(id);
@@ -1496,9 +1498,11 @@ impl LibraryTab {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                 for tag in &tags {
-                    let by_ai = library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai;
                     let color = library.tag_color(tag.id).map(crate::annotations::color);
-                    let response = owned_tag_chip(ui, tokens, &tag.name, by_ai, color);
+                    let response = tag_chip_button(ui, tokens, &tag.name, color);
+                    if response.clicked() {
+                        choice = Some(menus::Choice::Show(View::Tag(tag.id)));
+                    }
                     response.context_menu(|ui| {
                         choice = menus::item_tag_menu(ui, tokens, library, id, tag.id);
                     });
@@ -1506,17 +1510,6 @@ impl LibraryTab {
             });
             if let Some(choice) = choice {
                 action = self.take_choice(choice, library, ui).or(action.take());
-            }
-            if tags
-                .iter()
-                .any(|tag| library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai)
-            {
-                mono_line(
-                    ui,
-                    "◆ added by the ai · right-click to keep or remove",
-                    tokens.faint,
-                    10.0,
-                );
             }
         }
         if ui.add(Button::plain("+ tag").small()).clicked() {
@@ -1563,14 +1556,6 @@ impl LibraryTab {
                             LibraryTabAction::RemoveFromCollection(id, collection.id)
                         });
                     }
-                    if by_ai {
-                        ui.label(
-                            egui::RichText::new("◆")
-                                .font(theme::mono(11.0))
-                                .color(tokens.accent_text),
-                        )
-                        .on_hover_text("filed by the ai");
-                    }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         mono_line(ui, &label, tokens.text_2, 11.0);
                     });
@@ -1599,7 +1584,7 @@ impl LibraryTab {
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(format!(
-                                                "◆ new: {}",
+                                                "suggested collection: {}",
                                                 assignment.label.to_lowercase()
                                             ))
                                             .font(theme::mono(11.0))
@@ -2002,49 +1987,42 @@ fn columns(width: f32) -> [f32; 5] {
     x
 }
 
-/// A tag as a chip in a row or the item pane: the user's filled (`#name`,
-/// its colour as a dot), the AI's outlined in the accent (`◆ name`).
-/// Returns its rect.
+/// A tag's chip, `#name` filled with its colour as a dot, whoever added it.
+fn tag_chip_width(ui: &Ui, name: &str, color: Option<egui::Color32>) -> f32 {
+    let dot = if color.is_some() { 11.0 } else { 0.0 };
+    dot + text::width(ui, &format!("#{name}"), &theme::mono(11.0)) + 12.0
+}
+
+/// Paints a tag's chip from `at` (its left centre); returns its rect.
 fn paint_tag_chip(
     ui: &Ui,
     tokens: &Tokens,
     at: egui::Pos2,
     name: &str,
-    by_ai: bool,
     color: Option<egui::Color32>,
+    hovered: bool,
 ) -> Rect {
-    let label = if by_ai {
-        format!("◆ {name}")
-    } else {
-        format!("#{name}")
-    };
-    let label_width = text::width(ui, &label, &theme::mono(11.0));
-    let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
-    let rect = Rect::from_min_size(pos2(at.x, at.y - 9.5), vec2(dot + label_width + 12.0, 19.0));
+    let dot = if color.is_some() { 11.0 } else { 0.0 };
+    let rect = Rect::from_min_size(
+        pos2(at.x, at.y - 9.5),
+        vec2(tag_chip_width(ui, name, color), 19.0),
+    );
     let painter = ui.painter();
-    if by_ai {
-        painter.rect_stroke(
-            rect,
-            tokens.ctl_radius(),
-            Stroke::new(1.0, tokens.accent),
-            egui::StrokeKind::Inside,
-        );
+    let fill = if hovered {
+        tokens.rule_strong
     } else {
-        painter.rect_filled(rect, tokens.ctl_radius(), tokens.hover);
-        if let Some(color) = color {
-            painter.circle_filled(pos2(rect.left() + 9.5, rect.center().y), 3.5, color);
-        }
+        tokens.hover
+    };
+    painter.rect_filled(rect, tokens.ctl_radius(), fill);
+    if let Some(color) = color {
+        painter.circle_filled(pos2(rect.left() + 9.5, rect.center().y), 3.5, color);
     }
     painter.text(
         pos2(rect.left() + 6.0 + dot, rect.center().y),
         Align2::LEFT_CENTER,
-        label,
+        format!("#{name}"),
         theme::mono(11.0),
-        if by_ai {
-            tokens.accent_text
-        } else {
-            tokens.text_2
-        },
+        tokens.text_2,
     );
     rect
 }
@@ -2064,15 +2042,8 @@ fn paint_tag_row(
     let mut chips = Vec::new();
     let mut x = left;
     for (index, tag) in tags.iter().enumerate() {
-        let by_ai = library.tag_owner(id, tag.id) == glyphst_library::TagOwner::Ai;
-        let label = if by_ai {
-            format!("◆ {}", tag.name)
-        } else {
-            format!("#{}", tag.name)
-        };
         let color = library.tag_color(tag.id).map(crate::annotations::color);
-        let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
-        let width = dot + text::width(ui, &label, &theme::mono(11.0)) + 12.0;
+        let width = tag_chip_width(ui, &tag.name, color);
         let left_over = tags.len() - index;
         // Room for this chip, and for `+n` after it when more follow.
         let more = if left_over > 1 { 28.0 } else { 0.0 };
@@ -2086,7 +2057,9 @@ fn paint_tag_row(
             );
             break;
         }
-        let rect = paint_tag_chip(ui, tokens, pos2(x, y), &tag.name, by_ai, color);
+        let hovered =
+            ui.rect_contains_pointer(Rect::from_min_size(pos2(x, y - 9.5), vec2(width, 19.0)));
+        let rect = paint_tag_chip(ui, tokens, pos2(x, y), &tag.name, color, hovered);
         chips.push((rect, tag.id));
         x = rect.right() + 4.0;
     }
@@ -2324,34 +2297,46 @@ fn paint_cover(
     painter.rect_stroke(rect, 0, tokens.hairline(), egui::StrokeKind::Inside);
 }
 
-fn accent_rule(ui: &mut Ui, tokens: &Tokens, title: &str, trailing: &str) {
+/// The summary's rule: `summary`, its date (the model on hover) and
+/// `[ summarise again ]`, which reports a click.
+fn summary_rule(ui: &mut Ui, tokens: &Tokens, date: &str, model: &str) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     let y = rect.center().y;
-    let title_rect = text::line(
+    let title = text::line(
         ui,
         pos2(rect.left(), y),
         Align2::LEFT_CENTER,
-        title,
+        "summary",
         theme::mono(11.0),
         tokens.accent_text,
-        rect.width() / 2.0,
+        rect.width() / 3.0,
     );
-    let trailing_rect = text::line(
-        ui,
-        pos2(rect.right(), y),
-        Align2::RIGHT_CENTER,
-        trailing,
-        theme::mono(10.0),
-        tokens.faint,
-        rect.width() / 2.0,
+    let mut again_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
-    if tokens.ornaments && trailing_rect.left() > title_rect.right() + 16.0 {
+    again_ui.spacing_mut().item_spacing.x = 8.0;
+    let again = again_ui
+        .add(Button::bracket_muted("summarise again").small())
+        .on_hover_text(
+            "ask the library model for a new summary, tags and collection; your own tags stay",
+        );
+    let when = again_ui
+        .add(egui::Label::new(
+            egui::RichText::new(date)
+                .font(theme::mono(10.0))
+                .color(tokens.faint),
+        ))
+        .on_hover_text(format!("by {model}"));
+    if tokens.ornaments && when.rect.left() > title.right() + 16.0 {
         ui.painter().hline(
-            title_rect.right() + 8.0..=trailing_rect.left() - 8.0,
+            title.right() + 8.0..=when.rect.left() - 8.0,
             y,
             Stroke::new(1.0, tokens.rule_strong),
         );
     }
+    again.clicked()
 }
 
 fn mono_line(ui: &mut Ui, line: &str, color: egui::Color32, size: f32) {
@@ -2704,31 +2689,26 @@ fn plural(count: usize, noun: &str) -> String {
     }
 }
 
-/// A tag on an item, the user's filled and the AI's outlined; clickable,
-/// for its menu.
-fn owned_tag_chip(
+/// A tag on an item: a click shows its items, a right-click its menu.
+fn tag_chip_button(
     ui: &mut Ui,
     tokens: &Tokens,
     name: &str,
-    by_ai: bool,
     color: Option<egui::Color32>,
 ) -> egui::Response {
-    let label = if by_ai {
-        format!("◆ {name}")
-    } else {
-        format!("#{name}")
-    };
-    let dot = if color.is_some() && !by_ai { 11.0 } else { 0.0 };
-    let width = dot + text::width(ui, &label, &theme::mono(11.0)) + 12.0;
+    let width = tag_chip_width(ui, name, color);
     let (rect, response) = ui.allocate_exact_size(vec2(width, 19.0), Sense::click());
-    paint_tag_chip(ui, tokens, rect.left_center(), name, by_ai, color);
+    paint_tag_chip(
+        ui,
+        tokens,
+        rect.left_center(),
+        name,
+        color,
+        response.hovered(),
+    );
     response
-        .on_hover_text(if by_ai {
-            "added by the ai · right-click to keep or remove"
-        } else {
-            "yours · right-click for more"
-        })
-        .on_hover_cursor(egui::CursorIcon::ContextMenu)
+        .on_hover_text("show its papers · right-click for more")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The files opened from outside the library, newest first.

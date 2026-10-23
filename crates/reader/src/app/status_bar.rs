@@ -125,9 +125,9 @@ impl ReaderApp {
         let queued = self.library.library_jobs().len();
         if queued > 0 || self.library_jobs.running() > 0 {
             let text = if self.library_jobs.is_paused() {
-                format!("◆ paused · {queued} queued")
+                format!("paused · {queued} queued")
             } else {
-                format!("◆ working · {queued} queued")
+                format!("summarising · {queued} queued")
             };
             segments.insert(
                 1,

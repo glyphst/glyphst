@@ -3,7 +3,7 @@
 //! prompts some of their entries open at the click (a tag to add, a new
 //! name, a new collection).
 
-use glyphst_library::{AssignmentTarget, LibraryCollectionId, LibraryItem, LibraryTagId, TagOwner};
+use glyphst_library::{LibraryCollectionId, LibraryItem, LibraryTagId};
 use glyphst_ui::menu as ui_menu;
 
 use super::*;
@@ -301,7 +301,7 @@ pub(super) fn row_menu(
         )));
     }
     ui_menu::separator(ui);
-    if entry(ui, "sparkles", "◆ run the ai again") {
+    if entry(ui, "sparkles", "summarise again") {
         choice = Some(Choice::Action(LibraryTabAction::Enrich(id)));
     }
     ui_menu::separator(ui);
@@ -311,8 +311,7 @@ pub(super) fn row_menu(
     choice
 }
 
-/// A tag's menu on an item: the AI's can be kept as the user's; either can
-/// be taken off; its colour; its items.
+/// A tag's menu on an item: take it off, its colour, its items.
 pub(super) fn item_tag_menu(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -325,20 +324,8 @@ pub(super) fn item_tag_menu(
         .library_tags()
         .iter()
         .find(|known| known.id == tag)?;
-    let by_ai = library.tag_owner(id, tag) == TagOwner::Ai;
-    let title = if by_ai {
-        format!("◆ {} · added by the ai", known.name)
-    } else {
-        format!("#{} · yours", known.name)
-    };
-    ui_menu::group(ui, &title);
+    ui_menu::group(ui, &format!("#{}", known.name));
     let mut choice = None;
-    if by_ai && entry(ui, "check", "keep as mine") {
-        choice = Some(Choice::Action(LibraryTabAction::Accept(
-            id,
-            AssignmentTarget::Tag(tag),
-        )));
-    }
     if entry(ui, "x", "remove") {
         choice = Some(Choice::Action(LibraryTabAction::RemoveTag(id, tag)));
     }
