@@ -121,6 +121,7 @@ pub enum Command {
     TranslateSelection,
     TranslateDocument,
     ShowTranslated,
+    SideBySide,
     Assistant,
     QuickAsk,
     /// Copies the MCP server's config for a coding agent started by hand.
@@ -215,7 +216,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 98] = [
+    pub const ALL: [Self; 99] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -300,6 +301,7 @@ impl Command {
         Self::TranslateSelection,
         Self::TranslateDocument,
         Self::ShowTranslated,
+        Self::SideBySide,
         Self::Assistant,
         Self::QuickAsk,
         Self::McpConfig,
@@ -403,6 +405,7 @@ impl Command {
             Self::TranslateSelection => "translation.selection",
             Self::TranslateDocument => "translation.document",
             Self::ShowTranslated => "translation.show_translated",
+            Self::SideBySide => "translation.side_by_side",
             Self::Assistant => "assistant.toggle",
             Self::QuickAsk => "assistant.quick_ask",
             Self::McpConfig => "assistant.mcp_config",
@@ -510,6 +513,7 @@ impl Command {
             Self::TranslateSelection => "Translate the selection",
             Self::TranslateDocument => "Translate the document",
             Self::ShowTranslated => "Show translated or original pages",
+            Self::SideBySide => "Translation side by side",
             Self::Assistant => "Show or hide the assistant",
             Self::QuickAsk => "Quick ask about this page",
             Self::McpConfig => "Copy the MCP server config for coding agents",
@@ -608,6 +612,7 @@ impl Command {
             Self::Bookmark => "bookmark-plus",
             Self::TranslateSelection | Self::TranslateDocument => "languages",
             Self::ShowTranslated => "globe",
+            Self::SideBySide => "columns-2",
             Self::Assistant => "sparkles",
             Self::QuickAsk => "message-square",
             Self::McpConfig => "copy",
@@ -708,9 +713,10 @@ impl Command {
             | Self::SelectPage
             | Self::RegionSelect
             | Self::Bookmark => Category::Text,
-            Self::TranslateSelection | Self::TranslateDocument | Self::ShowTranslated => {
-                Category::Translation
-            }
+            Self::TranslateSelection
+            | Self::TranslateDocument
+            | Self::ShowTranslated
+            | Self::SideBySide => Category::Translation,
             Self::Assistant | Self::QuickAsk | Self::McpConfig => Category::Assistant,
             Self::PresentDraw
             | Self::PresentHighlight
@@ -827,6 +833,7 @@ impl Command {
             | Self::SmallerText
             | Self::TranslateDocument
             | Self::ShowTranslated
+            | Self::SideBySide
             | Self::SplitDown
             | Self::ClosePane
             | Self::ToggleSpread
@@ -975,6 +982,7 @@ impl Command {
             Self::RotateClockwise
             | Self::RotateCounterclockwise
             | Self::ToggleSpread
+            | Self::SideBySide
             | Self::RegionSelect => Needs::FixedLayout,
             command if command.category() == Category::Present => Needs::Presenting,
             _ => Needs::Document,

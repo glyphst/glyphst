@@ -250,6 +250,7 @@ impl ReaderApp {
             _ => None,
         };
         let spread = tab.layout.arrangement.spread;
+        let facing = tab.layout.arrangement.facing;
         let rotation = u32::from(tab.layout.arrangement.rotation) * 90;
         let finding = tab.find.open;
         let presenting = tab.present.is_some();
@@ -482,8 +483,15 @@ impl ReaderApp {
                 Segment::label(
                     "spread",
                     Side::Right,
-                    Some("book-open"),
-                    if spread { "spread" } else { "single" },
+                    Some(if facing { "columns-2" } else { "book-open" }),
+                    // Labels of one width, so the bar does not move.
+                    if facing {
+                        "facing"
+                    } else if spread {
+                        "spread"
+                    } else {
+                        "single"
+                    },
                 )
                 .priority(1)
                 .tooltip(tip("spread")),

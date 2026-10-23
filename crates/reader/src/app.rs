@@ -25,7 +25,7 @@ use crate::{
     annotations::{self, AnnotationId, Annotations},
     commands::{Command, Needs},
     desktop_theme::DesktopTheme,
-    document::{Arrangement, FrameTimes, THUMBNAIL_SCALE},
+    document::{Arrangement, FrameTimes, THUMBNAIL_SCALE, slot_page, translation_slot},
     document_tab::{DocumentTab, ViewAction, ViewInput},
     find::{self, FindBarAction},
     generation::{Generations, PageState},
@@ -2371,6 +2371,18 @@ impl ReaderApp {
                 DocumentRotation::Degrees270 => 3,
             },
             spread: self.library.document_page_layout(path) == DocumentPageLayout::TwoColumn,
+            facing: false,
+        }
+    }
+
+    /// Shows the active document's pages beside their translation, or in
+    /// place (frame 02n); not remembered.
+    pub(crate) fn set_facing(&mut self, facing: bool) {
+        if let Some(active) = self.active {
+            let tab = &mut self.tabs[active];
+            let mut arrangement = tab.layout.arrangement;
+            arrangement.facing = facing;
+            tab.arrange(arrangement);
         }
     }
 
@@ -2753,6 +2765,7 @@ impl ReaderApp {
             }
             SidebarAction::StartTranslation => self.start_document_translation(ctx),
             SidebarAction::TranslateRest => self.start_document_translation(ctx),
+            SidebarAction::SetFacing(facing) => self.set_facing(facing),
             SidebarAction::CancelTranslation => {
                 if let Some(session) = self
                     .active
@@ -4539,6 +4552,21 @@ impl ReaderApp {
                 self.arrange(|arrangement| arrangement.spread = !arrangement.spread);
                 None
             }
+            Command::SideBySide => {
+                let facing = self
+                    .active
+                    .is_some_and(|active| self.tabs[active].layout.arrangement.facing);
+                self.set_facing(!facing);
+                // Beside nothing, a translation starts.
+                if !facing
+                    && self
+                        .active
+                        .is_some_and(|active| self.tabs[active].translation.is_none())
+                {
+                    self.start_document_translation(ctx);
+                }
+                None
+            }
             Command::Reload => {
                 if let Some(active) = self.active {
                     self.reload(active, ctx);
@@ -5371,13 +5399,31 @@ impl ReaderApp {
             },
         ));
         let painter = ui.painter_at(rect);
-        let maps: Vec<PageMap> = frame
+        // Every drawing, translation faces too; the pages' own below.
+        let all_maps: Vec<PageMap> = frame
             .draws
             .iter()
             .map(|draw| PageMap::new(draw, rect, ppp))
             .collect();
+        let maps: Vec<PageMap> = all_maps
+            .iter()
+            .filter(|map| !slot_page(map.page).1)
+            .copied()
+            .collect();
+        let blank_faces: Vec<PageMap> = self.tabs[active]
+            .blank_faces(target)
+            .iter()
+            .map(|draw| PageMap::new(draw, rect, ppp))
+            .collect();
         self.paint_text_overlays(&painter, &maps, active, &tokens);
-        self.paint_translation_progress(&painter, &maps, active, &tokens, reveal_seconds);
+        self.paint_translation_progress(
+            &painter,
+            &all_maps,
+            &blank_faces,
+            active,
+            &tokens,
+            reveal_seconds,
+        );
         if presenting {
             self.paint_ink(&painter, &maps, active);
         }
@@ -5392,8 +5438,8 @@ impl ReaderApp {
                 glyphst_ui::paint::paint_turned_image(&painter, *texture, paper, turns);
             }
         }
-        let papers: Vec<egui::Rect> = maps.iter().map(|map| map.paper).collect();
-        for map in &maps {
+        let papers: Vec<egui::Rect> = all_maps.iter().map(|map| map.paper).collect();
+        for map in &all_maps {
             let key = PageKey {
                 tab: tab_id,
                 page: map.page,
@@ -5470,9 +5516,11 @@ impl ReaderApp {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         }
 
-        // Over a translated block: its outline, and the original text.
+        // Over a translated block: its outline, and the original text
+        // (beside its translation, the original is in view already).
         if self.drag.is_none()
             && self.prefs.original_on_hover
+            && !tab.is_facing()
             && let Some(pos) = response.hover_pos()
             && let Some((map, point)) = under(pos)
             && let Some((block, original)) = tab.original_at(map.page, point)
@@ -5812,23 +5860,48 @@ impl ReaderApp {
 
     /// Library highlights, search matches and the selection over the pages.
     /// Blocks still waiting for their translation shimmer faintly, and
-    /// arriving ones sweep in (frame 02m).
+    /// arriving ones sweep in (frame 02m). Beside their translation
+    /// (frame 02n), faces still to come are blank paper, and the block under
+    /// the pointer is outlined on both sides.
     fn paint_translation_progress(
         &self,
         painter: &egui::Painter,
         maps: &[PageMap],
+        blank_faces: &[PageMap],
         active: usize,
         tokens: &Tokens,
         seconds: f64,
     ) {
         let tab = &self.tabs[active];
-        let Some(session) = tab.translation.as_ref().filter(|s| s.show_translated) else {
+        let facing = tab.is_facing();
+        for face in blank_faces {
+            painter.rect_filled(face.paper, 0, tokens.page);
+        }
+        let Some(session) = tab
+            .translation
+            .as_ref()
+            .filter(|session| facing || session.show_translated)
+        else {
             return;
         };
-        for map in maps {
-            for block in session.waiting_blocks(map.page) {
-                glyphst_ui::paint::shimmer_band(painter, map.rect_to_screen(block), tokens.accent);
+        for map in maps.iter().chain(blank_faces) {
+            let (page, face) = slot_page(map.page);
+            // The translation side shows what is on its way.
+            if face == facing {
+                for block in session.waiting_blocks(page) {
+                    glyphst_ui::paint::shimmer_band(
+                        painter,
+                        map.rect_to_screen(block),
+                        tokens.accent,
+                    );
+                }
             }
+        }
+        if facing
+            && self.drag.is_none()
+            && let Some(pos) = painter.ctx().pointer_hover_pos()
+        {
+            paint_partners(painter, maps, session, pos, tokens);
         }
         tab.reveals.paint(
             painter,
@@ -6494,12 +6567,15 @@ impl eframe::App for ReaderApp {
                 if let Some(wait) = session.follow(page, now) {
                     ctx.request_repaint_after(wait);
                 }
-                let shown = session.show_translated;
+                let facing = tab.layout.arrangement.facing;
+                let shown = session.show_translated || facing;
                 let seconds = self.started.elapsed().as_secs_f64();
                 for (page, revision, blocks) in session.take_reveals() {
                     if shown {
+                        // Facing, the translation sweeps in on its face.
+                        let slot = if facing { translation_slot(page) } else { page };
                         // The page's source version for the revision.
-                        tab.reveals.add(page, revision + 1, blocks, seconds);
+                        tab.reveals.add(slot, revision + 1, blocks, seconds);
                     }
                 }
             }
@@ -7088,6 +7164,64 @@ fn opening_zoom(mut position: DocumentPosition, remember: bool) -> DocumentPosit
         position.zoom = 1.0;
     }
     position
+}
+
+/// Beside its translation, the block under `pos` outlined on both sides:
+/// its translation on the face and its original on the page.
+fn paint_partners(
+    painter: &egui::Painter,
+    maps: &[PageMap],
+    session: &crate::translation::DocSession,
+    pos: egui::Pos2,
+    tokens: &Tokens,
+) {
+    use glyphst_pdf_translation_service::BoundingBox;
+    let Some(map) = crate::text_overlay::page_at(maps, pos) else {
+        return;
+    };
+    let (page, face) = slot_page(map.page);
+    let Some(preview) = session.previews.get(&page) else {
+        return;
+    };
+    let point = map.page_point(pos);
+    let inside = |b: &BoundingBox| {
+        point[0] >= b.x0 && point[0] <= b.x1 && point[1] >= b.y0 && point[1] <= b.y1
+    };
+    let area = |b: &BoundingBox| (b.x1 - b.x0) * (b.y1 - b.y0);
+    let Some(region) = preview
+        .hover
+        .iter()
+        .filter(|region| region.translated)
+        .filter(|region| {
+            if face {
+                inside(&region.target_bounds)
+            } else {
+                region.source_regions.iter().any(inside)
+            }
+        })
+        .min_by(|a, b| area(&a.target_bounds).total_cmp(&area(&b.target_bounds)))
+    else {
+        return;
+    };
+    let outline = |map: &PageMap, b: &BoundingBox| {
+        let rect = map.rect_to_screen([b.x0, b.y0, b.x1, b.y1]).expand(3.0);
+        painter.rect(
+            rect,
+            2,
+            tokens.accent.gamma_multiply(0.08),
+            egui::Stroke::new(1.0, tokens.accent),
+            egui::StrokeKind::Outside,
+        );
+    };
+    let by_slot = |slot: usize| maps.iter().find(|map| map.page == slot);
+    if let Some(face_map) = by_slot(translation_slot(page)) {
+        outline(face_map, &region.target_bounds);
+    }
+    if let Some(page_map) = by_slot(page) {
+        for source in &region.source_regions {
+            outline(page_map, source);
+        }
+    }
 }
 
 fn truncate(text: &str, limit: usize) -> String {

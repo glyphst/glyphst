@@ -44,6 +44,21 @@ const THUMBNAIL_MAX_POINTS: usize = 200_000;
 const LAYER_SCALE: f32 = 4.0;
 const MAX_LAYER_DIMENSION: u32 = 4096;
 
+/// When pages show beside their translation (frame 02n), a page's
+/// translation face is loaded and drawn as a slot of its own, past every
+/// page index; nothing else (text, thumbnails, positions) knows it.
+pub const TRANSLATION_FACE: usize = 1 << 40;
+
+/// The slot of `page`'s translation face.
+pub fn translation_slot(page: usize) -> usize {
+    page | TRANSLATION_FACE
+}
+
+/// The page a slot shows, and whether it is the page's translation face.
+pub fn slot_page(slot: usize) -> (usize, bool) {
+    (slot & !TRANSLATION_FACE, slot & TRANSLATION_FACE != 0)
+}
+
 /// How pages are arranged: turned by quarter turns, and one or two to a
 /// row (a book's spread, the first page alone).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +66,9 @@ pub struct Arrangement {
     /// Quarter turns clockwise (0-3).
     pub rotation: u8,
     pub spread: bool,
+    /// Each page with its translation beside it (frame 02n); a spread is
+    /// not, then.
+    pub facing: bool,
 }
 
 /// Pages in rows, one or two to a row, each row centered on the widest.
@@ -85,10 +103,11 @@ impl Layout {
             [f64::from(b[2] - b[0]), f64::from(b[3] - b[1])]
         };
         // Rows: the first page alone, then pairs, when spread.
+        let spread = arrangement.spread && !arrangement.facing;
         let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
         let mut page = 0;
         while page < bounds.len() {
-            let end = if arrangement.spread && page > 0 {
+            let end = if spread && page > 0 {
                 (page + 2).min(bounds.len())
             } else {
                 page + 1
@@ -96,9 +115,11 @@ impl Layout {
             rows.push(page..end);
             page = end;
         }
+        // Facing, a page's translation takes as much room again.
+        let faces = if arrangement.facing { 2.0 } else { 1.0 };
         let row_width = |row: &std::ops::Range<usize>| {
-            row.clone().map(|page| size(page)[0]).sum::<f64>()
-                + PAGE_GAP * (row.len().saturating_sub(1)) as f64
+            row.clone().map(|page| size(page)[0] * faces).sum::<f64>()
+                + PAGE_GAP * (row.len() as f64 * faces - 1.0).max(0.0)
         };
         let width = rows.iter().map(row_width).fold(0.0, f64::max);
         let mut offsets = vec![[0.0; 2]; bounds.len()];
@@ -131,6 +152,11 @@ impl Layout {
     pub fn page_size(&self, page: usize) -> [f64; 2] {
         let b = self.turned[page];
         [f64::from(b[2] - b[0]), f64::from(b[3] - b[1])]
+    }
+
+    /// How far right of a page its translation face is, when facing.
+    pub fn face_offset(&self, page: usize) -> f64 {
+        self.page_size(page)[0] + PAGE_GAP
     }
 
     /// The document position of a page point.
@@ -220,6 +246,18 @@ impl Layout {
             viewport,
             rotation: self.arrangement.rotation,
         }
+    }
+
+    /// [`Layout::page_camera`] for the translation face beside `page`.
+    pub fn face_camera(
+        &self,
+        page: usize,
+        origin: [f64; 2],
+        scale: f32,
+        viewport: [u32; 2],
+    ) -> Camera {
+        let shifted = [origin[0] - self.face_offset(page), origin[1]];
+        self.page_camera(page, shifted, scale, viewport)
     }
 }
 
@@ -825,6 +863,10 @@ fn load_page(
         })) => {
             if !send(loaded) {
                 return None;
+            }
+            // A translation face beside its page has neither: the page has.
+            if slot_page(page).1 {
+                return list;
             }
             // The display list, thumbnail and text follow the page, so a
             // dense page shows without waiting for them; a page whose list

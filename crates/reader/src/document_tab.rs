@@ -24,7 +24,7 @@ use crate::{
     doc_text::DocText,
     document::{
         Arrangement, DocumentInfo, Indexer, Layout, Loaded, Loader, OutlineEntry, PAGE_GAP,
-        PageSource, View,
+        PageSource, View, slot_page, translation_slot,
     },
     find::Find,
     generation::PageSketch,
@@ -456,6 +456,9 @@ impl DocumentTab {
                 } => {
                     self.sketches.insert(page, (version, sketch));
                 }
+                Loaded::Thumbnail { page, .. } | Loaded::OriginalText { page, .. }
+                    if slot_page(page).1 => {}
+                Loaded::Text { page, .. } if slot_page(page).1 => {}
                 Loaded::Thumbnail { page, image } => {
                     let texture = ctx.load_texture(
                         format!("thumbnail-{}-{page}", self.id),
@@ -616,14 +619,20 @@ impl DocumentTab {
         self.loading_since.remove(&page);
     }
 
-    /// Where `page` is drawn from: its translation when one is shown,
-    /// otherwise the document.
+    /// Where `page` (or a translation face's slot) is drawn from: its
+    /// translation when one is shown, otherwise the document. Facing, a
+    /// page always shows the document and its face the translation.
     pub fn source(&self, page: usize) -> PageSource {
-        match self
-            .translation
-            .as_ref()
-            .and_then(|session| session.shown_preview(page))
-        {
+        let (page, face) = slot_page(page);
+        let session = self.translation.as_ref();
+        let preview = if face {
+            session.and_then(|session| session.previews.get(&page))
+        } else if self.layout.arrangement.facing {
+            None
+        } else {
+            session.and_then(|session| session.shown_preview(page))
+        };
+        match preview {
             Some(preview) => PageSource::Preview {
                 revision: preview.revision,
                 pdf: preview.pdf.clone(),
@@ -1652,7 +1661,7 @@ impl DocumentTab {
                 // Drawing starts `inset` left of the laid-out view.
                 let mut view = self.view;
                 view.origin[0] -= self.inset / view.scale;
-                let draws = visible
+                let mut draws: Vec<PageDraw> = visible
                     .clone()
                     .map(|page| self.page_draw(page, &view, viewport))
                     .collect();
@@ -1664,6 +1673,24 @@ impl DocumentTab {
                     }
                 }
                 wanted.retain(|&page| page < self.layout.len());
+                // Facing, each translated page's face beside it, wanted
+                // after the pages themselves.
+                if self.layout.arrangement.facing
+                    && let Some(session) = &self.translation
+                {
+                    let faces: Vec<usize> = wanted
+                        .iter()
+                        .copied()
+                        .filter(|page| session.previews.contains_key(page))
+                        .collect();
+                    draws.extend(
+                        faces
+                            .iter()
+                            .filter(|page| visible.contains(page))
+                            .map(|&page| self.face_draw(page, &view, viewport)),
+                    );
+                    wanted.extend(faces.into_iter().map(translation_slot));
+                }
                 (draws, wanted)
             }
         }
@@ -1675,7 +1702,35 @@ impl DocumentTab {
         if !self.fitted {
             return Vec::new();
         }
-        self.draws_and_wanted(viewport).0
+        let mut draws = self.draws_and_wanted(viewport).0;
+        draws.retain(|draw| !slot_page(draw.page).1);
+        draws
+    }
+
+    /// Whether pages show beside their translation.
+    pub fn is_facing(&self) -> bool {
+        self.layout.arrangement.facing && self.present.is_none()
+    }
+
+    /// The translation faces in view with nothing to show yet, drawn as
+    /// their slots.
+    pub fn blank_faces(&self, viewport: [u32; 2]) -> Vec<PageDraw> {
+        if !self.is_facing() || !self.fitted {
+            return Vec::new();
+        }
+        let y1 = self.view.origin[1] + self.viewport[1] / self.view.scale;
+        let mut view = self.view;
+        view.origin[0] -= self.inset / view.scale;
+        let translated = |page| {
+            self.translation
+                .as_ref()
+                .is_some_and(|s| s.previews.contains_key(&page))
+        };
+        self.layout
+            .visible(self.view.origin[1], y1)
+            .filter(|&page| !translated(page))
+            .map(|page| self.face_draw(page, &view, viewport))
+            .collect()
     }
 
     /// Placeholders for the pages of `frame` that `resident` says are not
@@ -1700,6 +1755,19 @@ impl DocumentTab {
             self.layout.offsets[page][1] + (height - size[1] / scale) / 2.0,
         ];
         self.page_draw(page, &view, viewport)
+    }
+
+    /// The translation face beside `page`, drawn as its slot.
+    fn face_draw(&self, page: usize, view: &View, viewport: [u32; 2]) -> PageDraw {
+        let mut draw = self.page_draw(page, view, viewport);
+        let shift = (self.layout.face_offset(page) * view.scale) as f32;
+        draw.page = translation_slot(page);
+        draw.camera = self
+            .layout
+            .face_camera(page, view.origin, view.scale as f32, viewport);
+        draw.paper[0] += shift;
+        draw.paper[2] += shift;
+        draw
     }
 
     fn page_draw(&self, page: usize, view: &View, viewport: [u32; 2]) -> PageDraw {
@@ -2295,6 +2363,7 @@ mod tests {
         tab.arrange(Arrangement {
             rotation: 0,
             spread: true,
+            facing: false,
         });
         let layout = &tab.layout;
         // The first page alone, then pairs side by side.
@@ -2321,11 +2390,46 @@ mod tests {
     }
 
     #[test]
+    fn facing_lays_each_page_beside_its_translation() {
+        let mut tab = tab(4);
+        let single_width = tab.layout.width;
+        tab.arrange(Arrangement {
+            rotation: 0,
+            spread: true,
+            facing: true,
+        });
+        let layout = &tab.layout;
+        // One page a row, as wide as two with the gap; a spread gives way.
+        assert!((layout.width - (2.0 * single_width + PAGE_GAP)).abs() < 1e-9);
+        assert!(layout.offsets[1][1] > layout.offsets[0][1]);
+        assert_eq!(layout.offsets[0][0], 0.0);
+        assert!((layout.face_offset(0) - (single_width + PAGE_GAP)).abs() < 1e-9);
+        settle(&mut tab);
+        // Nothing translated yet: each face in view is blank paper, right
+        // of its page, and only the pages are hit.
+        let viewport = [1200, 900];
+        let faces = tab.blank_faces(viewport);
+        let pages = tab.visible_draws(viewport);
+        assert!(!faces.is_empty() && faces.len() == pages.len());
+        for (face, page) in faces.iter().zip(&pages) {
+            assert_eq!(slot_page(face.page), (page.page, true));
+            assert!(face.paper[0] > page.paper[2]);
+            assert_eq!(face.paper[1], page.paper[1]);
+        }
+        assert!(pages.iter().all(|draw| !slot_page(draw.page).1));
+        assert!(matches!(
+            tab.source(translation_slot(0)),
+            PageSource::Original
+        ));
+    }
+
+    #[test]
     fn turned_pages_lie_on_their_side_and_map_points_back() {
         let mut tab = tab(3);
         tab.arrange(Arrangement {
             rotation: 1,
             spread: false,
+            facing: false,
         });
         let layout = &tab.layout;
         assert_eq!(layout.page_size(0), [800.0, 600.0]);

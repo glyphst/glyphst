@@ -106,6 +106,8 @@ pub enum SidebarAction {
     StartTranslation,
     /// Translate every page of a session that follows the reader.
     TranslateRest,
+    /// Show pages beside their translation, or in place.
+    SetFacing(bool),
     CancelTranslation,
     ExportTranslation(ExportLayout),
     ShowTranslated(bool),
@@ -438,6 +440,31 @@ fn translation_panel(
         });
     }
     ui.add_space(10.0);
+    // Where translated pages go: over the originals, or beside them.
+    ui.horizontal(|ui| {
+        ui.set_min_height(25.0);
+        ui.label(
+            egui::RichText::new("view")
+                .font(theme::mono(12.0))
+                .color(if is_pdf { tokens.text_2 } else { tokens.faint }),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut facing = tab.layout.arrangement.facing;
+            if ui
+                .add_enabled_ui(is_pdf, |ui| {
+                    segmented::labels(
+                        ui,
+                        &mut facing,
+                        &[(false, "in place"), (true, "side by side")],
+                    )
+                })
+                .inner
+            {
+                actions.push(SidebarAction::SetFacing(facing));
+            }
+        });
+    });
+    ui.add_space(4.0);
     let mut hover = info.original_on_hover;
     if switch_row(ui, "original on hover", &mut hover, true) {
         actions.push(SidebarAction::SetOriginalOnHover(hover));
@@ -528,12 +555,15 @@ fn translation_panel(
                 .max_rect(foot)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        let mut shown = session.show_translated;
-        if segmented::labels(
-            &mut foot_ui,
-            &mut shown,
-            &[(true, "translated"), (false, "original")],
-        ) {
+        // Beside their translation, both are in view already.
+        let facing = tab.layout.arrangement.facing;
+        let mut shown = session.show_translated || facing;
+        let changed = foot_ui
+            .add_enabled_ui(!facing, |ui| {
+                segmented::labels(ui, &mut shown, &[(true, "translated"), (false, "original")])
+            })
+            .inner;
+        if changed {
             actions.push(SidebarAction::ShowTranslated(shown));
         }
         foot_ui.add_space(8.0);
