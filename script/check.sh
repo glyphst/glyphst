@@ -283,6 +283,7 @@ if [[ ${tier} == screens ]]; then
         "04s-library-write-page --ai-fake --library-demo page-cost"
         "04v-library-history --library-demo history"
         "02h-outside-library @ --library-demo outside"
+        "04w-library-processing --library-demo processing"
         "04h-library-backfill --ai-fake --library-demo backfill"
         "04k-library-folder --library-demo folder"
         "04t-library-join --library-demo join"

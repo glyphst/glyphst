@@ -12,7 +12,7 @@ pub mod search;
 pub mod store;
 pub mod vectors;
 
-pub use index::{IndexStatus, ItemText, LibraryFile, Snapshot};
+pub use index::{IndexStatus, ItemText, ItemTextState, LibraryFile, Snapshot};
 pub use indexer::Indexer;
 pub use search::{ChunkLocation, Fusion, ItemHit, PageHit, Query, SearchRequest, SearchResults};
 pub use store::{SCHEMA_VERSION, Store};

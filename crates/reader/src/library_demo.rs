@@ -11,7 +11,7 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 23] = [
+pub const STATES: [&str; 24] = [
     "all",
     "item",
     "pages",
@@ -25,6 +25,7 @@ pub const STATES: [&str; 23] = [
     "search-failed",
     "history",
     "outside",
+    "processing",
     "backfill",
     "folder",
     "identifier",
@@ -315,6 +316,80 @@ pub fn library(document: Option<&std::path::Path>) -> LibraryStore {
         );
     }
     library
+}
+
+/// For frame 04w: two papers just added, one still finding its details
+/// and one whose text is being read before its summary, with what the
+/// search index says of them. Returns the second (for the item pane).
+pub fn processing(
+    library: &mut LibraryStore,
+) -> Option<(DocumentId, glyphst_search::indexer::ItemStates)> {
+    use glyphst_library::{LibraryJobKind, LibraryJobOrigin};
+    let folder =
+        std::env::temp_dir().join(format!("glyphst-processing-demo-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&folder);
+    let mut add = |name: &str| {
+        let path = folder.join(name);
+        let _ = std::fs::write(&path, format!("%PDF-1.4\n% {name}\n"));
+        match library.link_item(&path, LibraryItemMetadata::for_path(&path), None) {
+            Ok(LibraryImportOutcome::Added(id)) => Some(id),
+            _ => None,
+        }
+    };
+    let new = add("2410.01234v2.pdf")?;
+    let read = add("mixture-of-depths.pdf")?;
+    let mut item = library.library_item(read)?.clone();
+    item.title =
+        "Mixture-of-Depths: Dynamically allocating compute in transformer-based language models"
+            .to_string();
+    item.creators = [
+        "David Raposo",
+        "Sam Ritter",
+        "Blake Richards",
+        "Timothy Lillicrap",
+    ]
+    .iter()
+    .map(|name| LibraryCreator {
+        name: name.to_string(),
+        role: LibraryCreatorRole::Author,
+    })
+    .collect();
+    item.year = Some(2024);
+    item.publication = "arXiv".to_string();
+    let _ = library.update_library_item_metadata(item);
+    let _ = library.set_metadata_record(
+        read,
+        MetadataRecord {
+            source: MetadataSource::Arxiv,
+            matched_identifier: Some("arxiv:2404.02258".to_string()),
+            ..MetadataRecord::default()
+        },
+    );
+    let _ = library.enqueue_library_jobs(
+        &[new],
+        LibraryJobKind::Metadata,
+        LibraryJobOrigin::Import,
+        false,
+    );
+    // The lookup is under way.
+    let _ = library.take_library_jobs(LibraryJobKind::Metadata, 1);
+    let _ = library.enqueue_library_jobs(
+        &[read],
+        LibraryJobKind::Enrich,
+        LibraryJobOrigin::Import,
+        false,
+    );
+    let states = std::collections::HashMap::from([
+        (new.0, glyphst_search::ItemTextState::Queued),
+        (
+            read.0,
+            glyphst_search::ItemTextState::Reading {
+                pages_done: 4,
+                pages: 12,
+            },
+        ),
+    ]);
+    Some((read, std::sync::Arc::new(states)))
 }
 
 /// For frames 04l and 04m: tag colours, the first paper's related items,

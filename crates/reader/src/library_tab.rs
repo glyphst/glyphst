@@ -23,6 +23,7 @@ use glyphst_ui::{
 pub mod columns;
 mod menus;
 mod pages_view;
+pub mod progress;
 mod search_view;
 
 use columns::{Column, Layout, Natural};
@@ -73,6 +74,8 @@ pub enum LibraryTabAction {
     },
     /// Run the AI pass on the item again.
     Enrich(DocumentId),
+    /// Look the item's details up again.
+    LookUp(DocumentId),
     /// Keep or reject one of the AI's tags or collections.
     Accept(DocumentId, AssignmentTarget),
     Reject(DocumentId, AssignmentTarget),
@@ -180,6 +183,8 @@ pub struct TabContext<'a> {
     pub writing: &'a [(u64, String)],
     /// The table's columns the user turned off.
     pub hidden_columns: &'a [Column],
+    /// How far each paper is (04w).
+    pub progress: &'a progress::Progress,
 }
 
 #[derive(Default)]
@@ -682,7 +687,15 @@ impl LibraryTab {
                 plural(history_outside(library).len(), "file")
             )
         } else {
-            format!("{} items", ids.len())
+            let busy = ids
+                .iter()
+                .filter(|id| context.progress.is_busy(**id))
+                .count();
+            if busy > 0 {
+                format!("{} items · {busy} being processed", ids.len())
+            } else {
+                format!("{} items", ids.len())
+            }
         };
         if searching.is_some() {
             counts = context
@@ -925,6 +938,7 @@ impl LibraryTab {
                     // Dragged onto a collection in the pane.
                     let response = response.interact(Sense::click_and_drag());
                     let mut chips = Vec::new();
+                    let mut row_hint = None;
                     let duplicate = possible_duplicate(library, item);
                     if ui.is_rect_visible(row) {
                         seen = seen.max(natural_widths(ui, library, item));
@@ -941,9 +955,13 @@ impl LibraryTab {
                                 paint_duplicate_row(ui, tokens, row, &columns, item, other);
                             }
                             None => {
+                                let shown = context.progress.of(library, item);
                                 chips = paint_item_row(
-                                    ui, tokens, row, &columns, library, item, doc, selected,
+                                    ui, tokens, row, &columns, library, item, doc, selected, &shown,
                                 );
+                                if let Some(now) = shown.now() {
+                                    row_hint = Some(now.to_string());
+                                }
                             }
                         }
                     }
@@ -989,6 +1007,10 @@ impl LibraryTab {
                             action = self.take_choice(choice, library, ui).or(action.take());
                         }
                     }
+                    let response = match row_hint {
+                        Some(hint) if !on_chip => response.on_hover_text(hint),
+                        _ => response,
+                    };
                     if !on_chip && (response.clicked() || response.secondary_clicked()) {
                         self.selected = Some(*id);
                     }
@@ -1445,6 +1467,7 @@ impl LibraryTab {
         let library = context.library;
         let id = item.id;
         let mut action = None;
+        let progress = context.progress.of(library, item);
 
         // The cover, title, authors, venue and where the metadata came from.
         ui.horizontal_top(|ui| {
@@ -1495,11 +1518,27 @@ impl LibraryTab {
                         }
                         line
                     })
-                    .unwrap_or_else(|| "looking it up…".to_string());
+                    .unwrap_or_else(|| {
+                        if progress.finding_details() {
+                            "finding its details…".to_string()
+                        } else {
+                            "no details found".to_string()
+                        }
+                    });
                 mono_line(ui, &source, tokens.faint, 10.0);
             });
         });
         ui.add_space(10.0);
+
+        // While the library works on it, or something went wrong: its
+        // stages (04w).
+        let no_details = matches!(progress.details, progress::Step::Off(Some(_)));
+        if progress.busy() || progress.failed().is_some() || no_details {
+            if let Some(chosen) = progress_list(ui, tokens, item, &progress) {
+                action = Some(chosen);
+            }
+            ui.add_space(10.0);
+        }
 
         // The work it may duplicate, to merge or keep apart (frame 04l).
         if let Some(other) = possible_duplicate(library, item) {
@@ -1545,6 +1584,24 @@ impl LibraryTab {
                 });
             }
             ui.add_space(10.0);
+        } else if progress.summarising() {
+            // The summary on its way.
+            flush_rule(ui, "summary", None);
+            ui.add_space(4.0);
+            let width = ui.available_width();
+            for share in [0.95, 0.88, 0.97, 0.6] {
+                let (bar, _) = ui.allocate_exact_size(vec2(width, 16.0), Sense::hover());
+                glyphst_ui::paint::shimmer_rect(
+                    ui,
+                    Rect::from_min_size(
+                        bar.left_center() - vec2(0.0, 5.0),
+                        vec2(width * share, 10.0),
+                    ),
+                    tokens.rule,
+                    tokens.accent_soft,
+                );
+            }
+            ui.add_space(10.0);
         } else if !item.abstract_text.is_empty() {
             flush_rule(ui, "abstract", None);
             ui.add(
@@ -1562,7 +1619,15 @@ impl LibraryTab {
         flush_rule(ui, "tags", None);
         let assignments = library.ai_assignments(id).to_vec();
         let tags = library.tags_for_item(id);
-        if tags.is_empty() {
+        if tags.is_empty() && progress.summarising() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for width in [74.0, 52.0, 90.0] {
+                    let (chip, _) = ui.allocate_exact_size(vec2(width, 19.0), Sense::hover());
+                    glyphst_ui::paint::shimmer_rect(ui, chip, tokens.rule, tokens.accent_soft);
+                }
+            });
+        } else if tags.is_empty() {
             mono_line(ui, "no tags yet", tokens.faint, 11.0);
         } else {
             let mut choice = None;
@@ -2153,11 +2218,21 @@ fn paint_item_row(
     item: &LibraryItem,
     doc: Option<&Doc>,
     selected: bool,
+    progress: &progress::ItemProgress,
 ) -> Vec<(Rect, LibraryTagId)> {
     ui.painter()
         .hline(rect.x_range(), rect.bottom() - 0.5, tokens.hairline());
     let y = rect.center().y;
     let mono = theme::mono(11.0);
+    // Where something is still being worked out, a shimmering bar (04w).
+    let skeleton = |x: f32, width: f32| {
+        let bar = Rect::from_min_size(
+            pos2(rect.left() + x + 8.0, y - 4.5),
+            vec2((width - 12.0).max(8.0), 9.0),
+        );
+        glyphst_ui::paint::shimmer_rect(ui, bar, tokens.rule, tokens.accent_soft);
+    };
+    let details = progress.finding_details();
     let cell = |x: f32, width: f32, value: &str, font: egui::FontId, color: egui::Color32| {
         text::row(
             ui,
@@ -2178,13 +2253,20 @@ fn paint_item_row(
                 theme::regular(13.0),
                 if selected { tokens.text } else { tokens.text_2 },
             ),
+            Column::Authors if details && item.creators.is_empty() => {
+                skeleton(x, width.min(150.0) * 0.8);
+            }
             Column::Authors => {
                 let names = columns::authors_fit(&surnames(item), width - 12.0, |line| {
                     text::width(ui, line, &mono)
                 });
                 cell(x, width, &names, mono.clone(), tokens.muted);
             }
+            Column::Venue if details && item.publication.is_empty() => {
+                skeleton(x, width.min(120.0) * 0.8);
+            }
             Column::Venue => cell(x, width, &item.publication, mono.clone(), tokens.muted),
+            Column::Year if details && item.year.is_none() => skeleton(x, width),
             Column::Year => cell(
                 x,
                 width,
@@ -2199,6 +2281,10 @@ fn paint_item_row(
                 mono.clone(),
                 tokens.faint,
             ),
+            Column::Tags if progress.summarising() && library.tags_for_item(item.id).is_empty() => {
+                skeleton(x, 64.0);
+                skeleton(x + 60.0, 52.0);
+            }
             Column::Tags => {
                 chips = paint_tag_row(
                     ui,
@@ -2209,6 +2295,11 @@ fn paint_item_row(
                     rect.left() + x + width - 4.0,
                     y,
                 );
+            }
+            Column::Read
+                if progress.failed().is_some() && doc.and_then(Doc::progress).is_none() =>
+            {
+                cell(x, width, "!", mono.clone(), tokens.err);
             }
             Column::Read => match doc.and_then(Doc::progress) {
                 Some(progress) if progress >= 0.999 => {
@@ -2415,6 +2506,91 @@ fn paint_cover(
         }
     }
     painter.rect_stroke(rect, 0, tokens.hairline(), egui::StrokeKind::Inside);
+}
+
+/// A paper's stages, one a line: `✓` done, `◌` under way (shimmering),
+/// `○` waiting, `!` failed with `[ try again ]`, `·` not coming and why.
+fn progress_list(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    item: &LibraryItem,
+    progress: &progress::ItemProgress,
+) -> Option<LibraryTabAction> {
+    use progress::Step;
+    let mut action = None;
+    egui::Frame::new()
+        .fill(tokens.surface)
+        .corner_radius(tokens.ctl_radius())
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let added = Step::Done(format!("added · {}", short_date(item.created)));
+            let steps = [
+                (&added, None),
+                (&progress.details, Some(LibraryTabAction::LookUp(item.id))),
+                (&progress.text, None),
+                (&progress.meaning, None),
+                (&progress.summary, Some(LibraryTabAction::Enrich(item.id))),
+            ];
+            for (step, retry) in steps {
+                let Some(label) = step.label() else {
+                    continue;
+                };
+                let (mark, mark_color, color) = match step {
+                    Step::Done(_) => ("✓", tokens.ok, tokens.muted),
+                    Step::Active(_) => ("◌", tokens.accent_text, tokens.accent_text),
+                    Step::Waiting(_) => ("○", tokens.faint, tokens.faint),
+                    Step::Failed(_) => ("!", tokens.err, tokens.err),
+                    Step::Off(_) => ("·", tokens.faint, tokens.faint),
+                };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(
+                        egui::RichText::new(mark)
+                            .font(theme::mono(11.0))
+                            .color(mark_color),
+                    );
+                    if matches!(step, Step::Active(_)) && !glyphst_ui::motion::is_reduced(ui.ctx())
+                    {
+                        let galley = ui.painter().layout_no_wrap(
+                            label.to_string(),
+                            theme::mono(11.0),
+                            color,
+                        );
+                        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+                        glyphst_ui::paint::shimmer_text(ui, rect.min, galley, color, tokens.text);
+                    } else {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(label)
+                                    .font(theme::mono(11.0))
+                                    .color(color),
+                            )
+                            .truncate(),
+                        );
+                    }
+                    let again = match (step, &retry) {
+                        (Step::Failed(_), Some(_)) => Some("try again"),
+                        (Step::Off(Some(_)), Some(LibraryTabAction::LookUp(_))) => {
+                            Some("look up again")
+                        }
+                        _ => None,
+                    };
+                    if let Some(again) = again
+                        && ui.add(Button::bracket_muted(again).small()).clicked()
+                    {
+                        action = match retry {
+                            Some(LibraryTabAction::LookUp(id)) => {
+                                Some(LibraryTabAction::LookUp(id))
+                            }
+                            _ => Some(LibraryTabAction::Enrich(item.id)),
+                        };
+                    }
+                });
+            }
+        });
+    action
 }
 
 /// The summary's rule: `summary`, its date (the model on hover) and

@@ -904,6 +904,7 @@ impl ReaderApp {
             return;
         };
         let docs = crate::home::documents(&self.library, &self.prefs.page_counts);
+        let progress = self.library_progress();
         let vault = self
             .prefs
             .library
@@ -926,6 +927,7 @@ impl ReaderApp {
                 topics: &[],
                 writing: &[],
                 hidden_columns: &[],
+                progress: &progress,
             },
             card,
             id,

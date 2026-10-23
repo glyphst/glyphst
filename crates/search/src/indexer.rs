@@ -19,7 +19,7 @@ use crate::{
     chunk::chunk_page,
     embed::Embedder,
     extract::{DocReader, format_name},
-    index::{DocJob, IndexStatus, Snapshot, Step},
+    index::{DocJob, IndexStatus, ItemTextState, Snapshot, Step},
     store::Store,
 };
 
@@ -40,11 +40,15 @@ enum Command {
     Stop,
 }
 
+/// Each item's text state, as last published.
+pub type ItemStates = Arc<std::collections::HashMap<u64, ItemTextState>>;
+
 /// The indexing thread, stopped when dropped.
 pub struct Indexer {
     commands: Sender<Command>,
     paused: Arc<AtomicBool>,
     status: Arc<Mutex<IndexStatus>>,
+    items: Arc<Mutex<ItemStates>>,
     error: Arc<Mutex<Option<String>>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -55,11 +59,14 @@ impl Indexer {
     pub fn start(path: PathBuf, notify: impl Fn() + Send + 'static) -> Result<Self> {
         let store = Store::open(&path)?;
         let status = Arc::new(Mutex::new(store.status()?));
+        let items = Arc::new(Mutex::new(Arc::new(
+            store.item_text_states(None).unwrap_or_default(),
+        )));
         let (commands, receiver) = mpsc::channel();
         let paused = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
-        let (worker_paused, worker_status, worker_error) =
-            (paused.clone(), status.clone(), error.clone());
+        let (worker_paused, worker_status, worker_error, worker_items) =
+            (paused.clone(), status.clone(), error.clone(), items.clone());
         // Built on its thread: an open document stays there.
         let handle = std::thread::Builder::new()
             .name("search-index".to_string())
@@ -69,6 +76,7 @@ impl Indexer {
                     commands: receiver,
                     paused: worker_paused,
                     status: worker_status,
+                    items: worker_items,
                     error: worker_error,
                     notify: Box::new(notify),
                     open: None,
@@ -81,6 +89,7 @@ impl Indexer {
             commands,
             paused,
             status,
+            items,
             error,
             handle: Some(handle),
         })
@@ -113,6 +122,14 @@ impl Indexer {
         self.status.lock().map(|status| *status).unwrap_or_default()
     }
 
+    /// Each item's text state, as of the last step.
+    pub fn item_states(&self) -> ItemStates {
+        self.items
+            .lock()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    }
+
     /// The last error the index itself hit (not a document's).
     pub fn error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|error| error.clone())
@@ -142,6 +159,7 @@ struct Worker {
     commands: Receiver<Command>,
     paused: Arc<AtomicBool>,
     status: Arc<Mutex<IndexStatus>>,
+    items: Arc<Mutex<ItemStates>>,
     error: Arc<Mutex<Option<String>>>,
     notify: Box<dyn Fn() + Send>,
     open: Option<Open>,
@@ -321,6 +339,12 @@ impl Worker {
             }
             *shared = status;
         }
+        let model = self.embedder.as_ref().map(|embedder| embedder.model_key());
+        if let Ok(states) = self.store.item_text_states(model)
+            && let Ok(mut shared) = self.items.lock()
+        {
+            *shared = Arc::new(states);
+        }
         (self.notify)();
     }
 
@@ -408,6 +432,7 @@ pub(crate) fn run_steps(store: Store, steps: usize) -> Store {
         commands: receiver,
         paused: Arc::new(AtomicBool::new(false)),
         status: Arc::new(Mutex::new(IndexStatus::default())),
+        items: Arc::default(),
         error: Arc::new(Mutex::new(None)),
         notify: Box::new(|| {}),
         open: None,
@@ -432,6 +457,7 @@ pub(crate) fn run_embed(store: Store, embedder: Arc<dyn Embedder>, batches: usiz
         commands: receiver,
         paused: Arc::new(AtomicBool::new(false)),
         status: Arc::new(Mutex::new(IndexStatus::default())),
+        items: Arc::default(),
         error: Arc::new(Mutex::new(None)),
         notify: Box::new(|| {}),
         open: None,

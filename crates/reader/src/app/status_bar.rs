@@ -122,13 +122,21 @@ impl ReaderApp {
                 .priority(1),
         ];
         // The library's background work (metadata, the AI pass).
-        let queued = self.library.library_jobs().len();
-        if queued > 0 || self.library_jobs.running() > 0 {
-            let text = if self.library_jobs.is_paused() {
+        let (queued, failed) = job_counts(self.library.library_jobs());
+        if queued > 0 || self.library_jobs.running() > 0 || failed > 0 {
+            let mut text = if queued == 0 && self.library_jobs.running() == 0 {
+                String::new()
+            } else if self.library_jobs.is_paused() {
                 format!("paused · {queued} queued")
             } else {
-                format!("summarising · {queued} queued")
+                format!("processing · {queued} queued")
             };
+            if failed > 0 {
+                if !text.is_empty() {
+                    text.push_str(" · ");
+                }
+                text.push_str(&format!("{failed} failed"));
+            }
             segments.insert(
                 1,
                 Segment::label("jobs", Side::Left, Some("sparkles"), text)
@@ -692,5 +700,42 @@ impl ReaderApp {
         if let Some(command) = requests.run {
             self.run_or_notify(command, &ctx);
         }
+    }
+}
+
+/// The library's jobs still to do (queued, running or waiting to retry)
+/// and the ones that failed for good.
+fn job_counts(jobs: &[glyphst_library::LibraryJob]) -> (usize, usize) {
+    let failed = jobs
+        .iter()
+        .filter(|job| matches!(job.state, glyphst_library::LibraryJobState::Failed { .. }))
+        .count();
+    (jobs.len() - failed, failed)
+}
+
+#[cfg(test)]
+mod job_count_tests {
+    use glyphst_library::{
+        DocumentId, LibraryJob, LibraryJobId, LibraryJobKind, LibraryJobOrigin, LibraryJobState,
+    };
+
+    #[test]
+    fn failed_jobs_are_not_counted_as_work_to_do() {
+        let job = |id, state| LibraryJob {
+            id: LibraryJobId(id),
+            item_id: DocumentId(id),
+            kind: LibraryJobKind::Enrich,
+            origin: LibraryJobOrigin::Import,
+            state,
+            attempts: 0,
+            force: false,
+            created: 0,
+        };
+        let jobs = [
+            job(1, LibraryJobState::Queued),
+            job(2, LibraryJobState::Running),
+            job(3, LibraryJobState::Failed { error: "no".into() }),
+        ];
+        assert_eq!(super::job_counts(&jobs), (2, 1));
     }
 }

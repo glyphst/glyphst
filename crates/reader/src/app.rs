@@ -467,6 +467,8 @@ pub struct ReaderApp {
     pub(crate) nav: crate::nav::NavHistory,
     /// A scripted run shows the canned library (`--library-demo`).
     demo_library: bool,
+    /// A scripted run's search index report (`--library-demo processing`).
+    demo_text: Option<glyphst_search::indexer::ItemStates>,
     /// The database was copied aside before syncing (once a run).
     sync_backed_up: bool,
     /// The sidebar's item card (its note, read once per item).
@@ -763,6 +765,7 @@ impl ReaderApp {
             library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
             nav: crate::nav::NavHistory::default(),
             demo_library: false,
+            demo_text: None,
             sync_backed_up: false,
             sidebar_card: Default::default(),
             library_dialog: None,
@@ -814,6 +817,14 @@ impl ReaderApp {
                         tab.selected = id;
                     }
                     "history" => tab.view = crate::library_tab::View::History,
+                    "processing" => {
+                        if let Some((id, text)) = crate::library_demo::processing(&mut app.library)
+                        {
+                            tab.view = crate::library_tab::View::Recent;
+                            tab.selected = Some(id);
+                            app.demo_text = Some(text);
+                        }
+                    }
                     search if search.starts_with("search") => {
                         tab.filter = "multi-head attention".to_string();
                         tab.selected = crate::library_demo::first_item(&app.library);
@@ -1738,6 +1749,11 @@ impl ReaderApp {
     /// Draws page tab `index` and does what it asks.
     fn show_page(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
         let meaning = self.meaning_card();
+        let progress = if matches!(self.pages.get(index), Some(Page::Library(_))) {
+            self.library_progress()
+        } else {
+            Default::default()
+        };
         let docs = || crate::home::documents(&self.library, &self.prefs.page_counts);
         match &mut self.pages[index] {
             Page::Keymap(page) => {
@@ -1779,6 +1795,7 @@ impl ReaderApp {
                         topics: &self.page_topics,
                         writing: &self.page_writing,
                         hidden_columns: &hidden_columns,
+                        progress: &progress,
                     },
                 );
                 if let Some(action) = action {
@@ -1837,11 +1854,29 @@ impl ReaderApp {
                 self.assistant.ask_about(item, &self.library);
                 Ok(())
             }
-            Action::Enrich(id) => self
+            Action::Enrich(id) => {
+                let queued = self.library.library_jobs().iter().any(|job| {
+                    job.item_id == id
+                        && job.kind == glyphst_library::LibraryJobKind::Enrich
+                        && !matches!(job.state, glyphst_library::LibraryJobState::Failed { .. })
+                });
+                if queued {
+                    self.notices.push("Already being summarised.");
+                }
+                self.library
+                    .enqueue_library_jobs(
+                        &[id],
+                        glyphst_library::LibraryJobKind::Enrich,
+                        glyphst_library::LibraryJobOrigin::Manual,
+                        true,
+                    )
+                    .map(|_| ())
+            }
+            Action::LookUp(id) => self
                 .library
                 .enqueue_library_jobs(
                     &[id],
-                    glyphst_library::LibraryJobKind::Enrich,
+                    glyphst_library::LibraryJobKind::Metadata,
                     glyphst_library::LibraryJobOrigin::Manual,
                     true,
                 )
@@ -3408,6 +3443,30 @@ impl ReaderApp {
                 .collect(),
             page_focused: self.page_focused.filter(|_| self.active.is_none()),
         }
+    }
+
+    /// How far the library is with each paper, this frame (04w).
+    pub(crate) fn library_progress(&self) -> crate::library_tab::progress::Progress {
+        use crate::library_tab::progress::{Progress, Summaries};
+        if let Some(text) = &self.demo_text {
+            return Progress::new(&self.library, Some(text.clone()), true, Summaries::On);
+        }
+        let model = self
+            .user_settings
+            .get()
+            .and_then(|settings| settings.ai.resolved_library());
+        let summaries = if model.is_none() {
+            Summaries::NoModel
+        } else if self.library_jobs.is_paused() {
+            Summaries::Paused
+        } else {
+            Summaries::On
+        };
+        let (text, meaning) = match &self.library_search {
+            Some(search) => (Some(search.item_states()), search.status().meaning),
+            None => (None, false),
+        };
+        Progress::new(&self.library, text, meaning, summaries)
     }
 
     /// Where the user is: the document, library view or page shown.

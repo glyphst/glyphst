@@ -504,6 +504,11 @@ impl SearchService {
         self.indexer.status()
     }
 
+    /// Each item's text state, as of the index's last step.
+    pub fn item_states(&self) -> glyphst_search::indexer::ItemStates {
+        self.indexer.item_states()
+    }
+
     pub fn set_paused(&self, paused: bool) {
         self.indexer.set_paused(paused);
     }

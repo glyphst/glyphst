@@ -746,3 +746,39 @@ fn items_close_in_meaning_are_neighbours_and_form_a_topic() {
     assert_eq!(items.clusters(5, 3), vec![vec![1, 2, 3]]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn each_item_says_how_far_its_text_is() {
+    let dir = folder("item-states");
+    let (attention, bert) = library(&dir);
+    let missing = dir.join("missing.pdf");
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .reconcile(
+            &Snapshot {
+                files: vec![file(1, attention, 1), file(2, bert, 2), file(3, missing, 3)],
+                items: vec![item(1, "Attention"), item(2, "BERT"), item(3, "Gone")],
+            },
+            0,
+        )
+        .unwrap();
+    let states = store.item_text_states(None).unwrap();
+    assert_eq!(states[&1], ItemTextState::Queued);
+    let store = run_steps(store, 10);
+    let states = store.item_text_states(None).unwrap();
+    assert_eq!(states[&1], ItemTextState::Done);
+    assert_eq!(states[&2], ItemTextState::Done);
+    // With a meaning model, read text still waits for its passages.
+    let states = store.item_text_states(Some("synonyms/7/1")).unwrap();
+    assert!(
+        matches!(states[&1], ItemTextState::Embedding { done: 0, passages } if passages > 0),
+        "{states:?}"
+    );
+    let store = crate::indexer::run_embed(store, std::sync::Arc::new(Synonyms), 5);
+    let states = store.item_text_states(Some("synonyms/7/1")).unwrap();
+    assert_eq!(states[&1], ItemTextState::Done);
+    assert!(
+        matches!(states[&3], ItemTextState::Failed | ItemTextState::Queued),
+        "{states:?}"
+    );
+}

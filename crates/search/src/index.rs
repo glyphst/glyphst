@@ -61,6 +61,30 @@ pub struct DocJob {
     pub attempts: u32,
 }
 
+/// How far one item's text is: read into the word index, then (with a
+/// meaning model) embedded passage by passage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemTextState {
+    Queued,
+    Reading { pages_done: usize, pages: usize },
+    Embedding { done: usize, passages: usize },
+    Done,
+    Failed,
+}
+
+impl ItemTextState {
+    /// How far along: the less done of two files' states wins.
+    fn rank(self) -> u8 {
+        match self {
+            ItemTextState::Failed => 0,
+            ItemTextState::Queued => 1,
+            ItemTextState::Reading { .. } => 2,
+            ItemTextState::Embedding { .. } => 3,
+            ItemTextState::Done => 4,
+        }
+    }
+}
+
 /// How far the index is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct IndexStatus {
@@ -369,6 +393,60 @@ impl Store {
             params![kind, mean, samples],
         )?;
         Ok(())
+    }
+
+    /// Each item's text state; `model_key` is the meaning model passages
+    /// are embedded with, when one runs.
+    pub fn item_text_states(
+        &self,
+        model_key: Option<&str>,
+    ) -> Result<std::collections::HashMap<u64, ItemTextState>> {
+        let mut statement = self.conn.prepare(
+            "SELECT f.item_id, d.state, d.page_count, d.pages_done, d.retry_at,
+                    COALESCE(c.n, 0), COALESCE(e.n, 0)
+             FROM item_files f
+             JOIN docs d ON d.id = f.doc_id
+             LEFT JOIN (SELECT doc_id, COUNT(*) AS n FROM chunks GROUP BY doc_id) c
+                 ON c.doc_id = d.id
+             LEFT JOIN (SELECT ch.doc_id, COUNT(*) AS n FROM vectors v
+                        JOIN chunks ch ON ch.id = v.chunk_id
+                        WHERE v.model_key = ?1 GROUP BY ch.doc_id) e
+                 ON e.doc_id = d.id",
+        )?;
+        let rows = statement.query_map([model_key.unwrap_or("")], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as usize,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, i64>(5)? as usize,
+                row.get::<_, i64>(6)? as usize,
+            ))
+        })?;
+        let mut states = std::collections::HashMap::new();
+        for row in rows {
+            let (item, state, pages, pages_done, retry_at, passages, embedded) = row?;
+            let state = match state.as_str() {
+                "failed" if retry_at.is_none() => ItemTextState::Failed,
+                "reading" => ItemTextState::Reading { pages_done, pages },
+                "done" if model_key.is_some() && embedded < passages => ItemTextState::Embedding {
+                    done: embedded,
+                    passages,
+                },
+                "done" => ItemTextState::Done,
+                _ => ItemTextState::Queued,
+            };
+            states
+                .entry(item)
+                .and_modify(|known: &mut ItemTextState| {
+                    if state.rank() < known.rank() {
+                        *known = state;
+                    }
+                })
+                .or_insert(state);
+        }
+        Ok(states)
     }
 
     /// The document with this content, if the index has it.

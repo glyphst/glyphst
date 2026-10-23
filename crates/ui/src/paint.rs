@@ -110,6 +110,44 @@ pub fn shimmer_text(
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
+/// A rounded bar in `base` with a brighter band (`peak`) sweeping across
+/// it: a placeholder where something being worked out will appear (frame
+/// 04w). With reduced motion it stays still. Bars painted in the same
+/// frame sweep together, as one band across the screen.
+pub fn shimmer_rect(ui: &egui::Ui, rect: Rect, base: Color32, peak: Color32) {
+    let painter = ui.painter();
+    let radius = (rect.height() / 3.0).min(3.0);
+    painter.rect_filled(rect, radius, base);
+    if motion::is_reduced(ui.ctx()) {
+        return;
+    }
+    // The band runs across the whole window, so neighbouring bars line up.
+    let screen = ui.ctx().content_rect();
+    let band = 140.0;
+    let time = ui.input(|i| i.time);
+    let phase = (time % motion::SHIMMER_PERIOD / motion::SHIMMER_PERIOD) as f32;
+    let center = screen.left() - band + phase * (screen.width() + 2.0 * band);
+    const STRIP: f32 = 3.0;
+    let clipped = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let mut x = (center - band).max(rect.left());
+    while x < (center + band).min(rect.right()) {
+        let distance = ((x + STRIP / 2.0 - center) / band).abs();
+        let strength = (1.0 - distance).clamp(0.0, 1.0).powi(2);
+        if strength > 0.02 {
+            clipped.rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(x, rect.top()),
+                    egui::pos2(x + STRIP, rect.bottom()),
+                ),
+                0,
+                theme::mix(base, peak, strength),
+            );
+        }
+        x += STRIP;
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
+}
+
 /// Three dots pulsing in turn, centred in `rect`: something is loading.
 pub fn loading_dots(ui: &egui::Ui, rect: Rect, color: Color32) {
     let time = ui.input(|i| i.time);
