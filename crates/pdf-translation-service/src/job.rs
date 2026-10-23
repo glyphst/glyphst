@@ -4,11 +4,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    mpsc as sync_mpsc,
-};
+use std::sync::{Arc, Mutex, mpsc as sync_mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow};
@@ -38,7 +34,7 @@ use glyphst_pdf_translation::{
 use glyphst_pdf_translation::{
     ScopedRun, TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot,
-    TranslationScope, translate_document_partial_resuming, translate_document_scoped,
+    TranslationScope, translate_document_scoped,
 };
 
 use crate::PdfTranslationConfig;
@@ -928,6 +924,7 @@ impl PdfTranslationService {
                     &source_fingerprint,
                     &inspection,
                     &all_pages,
+                    scope,
                     cancellation,
                     progress,
                     &mut publish_update,
@@ -945,6 +942,7 @@ impl PdfTranslationService {
                     &source_fingerprint,
                     &inspection,
                     &automatic_ocr_pages,
+                    scope,
                     cancellation,
                     progress,
                     &mut publish_update,
@@ -1651,6 +1649,7 @@ impl PdfTranslationService {
         document_id: &str,
         inspection: &PdfInspection,
         selected_pages: &[usize],
+        scope: &TranslationScope,
         cancellation: &CancellationToken,
         progress: &mut ProgressTracker,
         update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
@@ -1698,7 +1697,14 @@ impl PdfTranslationService {
                 pdf: extract_single_pdf_page(&request.source_path, *page_index),
             })
             .collect::<Vec<_>>();
-        let next_task = AtomicUsize::new(0);
+        // Pages left to recognise, taken most urgent first: a session
+        // following the reader recognises the pages around it, and waits
+        // for the reader (or the whole document) for the rest.
+        let remaining = Mutex::new(selected_pages.iter().copied().collect::<BTreeSet<_>>());
+        let task_of = tasks
+            .iter()
+            .map(|task| (task.page_index, task))
+            .collect::<HashMap<_, _>>();
         let (sender, receiver) = sync_mpsc::channel::<PageOcrWorkerResult>();
         let worker_count = bounded_ocr_worker_count(tasks.len());
         let mut results = Vec::with_capacity(tasks.len());
@@ -1713,50 +1719,41 @@ impl PdfTranslationService {
             provider_version: PIPELINE_VERSION.to_string(),
             extra: Default::default(),
         };
-        let mut emitted_prefix = ready_pages.iter().take_while(|page| page.is_some()).count();
-        let initial_prefix_document = (emitted_prefix > 0).then(|| {
-            let mut document = DocumentV1::new(
-                stream_metadata.clone(),
-                ready_pages[..emitted_prefix]
-                    .iter()
-                    .map(|page| page.as_ref().expect("ready prefix contains a page").clone())
-                    .collect(),
-            );
-            reconcile_provider_continuations(&mut document);
-            document
-        });
-        if let Some(document) = &initial_prefix_document {
-            for page in &document.pages {
-                ready_pages[page.page_index] = Some(page.clone());
-            }
-        }
-        for page_index in 0..emitted_prefix {
+        let contiguous =
+            |ready: &[Option<Page>]| ready.iter().take_while(|page| page.is_some()).count();
+        for page in ready_pages.iter().flatten() {
             update_sink(PdfTranslationSessionUpdate::PagePrepared {
                 metadata: stream_metadata.clone(),
-                page: ready_pages[page_index]
-                    .as_ref()
-                    .expect("ready prefix contains a page")
-                    .clone(),
+                page: page.clone(),
                 page_count: ready_pages.len(),
-                ready_prefix: emitted_prefix,
+                ready_prefix: contiguous(&ready_pages),
             });
         }
-        std::thread::scope(|scope| {
+        std::thread::scope(|threads| {
             for _ in 0..worker_count {
                 let sender = sender.clone();
                 let client = client.clone();
                 let native = &native;
-                let tasks = &tasks;
-                let next_task = &next_task;
-                scope.spawn(move || {
-                    loop {
-                        let task_index = next_task.fetch_add(1, AtomicOrdering::Relaxed);
-                        let Some(task) = tasks.get(task_index) else {
-                            break;
+                let (remaining, task_of) = (&remaining, &task_of);
+                threads.spawn(move || {
+                    while !cancellation.is_cancelled() {
+                        let view = scope.view();
+                        let next = {
+                            let mut remaining = remaining
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            if remaining.is_empty() {
+                                break;
+                            }
+                            take_ocr_page(&mut remaining, &view)
+                        };
+                        let Some(page) = next else {
+                            scope.wait_changed(view.generation(), OCR_SCOPE_POLL);
+                            continue;
                         };
                         let result = run_ocr_page(
                             &client,
-                            task,
+                            task_of[&page],
                             native,
                             target_pages,
                             &request.source_path,
@@ -1769,14 +1766,59 @@ impl PdfTranslationService {
                     }
                 });
             }
-            // Start translating a native-text prefix only after the OCR
-            // workers are running. This keeps preparation and translation
-            // overlapped even when Auto mode can immediately release the
-            // document's leading pages.
-            if let Some(document) = initial_prefix_document {
-                translate_ready_prefix(
+            drop(sender);
+            // Translate what is ready as pages come in, and when the reader
+            // moves to pages that needed no recognition.
+            let mut translated_at = None::<u64>;
+            let mut completed = 0usize;
+            loop {
+                let received = receiver.recv_timeout(OCR_SCOPE_POLL);
+                let result = match received {
+                    Ok(result) => Some(result),
+                    Err(sync_mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(sync_mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                if cancellation.is_cancelled() {
+                    continue;
+                }
+                if let Some(result) = result {
+                    completed += 1;
+                    progress.report(
+                        PdfTranslationStage::Ocr,
+                        format!(
+                            "OCR page {} finished ({completed}/{})",
+                            result.page_index + 1,
+                            tasks.len()
+                        ),
+                        Some(completed as u32),
+                        Some(tasks.len() as u32),
+                    );
+                    let page_index = result.page_index;
+                    let page = result
+                        .page
+                        .clone()
+                        .unwrap_or_else(|| native.pages[page_index].clone());
+                    ready_pages[page_index] = Some(page.clone());
+                    if let Some(failure) = &result.failure {
+                        update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
+                    }
+                    update_sink(PdfTranslationSessionUpdate::PagePrepared {
+                        metadata: stream_metadata.clone(),
+                        page,
+                        page_count: ready_pages.len(),
+                        ready_prefix: contiguous(&ready_pages),
+                    });
+                    results.push(result);
+                } else if translated_at == Some(scope.generation()) {
+                    continue;
+                }
+                translated_at = Some(scope.generation());
+                translate_ready_pages(
                     self,
-                    document,
+                    &ready_pages,
+                    &native,
+                    &stream_metadata,
+                    scope,
                     &request.source_path,
                     inspection,
                     preview_job_directory,
@@ -1787,84 +1829,6 @@ impl PdfTranslationService {
                     streamed_preview_revisions,
                     update_sink,
                 );
-            }
-            drop(sender);
-            for (completed, result) in receiver.into_iter().enumerate() {
-                progress.report(
-                    PdfTranslationStage::Ocr,
-                    format!(
-                        "OCR page {} finished ({}/{})",
-                        result.page_index + 1,
-                        completed + 1,
-                        tasks.len()
-                    ),
-                    Some((completed + 1) as u32),
-                    Some(tasks.len() as u32),
-                );
-                let page_index = result.page_index;
-                let page = result
-                    .page
-                    .clone()
-                    .unwrap_or_else(|| native.pages[page_index].clone());
-                ready_pages[page_index] = Some(page);
-                if let Some(failure) = &result.failure {
-                    update_sink(PdfTranslationSessionUpdate::PageFailed(failure.clone()));
-                }
-                let ready_prefix = ready_pages.iter().take_while(|page| page.is_some()).count();
-                let reconciled_prefix = if ready_prefix > emitted_prefix {
-                    let mut prefix_document = DocumentV1::new(
-                        stream_metadata.clone(),
-                        ready_pages[..ready_prefix]
-                            .iter()
-                            .map(|page| {
-                                page.as_ref().expect("ready prefix contains a page").clone()
-                            })
-                            .collect(),
-                    );
-                    reconcile_provider_continuations(&mut prefix_document);
-                    for page in &prefix_document.pages {
-                        let page_index = page.page_index;
-                        ready_pages[page_index] = Some(page.clone());
-                    }
-                    Some(prefix_document)
-                } else {
-                    None
-                };
-                for page_index in emitted_prefix..ready_prefix {
-                    update_sink(PdfTranslationSessionUpdate::PagePrepared {
-                        metadata: stream_metadata.clone(),
-                        page: ready_pages[page_index]
-                            .as_ref()
-                            .expect("ready prefix contains a page")
-                            .clone(),
-                        page_count: ready_pages.len(),
-                        ready_prefix,
-                    });
-                }
-                if ready_prefix > emitted_prefix {
-                    update_sink(PdfTranslationSessionUpdate::Reconciled {
-                        ready_prefix,
-                        invalidated_unit_ids: Vec::new(),
-                        final_pass: false,
-                    });
-                }
-                if let Some(prefix_document) = reconciled_prefix {
-                    translate_ready_prefix(
-                        self,
-                        prefix_document,
-                        &request.source_path,
-                        inspection,
-                        preview_job_directory,
-                        backend,
-                        cancellation,
-                        streamed_units,
-                        streamed_preview_units,
-                        streamed_preview_revisions,
-                        update_sink,
-                    );
-                }
-                emitted_prefix = ready_prefix;
-                results.push(result);
             }
         });
         cancellation
@@ -1932,6 +1896,23 @@ impl PdfTranslationService {
 }
 
 const MAX_ACTIVE_OCR_PAGES: usize = 3;
+
+/// The remaining page to recognise next, most urgent first; `None` while
+/// none is in scope.
+fn take_ocr_page(
+    remaining: &mut BTreeSet<usize>,
+    view: &glyphst_pdf_translation::ScopeView,
+) -> Option<usize> {
+    let page = remaining
+        .iter()
+        .filter_map(|&page| view.ocr_rank(page).map(|rank| (rank, page)))
+        .min()
+        .map(|(_, page)| page)?;
+    remaining.remove(&page);
+    Some(page)
+}
+/// How often recognition looks at a scope that has nothing for it.
+const OCR_SCOPE_POLL: Duration = Duration::from_millis(100);
 
 fn bounded_ocr_worker_count(task_count: usize) -> usize {
     task_count.min(MAX_ACTIVE_OCR_PAGES)
@@ -2139,10 +2120,17 @@ fn globalize_ocr_page(mut page: Page, page_index: usize) -> Page {
     page
 }
 
+/// One pass over the pages ready so far: the document with every page,
+/// those still being recognised standing in as their native text, so
+/// paragraphs and references read right; only units wholly on ready pages
+/// that the scope covers are translated.
 #[allow(clippy::too_many_arguments)]
-fn translate_ready_prefix(
+fn translate_ready_pages(
     service: &PdfTranslationService,
-    mut document: DocumentV1,
+    ready_pages: &[Option<Page>],
+    native: &DocumentV1,
+    metadata: &DocumentMetadata,
+    scope: &TranslationScope,
     source_path: &Path,
     inspection: &PdfInspection,
     job_directory: &Path,
@@ -2153,16 +2141,33 @@ fn translate_ready_prefix(
     preview_revisions: &mut HashMap<usize, u64>,
     update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
 ) {
-    if cancellation.is_cancelled() || document.pages.is_empty() {
+    if cancellation.is_cancelled() || ready_pages.is_empty() {
         return;
     }
+    let ready: Vec<bool> = ready_pages.iter().map(Option::is_some).collect();
+    let mut document = DocumentV1::new(
+        metadata.clone(),
+        ready_pages
+            .iter()
+            .zip(&native.pages)
+            .map(|(ready, native)| ready.clone().unwrap_or_else(|| native.clone()))
+            .collect(),
+    );
+    reconcile_provider_continuations(&mut document);
     annotate_reference_sections(&mut document);
     let resumed = streamed_units.clone();
-    match translate_document_partial_resuming(
+    let is_ready = |page: usize| ready.get(page).copied().unwrap_or(false);
+    match translate_document_scoped(
         document,
         backend,
         cancellation,
         resumed,
+        ScopedRun {
+            scope,
+            ready: &is_ready,
+            park_when_idle: false,
+            stop: None,
+        },
         |snapshot| {
             update_sink(PdfTranslationSessionUpdate::UnitsChanged(snapshot.clone()));
             Ok(())
@@ -2176,7 +2181,7 @@ fn translate_ready_prefix(
             let (next_preview_units, dirty_pages) =
                 reconcile_preview_units(&block_pages, known_preview_units, &outcome.document.units);
             *known_preview_units = next_preview_units;
-            for page_index in dirty_pages {
+            for page_index in preview_order(dirty_pages, &scope.view()) {
                 let revision = preview_revisions.entry(page_index).or_default();
                 *revision = revision.wrapping_add(1).max(1);
                 let update = match service.compile_page_preview(
@@ -4277,6 +4282,23 @@ mod tests {
         let bounds = extracted.load_pdf_page(0).unwrap().bounds().unwrap();
         assert_eq!(bounds.width(), mupdf::Size::A5.width);
         assert_eq!(bounds.height(), mupdf::Size::A5.height);
+    }
+
+    #[test]
+    fn recognition_follows_the_reader_then_takes_the_rest() {
+        let scope = TranslationScope::following(5, 1);
+        let mut remaining: BTreeSet<usize> = (0..10).collect();
+        let mut order = Vec::new();
+        while let Some(page) = take_ocr_page(&mut remaining, &scope.view()) {
+            order.push(page);
+        }
+        // The reader's page, a page each side, the window's last page.
+        assert_eq!(order, vec![5, 4, 6, 7]);
+        scope.expand_to_whole();
+        while let Some(page) = take_ocr_page(&mut remaining, &scope.view()) {
+            order.push(page);
+        }
+        assert_eq!(order[4..], [8, 9, 3, 2, 1, 0]);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use super::fusion::{
     native_text_looks_like_dialogue, native_text_looks_like_prompt, reclassify_dialogue_blocks,
     reclassify_standalone_prompt_blocks,
 };
+use super::text_quality::text_looks_broken;
 use super::*;
 use crate::toc::annotate_table_of_contents_page;
 
@@ -25,6 +26,7 @@ pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfI
         )?;
         let mut character_count = 0;
         let mut replacement_character_count = 0;
+        let mut text = String::new();
         let mut text_area = 0.0;
         let mut image_area = 0.0;
         for block in text_page.blocks() {
@@ -40,6 +42,7 @@ pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfI
                     for line in block.lines() {
                         for character in line.chars() {
                             if let Some(value) = character.char() {
+                                text.push(value);
                                 if !value.is_whitespace() {
                                     character_count += 1;
                                 }
@@ -48,6 +51,7 @@ pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfI
                                 }
                             }
                         }
+                        text.push('\n');
                     }
                 }
                 TextBlockType::Image => {
@@ -68,7 +72,8 @@ pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfI
         let needs_ocr = character_count < 80
             || text_area_ratio < 0.012
             || replacement_ratio > 0.02
-            || (image_area_ratio > 0.72 && character_count < 350);
+            || (image_area_ratio > 0.72 && character_count < 350)
+            || text_looks_broken(&text);
         pages.push(PdfPageProfile {
             page_index,
             width: bounds.x1 - bounds.x0,

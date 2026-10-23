@@ -80,6 +80,7 @@ pub enum OcrFusionRelation {
 
 mod extraction;
 mod fusion;
+mod text_quality;
 
 pub use extraction::{extract_native_document, inspect_pdf};
 pub use fusion::{fuse_native_with_ocr, fuse_native_with_ocr_report, reconcile_ocr_geometry};

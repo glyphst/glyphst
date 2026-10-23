@@ -2,8 +2,9 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OcrMode {
-    #[default]
     Always,
+    /// Only pages without usable text: scans, photos, garbled fonts.
+    #[default]
     Auto,
     Off,
 }
@@ -159,7 +160,7 @@ impl std::fmt::Debug for OcrSettings {
 impl Default for OcrSettings {
     fn default() -> Self {
         Self {
-            mode: OcrMode::Always,
+            mode: OcrMode::Auto,
             provider: OcrProvider::Unlimited,
             paddle: PaddleOcrSettings::default(),
             unlimited: UnlimitedOcrSettings::default(),
