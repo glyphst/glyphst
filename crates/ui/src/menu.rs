@@ -85,7 +85,7 @@ impl<'a> Item<'a> {
             + 8.0;
         let width = self
             .width
-            .unwrap_or_else(|| natural.max(ui.available_width()).max(180.0));
+            .unwrap_or_else(|| natural.max(fill_width(ui)).max(180.0));
         let height = if self.detail.is_some() { 40.0 } else { 26.0 };
         let (rect, response) = ui.allocate_exact_size(vec2(width, t.row(height)), Sense::click());
         let enabled = ui.is_enabled();
@@ -181,17 +181,30 @@ impl egui::Widget for Item<'_> {
     }
 }
 
+/// The width a row stretches to: none while egui measures a popup (its
+/// sizing pass offers the default area width, about 600 pt), so the menu
+/// fits its widest entry, then the menu's own width.
+fn fill_width(ui: &Ui) -> f32 {
+    if ui.is_sizing_pass() {
+        0.0
+    } else {
+        ui.available_width()
+    }
+}
+
 /// A hairline between groups of items.
 pub fn separator(ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(fill_width(ui), 9.0), Sense::hover());
     ui.painter()
         .hline(rect.x_range(), rect.center().y, t.hairline());
 }
 
 /// A faint group title inside a menu (`── pages ──`).
 pub fn group(ui: &mut Ui, title: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    let title_width = text::width(ui, title, &theme::mono(11.0)) + 16.0;
+    let width = title_width.max(fill_width(ui));
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
     crate::motif::paint_rule_title(ui, rect.shrink2(vec2(8.0, 0.0)), title, None, false);
 }
 
@@ -231,6 +244,60 @@ mod tests {
         assert!(
             heights.windows(2).all(|pair| pair[0] == pair[1]),
             "{heights:?}"
+        );
+    }
+
+    /// The bug where every context menu was as wide as egui's default
+    /// area (600 pt): a menu fits its widest entry.
+    #[test]
+    fn a_context_menu_fits_its_entries() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::embedded());
+        let mut menu = None;
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0));
+        let click = egui::pos2(100.0, 100.0);
+        let frames = [
+            vec![egui::Event::PointerMoved(click)],
+            vec![egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let response = ui.allocate_rect(screen, Sense::click());
+                response.context_menu(|ui| {
+                    style(ui);
+                    let _ = Item::new("Close").icon("x").key("Ctrl+W").show(ui);
+                    separator(ui);
+                    group(ui, "pages");
+                    let _ = Item::new("Copy path").show(ui);
+                    menu = Some(ui.min_rect());
+                });
+            });
+            output.textures_delta.clear();
+        }
+        let menu = menu.expect("the menu opened");
+        assert!(
+            (180.0..300.0).contains(&menu.width()),
+            "menu is {} wide",
+            menu.width()
         );
     }
 }
