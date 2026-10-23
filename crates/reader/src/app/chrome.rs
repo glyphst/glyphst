@@ -26,6 +26,11 @@ pub(super) struct StageChrome {
     pub panes: Vec<(u64, Rect)>,
     /// The tab being dragged from the tab bar.
     pub tab_drag: Option<u64>,
+    /// Tabs whose file is being copied into the library.
+    pub adding: std::collections::HashSet<u64>,
+    /// When a tab's file came into the library (egui time), so its check
+    /// draws in.
+    pub added: std::collections::HashMap<u64, f64>,
 }
 
 /// What a split pane's header asked for.
@@ -231,13 +236,13 @@ impl ReaderApp {
         }
         if !split
             && let Some(breadcrumb) = layout.breadcrumb
-            && let Some(path) = self.breadcrumb(ui, breadcrumb, active)
+            && let Some(action) = self.breadcrumb(ui, breadcrumb, active)
         {
             let ctx = ui.ctx().clone();
-            self.library_tab_action(
-                crate::library_tab::LibraryTabAction::AddOpened(vec![path]),
-                &ctx,
-            );
+            if matches!(action, crate::library_tab::LibraryTabAction::AddOpened(_)) {
+                self.chrome.adding.insert(self.tabs[active].id);
+            }
+            self.library_tab_action(action, &ctx);
         }
         if split {
             self.pane_dividers(ui, &dividers);
@@ -370,11 +375,36 @@ impl ReaderApp {
         }
     }
 
+    /// What the breadcrumb's library slot shows for tab `active`, if
+    /// anything: the library is in use and the document is one it takes.
+    pub(super) fn library_slot(&self, active: usize) -> Option<glyphst_ui::library_status::State> {
+        use glyphst_ui::library_status::State;
+        let tab = &self.tabs[active];
+        if !(self.persist || self.demo_library) || !crate::import::is_library_document(&tab.path) {
+            return None;
+        }
+        Some(if self.library.library_item_for_path(&tab.path).is_some() {
+            State::InLibrary {
+                since: self.chrome.added.get(&tab.id).copied(),
+            }
+        } else if self.chrome.adding.contains(&tab.id) || self.demo_adding {
+            State::Adding
+        } else {
+            State::Add
+        })
+    }
+
     /// The breadcrumb over the pages: the file and the outline path to the
     /// current page, at the right what the overview or find has to say, and
-    /// `[ + add to library ]` for a document from outside the library
-    /// (frame 02h), whose path it returns when clicked.
-    fn breadcrumb(&self, ui: &mut egui::Ui, rect: Rect, active: usize) -> Option<PathBuf> {
+    /// the library slot (frames 02h): `[ + add to library ]` for a
+    /// document from outside the library, `✓ in library` for one in it.
+    /// Returns what a click on the slot asks for.
+    fn breadcrumb(
+        &self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        active: usize,
+    ) -> Option<crate::library_tab::LibraryTabAction> {
         let tokens = Tokens::get(ui.ctx());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, tokens.surface.to_opaque());
@@ -403,26 +433,36 @@ impl ReaderApp {
         };
         let font = theme::mono(11.0);
         let y = rect.center().y;
-        let outside = (self.persist || self.demo_library)
-            && crate::import::is_library_document(&tab.path)
-            && self.library.library_item_for_path(&tab.path).is_none();
-        let mut add = None;
+        let mut action = None;
         let mut meta_right = rect.right() - 12.0;
-        if outside {
-            let mut button_ui = ui.new_child(
+        if let Some(state) = self.library_slot(active) {
+            use glyphst_ui::library_status::State;
+            let mut slot_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect.shrink2(vec2(8.0, 0.0)))
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
-            let response = button_ui
-                .add(glyphst_ui::button::Button::bracket("+ add to library"))
-                .on_hover_text(
-                    "copy it into the library folder; its highlights and place come along",
-                );
-            if response.clicked() {
-                add = Some(tab.path.clone());
-            }
+            let response = glyphst_ui::library_status::show(&mut slot_ui, state);
             meta_right = response.rect.left() - 16.0;
+            let item = self
+                .library
+                .library_item_for_path(&tab.path)
+                .map(|item| item.id);
+            use crate::library_tab::LibraryTabAction;
+            let (tip, clicked) = match (state, item) {
+                (State::Add, _) => (
+                    "copy it into the library folder; its highlights and place come along",
+                    Some(LibraryTabAction::AddOpened(vec![tab.path.clone()])),
+                ),
+                (State::InLibrary { .. }, Some(id)) => (
+                    "show it in the library",
+                    Some(LibraryTabAction::ShowInLibrary(id)),
+                ),
+                _ => ("copying it into the library", None),
+            };
+            if response.on_hover_text(tip).clicked() {
+                action = clicked;
+            }
         }
         let meta_rect = ui_text::line(
             ui,
@@ -487,7 +527,7 @@ impl ReaderApp {
             );
             x = part_rect.right() + 8.0;
         }
-        add
+        action
     }
 
     /// A split pane's header: `▌ file — p.4 / 15 — 100%` and a close
@@ -896,6 +936,7 @@ impl ReaderApp {
                 .add(glyphst_ui::button::Button::bracket("add to library"))
                 .clicked()
             {
+                self.chrome.adding.insert(self.tabs[active].id);
                 self.library_tab_action(
                     crate::library_tab::LibraryTabAction::AddOpened(vec![path]),
                     ctx,

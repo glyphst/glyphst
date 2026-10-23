@@ -467,6 +467,8 @@ pub struct ReaderApp {
     pub(crate) nav: crate::nav::NavHistory,
     /// A scripted run shows the canned library (`--library-demo`).
     demo_library: bool,
+    /// The demo's document shows as being added to the library.
+    demo_adding: bool,
     /// A scripted run's search index report (`--library-demo processing`).
     demo_text: Option<glyphst_search::indexer::ItemStates>,
     /// The database was copied aside before syncing (once a run).
@@ -765,6 +767,7 @@ impl ReaderApp {
             library_sync: crate::library_sync::LibrarySync::new(&cc.egui_ctx),
             nav: crate::nav::NavHistory::default(),
             demo_library: false,
+            demo_adding: false,
             demo_text: None,
             sync_backed_up: false,
             sidebar_card: Default::default(),
@@ -782,12 +785,14 @@ impl ReaderApp {
         app.rebuild_keymap();
         if let Some(state) = &launch.library_demo {
             app.demo_library = true;
-            // `outside`: the document open is not one of the library's.
+            // `outside`: the document open is not one of the library's;
+            // `outside-adding`: and it is being copied in (frames 02h).
             let document = launch
                 .files
                 .first()
                 .map(PathBuf::as_path)
-                .filter(|_| state != "outside");
+                .filter(|_| !state.starts_with("outside"));
+            app.demo_adding = state == "outside-adding";
             app.library = crate::library_demo::library(document);
             // With a document the run shows it (its sidebar's item tab).
             if launch.files.is_empty() {
@@ -1408,9 +1413,11 @@ impl ReaderApp {
     }
 
     /// What was kept about a file brought into the library (its place,
-    /// highlights, notes) moves to its copy, and its open tabs show the
-    /// copy.
+    /// highlights, notes) moves to its copy, and its open tabs read the
+    /// copy from then on, in place: the page stays as it is, with no
+    /// reload, and its library slot draws its check.
     fn adopt_imported(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         for (source, id) in self.importer.take_adopted() {
             let Some(copy) = self
                 .library
@@ -1423,19 +1430,46 @@ impl ReaderApp {
             if source == copy {
                 continue;
             }
-            // Closed first, so its last place is kept and then moves too.
-            let open = self.tabs.iter().position(|tab| tab.path == source);
-            if let Some(index) = open {
-                self.close(index);
+            let open: Vec<usize> = (0..self.tabs.len())
+                .filter(|&index| self.tabs[index].path == source)
+                .collect();
+            // Saved first, so its last place moves too.
+            for &index in &open {
+                self.save_position(index, true);
             }
             if let Err(error) = self.library.adopt_document_path(&source, &copy) {
                 self.notices.push(format!(
                     "Could not carry the file's highlights over: {error:#}"
                 ));
             }
-            if open.is_some() {
-                self.open(&copy, ctx, None);
+            self.rekey_book(&source, &copy);
+            let modified = std::fs::metadata(&copy)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            for index in open {
+                let tab = &mut self.tabs[index];
+                tab.path.clone_from(&copy);
+                // Else the copy's own time reads as a change and reloads it.
+                tab.modified = modified;
+                tab.annotations = Annotations::load(&self.library, &copy);
+                self.chrome.adding.remove(&tab.id);
+                self.chrome.added.insert(tab.id, now);
             }
+        }
+        if !self.importer.is_running() {
+            self.chrome.adding.clear();
+        }
+    }
+
+    /// The choices kept by a book's path (effects, page count) follow it
+    /// to `to`.
+    fn rekey_book(&mut self, from: &Path, to: &Path) {
+        let (from, to) = (from.display().to_string(), to.display().to_string());
+        if let Some(effects) = self.prefs.books.remove(&from) {
+            self.prefs.books.entry(to.clone()).or_insert(effects);
+        }
+        if let Some(count) = self.prefs.page_counts.remove(&from) {
+            self.prefs.page_counts.entry(to).or_insert(count);
         }
     }
 

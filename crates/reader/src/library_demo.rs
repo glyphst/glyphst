@@ -11,7 +11,7 @@ use glyphst_library::{
 };
 
 /// The states `--library-demo` takes.
-pub const STATES: [&str; 24] = [
+pub const STATES: [&str; 26] = [
     "all",
     "item",
     "pages",
@@ -25,6 +25,8 @@ pub const STATES: [&str; 24] = [
     "search-failed",
     "history",
     "outside",
+    "outside-adding",
+    "added",
     "processing",
     "backfill",
     "folder",

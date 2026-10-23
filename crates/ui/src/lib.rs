@@ -47,6 +47,7 @@ mod icon_data;
 pub mod icons;
 pub mod key;
 pub mod layout;
+pub mod library_status;
 pub mod menu;
 pub mod meter;
 pub mod motif;
