@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context as _, Result, anyhow};
-use glyphst_embed::setup::Setup;
+use glyphst_models::setup::Setup;
 use image::RgbImage;
 use oar_ocr::core::config::onnx::OrtSessionConfig;
 use oar_ocr::domain::tasks::TextDetectionConfig;

@@ -2,7 +2,7 @@
 //! computer, and PP-OCRv6 Small's detection and recognition models and
 //! dictionary (oar-ocr's v0.7.0 release, the files pdf-inspector pins).
 
-use glyphst_embed::manifest::{Asset, Engine};
+use glyphst_models::{Asset, Engine};
 
 pub const RUNTIME_VERSION: &str = "1.27.0";
 

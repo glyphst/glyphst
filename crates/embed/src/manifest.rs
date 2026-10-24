@@ -2,49 +2,14 @@
 //! `llama-server` for this machine, and EmbeddingGemma 2. A new build or
 //! model is a code change with new hashes (`script/bump-llama.sh`).
 
-/// A file to fetch: where from, its SHA-256 and size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Asset {
-    pub name: &'static str,
-    pub url: &'static str,
-    pub sha256: &'static str,
-    pub size: u64,
-}
-
-/// llama.cpp's archive for this machine, and the server inside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Engine {
-    /// What it is (`llama.cpp`), naming its folder with the build.
-    pub name: &'static str,
-    pub build: &'static str,
-    pub archive: Asset,
-    /// The server's path inside the archive.
-    pub exe: &'static str,
-}
+pub use glyphst_models::{Asset, Engine};
 
 pub const ENGINE_BUILD: &str = "b11724";
 
-/// The text half of EmbeddingGemma 2 at 8 bits (never the F16 files: its
-/// activations overflow float16 into NaN).
-pub const MODEL: Asset = Asset {
-    name: "embeddinggemma-2-Q8_0.gguf",
-    url: "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8/embeddinggemma-2-Q8_0.gguf",
-    sha256: "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
-    size: 309_855_456,
-};
-
-/// The reranker: a cross-encoder that rereads the best passages against
-/// the query, run by the same engine. bge-reranker-v2-m3 (multilingual)
-/// over Qwen3-Reranker-0.6B: on the labelled set it put 7 of 8
-/// paraphrases first from keyword results (Qwen3: 6), kept the hybrid
-/// search's order (Qwen3 pushed one down), and reread 30 passages in
-/// about 390 ms against 1,400 on the Arc.
-pub const RERANKER: Asset = Asset {
-    name: "bge-reranker-v2-m3-Q8_0.gguf",
-    url: "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q8_0.gguf",
-    sha256: "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3",
-    size: 635_676_416,
-};
+/// The embedder and reranker used until others are chosen (pinned in the
+/// models catalog).
+pub const MODEL: Asset = glyphst_models::catalog::EMBEDDINGGEMMA;
+pub const RERANKER: Asset = glyphst_models::catalog::BGE_RERANKER;
 
 /// What the vectors are, for the index: a new model, revision, size or
 /// prompt makes new vectors.

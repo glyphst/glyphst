@@ -9,8 +9,8 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
-# The pinned, resumable downloads meaning search uses.
-glyphst-embed = { path = "../embed" }
+# The pinned, resumable downloads every local model uses.
+glyphst-models = { path = "../models" }
 image.workspace = true
 log.workspace = true
 # PP-OCRv6 Small on ONNX Runtime, as Firecrawl's pdf-inspector runs it;

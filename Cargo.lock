@@ -3258,6 +3258,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glyphst-core",
+ "glyphst-models",
  "glyphst-pdf",
  "glyphst-search",
  "libc",
@@ -3330,12 +3331,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyphst-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glyphst-core",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+]
+
+[[package]]
 name = "glyphst-ocr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "glyphst-core",
- "glyphst-embed",
+ "glyphst-models",
  "image",
  "log",
  "oar-ocr",

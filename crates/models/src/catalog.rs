@@ -1,0 +1,456 @@
+//! The models that can run on this computer, by task: what each costs to
+//! download and gives, its license, and its pinned files. Their engines
+//! (llama.cpp, ONNX Runtime) are pinned by the crates that run them.
+
+use std::path::PathBuf;
+
+use crate::Asset;
+
+/// What a model is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Task {
+    /// Reading scanned pages (OCR).
+    TextRecognition,
+    /// Search by meaning: passages and queries as vectors.
+    Embedding,
+    /// Rereading the best matches against the query.
+    Rerank,
+}
+
+impl Task {
+    pub const ALL: [Self; 3] = [Self::TextRecognition, Self::Embedding, Self::Rerank];
+
+    /// The folder its models (and their engine) live in.
+    pub fn root(self) -> PathBuf {
+        let data = glyphst_core::paths::data_dir();
+        match self {
+            Self::TextRecognition => std::env::var_os("GLYPHST_OCR_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| data.join("ocr")),
+            Self::Embedding | Self::Rerank => data.join("meaning-search"),
+        }
+    }
+}
+
+/// A model's license, and whether its terms must be accepted before it
+/// downloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct License {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub must_accept: bool,
+    /// The terms in a line, for a license that must be accepted.
+    pub summary: &'static str,
+}
+
+const APACHE: License = License {
+    name: "Apache-2.0",
+    url: "https://www.apache.org/licenses/LICENSE-2.0",
+    must_accept: false,
+    summary: "",
+};
+
+/// A model the app can download and run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelEntry {
+    /// Stable, kept in the settings.
+    pub id: &'static str,
+    pub task: Task,
+    pub name: &'static str,
+    /// What it is good at and what it costs, in a sentence.
+    pub note: &'static str,
+    pub files: &'static [Asset],
+    pub license: License,
+    /// Runs on ONNX Runtime, which can use a GPU when asked to; llama.cpp
+    /// uses one by itself.
+    pub device_choice: bool,
+    /// The one used until another is chosen.
+    pub default: bool,
+}
+
+impl ModelEntry {
+    /// Bytes to download.
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|file| file.size).sum()
+    }
+}
+
+/// Every model, by task, smallest first within a task.
+pub const CATALOG: &[ModelEntry] = &[
+    ModelEntry {
+        id: "pp-ocrv6-tiny",
+        task: Task::TextRecognition,
+        name: "pp-ocrv6 tiny",
+        note: "Fastest, least accurate (PaddleOCR: detection 80.6, recognition 73.5). For slow machines.",
+        files: &[PP_OCRV6_TINY_DET, PP_OCRV6_TINY_REC, PP_OCRV6_TINY_DICT],
+        license: APACHE,
+        device_choice: true,
+        default: false,
+    },
+    ModelEntry {
+        id: "pp-ocrv6-small",
+        task: Task::TextRecognition,
+        name: "pp-ocrv6 small",
+        note: "Balanced: detection 84.1, recognition 81.3. About 2 s a page on a laptop's CPU.",
+        files: &[PP_OCRV6_SMALL_DET, PP_OCRV6_SMALL_REC, PP_OCRV6_DICT],
+        license: APACHE,
+        device_choice: true,
+        default: true,
+    },
+    ModelEntry {
+        id: "pp-ocrv6-medium",
+        task: Task::TextRecognition,
+        name: "pp-ocrv6 medium",
+        note: "The most accurate PP-OCR: detection 86.2, recognition 83.2. Best with a dedicated GPU.",
+        files: &[PP_OCRV6_MEDIUM_DET, PP_OCRV6_MEDIUM_REC, PP_OCRV6_DICT],
+        license: APACHE,
+        device_choice: true,
+        default: false,
+    },
+    ModelEntry {
+        id: "indra-v1.1.0",
+        task: Task::TextRecognition,
+        name: "indra",
+        note: "Lines, layout blocks in reading order and tables, in 80+ languages. Fast on the CPU.",
+        files: INDRA,
+        license: License {
+            name: "modified OpenRAIL-M",
+            url: "https://huggingface.co/datalab-to/indra-ocr/blob/bd02167fdf2005a19962cc15188f8496a2c87d3b/LICENSE",
+            must_accept: true,
+            summary: "Free for research, personal use and companies under $20M in funding or revenue; not for competing with Datalab's API.",
+        },
+        device_choice: true,
+        default: false,
+    },
+    ModelEntry {
+        id: "embeddinggemma-2",
+        task: Task::Embedding,
+        name: "embeddinggemma 2",
+        note: "Multilingual, 256-dimension vectors.",
+        files: &[EMBEDDINGGEMMA],
+        license: License {
+            name: "Gemma Terms of Use",
+            url: "https://ai.google.dev/gemma/terms",
+            must_accept: false,
+            summary: "",
+        },
+        device_choice: false,
+        default: true,
+    },
+    ModelEntry {
+        id: "qwen3-embedding-0.6b",
+        task: Task::Embedding,
+        name: "qwen3-embedding 0.6b",
+        note: "Stronger on long passages and code; twice the download.",
+        files: &[QWEN3_EMBEDDING_SMALL],
+        license: APACHE,
+        device_choice: false,
+        default: false,
+    },
+    ModelEntry {
+        id: "qwen3-embedding-4b",
+        task: Task::Embedding,
+        name: "qwen3-embedding 4b",
+        note: "The best results; quick only with 8 GB of GPU memory.",
+        files: &[QWEN3_EMBEDDING_LARGE],
+        license: APACHE,
+        device_choice: false,
+        default: false,
+    },
+    ModelEntry {
+        id: "bge-reranker-v2-m3",
+        task: Task::Rerank,
+        name: "bge-reranker v2 m3",
+        note: "Multilingual; rereads 30 passages in under half a second on an integrated GPU.",
+        files: &[BGE_RERANKER],
+        license: APACHE,
+        device_choice: false,
+        default: true,
+    },
+    ModelEntry {
+        id: "qwen3-reranker-0.6b",
+        task: Task::Rerank,
+        name: "qwen3-reranker 0.6b",
+        note: "An alternative reranker; slower, and no better on the labelled set.",
+        files: &[QWEN3_RERANKER],
+        license: APACHE,
+        device_choice: false,
+        default: false,
+    },
+];
+
+/// The model `id`.
+pub fn entry(id: &str) -> Option<&'static ModelEntry> {
+    CATALOG.iter().find(|entry| entry.id == id)
+}
+
+/// The models for `task`.
+pub fn for_task(task: Task) -> impl Iterator<Item = &'static ModelEntry> {
+    CATALOG.iter().filter(move |entry| entry.task == task)
+}
+
+/// The model `task` uses until another is chosen.
+pub fn default_for(task: Task) -> &'static ModelEntry {
+    for_task(task)
+        .find(|entry| entry.default)
+        .expect("every task has a default model")
+}
+
+/// Whether every file of `entry` is downloaded whole.
+pub fn is_installed(entry: &ModelEntry) -> bool {
+    let root = entry.task.root();
+    entry
+        .files
+        .iter()
+        .all(|file| crate::install::model_ready(&root, file))
+}
+
+/// Deletes `entry`'s files, but not those another installed model shares
+/// (PP-OCRv6 small and medium share a dictionary).
+pub fn remove(entry: &ModelEntry) -> std::io::Result<()> {
+    let root = entry.task.root();
+    let shared: Vec<&str> = CATALOG
+        .iter()
+        .filter(|other| other.id != entry.id && other.task.root() == root && is_installed(other))
+        .flat_map(|other| other.files.iter().map(|file| file.name))
+        .collect();
+    let own: Vec<Asset> = entry
+        .files
+        .iter()
+        .filter(|file| !shared.contains(&file.name))
+        .copied()
+        .collect();
+    crate::install::remove_models(&root, &own)
+}
+
+/// Bytes on disk under every task's folder: models, engines and partial
+/// downloads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub models: u64,
+    pub engines: u64,
+    pub partial: u64,
+}
+
+pub fn disk_usage() -> DiskUsage {
+    let mut roots: Vec<PathBuf> = Task::ALL.iter().map(|task| task.root()).collect();
+    roots.dedup();
+    let mut usage = DiskUsage::default();
+    for root in roots {
+        usage.models += crate::install::folder_size(&root.join("models"));
+        usage.engines += crate::install::folder_size(&root.join("engines"));
+        usage.partial += crate::install::folder_size(&root.join("downloads"));
+    }
+    usage
+}
+
+macro_rules! oar {
+    ($name:literal, $sha256:literal, $size:literal) => {
+        Asset {
+            name: $name,
+            url: concat!(
+                "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/",
+                $name
+            ),
+            sha256: $sha256,
+            size: $size,
+        }
+    };
+}
+
+pub const PP_OCRV6_TINY_DET: Asset = oar!(
+    "pp-ocrv6_tiny_det.onnx",
+    "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+    1_780_590
+);
+pub const PP_OCRV6_TINY_REC: Asset = oar!(
+    "pp-ocrv6_tiny_rec.onnx",
+    "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+    4_462_639
+);
+pub const PP_OCRV6_TINY_DICT: Asset = oar!(
+    "ppocrv6_tiny_dict.txt",
+    "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+    27_156
+);
+pub const PP_OCRV6_SMALL_DET: Asset = oar!(
+    "pp-ocrv6_small_det.onnx",
+    "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+    9_880_512
+);
+pub const PP_OCRV6_SMALL_REC: Asset = oar!(
+    "pp-ocrv6_small_rec.onnx",
+    "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+    21_159_378
+);
+pub const PP_OCRV6_MEDIUM_DET: Asset = oar!(
+    "pp-ocrv6_medium_det.onnx",
+    "eb13b44b25bb36f89528b68720af8a61d9cf381176107f465db1757b65d086e1",
+    62_032_837
+);
+pub const PP_OCRV6_MEDIUM_REC: Asset = oar!(
+    "pp-ocrv6_medium_rec.onnx",
+    "9c09abf0957f7968c7586464b7397b84ad2387a0497a351af40e9acc71b673ba",
+    76_554_979
+);
+/// The dictionary small and medium share.
+pub const PP_OCRV6_DICT: Asset = oar!(
+    "ppocrv6_dict.txt",
+    "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+    74_947
+);
+
+macro_rules! indra {
+    ($name:literal, $sha256:literal, $size:literal) => {
+        Asset {
+            name: concat!("indra-v1.1.0/", $name),
+            url: concat!(
+                "https://huggingface.co/datalab-to/indra-ocr/resolve/bd02167fdf2005a19962cc15188f8496a2c87d3b/",
+                $name
+            ),
+            sha256: $sha256,
+            size: $size,
+        }
+    };
+}
+
+/// Indra OCR v1.1.0 without its math reader: the line detector, the
+/// recognizers by script, the script and orientation classifiers, the
+/// reading-order model and the language models.
+pub const INDRA: &[Asset] = &[
+    indra!(
+        "det.onnx",
+        "f2bd4cba23e9c328cf7ec824634e423e191a2c6aacbbf35c62bd79dd70f62f59",
+        389_948
+    ),
+    indra!(
+        "rec.onnx",
+        "475972a2710be4a3cbfeb2bc7f3624ffd563de07de42476fc7a290d4e1ece484",
+        5_042_161
+    ),
+    indra!(
+        "rec_cjk.onnx",
+        "4a035516a17e62cdf33a4fe2d88077654cb8841cff024685cdef4e351694ef50",
+        10_176_018
+    ),
+    indra!(
+        "rec_rtl.onnx",
+        "468796bd684486a8388c30c8b4ed2a26e3eeb1f8ff02831c24c2e12c79a2a834",
+        4_812_710
+    ),
+    indra!(
+        "rec_world.onnx",
+        "c8d1e59f21b04966f179d2d2d8e22b230d22110b3f89855bbbf2624a58c40043",
+        5_627_990
+    ),
+    indra!(
+        "script.onnx",
+        "b6ce4e926e19c243faaf37bd46880398bf2cb4ae56a29e1177a3b017c1280e36",
+        191_630
+    ),
+    indra!(
+        "order.onnx",
+        "a42db2e8b536ad3d84045a4b7f9b0a72667cf8be4aa02d63f7b38004719fb180",
+        2_973_138
+    ),
+    indra!(
+        "orient.onnx",
+        "20eaf670f55a7cf9facfe1bdd6c7b8e40be75bbf4d48a3df43f66aa3bbd874fd",
+        371_802
+    ),
+    indra!(
+        "meta.json",
+        "4ce4c94b46f5d644033c02e718322014ff4081270f385038c571912b56696339",
+        211_869
+    ),
+    indra!(
+        "lm.npz",
+        "6c0fb618a363a0acdd05d4f5b0edd9e8146d2d990541b87f6130bbfe17cea58d",
+        15_695_957
+    ),
+    indra!(
+        "lm_cjk.npz",
+        "6d64f13f4f90f4e529bd63340c6df76238d007feaef2abb903d8cd28d92bc2f3",
+        18_955_160
+    ),
+    indra!(
+        "lm_world.npz",
+        "34df5e74a2fcbb9cf5e7f360a559375ffa2e04d2d2943a42308c177bcb444d5d",
+        11_641_215
+    ),
+];
+
+/// The text half of EmbeddingGemma 2 at 8 bits (never the F16 files: its
+/// activations overflow float16 into NaN).
+pub const EMBEDDINGGEMMA: Asset = Asset {
+    name: "embeddinggemma-2-Q8_0.gguf",
+    url: "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8/embeddinggemma-2-Q8_0.gguf",
+    sha256: "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+    size: 309_855_456,
+};
+
+pub const QWEN3_EMBEDDING_SMALL: Asset = Asset {
+    name: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+    url: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    sha256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+    size: 639_150_592,
+};
+
+/// At 4 bits (Q4_K_M): 2.5 GB instead of 4.3 for little loss.
+pub const QWEN3_EMBEDDING_LARGE: Asset = Asset {
+    name: "Qwen3-Embedding-4B-Q4_K_M.gguf",
+    url: "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/f4602530db1d980e16da9d7d3a70294cf5c190be/Qwen3-Embedding-4B-Q4_K_M.gguf",
+    sha256: "2b0cf8f17b4c723c27303015383c27ec4bf2d8314bb677d05e920dd70bb0f16b",
+    size: 2_496_703_776,
+};
+
+/// The reranker: a cross-encoder that rereads the best passages against
+/// the query, run by the same engine. bge-reranker-v2-m3 (multilingual)
+/// over Qwen3-Reranker-0.6B: on the labelled set it put 7 of 8
+/// paraphrases first from keyword results (Qwen3: 6), kept the hybrid
+/// search's order (Qwen3 pushed one down), and reread 30 passages in
+/// about 390 ms against 1,400 on the Arc.
+pub const BGE_RERANKER: Asset = Asset {
+    name: "bge-reranker-v2-m3-Q8_0.gguf",
+    url: "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/3093af03b1a635e67b084b1d8c03c5f5e020fd05/bge-reranker-v2-m3-Q8_0.gguf",
+    sha256: "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3",
+    size: 635_676_416,
+};
+
+pub const QWEN3_RERANKER: Asset = Asset {
+    name: "qwen3-reranker-0.6b-q8_0.gguf",
+    url: "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/a02f48bb4f057028298c21fa033da2b30d7742d5/qwen3-reranker-0.6b-q8_0.gguf",
+    sha256: "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+    size: 639_153_184,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_pin_is_whole_and_every_task_has_one_default() {
+        for entry in CATALOG {
+            assert!(!entry.files.is_empty(), "{}", entry.id);
+            for file in entry.files {
+                assert_eq!(file.sha256.len(), 64, "{}", file.name);
+                assert!(file.size > 0, "{}", file.name);
+                let leaf = file.name.rsplit('/').next().unwrap();
+                assert!(file.url.ends_with(leaf), "{}", file.url);
+                assert!(!file.url.contains("F16"), "{}", file.url);
+            }
+            assert_eq!(entry.license.must_accept, !entry.license.summary.is_empty());
+        }
+        for task in Task::ALL {
+            assert_eq!(for_task(task).filter(|entry| entry.default).count(), 1);
+        }
+        assert_eq!(default_for(Task::TextRecognition).id, "pp-ocrv6-small");
+        // Indra's files keep to their folder.
+        assert!(
+            INDRA
+                .iter()
+                .all(|file| file.name.starts_with("indra-v1.1.0/"))
+        );
+    }
+}

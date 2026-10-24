@@ -9,6 +9,7 @@ members = [
     "crates/markdown",
     "crates/mermaid-render",
     "crates/metadata",
+    "crates/models",
     "crates/ocr",
     "crates/pdf",
     "crates/pdf-gpu",

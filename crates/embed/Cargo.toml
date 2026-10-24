@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 glyphst-core = { path = "../core" }
+glyphst-models = { path = "../models" }
 glyphst-search = { path = "../search" }
 log.workspace = true
 rand.workspace = true

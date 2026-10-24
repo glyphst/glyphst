@@ -2,7 +2,7 @@
 //! EmbeddingGemma 2 (pinned, resumable), running the server, and turning
 //! text into vectors through it.
 
-pub mod download;
+pub use glyphst_models::download;
 pub mod install;
 pub mod llama;
 pub mod manifest;

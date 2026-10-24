@@ -354,7 +354,7 @@ pub fn setup(custom_engine: Option<&str>) -> Setup {
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from);
-    Setup::new(glyphst_embed::install::root(), custom)
+    glyphst_embed::setup::meaning(glyphst_embed::install::root(), custom)
 }
 
 /// The reranker's setup: its model on the same engine.
@@ -363,7 +363,7 @@ pub fn rerank_setup(custom_engine: Option<&str>) -> Setup {
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from);
-    Setup::for_model(
+    glyphst_embed::setup::for_model(
         glyphst_embed::install::root(),
         custom,
         glyphst_embed::manifest::RERANKER,
