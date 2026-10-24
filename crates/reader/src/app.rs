@@ -6584,16 +6584,20 @@ impl eframe::App for ReaderApp {
             }
         }
         // Naming another llama-server, or choosing another model, makes a
-        // new setup (not mid-download).
+        // new setup for what changed; a download of the old model stops,
+        // keeping what came for a later resume.
         let chosen = (
             self.prefs.library.llama_server.clone(),
             self.prefs.library.meaning_model.clone(),
             self.prefs.library.rerank_model.clone(),
         );
-        if self.persist && chosen != self.meaning_engine && !self.meaning.is_running() {
+        if self.persist && chosen != self.meaning_engine {
             let (engine, meaning, rerank) = &chosen;
-            self.meaning = crate::meaning::setup(Some(engine), meaning);
-            if !self.rerank.is_running() {
+            let (old_engine, old_meaning, old_rerank) = &self.meaning_engine;
+            if engine != old_engine || meaning != old_meaning {
+                self.meaning = crate::meaning::setup(Some(engine), meaning);
+            }
+            if engine != old_engine || rerank != old_rerank {
                 self.rerank = crate::meaning::rerank_setup(Some(engine), rerank);
             }
             self.meaning_engine = chosen;
