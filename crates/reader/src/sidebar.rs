@@ -13,7 +13,9 @@ use glyphst_settings::TranslationProvider;
 use glyphst_ui::{
     Tip,
     button::Button,
-    menu as ui_menu, motif, motion,
+    menu as ui_menu,
+    meter::Meter,
+    motif, motion,
     pane::{Action, Header},
     row::{self as ui_row, ListRow},
     segmented,
@@ -579,6 +581,51 @@ fn translation_panel(
         };
         motif::rule_title(ui, "pages", Some(&count));
         let current = tab.current_page();
+        let states: Vec<PageProgress> =
+            (0..total).map(|page| session.page_progress(page)).collect();
+        let kept = |page: usize| {
+            session
+                .previews
+                .get(&page)
+                .map_or(&[][..], |preview| preview.kept_original.as_slice())
+        };
+        // What a page says on hover: its state, and why.
+        let why = |page: usize| {
+            session
+                .failure(page)
+                .map(|failure| failure.message.clone())
+                .or_else(|| (!kept(page).is_empty()).then(|| kept(page).join("\n")))
+        };
+        ui.add_space(4.0);
+        progress_summary(ui, &states, (0..total).map(|page| kept(page).len()).sum());
+        ui.add_space(8.0);
+        let hover = |page: usize| {
+            let (glyph, label, _) = progress_label(states[page], kept(page).len(), &tokens);
+            let mut text = format!("p.{} · {glyph} {label}", page + 1);
+            if let Some(why) = why(page) {
+                text.push_str(&format!("\n{why}"));
+            }
+            text
+        };
+        if let Some(page) = page_map(ui, &states, current, hover) {
+            actions.push(SidebarAction::View(ViewAction::GoToPage(page)));
+        }
+        ui.add_space(6.0);
+        map_legend(ui);
+        ui.add_space(6.0);
+        // Below the map, only the pages that need a look: translating,
+        // failed, or with blocks kept original.
+        let mut listed: Vec<usize> = (0..total)
+            .filter(|&page| matches!(states[page], PageProgress::Partial { .. }))
+            .collect();
+        listed.extend((0..total).filter(|&page| matches!(states[page], PageProgress::Failed(_))));
+        listed.extend(
+            (0..total).filter(|&page| states[page] == PageProgress::Done && !kept(page).is_empty()),
+        );
+        let waiting = states
+            .iter()
+            .filter(|state| **state == PageProgress::Waiting)
+            .count();
         let height = (ui.available_height() - footer).max(60.0);
         egui::ScrollArea::vertical()
             .id_salt(("translation-pages", tab.id))
@@ -586,22 +633,32 @@ fn translation_panel(
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for (first, last, state) in
-                    page_runs(total, current, |page| session.page_progress(page))
-                {
-                    // A page alone says which of its blocks kept their
-                    // original, and why.
-                    let kept = (first == last)
-                        .then(|| session.previews.get(&first))
-                        .flatten()
-                        .map(|preview| preview.kept_original.as_slice())
-                        .unwrap_or_default();
-                    let reasons = kept.join("\n");
-                    let why = session
-                        .failure(first)
-                        .map(|failure| failure.message.as_str())
-                        .or((!kept.is_empty()).then_some(reasons.as_str()));
-                    page_status_row(ui, first, last, state, first == current, why, kept.len());
+                for &page in listed.iter().take(ACTIVE_ROWS) {
+                    let why = why(page);
+                    page_status_row(
+                        ui,
+                        page,
+                        page,
+                        states[page],
+                        page == current,
+                        why.as_deref(),
+                        kept(page).len(),
+                    );
+                }
+                let more = listed.len().saturating_sub(ACTIVE_ROWS);
+                let rest = match (more, waiting) {
+                    (0, 0) => None,
+                    (0, waiting) => Some(format!("and {waiting} waiting")),
+                    (more, 0) => Some(format!("and {more} more")),
+                    (more, waiting) => Some(format!("and {more} more · {waiting} waiting")),
+                };
+                if let Some(rest) = rest {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(rest)
+                            .font(theme::mono(10.0))
+                            .color(tokens.faint),
+                    );
                 }
             });
         match &session.export {
@@ -1073,36 +1130,187 @@ fn ocr_row(ui: &mut egui::Ui, ocr: &OcrRow, actions: &mut Vec<SidebarAction>) {
     });
 }
 
-/// The pages as rows: runs of three or more pages in the same state, away
-/// from the current page, fold into one `p.7 … p.15` row.
-fn page_runs(
-    count: usize,
-    current: usize,
-    status: impl Fn(usize) -> PageProgress,
-) -> Vec<(usize, usize, PageProgress)> {
-    let mut runs: Vec<(usize, usize, PageProgress)> = Vec::new();
-    for page in 0..count {
-        let state = status(page);
-        let near = page.abs_diff(current) <= 2;
-        match runs.last_mut() {
-            Some((first, last, run))
-                if *run == state && !near && last.abs_diff(current) > 2 && *first != current =>
-            {
-                *last = page;
-            }
-            _ => runs.push((page, page, state)),
+/// The rows listed under the page map, before `and N more`.
+const ACTIVE_ROWS: usize = 6;
+/// The most rows the page map takes, its cells shrinking to stay within.
+const MAP_ROWS: usize = 14;
+
+/// The side of a page map's cells, the gap between them and how many fit
+/// a row of `width`, for `count` pages: the largest that keeps the map
+/// within [`MAP_ROWS`] rows.
+fn map_cells(count: usize, width: f32) -> (f32, f32, usize) {
+    let fit = |cell: f32, gap: f32| (((width + gap) / (cell + gap)).floor() as usize).max(1);
+    for cell in [18.0, 16.0, 14.0, 12.0, 10.0, 8.0, 7.0, 6.0, 5.0, 4.0] {
+        let gap = if cell >= 10.0 { 3.0 } else { 1.0 };
+        let per_row = fit(cell, gap);
+        if count.div_ceil(per_row) <= MAP_ROWS {
+            return (cell, gap, per_row);
         }
     }
-    // Short runs read better unfolded.
-    runs.into_iter()
-        .flat_map(|(first, last, state)| {
-            if last - first + 1 >= 3 {
-                vec![(first, last, state)]
-            } else {
-                (first..=last).map(|page| (page, page, state)).collect()
+    (3.0, 1.0, fit(3.0, 1.0))
+}
+
+/// `━━━━━──── 42%  2 translating · 2 waiting` (frame 03e).
+fn progress_summary(ui: &mut egui::Ui, states: &[PageProgress], kept: usize) {
+    let tokens = Tokens::get(ui.ctx());
+    let count =
+        |wanted: fn(&PageProgress) -> bool| states.iter().filter(|state| wanted(state)).count();
+    let done = count(|state| *state == PageProgress::Done);
+    let translating = count(|state| matches!(state, PageProgress::Partial { .. }));
+    let failed = count(|state| matches!(state, PageProgress::Failed(_)));
+    let waiting = count(|state| *state == PageProgress::Waiting);
+    let mut parts = Vec::new();
+    if translating > 0 {
+        parts.push(format!("{translating} translating"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    } else if waiting > 0 {
+        parts.push(format!("{waiting} waiting"));
+    }
+    if kept > 0 {
+        parts.push(format!(
+            "{kept} block{} kept original",
+            if kept == 1 { "" } else { "s" }
+        ));
+    }
+    let fraction = done as f32 / states.len().max(1) as f32;
+    let percent = format!("{:.0}%", fraction * 100.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(104.0, 14.0), egui::Sense::hover());
+        Meter::new(fraction)
+            .width(bar.width())
+            .label(&percent)
+            .paint(ui, bar);
+        ui.label(
+            egui::RichText::new(parts.join(" · "))
+                .font(theme::mono(10.0))
+                .color(tokens.muted),
+        );
+    });
+}
+
+/// A page's colour in the map.
+fn map_color(state: PageProgress, tokens: &Tokens) -> egui::Color32 {
+    match state {
+        PageProgress::Done => tokens.ok.gamma_multiply(0.55),
+        PageProgress::Partial { .. } => tokens.accent,
+        PageProgress::Failed(_) => tokens.err,
+        PageProgress::Waiting => tokens.faint,
+        PageProgress::NotTranslated => tokens.hover,
+    }
+}
+
+/// The pages as a map (frame 03e): a cell a page, coloured by its state,
+/// the current page outlined; `hover` says what a page's cell shows.
+/// Returns the page clicked.
+fn page_map(
+    ui: &mut egui::Ui,
+    states: &[PageProgress],
+    current: usize,
+    hover: impl Fn(usize) -> String,
+) -> Option<usize> {
+    let tokens = Tokens::get(ui.ctx());
+    let width = ui.available_width();
+    let (cell, gap, per_row) = map_cells(states.len(), width);
+    let rows = states.len().div_ceil(per_row);
+    let height = rows as f32 * (cell + gap) - gap;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height.max(0.0)), egui::Sense::click());
+    let cell_rect = |page: usize| {
+        let (row, column) = (page / per_row, page % per_row);
+        egui::Rect::from_min_size(
+            rect.min + egui::vec2(column as f32 * (cell + gap), row as f32 * (cell + gap)),
+            egui::vec2(cell, cell),
+        )
+    };
+    let radius = if cell > 8.0 { 2.0 } else { 1.0 };
+    let painter = ui.painter();
+    for (page, state) in states.iter().enumerate() {
+        painter.rect_filled(cell_rect(page), radius, map_color(*state, &tokens));
+    }
+    if current < states.len() {
+        painter.rect_stroke(
+            cell_rect(current).expand(0.5),
+            radius,
+            egui::Stroke::new(1.5, tokens.text),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let page = response.hover_pos().and_then(|pos| {
+        let offset = pos - rect.min;
+        let (column, row) = (
+            (offset.x / (cell + gap)) as usize,
+            (offset.y / (cell + gap)) as usize,
+        );
+        let page = row * per_row + column;
+        (column < per_row && page < states.len()).then_some(page)
+    });
+    let clicked = response.clicked();
+    if let Some(page) = page {
+        response.on_hover_text(hover(page));
+    }
+    page.filter(|_| clicked)
+}
+
+/// `■ done ■ translating ■ waiting ■ failed`, under the map.
+fn map_legend(ui: &mut egui::Ui) {
+    let tokens = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (state, label) in [
+            (PageProgress::Done, "done"),
+            (PageProgress::Partial { done: 0, total: 1 }, "translating"),
+            (PageProgress::Waiting, "waiting"),
+            (PageProgress::Failed(PageFailureCode::Other), "failed"),
+        ] {
+            let (swatch, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(swatch, 1.0, map_color(state, &tokens));
+            ui.add_space(-4.0);
+            ui.label(
+                egui::RichText::new(label)
+                    .font(theme::mono(10.0))
+                    .color(tokens.faint),
+            );
+        }
+    });
+}
+
+/// A page's state as `✓ translated`, `◌ translating · 3/5 blocks`, `✕
+/// network`…, with its colour.
+fn progress_label(
+    state: PageProgress,
+    kept: usize,
+    tokens: &Tokens,
+) -> (&'static str, String, egui::Color32) {
+    match state {
+        PageProgress::Done if kept > 0 => {
+            ("✓", format!("translated · {kept} kept original"), tokens.ok)
+        }
+        PageProgress::Done => ("✓", "translated".to_string(), tokens.ok),
+        PageProgress::Partial { done, total } => (
+            "◌",
+            format!("translating · {done}/{total} blocks"),
+            tokens.accent_text,
+        ),
+        PageProgress::Failed(code) => (
+            "✕",
+            match code {
+                PageFailureCode::LocalOcrMissing => "scan · needs ocr",
+                PageFailureCode::LocalOcrFailed => "ocr failed",
+                PageFailureCode::Network => "network",
+                PageFailureCode::Provider => "ocr service",
+                PageFailureCode::Layout => "page error",
+                PageFailureCode::Other => "failed",
             }
-        })
-        .collect()
+            .to_string(),
+            tokens.err,
+        ),
+        PageProgress::Waiting => ("·", "waiting".to_string(), tokens.muted),
+        PageProgress::NotTranslated => ("·", "not translated".to_string(), tokens.faint),
+    }
 }
 
 fn page_status_row(
@@ -1142,33 +1350,7 @@ fn page_status_row(
             tokens.text_2
         },
     );
-    let partial;
-    let done;
-    let (glyph, label, color) = match state {
-        PageProgress::Done if kept > 0 => {
-            done = format!("translated · {kept} kept original");
-            ("✓", done.as_str(), tokens.ok)
-        }
-        PageProgress::Done => ("✓", "translated", tokens.ok),
-        PageProgress::Partial { done, total } => {
-            partial = format!("translating · {done}/{total} blocks");
-            ("◌", partial.as_str(), tokens.accent_text)
-        }
-        PageProgress::Failed(code) => (
-            "✕",
-            match code {
-                PageFailureCode::LocalOcrMissing => "scan · needs ocr",
-                PageFailureCode::LocalOcrFailed => "ocr failed",
-                PageFailureCode::Network => "network",
-                PageFailureCode::Provider => "ocr service",
-                PageFailureCode::Layout => "page error",
-                PageFailureCode::Other => "failed",
-            },
-            tokens.err,
-        ),
-        PageProgress::Waiting => ("·", "waiting", tokens.muted),
-        PageProgress::NotTranslated => ("·", "not translated", tokens.faint),
-    };
+    let (glyph, label, color) = progress_label(state, kept, &tokens);
     let x = rect.left() + rect.width() * 0.45;
     ui.painter().text(
         egui::pos2(x, y),
@@ -1180,7 +1362,7 @@ fn page_status_row(
     ui.painter().text(
         egui::pos2(x + 14.0, y),
         egui::Align2::LEFT_CENTER,
-        label,
+        &label,
         font,
         match state {
             PageProgress::Done if current => tokens.ok,
@@ -2494,6 +2676,18 @@ fn note_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_map_shrinks_its_cells_to_fit_a_book() {
+        // A paper's pages are large cells on a row or two…
+        assert_eq!(map_cells(12, 276.0), (18.0, 3.0, 13));
+        // …a book's shrink so the map stays within its rows.
+        let (cell, _, per_row) = map_cells(530, 276.0);
+        assert!(530_usize.div_ceil(per_row) <= MAP_ROWS);
+        assert!(cell >= 6.0, "{cell}");
+        let (cell, _, per_row) = map_cells(5_000, 276.0);
+        assert!(cell >= 3.0 && per_row > 0);
+    }
 
     #[test]
     fn turning_following_off_keeps_the_outline_where_it_is() {

@@ -181,6 +181,37 @@ if [[ ${tier} == screens ]]; then
     mkdir -p "${shots}"
     reader="${repo}/target/debug/glyphst-reader"
     dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
+    # A long document, for the translation's page map: 240 pages of text,
+    # written here so no sample needs to be a book.
+    long=${GLYPHST_SCREENS_LONG:-${run_dir}/long.pdf}
+    if [[ ! -e ${long} ]]; then
+        LC_ALL=C awk 'function emit(text) { printf "%s", text; at += length(text) }
+            function object(number, body) {
+                offset[number] = at
+                emit(number " 0 obj\n" body "\nendobj\n")
+            }
+            BEGIN {
+                pages = 240
+                emit("%PDF-1.4\n")
+                object(1, "<< /Type /Catalog /Pages 2 0 R >>")
+                for (i = 0; i < pages; i++) kids = kids (4 + 2 * i) " 0 R "
+                object(2, "<< /Type /Pages /Kids [" kids "] /Count " pages " >>")
+                object(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+                for (i = 0; i < pages; i++) {
+                    object(4 + 2 * i, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]" \
+                        " /Resources << /Font << /F1 3 0 R >> >> /Contents " (5 + 2 * i) " 0 R >>")
+                    text = "BT /F1 20 Tf 72 760 Td (Chapter " (i + 1) ") Tj /F1 11 Tf 0 -30 Td" \
+                        " (This page of the long sample says something worth translating.) Tj" \
+                        " 0 -16 Td (Its second line carries on, so the paragraph has length.) Tj ET"
+                    object(5 + 2 * i, "<< /Length " length(text) " >>\nstream\n" text "\nendstream")
+                }
+                size = 4 + 2 * pages
+                start = at
+                emit("xref\n0 " size "\n0000000000 65535 f \n")
+                for (k = 1; k < size; k++) emit(sprintf("%010d 00000 n \n", offset[k]))
+                emit("trailer\n<< /Size " size " /Root 1 0 R >>\nstartxref\n" start "\n%%EOF\n")
+            }' > "${long}"
+    fi
     # A dusk gradient (navy to orange, with a teal band) as the wallpaper,
     # written as a binary PPM so no image tool is needed.
     wallpaper=${GLYPHST_SCREENS_WALLPAPER:-${run_dir}/wallpaper.ppm}
@@ -216,8 +247,8 @@ if [[ ${tier} == screens ]]; then
         }' > "${detail}"
     fi
     # name, then the Reader's arguments (`@` stands for the document, `#`
-    # for the second one, `%` for a dense drawing, `^` for the wallpaper,
-    # `~` for the detailed one and `@@` for a plain `@`;
+    # for the second one, `%` for a dense drawing, `+` for a long text, `^`
+    # for the wallpaper, `~` for the detailed one and `@@` for a plain `@`;
     # a `--screenshot-*` argument picks the kind of shot instead of a plain
     # one).
     states=(
@@ -273,6 +304,7 @@ if [[ ${tier} == screens ]]; then
         "03-translation-following @ --sidebar translation --translate-fake --translate-follow"
         "03-translation-done @ --sidebar translation --translate-fake --translate-document"
         "03-translation-clear-confirm @ --sidebar translation --translate-fake --translate-document --command translation.clear"
+        "03-translation-book + --sidebar translation --translate-fake --translate-follow"
         "03-translation-failed @ --sidebar translation --translate-fake --translate-document --translate-failures network,network"
         "03-translation-failed-install @ --sidebar translation --translate-fake --translate-follow --translate-failures local-ocr-missing"
         "03-translation-ocr-menu @ --sidebar translation --pointer-demo click:189,211;wait*3"
@@ -459,6 +491,7 @@ if [[ ${tier} == screens ]]; then
                     @@) args+=("@") ;;
                     \#) args+=("${second}") ;;
                     %) args+=("${dense}") ;;
+                    +) args+=("${long}") ;;
                     ^) args+=("${wallpaper}") ;;
                     \~) args+=("${detail}") ;;
                     --screenshot-*) shot=${arg} ;;
