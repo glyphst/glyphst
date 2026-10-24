@@ -107,6 +107,9 @@ pub(super) fn ensure_current_tables(database: &Database) -> Result<()> {
         write_txn.open_table(DOCUMENT_PREFERENCES_V4_TABLE)?;
     }
     {
+        write_txn.open_table(DOCUMENT_OCR_V1_TABLE)?;
+    }
+    {
         write_txn.open_table(LIBRARY_ITEMS_V1_TABLE)?;
     }
     {
@@ -147,6 +150,7 @@ pub(super) fn load_current_library(database: &Database, managed_root: &Path) -> 
     let read_txn = database.begin_read()?;
     load_storage_v2(&read_txn, &mut library)?;
     load_document_preferences(&read_txn, &mut library)?;
+    load_document_ocr(&read_txn, &mut library)?;
     load_catalog(&read_txn, &mut library, managed_root)?;
     drop(read_txn);
     library.sanitize();
@@ -387,6 +391,29 @@ fn load_document_preferences(
             Err(error) => eprintln!("failed to decode document preferences: {error:#}"),
         }
     }
+    Ok(())
+}
+
+fn load_document_ocr(read_txn: &redb::ReadTransaction, library: &mut Library) -> Result<()> {
+    // A library from before the table has none.
+    let table = match read_txn.open_table(DOCUMENT_OCR_V1_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in table.iter()? {
+        let (_, value) = entry?;
+        match decode::<StoredDocumentOcrV1>(value.value())
+            .and_then(StoredDocumentOcrV1::into_domain)
+        {
+            Ok(mut ocr) => {
+                ocr.path = normalize_path(&ocr.path);
+                library.document_ocr.push(ocr);
+            }
+            Err(error) => eprintln!("failed to decode a document's OCR choice: {error:#}"),
+        }
+    }
+    library.document_ocr.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(())
 }
 

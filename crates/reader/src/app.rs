@@ -2791,6 +2791,10 @@ impl ReaderApp {
             SidebarAction::StartTranslation => self.start_document_translation(ctx),
             SidebarAction::TranslateRest => self.start_document_translation(ctx),
             SidebarAction::RetryFailed => self.retry_failed_translation(ctx),
+            SidebarAction::SetDocumentOcr(choice) => self.set_document_ocr(choice, ctx),
+            SidebarAction::OpenModels => self
+                .settings_window
+                .show_section(crate::settings_window::Section::Models),
             SidebarAction::InstallLocalOcr => {
                 if let Some(settings) = self.user_settings.get().cloned() {
                     self.settings_window.install_local_ocr(ctx, &settings);
@@ -3010,6 +3014,62 @@ impl ReaderApp {
         );
     }
 
+    /// Gives the active document its own OCR choice; a translation under
+    /// way starts again with it, its pages kept until retranslated (from
+    /// the cache).
+    fn set_document_ocr(&mut self, choice: Option<(String, Option<String>)>, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let path = self.tabs[active].path.clone();
+        if let Err(error) = self.library.set_document_ocr(&path, choice) {
+            self.notices.push(format!(
+                "Could not keep the document's OCR choice: {error:#}"
+            ));
+            return;
+        }
+        let Some(old) = self.tabs[active]
+            .translation
+            .take_if(|session| session.is_running())
+        else {
+            return;
+        };
+        let scope = if old.is_following() {
+            let page = self.tabs[active].current_page();
+            glyphst_pdf_translation_service::TranslationScope::following(page, FOLLOW_AHEAD)
+        } else {
+            glyphst_pdf_translation_service::TranslationScope::whole()
+        };
+        let previews = old.previews.clone();
+        drop(old);
+        self.start_translation(ctx, scope, false);
+        if let Some(session) = self.tabs[active].translation.as_mut() {
+            session.keep_previews(previews);
+        }
+    }
+
+    /// The translation panel's OCR row for the active document.
+    pub(crate) fn ocr_row(
+        &self,
+        settings: &glyphst_settings::OcrSettings,
+        active: usize,
+    ) -> crate::sidebar::OcrRow {
+        let installed =
+            glyphst_models::catalog::for_task(glyphst_models::catalog::Task::TextRecognition)
+                .filter(|model| {
+                    glyphst_ocr::setup(model, glyphst_ocr::Device::Cpu)
+                        .all_paths()
+                        .is_some()
+                })
+                .map(|model| model.id)
+                .collect();
+        crate::sidebar::OcrRow {
+            settings: settings.clone(),
+            document: self.library.document_ocr(&self.tabs[active].path),
+            installed,
+        }
+    }
+
     /// Runs the active document's translation again over the same pages,
     /// recognising again the pages that failed; translated text comes back
     /// from the cache.
@@ -3054,11 +3114,15 @@ impl ReaderApp {
             return;
         };
         let target = self.prefs.target_language.clone();
+        let options = crate::translation::SessionOptions {
+            retry,
+            ocr: self.library.document_ocr(&self.tabs[active].path),
+        };
         let started = self.translator.start_session(
             &self.tabs[active].path,
             target.as_deref(),
             scope,
-            retry,
+            options,
             ctx,
         );
         match started {

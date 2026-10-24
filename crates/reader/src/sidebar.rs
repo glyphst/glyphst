@@ -110,6 +110,10 @@ pub enum SidebarAction {
     RetryFailed,
     /// Install local OCR (Settings · OCR), which failed pages need.
     InstallLocalOcr,
+    /// This document's own OCR engine and mode (`None`: the settings').
+    SetDocumentOcr(Option<(String, Option<String>)>),
+    /// Open Settings · Models.
+    OpenModels,
     /// Show pages beside their translation, or in place.
     SetFacing(bool),
     CancelTranslation,
@@ -151,6 +155,66 @@ pub struct SidebarInfo<'a> {
     pub page_columns: PageColumns,
     /// Local OCR is installed (looked up while a page needs it).
     pub local_ocr_ready: bool,
+    /// The document's OCR choice and what it falls back to, while the
+    /// translation tab shows.
+    pub ocr: Option<OcrRow>,
+}
+
+/// The translation panel's OCR row: the settings' choice, the document's
+/// own, and the local models installed.
+pub struct OcrRow {
+    pub settings: glyphst_settings::OcrSettings,
+    pub document: Option<glyphst_library::DocumentOcr>,
+    pub installed: Vec<&'static str>,
+}
+
+impl OcrRow {
+    /// The engine in effect: `local:<model>`, `paddle`, `unlimited`, `off`.
+    fn engine(&self) -> String {
+        if let Some(document) = &self.document {
+            return document.engine.clone();
+        }
+        settings_engine(&self.settings)
+    }
+
+    /// `auto` or `always`.
+    fn mode(&self) -> String {
+        self.document
+            .as_ref()
+            .and_then(|document| document.mode.clone())
+            .unwrap_or_else(|| match self.settings.mode {
+                glyphst_settings::OcrMode::Always => "always".to_owned(),
+                _ => "auto".to_owned(),
+            })
+    }
+
+    /// `pp-ocrv6 small · auto`.
+    fn label(&self) -> String {
+        let engine = self.engine();
+        if engine == "off" {
+            return "off".to_owned();
+        }
+        format!("{} · {}", engine_name(&engine), self.mode())
+    }
+}
+
+/// The settings' engine in the document choice's words.
+fn settings_engine(settings: &glyphst_settings::OcrSettings) -> String {
+    use glyphst_settings::{OcrMode, OcrProvider};
+    match (settings.mode, settings.provider) {
+        (OcrMode::Off, _) => "off".to_owned(),
+        (_, OcrProvider::Local) => format!("local:{}", settings.local.model),
+        (_, OcrProvider::Paddle) => "paddle".to_owned(),
+        (_, OcrProvider::Unlimited) => "unlimited".to_owned(),
+    }
+}
+
+/// `pp-ocrv6 small`, `paddle`.
+fn engine_name(engine: &str) -> &str {
+    match engine.strip_prefix("local:") {
+        Some(model) => glyphst_models::catalog::entry(model).map_or(model, |entry| entry.name),
+        None => engine,
+    }
 }
 
 /// A bookmark in another document.
@@ -444,6 +508,10 @@ fn translation_panel(
                 }
             }
         });
+    }
+    if let Some(ocr) = &info.ocr {
+        ui.add_space(6.0);
+        ocr_row(ui, ocr, actions);
     }
     ui.add_space(10.0);
     // Where translated pages go: over the originals, or beside them.
@@ -817,6 +885,94 @@ fn failures_box(
                 actions.push(SidebarAction::RetryFailed);
             }
         });
+}
+
+/// The document's OCR: which engine reads its scans, and when (frame 03d).
+fn ocr_row(ui: &mut egui::Ui, ocr: &OcrRow, actions: &mut Vec<SidebarAction>) {
+    let Some(response) = select_row(ui, "ocr", &ocr.label()) else {
+        return;
+    };
+    let engine = ocr.engine();
+    let mode = ocr
+        .document
+        .as_ref()
+        .and_then(|document| document.mode.clone());
+    let choose = |engine: String| SidebarAction::SetDocumentOcr(Some((engine, mode.clone())));
+    egui::Popup::menu(&response).show(|ui| {
+        ui_menu::style(ui);
+        let settings = settings_engine(&ocr.settings);
+        if ui_menu::Item::new("as in settings")
+            .detail(engine_name(&settings))
+            .checked(ocr.document.is_none())
+            .show(ui)
+            .clicked()
+        {
+            actions.push(SidebarAction::SetDocumentOcr(None));
+        }
+        ui_menu::group(ui, "this computer");
+        for model in
+            glyphst_models::catalog::for_task(glyphst_models::catalog::Task::TextRecognition)
+        {
+            let id = format!("local:{}", model.id);
+            if ocr.installed.contains(&model.id) {
+                let size = format_size(model.size());
+                if ui_menu::Item::new(model.name)
+                    .detail(&size)
+                    .checked(engine == id)
+                    .show(ui)
+                    .clicked()
+                {
+                    actions.push(choose(id));
+                }
+            } else if ui_menu::Item::new(model.name)
+                .detail("install…")
+                .show(ui)
+                .clicked()
+            {
+                actions.push(SidebarAction::OpenModels);
+            }
+        }
+        ui_menu::group(ui, "online");
+        for (name, detail) in [("paddle", "paddleocr-vl"), ("unlimited", "baidu")] {
+            if ui_menu::Item::new(name)
+                .detail(detail)
+                .checked(engine == name)
+                .show(ui)
+                .clicked()
+            {
+                actions.push(choose(name.to_owned()));
+            }
+        }
+        if ui_menu::Item::new("off")
+            .detail("native text only")
+            .checked(engine == "off")
+            .show(ui)
+            .clicked()
+        {
+            actions.push(choose("off".to_owned()));
+        }
+        ui_menu::group(ui, "recognise");
+        let keep = if engine == "off" {
+            settings.clone()
+        } else {
+            engine.clone()
+        };
+        for (label, value) in [
+            ("when a page has no text", "auto"),
+            ("every page", "always"),
+        ] {
+            if ui_menu::Item::new(label)
+                .checked(engine != "off" && ocr.mode() == value)
+                .show(ui)
+                .clicked()
+            {
+                actions.push(SidebarAction::SetDocumentOcr(Some((
+                    keep.clone(),
+                    Some(value.to_owned()),
+                ))));
+            }
+        }
+    });
 }
 
 /// The pages as rows: runs of three or more pages in the same state, away

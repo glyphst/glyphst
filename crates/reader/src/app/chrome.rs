@@ -842,6 +842,9 @@ impl ReaderApp {
             bookmark_key: self.keymap.label(Command::Bookmark).unwrap_or_default(),
             opened: self.opened_label(active),
             page_columns: self.prefs.page_columns,
+            ocr: (self.prefs.sidebar == SidebarTab::Translation)
+                .then(|| settings.map(|settings| self.ocr_row(&settings.ocr, active)))
+                .flatten(),
             // Looked up only while a page waits for it.
             local_ocr_ready: self.tabs[active]
                 .translation

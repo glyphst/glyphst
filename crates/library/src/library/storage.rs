@@ -401,6 +401,29 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Keeps `path`'s OCR choice (`None` forgets it).
+    pub(super) fn write_document_ocr(&self, path: &Path, ocr: Option<&DocumentOcr>) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Err(anyhow!("document library database is unavailable"));
+        };
+        let key = history_key(path);
+        let write_txn = database.begin_write()?;
+        {
+            let mut table = write_txn.open_table(DOCUMENT_OCR_V1_TABLE)?;
+            match ocr {
+                Some(ocr) => {
+                    let encoded = encode(&StoredDocumentOcrV1::from(ocr))?;
+                    table.insert(key.as_slice(), encoded.as_slice())?;
+                }
+                None => {
+                    table.remove(key.as_slice())?;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     pub(super) fn delete_document_preferences(&self, path: &Path) -> Result<()> {
         let Some(database) = &self.database else {
             return Err(anyhow!("document library database is unavailable"));
@@ -524,6 +547,21 @@ impl LibraryStore {
             for entry in &self.library.document_preferences {
                 let key = history_key(&entry.path);
                 let encoded = encode(&StoredDocumentPreferencesV4::from(entry))?;
+                table.insert(key.as_slice(), encoded.as_slice())?;
+            }
+        }
+        {
+            let mut table = write_txn.open_table(DOCUMENT_OCR_V1_TABLE)?;
+            let keys = table
+                .iter()?
+                .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_vec()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                table.remove(key.as_slice())?;
+            }
+            for entry in &self.library.document_ocr {
+                let key = history_key(&entry.path);
+                let encoded = encode(&StoredDocumentOcrV1::from(entry))?;
                 table.insert(key.as_slice(), encoded.as_slice())?;
             }
         }

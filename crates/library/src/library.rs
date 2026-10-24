@@ -41,6 +41,11 @@ const READING_SESSIONS_V1_TABLE: TableDefinition<u64, &[u8]> =
 const DOCUMENT_PREFERENCES_V4_VERSION: u8 = 4;
 const DOCUMENT_PREFERENCES_V4_TABLE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("document_preferences_v4");
+/// Each document's own OCR choice (the translation panel's), beside its
+/// other preferences.
+const DOCUMENT_OCR_V1_VERSION: u8 = 1;
+const DOCUMENT_OCR_V1_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("document_ocr_v1");
 const AI_SESSIONS_V6_VERSION: u8 = 6;
 const AI_SESSIONS_V6_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("ai_sessions_v6_global");
@@ -1284,6 +1289,36 @@ impl StoredDocumentPreferencesV4 {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredDocumentOcrV1 {
+    version: u8,
+    path: StoredPathV1,
+    engine: String,
+    mode: Option<String>,
+}
+
+impl From<&DocumentOcr> for StoredDocumentOcrV1 {
+    fn from(ocr: &DocumentOcr) -> Self {
+        Self {
+            version: DOCUMENT_OCR_V1_VERSION,
+            path: StoredPathV1::from_path(&ocr.path),
+            engine: ocr.engine.clone(),
+            mode: ocr.mode.clone(),
+        }
+    }
+}
+
+impl StoredDocumentOcrV1 {
+    fn into_domain(self) -> Result<DocumentOcr> {
+        require_storage_version(self.version, DOCUMENT_OCR_V1_VERSION)?;
+        Ok(DocumentOcr {
+            path: self.path.into_path()?,
+            engine: self.engine,
+            mode: self.mode,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentPosition {
     pub scroll_x_doc: f32,
@@ -1911,6 +1946,16 @@ pub struct DocumentPreferences {
     pub page_layout: DocumentPageLayout,
 }
 
+/// How one document's pages are recognised, instead of the settings':
+/// `engine` is `local:<model>`, `paddle`, `unlimited` or `off`; `mode`
+/// (`auto`, `always`) when it differs from the settings'.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentOcr {
+    pub path: PathBuf,
+    pub engine: String,
+    pub mode: Option<String>,
+}
+
 impl DocumentPreferences {
     fn is_empty(&self) -> bool {
         self.target_language.is_empty()
@@ -1951,6 +1996,7 @@ pub struct Library {
     pub home_preferences: HomePreferences,
     pub reader_session: Option<ReaderSessionSnapshot>,
     pub document_preferences: Vec<DocumentPreferences>,
+    pub document_ocr: Vec<DocumentOcr>,
     next_bookmark_id: u64,
     next_highlight_id: u64,
     next_note_id: u64,

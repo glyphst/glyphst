@@ -225,7 +225,7 @@ impl Translator {
         path: &Path,
         target: Option<&str>,
         scope: Arc<TranslationScope>,
-        retry: bool,
+        options: SessionOptions,
         ctx: &egui::Context,
     ) -> Result<DocSession, String> {
         let settings = self
@@ -249,8 +249,11 @@ impl Translator {
         };
         let mut config = PdfTranslationConfig::from_settings(&settings);
         // A retry recognises again the pages that failed last time.
-        if retry {
+        if options.retry {
             config = config.retrying_failed_pages();
+        }
+        if let Some(ocr) = &options.ocr {
+            config = config.with_document_ocr(&ocr.engine, ocr.mode.as_deref());
         }
         let cancel = CancellationToken::new();
         let (events_tx, events) = mpsc::channel();
@@ -364,6 +367,14 @@ pub enum SessionStatus {
     Running,
     Finished,
     Failed(String),
+}
+
+/// How a session starts: again over pages that failed, and with the
+/// document's own OCR choice.
+#[derive(Clone, Debug, Default)]
+pub struct SessionOptions {
+    pub retry: bool,
+    pub ocr: Option<glyphst_library::DocumentOcr>,
 }
 
 /// Blocks a page's new preview shows translated, to reveal.
@@ -634,6 +645,16 @@ impl DocSession {
                 .filter(|page| self.page_progress(*page) == PageProgress::Done)
                 .count(),
         )
+    }
+
+    /// Shows `previews` (another session's) until this session's own
+    /// replace them.
+    pub fn keep_previews(&mut self, previews: HashMap<usize, Preview>) {
+        for (page, mut preview) in previews {
+            // Any revision of this session's is newer.
+            preview.revision = 0;
+            self.previews.entry(page).or_insert(preview);
+        }
     }
 
     /// Records that a page could not be translated (screens give some).
@@ -1048,7 +1069,13 @@ mod tests {
         let ctx = egui::Context::default();
         let translator = translator(&ctx);
         let mut session = translator
-            .start_session(&path, None, TranslationScope::following(1, 1), false, &ctx)
+            .start_session(
+                &path,
+                None,
+                TranslationScope::following(1, 1),
+                SessionOptions::default(),
+                &ctx,
+            )
             .unwrap();
         wait_until(|| {
             session.poll();
@@ -1114,7 +1141,13 @@ mod tests {
         let ctx = egui::Context::default();
         let translator = translator(&ctx);
         let mut session = translator
-            .start_session(&path, None, TranslationScope::whole(), false, &ctx)
+            .start_session(
+                &path,
+                None,
+                TranslationScope::whole(),
+                SessionOptions::default(),
+                &ctx,
+            )
             .unwrap();
         assert_eq!(session.target, "fr");
         wait_until(|| {

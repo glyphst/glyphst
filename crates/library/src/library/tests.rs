@@ -1950,6 +1950,39 @@ fn preference_setters_preserve_other_document_fields() {
 }
 
 #[test]
+fn keeps_a_documents_own_ocr_choice_and_forgets_it() {
+    let database_path = temp_library_path("document-ocr-round-trip");
+    let document_path = Path::new("/tmp/scanned.pdf");
+    {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        assert_eq!(store.document_ocr(document_path), None);
+        store
+            .set_document_ocr(
+                document_path,
+                Some(("local:indra-v1.1.0".into(), Some("always".into()))),
+            )
+            .unwrap();
+    }
+    {
+        let mut store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        let ocr = store.document_ocr(document_path).unwrap();
+        assert_eq!(ocr.engine, "local:indra-v1.1.0");
+        assert_eq!(ocr.mode.as_deref(), Some("always"));
+        // Its other preferences are untouched.
+        assert_eq!(
+            store.document_rotation(document_path),
+            DocumentRotation::default()
+        );
+        store.set_document_ocr(document_path, None).unwrap();
+    }
+    {
+        let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
+        assert_eq!(store.document_ocr(document_path), None);
+    }
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
 fn persists_document_rotation_round_trip() {
     let database_path = temp_library_path("document-rotation-round-trip");
     let document_path = Path::new("/tmp/rotated.pdf");

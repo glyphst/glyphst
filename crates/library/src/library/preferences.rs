@@ -149,6 +149,45 @@ impl LibraryStore {
         Ok(true)
     }
 
+    /// How `path`'s pages are recognised, when it has its own choice.
+    pub fn document_ocr(&self, path: &Path) -> Option<DocumentOcr> {
+        let path = normalize_path(path);
+        self.library
+            .document_ocr
+            .iter()
+            .find(|ocr| ocr.path == path)
+            .cloned()
+    }
+
+    /// Gives `path` its own OCR `engine` and `mode`; `None` goes back to
+    /// the settings'.
+    pub fn set_document_ocr(
+        &mut self,
+        path: &Path,
+        choice: Option<(String, Option<String>)>,
+    ) -> Result<()> {
+        let path = normalize_path(path);
+        let ocr = choice.map(|(engine, mode)| DocumentOcr {
+            path: path.clone(),
+            engine,
+            mode,
+        });
+        if self.document_ocr(&path) == ocr {
+            return Ok(());
+        }
+        self.write_document_ocr(&path, ocr.as_ref())?;
+        self.library.document_ocr.retain(|known| known.path != path);
+        if let Some(ocr) = ocr {
+            let index = self
+                .library
+                .document_ocr
+                .binary_search_by(|known| known.path.cmp(&path))
+                .unwrap_or_else(|index| index);
+            self.library.document_ocr.insert(index, ocr);
+        }
+        Ok(())
+    }
+
     pub fn clear_epub_reader_preferences(&mut self, path: &Path) -> Result<()> {
         self.update_document_preferences(path, |preferences| {
             preferences.epub = None;

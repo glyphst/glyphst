@@ -44,6 +44,32 @@ impl PdfTranslationConfig {
         }
     }
 
+    /// The same with one document's own OCR choice: `engine` is
+    /// `local:<model>`, `paddle`, `unlimited` or `off`, `mode` `auto` or
+    /// `always` (the settings' when `None`).
+    pub fn with_document_ocr(mut self, engine: &str, mode: Option<&str>) -> Self {
+        use glyphst_settings::{OcrMode, OcrProvider};
+        match engine {
+            "off" => self.ocr.mode = OcrMode::Off,
+            "paddle" => self.ocr.provider = OcrProvider::Paddle,
+            "unlimited" => self.ocr.provider = OcrProvider::Unlimited,
+            local => {
+                if let Some(model) = local.strip_prefix("local:") {
+                    self.ocr.provider = OcrProvider::Local;
+                    self.ocr.local.model = model.to_owned();
+                }
+            }
+        }
+        if engine != "off" {
+            match mode {
+                Some("always") => self.ocr.mode = OcrMode::Always,
+                Some("auto") => self.ocr.mode = OcrMode::Auto,
+                _ => {}
+            }
+        }
+        self
+    }
+
     /// The same, recognising again the pages that failed last time.
     pub fn retrying_failed_pages(mut self) -> Self {
         self.retry_failed_pages = true;
