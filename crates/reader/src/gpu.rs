@@ -1146,6 +1146,7 @@ impl CallbackTrait for ViewCallback {
         let Some(view) = views.get_mut(&self.tab) else {
             return Vec::new();
         };
+        let full = view.target.size();
         {
             let mut pass = view
                 .target
@@ -1182,7 +1183,10 @@ impl CallbackTrait for ViewCallback {
                 }
             }
             // Revealing blocks: paper over the block from the scramble band
-            // down, then the replaced drawing below the scan line.
+            // down, then the replaced drawing below the scan line. Page
+            // draws leave their last batch's scissor set; the covers span
+            // every page.
+            pass.set_scissor_rect(0, 0, full[0], full[1]);
             if let Some(covers) = &covers {
                 pass.set_pipeline(paper_pipeline);
                 pass.set_bind_group(0, &*paper_bind_group, &[]);

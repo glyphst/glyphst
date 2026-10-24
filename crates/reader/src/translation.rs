@@ -733,36 +733,99 @@ fn reveal_blocks(
                 .collect()
         })
         .collect();
-    let mut blocks: Vec<RevealBlock> = preview
+    let union = |a: PageRect, b: PageRect| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    };
+    // A region's whole area: its translation, the box Typst set it in
+    // (text can run past the translation's measured bounds) and its
+    // original.
+    let area_of = |region: &PdfTranslationHoverRegion| {
+        let t = region.target_bounds;
+        let mut area = [t.x0, t.y0, t.x1, t.y1];
+        for item in preview
+            .layout
+            .items
+            .iter()
+            .filter(|item| region.block_id.as_deref() == Some(item.block_id.as_str()))
+        {
+            let b = item.bbox;
+            area = union(area, [b.x0, b.y0, b.x1, b.y1]);
+        }
+        region
+            .source_regions
+            .iter()
+            .fold(area, |area, b| union(area, [b.x0, b.y0, b.x1, b.y1]))
+    };
+    let (new, old): (Vec<_>, Vec<_>) = preview
         .hover_regions
         .iter()
-        .filter(|region| region.translated && !before.contains(region.id.as_str()))
-        .map(|region| {
-            let t = region.target_bounds;
-            let inside = |g: &PageRect| {
-                let (x, y) = ((g[0] + g[2]) / 2.0, (g[1] + g[3]) / 2.0);
-                x >= t.x0 - 1.0 && x <= t.x1 + 1.0 && y >= t.y0 - 1.0 && y <= t.y1 + 1.0
-            };
-            let mut area = [t.x0, t.y0, t.x1, t.y1];
-            for source in &region.source_regions {
-                area = [
-                    area[0].min(source.x0),
-                    area[1].min(source.y0),
-                    area[2].max(source.x1),
-                    area[3].max(source.y1),
+        .partition(|region| region.translated && !before.contains(region.id.as_str()));
+    let old: Vec<PageRect> = old.into_iter().map(area_of).collect();
+    let mut areas: Vec<PageRect> = new.into_iter().map(area_of).collect();
+    let centre = |g: &PageRect| ((g[0] + g[2]) / 2.0, (g[1] + g[3]) / 2.0);
+    let contains = |a: &PageRect, (x, y): (f32, f32), margin: f32| {
+        x >= a[0] - margin && x <= a[2] + margin && y >= a[1] - margin && y <= a[3] + margin
+    };
+    let distance = |a: &PageRect, (x, y): (f32, f32)| {
+        let dx = (a[0] - x).max(x - a[2]).max(0.0);
+        let dy = (a[1] - y).max(y - a[3]).max(0.0);
+        dx.hypot(dy)
+    };
+    let mut heights: Vec<f32> = lines.iter().flatten().map(|g| g[3] - g[1]).collect();
+    heights.sort_by(f32::total_cmp);
+    let reach = heights.get(heights.len() / 2).copied().unwrap_or(10.0) * 1.5;
+    // Every glyph goes to the new block holding it, or else the nearest one
+    // within reach unless an older block holds it: a translated glyph in no
+    // block would show before its block is revealed.
+    let mut glyphs: Vec<Vec<(usize, PageRect)>> = vec![Vec::new(); areas.len()];
+    for (line, glyph) in lines
+        .iter()
+        .enumerate()
+        .flat_map(|(line, glyphs)| glyphs.iter().map(move |glyph| (line, *glyph)))
+    {
+        let point = centre(&glyph);
+        let owner = areas
+            .iter()
+            .position(|area| contains(area, point, 1.0))
+            .or_else(|| {
+                if old.iter().any(|area| contains(area, point, 1.0)) {
+                    return None;
+                }
+                areas
+                    .iter()
+                    .enumerate()
+                    .map(|(index, area)| (index, distance(area, point)))
+                    .filter(|(_, distance)| *distance <= reach)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(index, _)| index)
+            });
+        if let Some(owner) = owner {
+            glyphs[owner].push((line, glyph));
+        }
+    }
+    let mut blocks: Vec<RevealBlock> = areas
+        .iter_mut()
+        .zip(glyphs)
+        .map(|(area, glyphs)| {
+            for (_, glyph) in &glyphs {
+                *area = [
+                    area[0].min(glyph[0]),
+                    area[1].min(glyph[1]),
+                    area[2].max(glyph[2]),
+                    area[3].max(glyph[3]),
                 ];
             }
-            let mut glyphs = Vec::new();
-            let mut count = 0;
-            for line in &lines {
-                let before = glyphs.len();
-                glyphs.extend(line.iter().filter(|glyph| inside(glyph)).copied());
-                count += usize::from(glyphs.len() > before);
-            }
+            let mut lines: Vec<usize> = glyphs.iter().map(|(line, _)| *line).collect();
+            lines.dedup();
             RevealBlock {
-                area,
-                glyphs,
-                lines: count.max(1),
+                area: *area,
+                glyphs: glyphs.into_iter().map(|(_, glyph)| glyph).collect(),
+                lines: lines.len().max(1),
             }
         })
         .collect();
@@ -788,6 +851,11 @@ fn stage_label(progress: &PdfTranslationProgress) -> &'static str {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use glyphst_pdf_translation_service::{
+        PdfTranslationPageGlyph, PdfTranslationPageQuad, PdfTranslationPageTextBlock,
+        PdfTranslationPageTextLayer, PdfTranslationPageTextLine,
+    };
+
     use super::*;
     use crate::fake_providers::{fake_translation, start_translation_server, translation_settings};
 
@@ -804,6 +872,72 @@ mod tests {
         let mut translator = Translator::new(false, true);
         translator.set_settings(Some(&Arc::new(translation_settings(port))));
         translator
+    }
+
+    fn glyph(character: char, [x0, y0, x1, y1]: PageRect) -> PdfTranslationPageGlyph {
+        use glyphst_pdf_translation_service::PdfTranslationPagePoint as Point;
+        PdfTranslationPageGlyph {
+            character,
+            quad: PdfTranslationPageQuad {
+                upper_left: Point::new(x0, y0),
+                upper_right: Point::new(x1, y0),
+                lower_left: Point::new(x0, y1),
+                lower_right: Point::new(x1, y1),
+            },
+            font_size: 10.0,
+            bold: false,
+        }
+    }
+
+    fn region(id: &str, translated: bool, [x0, y0, x1, y1]: PageRect) -> PdfTranslationHoverRegion {
+        let bounds = glyphst_pdf_translation_service::BoundingBox::new(x0, y0, x1, y1);
+        PdfTranslationHoverRegion {
+            id: id.to_string(),
+            kind: glyphst_pdf_translation_service::PdfTranslationHoverRegionKind::Text,
+            translated,
+            unit_id: None,
+            block_id: None,
+            target_bounds: bounds,
+            source_regions: vec![bounds],
+        }
+    }
+
+    #[test]
+    fn a_translated_glyph_set_past_its_block_is_still_revealed_with_it() {
+        let line = |glyphs: Vec<PdfTranslationPageGlyph>| PdfTranslationPageTextLine {
+            bounds: glyphst_pdf_translation_service::BoundingBox::new(0.0, 0.0, 0.0, 0.0),
+            glyphs,
+        };
+        let preview = PdfTranslationPagePreview {
+            page_index: 0,
+            revision: 1,
+            layout: glyphst_pdf_translation_service::LayoutPage {
+                page_index: 0,
+                geometry: glyphst_pdf_translation_service::PageGeometry::new(200.0, 300.0),
+                items: Vec::new(),
+            },
+            hover_regions: vec![
+                region("new", true, [10.0, 10.0, 100.0, 30.0]),
+                region("kept", false, [10.0, 200.0, 100.0, 220.0]),
+            ],
+            text_layer: PdfTranslationPageTextLayer {
+                blocks: vec![PdfTranslationPageTextBlock {
+                    lines: vec![
+                        line(vec![glyph('a', [12.0, 12.0, 18.0, 22.0])]),
+                        // Typst ran a line past the measured translation.
+                        line(vec![glyph('b', [12.0, 33.0, 18.0, 43.0])]),
+                        line(vec![glyph('c', [12.0, 205.0, 18.0, 215.0])]),
+                    ],
+                }],
+            },
+            pdf: Arc::from(Vec::new()),
+            layout_failures: Vec::new(),
+        };
+        let blocks = reveal_blocks(None, &preview);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].glyphs.len(), 2, "{blocks:?}");
+        assert_eq!(blocks[0].lines, 2);
+        assert!(blocks[0].area[3] >= 43.0, "{:?}", blocks[0].area);
     }
 
     #[test]
