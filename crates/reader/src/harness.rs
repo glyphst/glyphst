@@ -743,9 +743,16 @@ impl ReaderApp {
             .active
             .is_some_and(|active| self.tabs[active].layers_pending());
         let text_pending = self.prepare_text_shot(ctx, now);
+        // A page drawn for the first time sketches itself in; wait for it
+        // before the shot's scripted step (the generating shots replay
+        // that sketch on purpose).
+        let revealing = !shot.started
+            && !matches!(shot.kind, ShotKind::Generating | ShotKind::Revealing)
+            && self.generations.animating();
         if !pages_drawn
             || layers_pending
             || text_pending
+            || revealing
             || shot.requested
             || self.pointer_demo.is_busy()
         {
