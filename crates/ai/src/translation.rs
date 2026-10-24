@@ -10,6 +10,7 @@ use crate::chatgpt_subscription::{
     acquire_request_access, invalidate_credentials, response_error, response_text, responses_url,
 };
 use crate::settings::{AiApiStyle, AiProvider, AiThinkingLevel, ResolvedAiConfig};
+use crate::stream_units::{UnitScanner, read_events};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticTranslationInput {
@@ -184,8 +185,22 @@ pub fn translate_semantic_batch_with_client(
         return Ok(Vec::new());
     }
 
+    let system = semantic_system_prompt(source_language, target_language);
+    let payload = serde_json::to_value(units)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    let response = match settings.api_style {
+        AiApiStyle::OpenAi => request_openai_payload(client, &settings, &system, payload),
+        AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, &system, payload),
+        AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, &system, payload),
+    }?;
+    parse_semantic_translations(&response, units).map_err(invalid_response)
+}
+
+/// The instructions for a semantic batch: JSON in, `{"translations": …}`
+/// out.
+fn semantic_system_prompt(source_language: Option<&str>, target_language: &str) -> String {
     let source = source_language.unwrap_or("the detected source language");
-    let system = format!(
+    format!(
         "You are a precise document translator. Translate every unit from {source} to \
 {target_language}. Use each unit's role and neighboring context to resolve terminology and \
 continuations, but translate only its text field. Preserve every token matching \
@@ -202,13 +217,45 @@ paragraph boundaries only when they exist in the input text. Return only valid J
 shape: \
 {{\"translations\":[{{\"id\":\"unit-id\",\"text\":\"translated text\"}}]}}. Return every input ID \
 exactly once and do not add IDs."
-    );
+    )
+}
+
+/// [`translate_semantic_batch_with_client`], streaming the reply: each
+/// unit goes to `on_unit` as soon as the provider has written it, and the
+/// whole batch still comes back at the end.
+pub fn translate_semantic_batch_streaming_with_client(
+    client: &reqwest::blocking::Client,
+    settings: ResolvedAiConfig,
+    units: &[SemanticTranslationInput],
+    source_language: Option<&str>,
+    target_language: &str,
+    on_unit: &mut dyn FnMut(SemanticTranslationOutput),
+) -> std::result::Result<Vec<SemanticTranslationOutput>, AiTranslationError> {
+    if !settings.can_request() {
+        return Err(configuration_error(settings.missing_credentials_message()));
+    }
+    if units.is_empty() {
+        return Ok(Vec::new());
+    }
+    let system = semantic_system_prompt(source_language, target_language);
     let payload = serde_json::to_value(units)
         .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    let mut scanner = UnitScanner::new(units.iter().map(|unit| unit.id.clone()));
+    let mut on_delta = |delta: &str| {
+        for unit in scanner.push(delta) {
+            on_unit(unit);
+        }
+    };
     let response = match settings.api_style {
-        AiApiStyle::OpenAi => request_openai_payload(client, &settings, &system, payload),
-        AiApiStyle::OpenAiResponses => request_chatgpt_payload(client, &settings, &system, payload),
-        AiApiStyle::Anthropic => request_anthropic_payload(client, &settings, &system, payload),
+        AiApiStyle::OpenAi => {
+            stream_openai_payload(client, &settings, &system, &payload, &mut on_delta)
+        }
+        AiApiStyle::OpenAiResponses => {
+            stream_chatgpt_payload(client, &settings, &system, &payload, &mut on_delta)
+        }
+        AiApiStyle::Anthropic => {
+            stream_anthropic_payload(client, &settings, &system, &payload, &mut on_delta)
+        }
     }?;
     parse_semantic_translations(&response, units).map_err(invalid_response)
 }
@@ -611,6 +658,275 @@ fn parse_chatgpt_stream_text(body: &str) -> Result<String> {
     (!text.trim().is_empty())
         .then_some(text)
         .ok_or_else(|| anyhow!("ChatGPT Subscription response did not include text content"))
+}
+
+/// Sends a streaming request; a failed status reads its body for the error.
+fn send_stream(
+    request: reqwest::blocking::RequestBuilder,
+    provider: &str,
+) -> std::result::Result<reqwest::blocking::Response, AiTranslationError> {
+    let response = request
+        .send()
+        .map_err(|error| request_error(provider, error))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(retry_after_duration);
+    let body = response.text().unwrap_or_default();
+    Err(http_status_error(provider, status, retry_after, &body))
+}
+
+/// Whether the server streams (some ignore `stream` and answer whole).
+fn is_event_stream(response: &reqwest::blocking::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/event-stream"))
+}
+
+/// A stream that broke off or carried an error: tried again like a network
+/// failure.
+fn stream_error(provider: &str, error: anyhow::Error) -> AiTranslationError {
+    AiTranslationError {
+        category: AiTranslationErrorCategory::Network,
+        message: format!("{provider} translation stream failed: {error:#}"),
+        status: None,
+        retryable: true,
+        retry_after: None,
+    }
+}
+
+fn stream_openai_payload(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: &Value,
+    on_delta: &mut dyn FnMut(&str),
+) -> std::result::Result<String, AiTranslationError> {
+    match stream_openai_payload_inner(client, settings, system, payload, true, on_delta) {
+        Err(error)
+            if error.category == AiTranslationErrorCategory::InvalidRequest
+                && matches!(error.status, Some(400 | 404 | 422)) =>
+        {
+            stream_openai_payload_inner(client, settings, system, payload, false, on_delta)
+        }
+        result => result,
+    }
+}
+
+fn stream_openai_payload_inner(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: &Value,
+    structured_output: bool,
+    on_delta: &mut dyn FnMut(&str),
+) -> std::result::Result<String, AiTranslationError> {
+    let provider = &settings.provider_name;
+    let mut body = json!({
+        "model": settings.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": serde_json::to_string(payload).map_err(|error|
+                configuration_error(format!("failed to encode request: {error}"))) ?}
+        ],
+        "temperature": 0,
+        "stream": true,
+    });
+    if structured_output {
+        body["response_format"] = json!({"type": "json_object"});
+    }
+    apply_translation_thinking_mode(&mut body, settings);
+    apply_translation_output_budget(&mut body, settings, payload);
+    let mut request = client.post(openai_chat_url(&settings.base_url)).json(&body);
+    if !settings.api_key.is_empty() {
+        request = request.bearer_auth(&settings.api_key);
+    }
+    let response = send_stream(request, provider)?;
+    let mut text = String::new();
+    let mut finish = None;
+    let mut read = |value: &Value, text: &mut String| {
+        let delta = value
+            .pointer("/choices/0/delta/content")
+            .or_else(|| value.pointer("/choices/0/message/content"))
+            .and_then(Value::as_str);
+        if let Some(delta) = delta {
+            text.push_str(delta);
+            on_delta(delta);
+        }
+        if let Some(reason) = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            finish = Some(reason.to_string());
+        }
+    };
+    if is_event_stream(&response) {
+        read_events(response, |data| {
+            if data == "[DONE]" {
+                return Ok(false);
+            }
+            let value = serde_json::from_str::<Value>(data).context("an invalid stream event")?;
+            if value.get("error").is_some() {
+                return Err(anyhow!(
+                    response_error(&value).unwrap_or_else(|| "the stream reported an error".into())
+                ));
+            }
+            read(&value, &mut text);
+            Ok(true)
+        })
+        .map_err(|error| stream_error(provider, error))?;
+    } else {
+        let value = response
+            .json::<Value>()
+            .map_err(|_| invalid_response_message(provider))?;
+        read(&value, &mut text);
+    }
+    if let Some(reason) = finish.filter(|reason| reason != "stop") {
+        return Err(invalid_response(anyhow!(
+            "{provider} stopped translation output with finish_reason={reason}"
+        )));
+    }
+    if text.trim().is_empty() {
+        return Err(invalid_response_message(provider));
+    }
+    Ok(text)
+}
+
+fn stream_anthropic_payload(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: &Value,
+    on_delta: &mut dyn FnMut(&str),
+) -> std::result::Result<String, AiTranslationError> {
+    let provider = &settings.provider_name;
+    let mut request = client
+        .post(anthropic_messages_url(&settings.base_url))
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": settings.model,
+            "system": system,
+            "messages": [{
+                "role": "user",
+                "content": serde_json::to_string(payload).map_err(|error|
+                    configuration_error(format!("failed to encode request: {error}"))) ?,
+            }],
+            "max_tokens": anthropic_max_tokens(payload),
+            "temperature": 0,
+            "stream": true,
+        }));
+    if !settings.api_key.is_empty() {
+        request = request.header("x-api-key", &settings.api_key);
+    }
+    let response = send_stream(request, provider)?;
+    let mut text = String::new();
+    if is_event_stream(&response) {
+        read_events(response, |data| {
+            let value = serde_json::from_str::<Value>(data).context("an invalid stream event")?;
+            match value.get("type").and_then(Value::as_str) {
+                Some("content_block_delta") => {
+                    if let Some(delta) = value.pointer("/delta/text").and_then(Value::as_str) {
+                        text.push_str(delta);
+                        on_delta(delta);
+                    }
+                    Ok(true)
+                }
+                Some("message_stop") => Ok(false),
+                Some("error") => Err(anyhow!(
+                    response_error(&value).unwrap_or_else(|| "the stream reported an error".into())
+                )),
+                _ => Ok(true),
+            }
+        })
+        .map_err(|error| stream_error(provider, error))?;
+    } else {
+        let value = response
+            .json::<Value>()
+            .map_err(|_| invalid_response_message(provider))?;
+        if let Some(whole) = value.pointer("/content/0/text").and_then(Value::as_str) {
+            text.push_str(whole);
+            on_delta(whole);
+        }
+    }
+    if text.trim().is_empty() {
+        return Err(invalid_response_message(provider));
+    }
+    Ok(text)
+}
+
+fn stream_chatgpt_payload(
+    client: &reqwest::blocking::Client,
+    settings: &ResolvedAiConfig,
+    system: &str,
+    payload: &Value,
+    on_delta: &mut dyn FnMut(&str),
+) -> std::result::Result<String, AiTranslationError> {
+    let provider = &settings.provider_name;
+    let content = serde_json::to_string(payload)
+        .map_err(|error| configuration_error(format!("failed to encode request: {error}")))?;
+    let body = chatgpt_translation_body(settings, system, content);
+    let access =
+        acquire_request_access().map_err(|error| authentication_error(format!("{error:#}")))?;
+    let request = access.authorize(client.post(responses_url(&settings.base_url)).json(&body));
+    let response = send_stream(request, provider).inspect_err(|error| {
+        if matches!(error.status, Some(401 | 403)) {
+            invalidate_credentials("Your ChatGPT session is invalid. Sign in again.");
+        }
+    })?;
+    let mut text = String::new();
+    let mut completed = None;
+    read_events(response, |data| {
+        if data == "[DONE]" {
+            return Ok(false);
+        }
+        let value = serde_json::from_str::<Value>(data).context("an invalid stream event")?;
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.output_text.delta") => {
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    text.push_str(delta);
+                    on_delta(delta);
+                }
+            }
+            Some("response.output_text.done") => {
+                completed = value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            Some("response.completed") => {
+                if completed.is_none() {
+                    completed = value.get("response").and_then(response_text);
+                }
+                return Ok(false);
+            }
+            Some("response.failed") | Some("response.incomplete") | Some("error") => {
+                return Err(anyhow!(response_error(&value).unwrap_or_else(|| {
+                    "ChatGPT Subscription request failed".to_string()
+                })));
+            }
+            _ => {}
+        }
+        Ok(true)
+    })
+    .map_err(|error| stream_error(provider, error))?;
+    // A reply sent whole at the end instead of in deltas.
+    if text.is_empty()
+        && let Some(completed) = completed
+    {
+        on_delta(&completed);
+        text = completed;
+    }
+    if text.trim().is_empty() {
+        return Err(invalid_response_message(provider));
+    }
+    Ok(text)
 }
 
 fn apply_translation_thinking_mode(body: &mut Value, settings: &ResolvedAiConfig) {
@@ -1082,6 +1398,131 @@ mod tests {
             anthropic_max_tokens(&json!({"text": "x".repeat(20_000)})),
             8192
         );
+    }
+
+    /// A server that streams `events` for one request (OpenAI's or
+    /// Anthropic's shape), waiting after the first for `next` before the
+    /// rest: a client that doesn't stream would wait forever.
+    fn streaming_server(
+        events: Vec<String>,
+        next: std::sync::mpsc::Receiver<()>,
+    ) -> (String, std::thread::JoinHandle<bool>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut waited = true;
+            for (index, event) in events.iter().enumerate() {
+                write!(stream, "data: {event}\n\n").unwrap();
+                stream.flush().unwrap();
+                if index == 0 {
+                    waited = next.recv_timeout(Duration::from_secs(10)).is_ok();
+                }
+            }
+            waited
+        });
+        (url, server)
+    }
+
+    fn streaming_units() -> Vec<SemanticTranslationInput> {
+        ["a", "b"]
+            .into_iter()
+            .map(|id| SemanticTranslationInput {
+                id: id.to_string(),
+                role: "body".to_string(),
+                text: format!("text {id}"),
+                context_before: None,
+                context_after: None,
+            })
+            .collect()
+    }
+
+    fn streaming_settings(api_style: AiApiStyle, base_url: String) -> ResolvedAiConfig {
+        ResolvedAiConfig {
+            provider: AiProvider::DeepSeek,
+            provider_name: "Test".to_string(),
+            api_style,
+            enabled: true,
+            model: "test".to_string(),
+            api_key: "key".to_string(),
+            base_url,
+            base_url_overridden: true,
+            thinking_level: AiThinkingLevel::Off,
+        }
+    }
+
+    /// Runs a streamed batch whose reply is `chunks` of the JSON, each as
+    /// an event made by `event`; checks the first unit came out before
+    /// the server sent the second.
+    fn check_streamed_units(api_style: AiApiStyle, event: impl Fn(&str) -> String) {
+        let chunks = [
+            r#"{"translations":[{"id":"a","text":"un"},"#,
+            r#"{"id":"b","text":"deux"}]}"#,
+        ];
+        let mut events: Vec<String> = chunks.iter().map(|chunk| event(chunk)).collect();
+        if api_style == AiApiStyle::OpenAi {
+            events.push(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string());
+            events.push("[DONE]".to_string());
+        } else {
+            events.push(r#"{"type":"message_stop"}"#.to_string());
+        }
+        let (next, wait) = std::sync::mpsc::channel();
+        let (url, server) = streaming_server(events, wait);
+        let mut seen = Vec::new();
+        let outputs = translate_semantic_batch_streaming_with_client(
+            &reqwest::blocking::Client::new(),
+            streaming_settings(api_style, url),
+            &streaming_units(),
+            None,
+            "fr",
+            &mut |unit| {
+                seen.push(unit.id.clone());
+                let _ = next.send(());
+            },
+        )
+        .unwrap();
+
+        assert!(
+            server.join().unwrap(),
+            "the first unit came before the rest"
+        );
+        assert_eq!(seen, ["a", "b"]);
+        assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn an_openai_reply_hands_over_each_unit_as_it_streams() {
+        check_streamed_units(AiApiStyle::OpenAi, |chunk| {
+            json!({"choices": [{"delta": {"content": chunk}}]}).to_string()
+        });
+    }
+
+    #[test]
+    fn an_anthropic_reply_hands_over_each_unit_as_it_streams() {
+        check_streamed_units(AiApiStyle::Anthropic, |chunk| {
+            json!({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}})
+                .to_string()
+        });
     }
 
     #[test]

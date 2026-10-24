@@ -41,26 +41,32 @@ impl TranslationBackend for GlyphstTranslationBackend {
         &self,
         units: &[TranslationUnit],
     ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+        self.translate_batch_streaming(units, &mut |_| {})
+    }
+
+    fn translate_batch_streaming(
+        &self,
+        units: &[TranslationUnit],
+        on_unit: &mut dyn FnMut(TranslationUnitOutput),
+    ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+        let output =
+            |translation: &glyphst_translation::SemanticTranslation| TranslationUnitOutput {
+                id: translation.id.clone(),
+                text: translation.text.clone(),
+                cached: translation.cached,
+                validation_error: translation.validation_error.clone(),
+            };
         let semantic_units = units.iter().map(semantic_unit).collect();
         self.service
-            .translate_semantic_batch(
+            .translate_semantic_batch_streaming(
                 &self.config,
                 self.provider,
                 self.source_language.clone(),
                 self.target_language.clone(),
                 semantic_units,
+                &mut |translation| on_unit(output(translation)),
             )
-            .map(|translations| {
-                translations
-                    .into_iter()
-                    .map(|translation| TranslationUnitOutput {
-                        id: translation.id,
-                        text: translation.text,
-                        cached: translation.cached,
-                        validation_error: translation.validation_error,
-                    })
-                    .collect()
-            })
+            .map(|translations| translations.iter().map(output).collect())
             .map_err(translation_error)
     }
 

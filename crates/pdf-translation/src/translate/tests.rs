@@ -979,6 +979,79 @@ fn unmapped_glyph_blocks_never_reach_translation_or_layout() {
 }
 
 #[test]
+fn a_unit_streamed_ahead_of_its_batch_shows_before_the_batch_returns() {
+    /// Streams the first unit, then waits until the run has shown it
+    /// before answering the whole batch.
+    struct StreamingBackend {
+        shown: Mutex<std::sync::mpsc::Receiver<()>>,
+        waited: Mutex<Option<bool>>,
+    }
+
+    impl TranslationBackend for StreamingBackend {
+        fn translate_batch(
+            &self,
+            units: &[TranslationUnit],
+        ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+            Ok(valid_outputs(units))
+        }
+
+        fn translate_batch_streaming(
+            &self,
+            units: &[TranslationUnit],
+            on_unit: &mut dyn FnMut(TranslationUnitOutput),
+        ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+            on_unit(valid_output(&units[0]));
+            let shown = self
+                .shown
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .is_ok();
+            *self.waited.lock().unwrap() = Some(shown);
+            Ok(valid_outputs(units))
+        }
+    }
+
+    let document = test_document_with_blocks(
+        (0..3)
+            .map(|index| (BlockRole::Body, format!("Body paragraph number {index}.")))
+            .collect(),
+    );
+    let first = build_translation_units(&document)[0].id.clone();
+    let (show, shown) = std::sync::mpsc::channel();
+    let backend = StreamingBackend {
+        shown: Mutex::new(shown),
+        waited: Mutex::new(None),
+    };
+    let mut seen = Vec::new();
+
+    let translated = translate_document_resuming(
+        document,
+        &backend,
+        &CancellationToken::new(),
+        Vec::new(),
+        |snapshot| {
+            let ids: Vec<String> = snapshot
+                .resolved_units
+                .iter()
+                .map(|unit| unit.id.clone())
+                .collect();
+            if ids == [first.clone()] {
+                let _ = show.send(());
+            }
+            seen.push(ids.len());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(*backend.waited.lock().unwrap(), Some(true));
+    assert_eq!(translated.units.len(), 3);
+    // Nothing, the streamed unit, then the rest of the batch.
+    assert_eq!(seen, [0, 1, 3]);
+}
+
+#[test]
 fn bounded_parallel_translation_preserves_document_order() {
     struct ConcurrentBackend {
         active: AtomicUsize,

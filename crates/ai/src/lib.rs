@@ -7,6 +7,7 @@ pub mod enrichment;
 mod json;
 pub mod pages;
 pub mod prompt;
+mod stream_units;
 pub mod tools;
 pub mod translation;
 

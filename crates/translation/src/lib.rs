@@ -504,6 +504,28 @@ impl TranslationService {
         target_language: LanguageCode,
         units: Vec<SemanticTranslationUnit>,
     ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
+        self.translate_semantic_batch_streaming(
+            config,
+            provider,
+            source_language,
+            target_language,
+            units,
+            &mut |_| {},
+        )
+    }
+
+    /// [`Self::translate_semantic_batch`], handing each translation to
+    /// `on_unit` as it comes: cached ones at once, an AI's as its reply
+    /// streams in, other providers' with the batch.
+    pub fn translate_semantic_batch_streaming(
+        &self,
+        config: &TranslationExecutionConfig,
+        provider: TranslationProvider,
+        source_language: Option<LanguageCode>,
+        target_language: LanguageCode,
+        units: Vec<SemanticTranslationUnit>,
+        on_unit: &mut dyn FnMut(&SemanticTranslation),
+    ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
         if units.is_empty() {
             return Ok(Vec::new());
         }
@@ -549,7 +571,10 @@ impl TranslationService {
                         validation_error: None,
                     })
                 }) {
-                    Some(translation) => translations.push(translation),
+                    Some(translation) => {
+                        on_unit(&translation);
+                        translations.push(translation);
+                    }
                     None => missing.push(unit.clone()),
                 }
             }
@@ -564,6 +589,7 @@ impl TranslationService {
                 source_language.as_ref(),
                 &target_language,
                 &missing,
+                on_unit,
             )?,
             TranslationProvider::Google => self.translate_semantic_with_google(
                 config,
@@ -700,6 +726,7 @@ impl TranslationService {
         source_language: Option<&LanguageCode>,
         target_language: &LanguageCode,
         units: &[SemanticTranslationUnit],
+        on_unit: &mut dyn FnMut(&SemanticTranslation),
     ) -> std::result::Result<Vec<SemanticTranslation>, TranslationError> {
         let resolved = config.ai.clone();
         if !resolved.can_request() {
@@ -722,12 +749,20 @@ impl TranslationService {
                 context_after: unit.context_after.clone(),
             })
             .collect::<Vec<_>>();
-        let outputs = glyphst_ai::translation::translate_semantic_batch_with_client(
+        let outputs = glyphst_ai::translation::translate_semantic_batch_streaming_with_client(
             &self.client,
             resolved,
             &inputs,
             source_language.map(LanguageCode::as_str),
             target_language.as_str(),
+            &mut |output| {
+                on_unit(&SemanticTranslation {
+                    id: output.id,
+                    text: output.text,
+                    cached: false,
+                    validation_error: None,
+                })
+            },
         )
         .map_err(ai_translation_error)?;
         let mut by_id = outputs

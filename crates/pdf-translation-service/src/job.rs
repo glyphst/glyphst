@@ -1568,7 +1568,22 @@ impl PdfTranslationService {
         original_unit_ids: &HashSet<String>,
         cancellation: &CancellationToken,
     ) -> Result<PdfTranslationPagePreview, PdfTranslationError> {
-        let prepared = prepare_translation_layout(translated, original_unit_ids);
+        // Only this page's units are laid out: the rest of the document
+        // keeps its original here, which leaves this page as it would be.
+        let on_page = page_unit_ids(translated, page_index)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let elsewhere = translated
+            .units
+            .iter()
+            .filter(|unit| !on_page.contains(&unit.id))
+            .map(|unit| unit.id.clone());
+        let kept = original_unit_ids
+            .iter()
+            .cloned()
+            .chain(elsewhere)
+            .collect::<HashSet<_>>();
+        let prepared = prepare_translation_layout(translated, &kept);
         let page = prepared
             .layout
             .pages
@@ -1735,7 +1750,7 @@ impl PdfTranslationService {
         scope: &TranslationScope,
         cancellation: &CancellationToken,
         progress: &mut ProgressTracker,
-        update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
+        update_sink: &mut (impl FnMut(PdfTranslationSessionUpdate) + Send),
         backend: &GlyphstTranslationBackend,
         streamed_units: &mut Vec<TranslatedUnit>,
         streamed_preview_units: &mut HashMap<String, (u64, Vec<usize>)>,
@@ -2361,7 +2376,7 @@ fn translate_ready_pages(
     streamed_units: &mut Vec<TranslatedUnit>,
     known_preview_units: &mut HashMap<String, (u64, Vec<usize>)>,
     preview_revisions: &mut HashMap<usize, u64>,
-    update_sink: &mut impl FnMut(PdfTranslationSessionUpdate),
+    update_sink: &mut (impl FnMut(PdfTranslationSessionUpdate) + Send),
 ) {
     if cancellation.is_cancelled() || ready_pages.is_empty() {
         return;
@@ -2379,60 +2394,54 @@ fn translate_ready_pages(
     annotate_reference_sections(&mut document);
     let resumed = streamed_units.clone();
     let is_ready = |page: usize| ready.get(page).copied().unwrap_or(false);
-    match translate_document_scoped(
-        document,
-        backend,
-        cancellation,
-        resumed,
-        ScopedRun {
-            scope,
-            ready: &is_ready,
-            park_when_idle: false,
-            stop: None,
-        },
-        |snapshot| {
-            update_sink(PdfTranslationSessionUpdate::UnitsChanged(snapshot.clone()));
-            Ok(())
-        },
-    ) {
+    // Pages preview as their units come, as in a document with text.
+    let sink = Mutex::new(update_sink);
+    let (result, known) = std::thread::scope(|threads| {
+        let (preview_tx, preview_rx) = sync_mpsc::channel();
+        let previews = threads.spawn(|| {
+            stream_page_previews(
+                service,
+                &document,
+                source_path,
+                inspection,
+                job_directory,
+                scope,
+                cancellation,
+                known_preview_units.clone(),
+                preview_revisions.clone(),
+                preview_rx,
+                &sink,
+            )
+        });
+        let result = translate_document_scoped(
+            document.clone(),
+            backend,
+            cancellation,
+            resumed,
+            ScopedRun {
+                scope,
+                ready: &is_ready,
+                park_when_idle: false,
+                stop: None,
+            },
+            |snapshot| {
+                if let Ok(mut sink) = sink.lock() {
+                    (**sink)(PdfTranslationSessionUpdate::UnitsChanged(snapshot.clone()));
+                }
+                preview_tx
+                    .send(snapshot.clone())
+                    .map_err(|_| "page preview worker stopped".to_string())
+            },
+        );
+        drop(preview_tx);
+        (result, previews.join().ok())
+    });
+    if let Some((units, revisions)) = known {
+        *known_preview_units = units;
+        *preview_revisions = revisions;
+    }
+    match result {
         Ok(outcome) => {
-            let block_pages = translation_block_locations(&outcome.document.document)
-                .into_iter()
-                .map(|(block_id, location)| (block_id, location.page_index))
-                .collect::<HashMap<_, _>>();
-            let (next_preview_units, dirty_pages) =
-                reconcile_preview_units(&block_pages, known_preview_units, &outcome.document.units);
-            *known_preview_units = next_preview_units;
-            for page_index in preview_order(dirty_pages, &scope.view()) {
-                let revision = preview_revisions.entry(page_index).or_default();
-                *revision = revision.wrapping_add(1).max(1);
-                let update = match service.compile_page_preview(
-                    &outcome.document,
-                    source_path,
-                    inspection,
-                    job_directory,
-                    page_index,
-                    *revision,
-                    &HashSet::new(),
-                    cancellation,
-                ) {
-                    Ok(preview) => PdfTranslationSessionUpdate::PagePreviewReady(preview),
-                    Err(error) => {
-                        PdfTranslationSessionUpdate::PageFailed(PdfTranslationPageFailure {
-                            page_index,
-                            phase: if error.stage == PdfTranslationStage::Layout {
-                                TranslationFailurePhase::Layout
-                            } else {
-                                TranslationFailurePhase::Preview
-                            },
-                            message: error.message,
-                            retryable: error.retryable,
-                            code: PageFailureCode::Layout,
-                        })
-                    }
-                };
-                update_sink(update);
-            }
             *streamed_units = outcome.document.units;
         }
         Err(_error) if cancellation.is_cancelled() => {}
@@ -2566,6 +2575,9 @@ fn reconcile_preview_units(
     (next_units, dirty_pages)
 }
 
+/// The units a page's previews were made from: each unit's hash and pages.
+type PreviewUnits = HashMap<String, (u64, Vec<usize>)>;
+
 #[allow(clippy::too_many_arguments)]
 fn stream_page_previews<U>(
     service: &PdfTranslationService,
@@ -2579,7 +2591,8 @@ fn stream_page_previews<U>(
     mut revisions: HashMap<usize, u64>,
     receiver: sync_mpsc::Receiver<TranslationRunSnapshot>,
     update_sink: &Mutex<&mut U>,
-) where
+) -> (PreviewUnits, HashMap<usize, u64>)
+where
     U: FnMut(PdfTranslationSessionUpdate) + Send,
 {
     let block_pages = translation_block_locations(document)
@@ -2656,6 +2669,7 @@ fn stream_page_previews<U>(
             }
         }
     }
+    (known_units, revisions)
 }
 
 #[allow(clippy::too_many_arguments)]

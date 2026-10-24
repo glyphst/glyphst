@@ -293,6 +293,18 @@ pub trait TranslationBackend: Sync {
         units: &[TranslationUnit],
     ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError>;
 
+    /// [`Self::translate_batch`], handing each unit's output to `on_unit`
+    /// as it arrives (the batch still returns them all); by default none
+    /// come before the batch.
+    fn translate_batch_streaming(
+        &self,
+        units: &[TranslationUnit],
+        on_unit: &mut dyn FnMut(TranslationUnitOutput),
+    ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
+        let _ = on_unit;
+        self.translate_batch(units)
+    }
+
     fn reject_unchanged_output(&self) -> bool {
         true
     }
@@ -630,6 +642,7 @@ pub fn translate_document_scoped(
     let mut failures = HashMap::<String, TranslationFailureDiagnostic>::new();
     let mut retrying_ids = HashSet::<String>::new();
     let mut cached_ids = resolved.keys().cloned().collect::<HashSet<_>>();
+    let mut streamed = HashSet::<String>::new();
 
     let mut view = run.scope.view();
     let initial = translation_snapshot(
@@ -648,7 +661,7 @@ pub fn translate_document_scoped(
     })?;
 
     let scheduler_result = thread::scope(|scope| {
-        let (sender, receiver) = mpsc::channel::<CompletedRequest>();
+        let (sender, receiver) = mpsc::channel::<WorkerEvent>();
         let mut active = 0usize;
         let mut active_complex = 0usize;
         let mut active_by_page = HashMap::<usize, usize>::new();
@@ -690,22 +703,27 @@ pub fn translate_document_scoped(
                 let sender = sender.clone();
                 scope.spawn(move || {
                     let request_started_at = Instant::now();
-                    let result =
-                        catch_unwind(AssertUnwindSafe(|| execute_request(backend, &request)))
-                            .unwrap_or_else(|_| {
-                                Err(TranslationBackendError {
-                                    category: Some(TranslationErrorCategory::InvalidResponse),
-                                    message: "PDF translation worker panicked".to_string(),
-                                    status: None,
-                                    retryable: true,
-                                    retry_after: None,
-                                })
-                            });
-                    let _ = sender.send(CompletedRequest {
+                    let units = sender.clone();
+                    let mut on_unit = |output| {
+                        let _ = units.send(WorkerEvent::Unit(output));
+                    };
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        execute_request(backend, &request, &mut on_unit)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(TranslationBackendError {
+                            category: Some(TranslationErrorCategory::InvalidResponse),
+                            message: "PDF translation worker panicked".to_string(),
+                            status: None,
+                            retryable: true,
+                            retry_after: None,
+                        })
+                    });
+                    let _ = sender.send(WorkerEvent::Done(CompletedRequest {
                         request,
                         result,
                         duration_ms: duration_millis(request_started_at.elapsed()),
-                    });
+                    }));
                 });
             }
 
@@ -744,14 +762,53 @@ pub fn translate_document_scoped(
                 (None, true) => Some(SCOPE_POLL),
                 (delay, false) => delay,
             };
-            let completed = if let Some(delay) = delay {
+            let event = if let Some(delay) = delay {
                 match receiver.recv_timeout(delay) {
-                    Ok(completed) => completed,
+                    Ok(event) => event,
                     Err(RecvTimeoutError::Timeout) => continue,
                     Err(RecvTimeoutError::Disconnected) => return Err(receive_error()),
                 }
             } else {
                 receiver.recv().map_err(|_| receive_error())?
+            };
+            let completed = match event {
+                WorkerEvent::Done(completed) => completed,
+                WorkerEvent::Unit(output) => {
+                    // A unit ahead of its request shows at once.
+                    let Some(unit) = units_by_id.get(output.id.as_str()) else {
+                        continue;
+                    };
+                    let mut state = TranslationResolutionState {
+                        resolved: &mut resolved,
+                        failures: &mut failures,
+                        retrying_ids: &mut retrying_ids,
+                        cached_ids: &mut cached_ids,
+                        streamed: &mut streamed,
+                    };
+                    if !accept_streamed_unit(backend, unit, output, &mut state) {
+                        continue;
+                    }
+                    state.streamed.insert(unit.id.clone());
+                    let snapshot = translation_snapshot(
+                        &units,
+                        &resolved,
+                        &failures,
+                        &retrying_ids,
+                        &cached_ids,
+                        queue_snapshot(&queue, started_at),
+                        &view,
+                    );
+                    on_update(&snapshot).map_err(|message| TranslationDocumentError {
+                        message,
+                        unresolved_unit_ids: units
+                            .iter()
+                            .filter(|unit| !resolved.contains_key(&unit.id))
+                            .map(|unit| unit.id.clone())
+                            .collect(),
+                        retryable: false,
+                    })?;
+                    continue;
+                }
             };
             active -= 1;
             active_complex -= usize::from(completed.request.plan.complex);
@@ -772,6 +829,7 @@ pub fn translate_document_scoped(
                 failures: &mut failures,
                 retrying_ids: &mut retrying_ids,
                 cached_ids: &mut cached_ids,
+                streamed: &mut streamed,
             };
             process_completed_request(backend, completed, &mut state, &mut pending, &mut queue);
             let snapshot = translation_snapshot(
@@ -881,19 +939,121 @@ struct TranslationResolutionState<'a> {
     failures: &'a mut HashMap<String, TranslationFailureDiagnostic>,
     retrying_ids: &'a mut HashSet<String>,
     cached_ids: &'a mut HashSet<String>,
+    /// Units taken as they streamed in, before their request finished.
+    streamed: &'a mut HashSet<String>,
 }
 
 fn execute_request(
     backend: &dyn TranslationBackend,
     request: &PendingRequest,
+    on_unit: &mut dyn FnMut(TranslationUnitOutput),
 ) -> Result<Vec<TranslationUnitOutput>, TranslationBackendError> {
     if request.final_recovery && request.plan.units.len() == 1 {
         backend
             .translate_single_recovery(&request.plan.units[0])
             .map(|output| vec![output])
     } else {
-        backend.translate_batch(&request.plan.units)
+        backend.translate_batch_streaming(&request.plan.units, on_unit)
     }
+}
+
+/// What a request's worker sends: a unit as it streams in, then the
+/// request done.
+enum WorkerEvent {
+    Unit(TranslationUnitOutput),
+    Done(CompletedRequest),
+}
+
+/// Checks an output for `unit` (repairing placeholders and whitespace);
+/// returns its translation, whether it was cached and the text to cache.
+fn check_output(
+    backend: &dyn TranslationBackend,
+    unit: &TranslationUnit,
+    output: TranslationUnitOutput,
+) -> Result<(ValidatedTranslation, bool, String), UnitFailure> {
+    if let Some(message) = output.validation_error {
+        let rejected_output = (!output.text.trim().is_empty()).then_some(output.text);
+        return Err(UnitFailure {
+            message,
+            retryable: false,
+            retry_after: None,
+            category: Some(TranslationErrorCategory::InvalidResponse),
+            status: None,
+            rejected_output,
+        });
+    }
+    let repaired_output = repair_duplicate_protected_placeholders(&unit.protected, &output.text);
+    let normalized_output =
+        normalize_translated_whitespace(&repaired_output, &unit.source_text, unit.role);
+    let validation =
+        validate_translation(unit, &normalized_output, backend.reject_unchanged_output()).and_then(
+            |translated| {
+                backend
+                    .validate_translated_output(unit, &normalized_output, &translated.text)
+                    .map(|()| translated)
+            },
+        );
+    match validation {
+        Ok(translated) => Ok((translated, output.cached, normalized_output)),
+        Err(message) => Err(UnitFailure {
+            message,
+            retryable: true,
+            retry_after: None,
+            category: Some(TranslationErrorCategory::InvalidResponse),
+            status: None,
+            rejected_output: Some(normalized_output),
+        }),
+    }
+}
+
+/// Takes `unit`'s checked translation into the run.
+fn accept_unit(
+    state: &mut TranslationResolutionState<'_>,
+    unit: TranslationUnit,
+    translated: ValidatedTranslation,
+    cached: bool,
+) {
+    if cached {
+        state.cached_ids.insert(unit.id.clone());
+    }
+    state.retrying_ids.remove(&unit.id);
+    state.failures.remove(&unit.id);
+    let semantic_hash = semantic_unit_hash(&unit);
+    state.resolved.insert(
+        unit.id.clone(),
+        TranslatedUnit {
+            id: unit.id,
+            member_block_ids: unit.member_block_ids,
+            role: unit.role,
+            source_text: unit.source_text,
+            translated_text: translated.text,
+            styled_runs: translated.runs,
+            style_fallback: translated.style_fallback,
+            semantic_hash,
+        },
+    );
+}
+
+/// Takes a unit that streamed in ahead of its request, when it checks
+/// out; one that doesn't waits for the request to finish. Returns whether
+/// it was taken.
+fn accept_streamed_unit(
+    backend: &dyn TranslationBackend,
+    unit: &TranslationUnit,
+    output: TranslationUnitOutput,
+    state: &mut TranslationResolutionState<'_>,
+) -> bool {
+    if state.resolved.contains_key(&unit.id) {
+        return false;
+    }
+    let Ok((translated, cached, validated_output)) = check_output(backend, unit, output) else {
+        return false;
+    };
+    if !cached {
+        backend.cache_validated_translations(&[(unit.clone(), validated_output)]);
+    }
+    accept_unit(state, unit.clone(), translated, cached);
+    true
 }
 
 fn process_completed_request(
@@ -925,47 +1085,12 @@ fn process_completed_request(
 
     for unit in completed.request.plan.units {
         let output = outputs.remove(&unit.id);
+        // Taken already as it streamed in.
+        if state.streamed.remove(&unit.id) {
+            continue;
+        }
         let result = match output {
-            Some(output) if output.validation_error.is_none() => {
-                let repaired_output =
-                    repair_duplicate_protected_placeholders(&unit.protected, &output.text);
-                let normalized_output =
-                    normalize_translated_whitespace(&repaired_output, &unit.source_text, unit.role);
-                let validation = validate_translation(
-                    &unit,
-                    &normalized_output,
-                    backend.reject_unchanged_output(),
-                )
-                .and_then(|translated| {
-                    backend
-                        .validate_translated_output(&unit, &normalized_output, &translated.text)
-                        .map(|()| translated)
-                });
-                match validation {
-                    Ok(translated) => Ok((translated, output.cached, normalized_output)),
-                    Err(message) => Err(UnitFailure {
-                        message,
-                        retryable: true,
-                        retry_after: None,
-                        category: Some(TranslationErrorCategory::InvalidResponse),
-                        status: None,
-                        rejected_output: Some(normalized_output),
-                    }),
-                }
-            }
-            Some(output) => {
-                let rejected_output = (!output.text.trim().is_empty()).then_some(output.text);
-                Err(UnitFailure {
-                    message: output
-                        .validation_error
-                        .expect("validation error was checked above"),
-                    retryable: false,
-                    retry_after: None,
-                    category: Some(TranslationErrorCategory::InvalidResponse),
-                    status: None,
-                    rejected_output,
-                })
-            }
+            Some(output) => check_output(backend, &unit, output),
             None => {
                 let error = request_error.as_ref();
                 Err(UnitFailure {
@@ -985,25 +1110,8 @@ fn process_completed_request(
             Ok((translated, cached, validated_output)) => {
                 if !cached {
                     cache_entries.push((unit.clone(), validated_output));
-                } else {
-                    state.cached_ids.insert(unit.id.clone());
                 }
-                state.retrying_ids.remove(&unit.id);
-                state.failures.remove(&unit.id);
-                let semantic_hash = semantic_unit_hash(&unit);
-                state.resolved.insert(
-                    unit.id.clone(),
-                    TranslatedUnit {
-                        id: unit.id,
-                        member_block_ids: unit.member_block_ids,
-                        role: unit.role,
-                        source_text: unit.source_text,
-                        translated_text: translated.text,
-                        styled_runs: translated.runs,
-                        style_fallback: translated.style_fallback,
-                        semantic_hash,
-                    },
-                );
+                accept_unit(state, unit, translated, cached);
             }
             Err(failure) => {
                 let attempt = completed.request.attempt;
