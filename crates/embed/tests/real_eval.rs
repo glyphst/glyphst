@@ -72,6 +72,7 @@ fn the_labelled_set_with_the_real_model() {
             model,
             library_dirs: var("GLYPHST_EMBED_LIBS").into_iter().collect(),
             pid_file: None,
+            embedding: Default::default(),
         })
         .unwrap(),
     );
@@ -95,6 +96,7 @@ fn the_labelled_set_with_the_real_model() {
             model,
             library_dirs: var("GLYPHST_EMBED_LIBS").into_iter().collect(),
             pid_file: None,
+            embedding: Default::default(),
         })
         .unwrap()
     });

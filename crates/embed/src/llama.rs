@@ -1,12 +1,16 @@
-//! EmbeddingGemma 2 through llama.cpp's server: passages and queries with
-//! the model card's prompts, in batches, cut to the dimensions the index
-//! keeps and made unit length again.
+//! An embedder (EmbeddingGemma 2, Qwen3 Embedding) through llama.cpp's
+//! server: passages and queries with the model card's prompts, in batches,
+//! cut to the dimensions the index keeps and made unit length again.
 
 use anyhow::{Result, anyhow};
-use glyphst_search::embed::{Embedder, Reranker, document_prompt, query_prompt, truncate};
+use glyphst_search::embed::{
+    Embedder, Reranker, document_prompt, query_prompt, qwen3_document_prompt, qwen3_query_prompt,
+    truncate,
+};
 
 use crate::{
-    manifest::{DIMENSIONS, MODEL_KEY},
+    manifest::DIMENSIONS,
+    models::{Embedding, Prompts},
     server::{Mode, Server, ServerConfig, ServerError},
 };
 
@@ -15,12 +19,14 @@ const BATCH: usize = 16;
 
 pub struct LlamaEmbedder {
     server: Server,
+    embedding: Embedding,
 }
 
 impl LlamaEmbedder {
     pub fn start(config: &ServerConfig) -> Result<Self, ServerError> {
         Ok(Self {
             server: Server::start(config)?,
+            embedding: config.embedding,
         })
     }
 
@@ -57,20 +63,28 @@ impl LlamaEmbedder {
 
 impl Embedder for LlamaEmbedder {
     fn model_key(&self) -> &str {
-        MODEL_KEY
+        self.embedding.model_key
     }
 
     fn embed_documents(&self, passages: &[(&str, &str)]) -> Result<Vec<Vec<f32>>> {
+        let prompt = match self.embedding.prompts {
+            Prompts::Gemma => document_prompt,
+            Prompts::Qwen3 => qwen3_document_prompt,
+        };
         self.vectors(
             passages
                 .iter()
-                .map(|(title, text)| document_prompt(title, text))
+                .map(|(title, text)| prompt(title, text))
                 .collect(),
         )
     }
 
     fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        self.vectors(vec![query_prompt(query)])?
+        let prompt = match self.embedding.prompts {
+            Prompts::Gemma => query_prompt(query),
+            Prompts::Qwen3 => qwen3_query_prompt(query),
+        };
+        self.vectors(vec![prompt])?
             .pop()
             .ok_or_else(|| anyhow!("the engine gave no vector"))
     }

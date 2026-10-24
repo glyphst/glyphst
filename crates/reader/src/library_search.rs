@@ -802,6 +802,7 @@ mod tests {
                 model,
                 library_dirs: var("GLYPHST_EMBED_LIBS").into_iter().collect(),
                 pid_file: None,
+                embedding: Default::default(),
             })
             .unwrap();
         service.set_embedder(Some(Arc::new(embedder)));

@@ -54,15 +54,16 @@ pub fn run(set: Option<PathBuf>) -> Result<()> {
         model,
         library_dirs: vulkan_dirs(),
         pid_file: None,
+        embedding: Default::default(),
     };
-    let embedder = match crate::meaning::setup(None).paths() {
+    let embedder = match crate::meaning::setup(None, "embeddinggemma-2").paths() {
         Some(paths) => Some(LlamaEmbedder::start(&config(paths))?),
         None => {
             println!("search by meaning is not downloaded: keywords only");
             None
         }
     };
-    let reranker = match crate::meaning::rerank_setup(None).paths() {
+    let reranker = match crate::meaning::rerank_setup(None, "bge-reranker-v2-m3").paths() {
         Some(paths) => Some(LlamaReranker::start(&config(paths))?),
         None => {
             println!("the reranker is not downloaded");

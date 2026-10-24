@@ -36,6 +36,21 @@ pub fn query_prompt(query: &str) -> String {
     format!("task: search result | query: {query}")
 }
 
+/// Qwen3 Embedding's passage: the text as it is, under its title.
+pub fn qwen3_document_prompt(title: &str, text: &str) -> String {
+    match title.trim() {
+        "" => text.to_owned(),
+        title => format!("{title}\n{text}"),
+    }
+}
+
+/// Qwen3 Embedding's search: an instruction, then the query.
+pub fn qwen3_query_prompt(query: &str) -> String {
+    format!(
+        "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{query}"
+    )
+}
+
 /// The first `dims` numbers (Matryoshka), at unit length again. `None` for
 /// a vector with NaN, infinity or no length, which a model must not give.
 pub fn truncate(vector: &[f32], dims: usize) -> Option<Vec<f32>> {

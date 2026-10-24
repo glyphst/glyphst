@@ -122,49 +122,6 @@ fn test_status<C: PartialEq, E: std::fmt::Display>(
 }
 
 /// Local OCR's download: its size, progress and the one action that fits.
-fn local_ocr_row(ui: &mut egui::Ui, setup: &mut glyphst_embed::setup::Setup) {
-    use glyphst_embed::setup::SetupState;
-    let size = |bytes: u64| crate::sidebar::format_size(bytes);
-    let (status, action) = match setup.state() {
-        SetupState::Offer { kept, total } if kept > 0 => (
-            format!("{} of {} downloaded", size(kept), size(total)),
-            Some("Resume"),
-        ),
-        SetupState::Offer { total, .. } => {
-            (format!("{} to download", size(total)), Some("Install"))
-        }
-        SetupState::Running {
-            done,
-            total,
-            retry_in,
-            ..
-        } => (
-            match retry_in {
-                Some(seconds) => format!("network lost · trying again in {seconds} s"),
-                None => format!("downloading {} of {}", size(done), size(total)),
-            },
-            Some("Pause"),
-        ),
-        SetupState::Paused { done, total } => (
-            format!("paused at {} of {}", size(done), size(total)),
-            Some("Resume"),
-        ),
-        SetupState::Failed { error, .. } => (format!("stopped: {error}"), Some("Retry")),
-        SetupState::Ready => ("✓ installed".to_owned(), None),
-    };
-    if let Some(action) = action
-        && ui.button(action).clicked()
-    {
-        if action == "Pause" {
-            setup.pause();
-        } else {
-            let ctx = ui.ctx().clone();
-            setup.start(move || ctx.request_repaint());
-        }
-    }
-    ui.label(RichText::new(status).small());
-}
-
 /// State of the provider pages between frames.
 #[derive(Default)]
 pub struct ProviderPages {
@@ -176,21 +133,11 @@ pub struct ProviderPages {
     new_provider: (String, String),
     ai_tests: HashMap<AiProvider, Test<ResolvedAiConfig, String>>,
     ocr_test: Option<Test<OcrSettings, OcrProbeError>>,
-    /// Local OCR's runtime and models, once the page looked at them.
-    ocr_setup: Option<glyphst_embed::setup::Setup>,
     /// Sign-in started here: ChatGPT Subscription turns on when it is done.
     signing_in: bool,
 }
 
 impl ProviderPages {
-    /// Starts (or resumes) downloading local OCR.
-    pub fn start_local_ocr(&mut self, ctx: &egui::Context) {
-        let ctx = ctx.clone();
-        self.ocr_setup
-            .get_or_insert_with(glyphst_ocr::default_setup)
-            .start(move || ctx.request_repaint());
-    }
-
     /// Takes a finished model list and finished connection tests.
     pub fn poll(&mut self) {
         if let Some((provider, receiver)) = &self.fetching
@@ -314,11 +261,14 @@ impl ProviderPages {
         apply(user, &current, draft);
     }
 
-    pub fn ocr(&mut self, ui: &mut egui::Ui, user: &mut UserSettings) {
+    /// The OCR page; returns whether its link to Settings · Models was
+    /// clicked.
+    pub fn ocr(&mut self, ui: &mut egui::Ui, user: &mut UserSettings) -> bool {
         let Some(current) = user.draft().cloned() else {
             loading(ui);
-            return;
+            return false;
         };
+        let mut manage = false;
         let mut draft = Settings::clone(&current);
         let ocr = &mut draft.ocr;
         glyphst_ui::settings::group(ui, "Recognition", |group| {
@@ -352,14 +302,26 @@ impl ProviderPages {
             });
             match ocr.provider {
                 OcrProvider::Local => {
-                    let setup = self
-                        .ocr_setup
-                        .get_or_insert_with(glyphst_ocr::default_setup);
-                    group.row(
-                        "Engine",
-                        Some("PP-OCRv6 small, on this computer: pages are never uploaded."),
-                        |ui| local_ocr_row(ui, setup),
+                    // The model and its device are chosen in Settings · Models.
+                    let name = glyphst_models::catalog::entry(&ocr.local.model)
+                        .map_or(ocr.local.model.as_str(), |entry| entry.name);
+                    let state = if crate::models::local_ocr_installed(ocr) {
+                        "installed"
+                    } else {
+                        "not downloaded yet"
+                    };
+                    let caption = format!(
+                        "{name} on the {} · {state}. Pages are never uploaded.",
+                        ocr.local.device.as_str()
                     );
+                    group.row("Model", Some(&caption), |ui| {
+                        if ui
+                            .add(glyphst_ui::button::Button::bracket("manage in models"))
+                            .clicked()
+                        {
+                            manage = true;
+                        }
+                    });
                 }
                 OcrProvider::Paddle => {
                     let id = ProviderSecretId::PaddleOcrToken;
@@ -403,6 +365,7 @@ impl ProviderPages {
             });
         });
         apply(user, &current, draft);
+        manage
     }
 
     pub fn ai(

@@ -120,6 +120,10 @@ pub struct LibraryPrefs {
     pub meaning_offer_hidden: bool,
     /// The reranker rereads each search's best passages (once downloaded).
     pub rerank: bool,
+    /// The embedder and reranker (`glyphst-models` catalog ids) search
+    /// uses; others are downloaded from Settings · Models.
+    pub meaning_model: String,
+    pub rerank_model: String,
     /// Searches and the passages opened from them are kept on this
     /// computer, to measure search by.
     pub learn_from_opened: bool,
@@ -189,6 +193,8 @@ impl Default for LibraryPrefs {
             llama_server: String::new(),
             meaning_offer_hidden: false,
             rerank: false,
+            meaning_model: "embeddinggemma-2".to_owned(),
+            rerank_model: "bge-reranker-v2-m3".to_owned(),
             learn_from_opened: true,
             ai_create_tags: true,
             suggest_collections: true,

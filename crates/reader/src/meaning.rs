@@ -220,6 +220,8 @@ enum Engine<T> {
 /// longer wanted.
 pub struct Runtime<T> {
     engine: Engine<T>,
+    /// The model it was started with: another one restarts it.
+    model: Option<std::path::PathBuf>,
 }
 
 pub type MeaningRuntime = Runtime<LlamaEmbedder>;
@@ -229,6 +231,7 @@ impl<T> Default for Runtime<T> {
     fn default() -> Self {
         Self {
             engine: Engine::Off,
+            model: None,
         }
     }
 }
@@ -259,20 +262,27 @@ impl<T: Served> Runtime<T> {
     pub fn poll(
         &mut self,
         paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        embedding: glyphst_embed::models::Embedding,
         ctx: &egui::Context,
     ) -> Option<Option<Arc<T>>> {
-        let Some((exe, model)) = paths else {
+        let other_model = paths.as_ref().map(|(_, model)| model) != self.model.as_ref();
+        if paths.is_none() || (other_model && !matches!(self.engine, Engine::Off)) {
+            // Stopped, or another model chosen: off, then started anew.
             let was_running = matches!(self.engine, Engine::Running(_));
             self.engine = Engine::Off;
+            self.model = None;
             return was_running.then_some(None);
-        };
+        }
+        let (exe, model) = paths?;
         match &self.engine {
             Engine::Off => {
+                self.model = Some(model.clone());
                 let config = ServerConfig {
                     exe,
                     model,
                     library_dirs: glyphst_embed::server::vulkan_dirs(),
                     pid_file: Some(glyphst_embed::install::root().join(T::PID_FILE)),
+                    embedding,
                 };
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let ctx = ctx.clone();
@@ -347,27 +357,31 @@ pub fn speed(rate: f64, seconds_left: Option<u64>) -> String {
     line
 }
 
-/// The setup for this app: the engine and model in the data folder, or the
-/// user's own server.
-pub fn setup(custom_engine: Option<&str>) -> Setup {
-    let custom = custom_engine
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from);
-    glyphst_embed::setup::meaning(glyphst_embed::install::root(), custom)
-}
-
-/// The reranker's setup: its model on the same engine.
-pub fn rerank_setup(custom_engine: Option<&str>) -> Setup {
-    let custom = custom_engine
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from);
+/// The setup for this app: the engine and the embedder `model` (a catalog
+/// id) in the data folder, or the user's own server.
+pub fn setup(custom_engine: Option<&str>, model: &str) -> Setup {
     glyphst_embed::setup::for_model(
         glyphst_embed::install::root(),
-        custom,
-        glyphst_embed::manifest::RERANKER,
+        custom(custom_engine),
+        glyphst_embed::models::embedding(model).entry.files[0],
     )
+}
+
+/// The reranker's setup: the reranker `model` on the same engine.
+pub fn rerank_setup(custom_engine: Option<&str>, model: &str) -> Setup {
+    glyphst_embed::setup::for_model(
+        glyphst_embed::install::root(),
+        custom(custom_engine),
+        glyphst_embed::models::reranker(model).files[0],
+    )
+}
+
+/// The user's own `llama-server`, when named.
+fn custom(engine: Option<&str>) -> Option<std::path::PathBuf> {
+    engine
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 #[cfg(test)]

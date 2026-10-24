@@ -38,10 +38,11 @@ pub enum Section {
     Translation,
     Ocr,
     Ai,
+    Models,
 }
 
 /// The section list's groups, top to bottom.
-const GROUPS: [(&str, &[Section]); 3] = [
+const GROUPS: [(&str, &[Section]); 4] = [
     (
         "general",
         &[
@@ -56,13 +57,14 @@ const GROUPS: [(&str, &[Section]); 3] = [
         "services",
         &[Section::Translation, Section::Ocr, Section::Ai],
     ),
+    ("this computer", &[Section::Models]),
 ];
 
 const SIDEBAR_WIDTH: f32 = 220.0;
 const HEADER_HEIGHT: f32 = 40.0;
 
 impl Section {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Reading,
         Self::Presenting,
@@ -71,6 +73,7 @@ impl Section {
         Self::Translation,
         Self::Ocr,
         Self::Ai,
+        Self::Models,
     ];
 
     /// The section a scripted run names: `appearance`, `ai`…
@@ -93,6 +96,7 @@ impl Section {
             Self::Translation => "languages",
             Self::Ocr => "scan-text",
             Self::Ai => "sparkles",
+            Self::Models => "cpu",
         }
     }
 
@@ -106,6 +110,7 @@ impl Section {
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
             Self::Ai => "AI & agents",
+            Self::Models => "Models",
         }
     }
 
@@ -131,6 +136,10 @@ impl Section {
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
             Self::Ai => "ai model provider key agent claude codex mcp assistant",
+            Self::Models => {
+                "models download local gpu cuda coreml ocr pp-ocr indra embedding \
+                 embeddinggemma qwen rerank reranker disk"
+            }
         }
     }
 
@@ -151,6 +160,11 @@ impl Section {
             Self::Translation => "The service that translates selections and documents.",
             Self::Ocr => "Recognizing the text of scanned pages.",
             Self::Ai => "Models and providers for the assistant and AI translation.",
+            Self::Models => {
+                "Models that run on this computer, for reading scans and searching by \
+                 meaning. Downloads are pinned and checked; pages and passages never leave \
+                 the computer."
+            }
         }
     }
 
@@ -169,6 +183,8 @@ pub struct SettingsWindow {
     pub open: bool,
     section: Option<Section>,
     providers: ProviderPages,
+    /// Settings · Models' downloads.
+    models: crate::models_page::ModelsPage,
     /// What the Effects page asked for, for the app to do.
     pub effects_actions: Vec<crate::effects_page::Action>,
     /// What Settings › Library asked the app to do.
@@ -207,6 +223,8 @@ pub struct SettingsContext<'a> {
     pub background_seed: Option<[u8; 3]>,
     /// Facts about the library for its page.
     pub library: LibraryFacts,
+    /// This computer, for the models that suit it.
+    pub machine: &'a glyphst_models::machine::Machine,
 }
 
 /// What Settings › Library shows about the library.
@@ -867,10 +885,15 @@ impl SettingsWindow {
         self.section = Some(section);
     }
 
-    /// Opens `section` (OCR) and starts downloading local OCR there.
-    pub fn install_local_ocr(&mut self, ctx: &egui::Context, section: Section) {
-        self.show_section(section);
-        self.providers.start_local_ocr(ctx);
+    /// Opens Settings · Models and starts downloading the local OCR model
+    /// `settings` use.
+    pub fn install_local_ocr(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &glyphst_settings::Settings,
+    ) {
+        self.show_section(Section::Models);
+        self.models.start_local_ocr(settings, ctx);
     }
 
     /// Lists a provider's models, as its Fetch models button does.
@@ -1156,8 +1179,22 @@ impl SettingsWindow {
                         );
                     }
                     Section::Translation => self.providers.translation(ui, app.user),
-                    Section::Ocr => self.providers.ocr(ui, app.user),
+                    Section::Ocr => {
+                        if self.providers.ocr(ui, app.user) {
+                            self.section = Some(Section::Models);
+                        }
+                    }
                     Section::Ai => self.providers.ai(ui, app.user, app.chatgpt),
+                    Section::Models => self.models.show(
+                        ui,
+                        crate::models_page::ModelsContext {
+                            user: app.user,
+                            library: &mut app.prefs.library,
+                            facts: &app.library,
+                            machine: app.machine,
+                            actions: &mut self.library_actions,
+                        },
+                    ),
                 }
                 ui.add_space(16.0);
             });
@@ -1761,6 +1798,7 @@ mod tests {
                         blur_supported: Some(false),
                         background_seed: None,
                         library: LibraryFacts::default(),
+                        machine: &glyphst_models::machine::Machine::default(),
                     },
                 );
             });

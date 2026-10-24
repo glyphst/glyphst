@@ -6,5 +6,6 @@ pub use glyphst_models::download;
 pub mod install;
 pub mod llama;
 pub mod manifest;
+pub mod models;
 pub mod server;
 pub mod setup;

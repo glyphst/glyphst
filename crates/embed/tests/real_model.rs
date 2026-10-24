@@ -1,5 +1,6 @@
 //! The real engine and model, by hand: set GLYPHST_EMBED_SERVER (the
-//! llama-server) and GLYPHST_EMBED_MODEL (the GGUF), and on NixOS
+//! llama-server) and GLYPHST_EMBED_MODEL (the GGUF), GLYPHST_EMBED_MODEL_ID
+//! for a model other than EmbeddingGemma (its catalog id), and on NixOS
 //! GLYPHST_EMBED_LIBS (the Vulkan loader's folder), then
 //! `cargo test -p glyphst-embed --test real_model -- --ignored --nocapture`.
 
@@ -22,6 +23,9 @@ fn the_real_model_finds_the_passage_that_means_it() {
         model,
         library_dirs: var("GLYPHST_EMBED_LIBS").into_iter().collect(),
         pid_file: None,
+        embedding: std::env::var("GLYPHST_EMBED_MODEL_ID")
+            .map(|id| glyphst_embed::models::embedding(&id))
+            .unwrap_or_default(),
     })
     .unwrap();
     eprintln!(

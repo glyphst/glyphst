@@ -142,7 +142,7 @@ impl UnlimitedOcrSettings {
 }
 
 /// Where local OCR runs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum OcrDevice {
     #[default]
     Cpu,

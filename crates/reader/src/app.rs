@@ -511,7 +511,10 @@ pub struct ReaderApp {
     /// (frame 04o).
     meaning: glyphst_embed::setup::Setup,
     /// The `llama-server` path `meaning` was made with.
-    meaning_engine: String,
+    meaning_engine: (String, String, String),
+    /// This computer (its GPU as the app draws with it), for the models
+    /// that suit it.
+    machine: glyphst_models::machine::Machine,
     /// Its engine, once downloaded.
     meaning_runtime: crate::meaning::MeaningRuntime,
     /// The reranker's model (on the same engine) and its engine.
@@ -623,9 +626,16 @@ impl ReaderApp {
             ChatGptSubscription::start(user_settings.store(), move || ctx.request_repaint())
         };
         let (agent_bridge, agent_calls) = crate::ai_bridge::UiBridge::new(&cc.egui_ctx);
-        let prefs_engine = prefs.library.llama_server.clone();
+        let prefs_engine = (
+            prefs.library.llama_server.clone(),
+            prefs.library.meaning_model.clone(),
+            prefs.library.rerank_model.clone(),
+        );
         let meaning = if persist {
-            crate::meaning::setup(Some(prefs.library.llama_server.as_str()))
+            crate::meaning::setup(
+                Some(prefs.library.llama_server.as_str()),
+                &prefs.library.meaning_model,
+            )
         } else {
             // Screens show a state, never the user's downloads.
             glyphst_embed::setup::Setup::showing(glyphst_embed::setup::SetupState::Offer {
@@ -634,7 +644,10 @@ impl ReaderApp {
             })
         };
         let rerank = if persist {
-            crate::meaning::rerank_setup(Some(prefs.library.llama_server.as_str()))
+            crate::meaning::rerank_setup(
+                Some(prefs.library.llama_server.as_str()),
+                &prefs.library.rerank_model,
+            )
         } else {
             glyphst_embed::setup::Setup::showing(glyphst_embed::setup::SetupState::Offer {
                 kept: 0,
@@ -661,6 +674,7 @@ impl ReaderApp {
             next_tab_id: 1,
             home: Home::default(),
             pickers: Pickers::default(),
+            machine: machine_of(&render_state),
             render_state,
             transition: None,
             closed_tabs: Vec::new(),
@@ -2778,8 +2792,9 @@ impl ReaderApp {
             SidebarAction::TranslateRest => self.start_document_translation(ctx),
             SidebarAction::RetryFailed => self.retry_failed_translation(ctx),
             SidebarAction::InstallLocalOcr => {
-                self.settings_window
-                    .install_local_ocr(ctx, crate::settings_window::Section::Ocr);
+                if let Some(settings) = self.user_settings.get().cloned() {
+                    self.settings_window.install_local_ocr(ctx, &settings);
+                }
             }
             SidebarAction::SetFacing(facing) => self.set_facing(facing),
             SidebarAction::CancelTranslation => {
@@ -4861,6 +4876,7 @@ impl ReaderApp {
                     blur_supported: self.window_blur.support().known(),
                     background_seed,
                     library: library_facts,
+                    machine: &self.machine,
                 },
             );
             if std::mem::take(&mut self.settings_window.open_shortcuts) {
@@ -6498,27 +6514,35 @@ impl eframe::App for ReaderApp {
                 }
             }
         }
-        // Naming another llama-server makes a new setup (not mid-download).
-        if self.persist
-            && self.prefs.library.llama_server != self.meaning_engine
-            && !self.meaning.is_running()
-        {
-            self.meaning_engine = self.prefs.library.llama_server.clone();
-            self.meaning = crate::meaning::setup(Some(self.meaning_engine.as_str()));
+        // Naming another llama-server, or choosing another model, makes a
+        // new setup (not mid-download).
+        let chosen = (
+            self.prefs.library.llama_server.clone(),
+            self.prefs.library.meaning_model.clone(),
+            self.prefs.library.rerank_model.clone(),
+        );
+        if self.persist && chosen != self.meaning_engine && !self.meaning.is_running() {
+            let (engine, meaning, rerank) = &chosen;
+            self.meaning = crate::meaning::setup(Some(engine), meaning);
             if !self.rerank.is_running() {
-                self.rerank = crate::meaning::rerank_setup(Some(self.meaning_engine.as_str()));
+                self.rerank = crate::meaning::rerank_setup(Some(engine), rerank);
             }
+            self.meaning_engine = chosen;
         }
+        let embedding = glyphst_embed::models::embedding(&self.prefs.library.meaning_model);
         // The engines start once their models are downloaded (the
         // reranker only when on) and the search takes them.
         if let Some(search) = &mut self.library_search {
-            if let Some(change) = self.meaning_runtime.poll(self.meaning.paths(), &ctx) {
+            if let Some(change) = self
+                .meaning_runtime
+                .poll(self.meaning.paths(), embedding, &ctx)
+            {
                 search.set_embedder(change.map(|embedder| {
                     embedder as std::sync::Arc<dyn glyphst_search::embed::Embedder>
                 }));
             }
             let wanted = self.rerank.paths().filter(|_| self.prefs.library.rerank);
-            if let Some(change) = self.rerank_runtime.poll(wanted, &ctx) {
+            if let Some(change) = self.rerank_runtime.poll(wanted, embedding, &ctx) {
                 search.set_reranker(change.map(|reranker| {
                     reranker as std::sync::Arc<dyn glyphst_search::embed::Reranker>
                 }));
@@ -7385,4 +7409,16 @@ mod beacon_tests {
         assert_eq!(beacon_ring(0.2, true), Some((14.0, 0.8)));
         assert!(beacon_ring(0.5, true).is_none());
     }
+}
+
+/// This computer, with the graphics adapter the app draws with.
+fn machine_of(render_state: &egui_wgpu::RenderState) -> glyphst_models::machine::Machine {
+    let info = render_state.adapter.get_info();
+    let gpu = (info.device_type != wgpu::DeviceType::Cpu).then(|| glyphst_models::machine::Gpu {
+        name: info.name.clone(),
+        discrete: info.device_type == wgpu::DeviceType::DiscreteGpu,
+        nvidia: info.vendor == 0x10DE,
+        memory: None,
+    });
+    glyphst_models::machine::Machine::detect(gpu)
 }

@@ -32,6 +32,9 @@ pub struct ServerConfig {
     pub library_dirs: Vec<PathBuf>,
     /// Where the running server's id is kept, to stop it after a crash.
     pub pid_file: Option<PathBuf>,
+    /// The embedder it serves (its pooling and prompts); a reranker's
+    /// server ignores it.
+    pub embedding: crate::models::Embedding,
 }
 
 /// Why the server could not serve.
@@ -99,8 +102,8 @@ impl Server {
             .arg("-m")
             .arg(&config.model)
             .args(match mode {
-                Mode::Embed => &["--embeddings", "--pooling", "mean"][..],
-                Mode::Rerank => &["--rerank"][..],
+                Mode::Embed => vec!["--embeddings", "--pooling", config.embedding.pooling],
+                Mode::Rerank => vec!["--rerank"],
             })
             // The model's 8K context per passage, not the server's default.
             .args(["-c", "8192", "-ub", "2048", "-b", "2048"])
@@ -601,6 +604,7 @@ mod tests {
             model: dir.join("model.gguf"),
             library_dirs: Vec::new(),
             pid_file: Some(dir.join("server.pid")),
+            embedding: Default::default(),
         };
         assert_eq!(list_devices(&config), vec!["Vulkan0: Test GPU"]);
         match Server::start(&config) {
