@@ -5,7 +5,8 @@
 struct Camera {
     origin: vec2<f32>,
     scale: f32,
-    _padding: f32,
+    // The whole drawing's opacity.
+    opacity: f32,
     viewport: vec2<f32>,
     _padding2: vec2<f32>,
     // Row-major 2x2 rotation.
@@ -52,7 +53,7 @@ fn vs_fill(@location(0) position: vec2<f32>, @location(1) color: vec4<f32>) -> F
 
 @fragment
 fn fs_fill(in: FillOut) -> @location(0) vec4<f32> {
-    return in.color;
+    return in.color * camera.opacity;
 }
 
 // Coverage fills: one quad per path whose pixels average the path's winding
@@ -302,7 +303,7 @@ fn fs_vector(in: VectorOut) -> @location(0) vec4<f32> {
     }
     // No discard: a shader that may discard runs before the stencil test
     // on many GPUs; a transparent premultiplied color blends to nothing.
-    return color;
+    return color * camera.opacity;
 }
 
 // Raster layers: premultiplied MuPDF pixmaps on a page-space quad.
@@ -325,5 +326,17 @@ fn vs_layer(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> Lay
 
 @fragment
 fn fs_layer(in: LayerOut) -> @location(0) vec4<f32> {
-    return textureSample(layer_texture, layer_sampler, in.uv);
+    return textureSample(layer_texture, layer_sampler, in.uv) * camera.opacity;
+}
+
+// Reveal marks: clip-space triangles that only write the stencil.
+
+@vertex
+fn vs_mark(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position, 0.0, 1.0);
+}
+
+@fragment
+fn fs_mark() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
 }

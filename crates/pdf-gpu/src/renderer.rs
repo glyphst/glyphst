@@ -20,6 +20,43 @@ pub const SAMPLE_COUNT: u32 = 4;
 /// Render passes drawing pages need a stencil attachment of this format with
 /// [`SAMPLE_COUNT`] samples, cleared to zero; non-rectangular clips use it.
 pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
+/// The stencil bit a caller sets to keep pages out of some pixels: every
+/// page batch tests its clip depth with this bit clear unless a draw asks
+/// for it ([`DrawOptions::stencil`]), so pixels marked with it show only
+/// drawings made for them. Clip depths stay below it.
+pub const STENCIL_REVEAL_BIT: u32 = 0x80;
+/// Camera uniforms a page holds, so one page drawn several times in a frame
+/// (at different opacities) keeps each drawing's own; the last is the
+/// page's overview tiles'.
+pub const CAMERA_SLOTS: u32 = 8;
+/// Bytes between camera slots: wgpu's uniform offset alignment.
+const CAMERA_STRIDE: u64 = 256;
+
+/// How [`Renderer::draw_with`] draws a page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawOptions {
+    /// Only the part of the page inside this rectangle (page points).
+    pub clip: Option<PageRect>,
+    /// The whole drawing's opacity, 0 to 1.
+    pub opacity: f32,
+    /// Stencil bits the drawing's pixels must carry
+    /// ([`STENCIL_REVEAL_BIT`] or 0).
+    pub stencil: u32,
+    /// The camera slot, below `CAMERA_SLOTS - 1`; drawings of one page in
+    /// one frame each take their own.
+    pub slot: u32,
+}
+
+impl Default for DrawOptions {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            opacity: 1.0,
+            stencil: 0,
+            slot: 0,
+        }
+    }
+}
 
 /// Tile size used when rendering the overview texture; one tile is the unit
 /// of work an interactive host does per frame.
@@ -188,7 +225,7 @@ pub struct DrawStats {
 struct CameraUniform {
     origin: [f32; 2],
     scale: f32,
-    _padding: f32,
+    opacity: f32,
     viewport: [f32; 2],
     _padding2: [f32; 2],
     /// Row-major page-to-view rotation.
@@ -220,6 +257,7 @@ pub struct Renderer {
     layer: wgpu::RenderPipeline,
     clip_push: wgpu::RenderPipeline,
     clip_pop: wgpu::RenderPipeline,
+    mark: wgpu::RenderPipeline,
 }
 
 fn stencil_state(pass_op: wgpu::StencilOperation, write_mask: u32) -> wgpu::DepthStencilState {
@@ -343,6 +381,18 @@ impl Selection {
 }
 
 impl GpuPage {
+    /// The deepest clip nesting of the page's levels. At
+    /// [`STENCIL_REVEAL_BIT`] or deeper the reveal bit would collide with
+    /// clip depths, and the page cannot be masked.
+    pub fn max_clip_depth(&self) -> u32 {
+        self.levels
+            .iter()
+            .flat_map(|level| &level.batches)
+            .map(|batch| batch.depth)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Largest camera scale the overview texture serves, if built.
     pub fn overview_scale(&self) -> Option<f32> {
         self.overview.as_ref().map(|overview| overview.scale)
@@ -381,11 +431,11 @@ impl Renderer {
             label: Some("pdf_gpu_camera"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<CameraUniform>() as u64),
                 },
                 count: None,
             }],
@@ -569,6 +619,37 @@ impl Renderer {
             wgpu::ColorWrites::empty(),
         );
 
+        // Marks pixels with the reveal bit (or clears it) whatever they
+        // hold, drawing no color.
+        let mark_face = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::Always,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op: wgpu::StencilOperation::Replace,
+        };
+        let mark = pipeline(
+            "pdf_gpu_mark",
+            "vs_mark",
+            "fs_mark",
+            &[],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<[f32; 2]>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+            })],
+            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::DepthStencilState {
+                stencil: wgpu::StencilState {
+                    front: mark_face,
+                    back: mark_face,
+                    read_mask: 0xff,
+                    write_mask: STENCIL_REVEAL_BIT,
+                },
+                ..stencil_state(wgpu::StencilOperation::Keep, 0)
+            },
+            wgpu::ColorWrites::empty(),
+        );
+
         let no_coverage = coverage_bind_group(device, &coverage_layout, &[0; 4]).1;
         Self {
             format,
@@ -584,7 +665,28 @@ impl Renderer {
             layer,
             clip_push,
             clip_pop,
+            mark,
         }
+    }
+
+    /// Sets (`set`) or clears [`STENCIL_REVEAL_BIT`] in the pixels of the
+    /// triangles in `vertices` (clip-space `[f32; 2]` corners, three a
+    /// triangle). Pages drawn afterwards skip marked pixels unless drawn
+    /// with that bit ([`DrawOptions::stencil`]).
+    pub fn mark(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        vertices: &wgpu::Buffer,
+        count: u32,
+        set: bool,
+    ) {
+        if count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.mark);
+        pass.set_stencil_reference(if set { STENCIL_REVEAL_BIT } else { 0 });
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.draw(0..count, 0..1);
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -727,7 +829,7 @@ impl Renderer {
             .collect();
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pdf_gpu_camera"),
-            size: size_of::<CameraUniform>() as u64,
+            size: CAMERA_STRIDE * u64::from(CAMERA_SLOTS),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -736,7 +838,11 @@ impl Renderer {
             layout: &self.camera_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &camera,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(size_of::<CameraUniform>() as u64),
+                }),
             }],
         });
         let gpu_bytes = levels
@@ -1038,7 +1144,10 @@ impl Renderer {
                     queue,
                     page,
                     &camera,
-                    page.bounds,
+                    DrawOptions {
+                        slot: CAMERA_SLOTS - 1,
+                        ..DrawOptions::default()
+                    },
                     &mut pass,
                     &mut DrawStats::default(),
                 );
@@ -1156,7 +1265,7 @@ impl Renderer {
         camera: &Camera,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> DrawStats {
-        self.draw_clipped(queue, page, camera, page.bounds, pass)
+        self.draw_with(queue, page, camera, DrawOptions::default(), pass)
     }
 
     /// [`Renderer::draw`] showing only the part of the page inside `clip`
@@ -1169,21 +1278,50 @@ impl Renderer {
         clip: PageRect,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> DrawStats {
+        let options = DrawOptions {
+            clip: Some(clip),
+            ..DrawOptions::default()
+        };
+        self.draw_with(queue, page, camera, options, pass)
+    }
+
+    /// [`Renderer::draw`] as `options` say: clipped, faded, or only into
+    /// pixels carrying stencil bits.
+    pub fn draw_with(
+        &self,
+        queue: &wgpu::Queue,
+        page: &GpuPage,
+        camera: &Camera,
+        options: DrawOptions,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> DrawStats {
         let mut stats = DrawStats::default();
-        let bounds = clip_to(page.bounds, clip);
+        let bounds = options
+            .clip
+            .map_or(page.bounds, |clip| clip_to(page.bounds, clip));
+        let options = DrawOptions {
+            slot: options.slot.min(CAMERA_SLOTS - 2),
+            ..options
+        };
         match &page.overview {
             Some(overview) if camera.scale <= overview.scale => {
-                self.write_camera(queue, page, camera);
+                self.write_camera(queue, page, camera, options);
                 stats.used_overview = true;
                 if let Some([x, y, width, height]) = camera.scissor(bounds) {
-                    pass.set_bind_group(0, &page.camera_bind_group, &[]);
+                    pass.set_bind_group(0, &page.camera_bind_group, &[camera_offset(options)]);
                     pass.set_scissor_rect(x, y, width, height);
-                    pass.set_stencil_reference(0);
+                    pass.set_stencil_reference(options.stencil);
                     self.draw_layer(&overview.layer, pass);
                     stats.draw_calls += 1;
                 }
             }
-            _ => self.draw_vectors(queue, page, camera, bounds, pass, &mut stats),
+            _ => {
+                let options = DrawOptions {
+                    clip: Some(bounds),
+                    ..options
+                };
+                self.draw_vectors(queue, page, camera, options, pass, &mut stats);
+            }
         }
         stats
     }
@@ -1195,14 +1333,20 @@ impl Renderer {
         pass.draw(0..4, 0..1);
     }
 
-    fn write_camera(&self, queue: &wgpu::Queue, page: &GpuPage, camera: &Camera) {
+    fn write_camera(
+        &self,
+        queue: &wgpu::Queue,
+        page: &GpuPage,
+        camera: &Camera,
+        options: DrawOptions,
+    ) {
         queue.write_buffer(
             &page.camera,
-            0,
+            u64::from(camera_offset(options)),
             bytemuck::bytes_of(&CameraUniform {
                 origin: camera.origin,
                 scale: camera.scale,
-                _padding: 0.0,
+                opacity: options.opacity.clamp(0.0, 1.0),
                 viewport: [camera.viewport[0] as f32, camera.viewport[1] as f32],
                 _padding2: [0.0; 2],
                 axes: camera.axes(),
@@ -1215,14 +1359,15 @@ impl Renderer {
         queue: &wgpu::Queue,
         page: &GpuPage,
         camera: &Camera,
-        bounds: PageRect,
+        options: DrawOptions,
         pass: &mut wgpu::RenderPass<'_>,
         stats: &mut DrawStats,
     ) {
         if page.ready_levels == 0 {
             return;
         }
-        self.write_camera(queue, page, camera);
+        let bounds = options.clip.unwrap_or(page.bounds);
+        self.write_camera(queue, page, camera, options);
         // Nothing shows outside the page box, as in MuPDF's pixmaps: EPUB
         // chapter backgrounds, for one, run past the pages they start on.
         let Some(full) = camera.scissor(bounds) else {
@@ -1277,7 +1422,7 @@ impl Renderer {
             content_before.push(content_before.last().copied().unwrap_or(0) + usize::from(draws));
         }
 
-        pass.set_bind_group(0, &page.camera_bind_group, &[]);
+        pass.set_bind_group(0, &page.camera_bind_group, &[camera_offset(options)]);
         let mut skipped_pops = Vec::new();
         // Layers and images bind their textures to group 1 in its place.
         let mut coverage_bound = false;
@@ -1295,7 +1440,13 @@ impl Renderer {
                     }
                     // Push tests the parent depth and raises it.
                     stats.draw_calls += 1;
-                    self.draw_clip(level, &self.clip_push, batch.depth - 1, range, pass);
+                    self.draw_clip(
+                        level,
+                        &self.clip_push,
+                        (batch.depth - 1) | options.stencil,
+                        range,
+                        pass,
+                    );
                 }
                 BatchKind::ClipPop(range) => {
                     if skipped_pops.last() == Some(&index) {
@@ -1304,7 +1455,13 @@ impl Renderer {
                     }
                     // Pop tests this depth and lowers it.
                     stats.draw_calls += 1;
-                    self.draw_clip(level, &self.clip_pop, batch.depth, range, pass);
+                    self.draw_clip(
+                        level,
+                        &self.clip_pop,
+                        batch.depth | options.stencil,
+                        range,
+                        pass,
+                    );
                 }
                 BatchKind::Fills(_) => {
                     let (Some(vertices), Some(indices)) =
@@ -1312,7 +1469,7 @@ impl Renderer {
                     else {
                         continue;
                     };
-                    pass.set_stencil_reference(batch.depth);
+                    pass.set_stencil_reference(batch.depth | options.stencil);
                     pass.set_pipeline(&self.fill);
                     pass.set_vertex_buffer(0, vertices.slice(..));
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -1326,7 +1483,7 @@ impl Renderer {
                     let Some(segments) = &level.segments else {
                         continue;
                     };
-                    pass.set_stencil_reference(batch.depth);
+                    pass.set_stencil_reference(batch.depth | options.stencil);
                     pass.set_pipeline(&self.vectors);
                     if !coverage_bound {
                         let coverage = level.coverage.as_ref().map(|(_, group)| group);
@@ -1342,7 +1499,7 @@ impl Renderer {
                 }
                 BatchKind::Raster(layer) => {
                     if let Some(Some(layer)) = page.layers.get(*layer) {
-                        pass.set_stencil_reference(batch.depth);
+                        pass.set_stencil_reference(batch.depth | options.stencil);
                         stats.draw_calls += 1;
                         self.draw_layer(layer, pass);
                         coverage_bound = false;
@@ -1350,7 +1507,7 @@ impl Renderer {
                 }
                 BatchKind::Image(image) => {
                     if let Some(Some(image)) = page.images.get(*image) {
-                        pass.set_stencil_reference(batch.depth);
+                        pass.set_stencil_reference(batch.depth | options.stencil);
                         stats.draw_calls += 1;
                         self.draw_layer(image, pass);
                         coverage_bound = false;
@@ -1377,6 +1534,11 @@ impl Renderer {
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(range.clone(), 0, 0..1);
     }
+}
+
+/// The dynamic offset of `options`' camera slot.
+fn camera_offset(options: DrawOptions) -> u32 {
+    (u64::from(options.slot.min(CAMERA_SLOTS - 1)) * CAMERA_STRIDE) as u32
 }
 
 /// Storage buffers of `sizes` bytes for a level's coverage fills (paths,
@@ -1907,6 +2069,191 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        pollster::block_on(adapter.request_device(&Default::default())).ok()
+    }
+
+    /// A 64 × 16 pt page filled with `color`, on the GPU.
+    fn solid_page(
+        renderer: &Renderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: [u8; 4],
+    ) -> GpuPage {
+        use glyphst_pdf::vector::{PagePath, PathVerb, VectorDraw, VectorItem, VectorPage};
+        let page = VectorPage {
+            bounds: [0.0, 0.0, 64.0, 16.0],
+            draws: vec![VectorDraw {
+                item: VectorItem::Fill {
+                    path: PagePath {
+                        verbs: vec![
+                            PathVerb::MoveTo,
+                            PathVerb::LineTo,
+                            PathVerb::LineTo,
+                            PathVerb::LineTo,
+                            PathVerb::Close,
+                        ],
+                        points: vec![[0.0, 0.0], [64.0, 0.0], [64.0, 16.0], [0.0, 16.0]],
+                    },
+                    even_odd: false,
+                    color,
+                },
+                clip: None,
+            }],
+            ..VectorPage::default()
+        };
+        let mut upload = renderer.begin_upload(device, PreparedPage::new(&page));
+        let mut belt = wgpu::util::StagingBelt::new(device.clone(), 1 << 16);
+        while !upload.step(device, queue, &mut belt, u64::MAX) {}
+        renderer.finish_upload(upload)
+    }
+
+    /// Draws with `draw` into a 64 × 16 px target cleared to white and reads
+    /// it back as RGBA rows.
+    fn render(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        draw: impl FnOnce(&mut wgpu::RenderPass<'_>, &Camera),
+    ) -> Vec<u8> {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = OffscreenTarget::new(
+            device,
+            format,
+            [64, 16],
+            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let camera = Camera::fitting([0.0, 0.0, 64.0, 16.0], [64, 16]);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = target.begin_pass(&mut encoder, wgpu::Color::WHITE);
+            draw(&mut pass, &camera);
+        }
+        encoder.copy_texture_to_buffer(
+            target.texture().as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(16),
+                },
+            },
+            wgpu::Extent3d {
+                width: 64,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        read.slice(..).get_mapped_range().unwrap().to_vec()
+    }
+
+    fn pixel(image: &[u8], x: usize, y: usize) -> [u8; 3] {
+        let at = y * 256 + x * 4;
+        [image[at], image[at + 1], image[at + 2]]
+    }
+
+    #[test]
+    fn marked_pixels_show_only_drawings_made_for_them() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let black = solid_page(&renderer, &device, &queue, [0, 0, 0, 255]);
+        let red = solid_page(&renderer, &device, &queue, [255, 0, 0, 255]);
+        // The left half, in clip space.
+        let left: Vec<u8> = [
+            [-1.0f32, 1.0],
+            [0.0, 1.0],
+            [-1.0, -1.0],
+            [-1.0, -1.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+        ]
+        .iter()
+        .flat_map(|[x, y]| x.to_ne_bytes().into_iter().chain(y.to_ne_bytes()))
+        .collect();
+        let left = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &left,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Marked: the black page skips the left half, the red one drawn
+        // for the mark fills only it.
+        let image = render(&device, &queue, |pass, camera| {
+            renderer.mark(pass, &left, 6, true);
+            renderer.draw(&queue, &black, camera, pass);
+            let options = DrawOptions {
+                stencil: STENCIL_REVEAL_BIT,
+                ..DrawOptions::default()
+            };
+            renderer.draw_with(&queue, &red, camera, options, pass);
+        });
+        assert_eq!(pixel(&image, 8, 8), [255, 0, 0]);
+        assert_eq!(pixel(&image, 56, 8), [0, 0, 0]);
+
+        // Cleared again, pages draw everywhere.
+        let image = render(&device, &queue, |pass, camera| {
+            renderer.mark(pass, &left, 6, true);
+            renderer.mark(pass, &left, 6, false);
+            renderer.draw(&queue, &black, camera, pass);
+        });
+        assert_eq!(pixel(&image, 8, 8), [0, 0, 0]);
+    }
+
+    #[test]
+    fn drawings_fade_with_their_own_opacity() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let black = solid_page(&renderer, &device, &queue, [0, 0, 0, 255]);
+        // Half the black over white: mid grey.
+        let image = render(&device, &queue, |pass, camera| {
+            let options = DrawOptions {
+                opacity: 0.5,
+                ..DrawOptions::default()
+            };
+            renderer.draw_with(&queue, &black, camera, options, pass);
+        });
+        let [r, g, b] = pixel(&image, 32, 8);
+        assert!(
+            (r as i32 - 128).abs() <= 2 && r == g && g == b,
+            "{r} {g} {b}"
+        );
+
+        // One page twice in a frame, in two slots: each keeps its opacity.
+        let image = render(&device, &queue, |pass, camera| {
+            for (slot, opacity, clip) in [
+                (0, 0.0, [0.0, 0.0, 32.0, 16.0]),
+                (1, 1.0, [32.0, 0.0, 64.0, 16.0]),
+            ] {
+                let options = DrawOptions {
+                    clip: Some(clip),
+                    opacity,
+                    slot,
+                    ..DrawOptions::default()
+                };
+                renderer.draw_with(&queue, &black, camera, options, pass);
+            }
+        });
+        assert_eq!(pixel(&image, 8, 8), [255, 255, 255]);
+        assert_eq!(pixel(&image, 56, 8), [0, 0, 0]);
+    }
 
     #[test]
     fn a_fitting_camera_shows_the_whole_page() {
