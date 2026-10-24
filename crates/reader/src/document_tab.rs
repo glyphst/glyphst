@@ -686,7 +686,7 @@ impl DocumentTab {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let text = original.text_of_glyphs(&glyphs);
+        let text = reflowed_text(original, &glyphs);
         let b = &region.target_bounds;
         (!text.is_empty()).then_some(([b.x0, b.y0, b.x1, b.y1], text))
     }
@@ -1910,9 +1910,70 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
     }
 }
 
+/// The text of `glyphs` (in reading order) as prose: the page's line
+/// breaks joined, a paragraph break only where a gap between lines is
+/// wider than most lines' height.
+fn reflowed_text(text: &PageText, glyphs: &[usize]) -> String {
+    // The glyphs by line, with each line's box.
+    let mut lines: Vec<(Vec<usize>, PageRect)> = Vec::new();
+    for &glyph in glyphs {
+        let rect = text.glyphs[glyph].rect;
+        match lines.last_mut() {
+            Some((line, bounds)) if text.line_of[line[0]] == text.line_of[glyph] => {
+                line.push(glyph);
+                *bounds = [
+                    bounds[0].min(rect[0]),
+                    bounds[1].min(rect[1]),
+                    bounds[2].max(rect[2]),
+                    bounds[3].max(rect[3]),
+                ];
+            }
+            _ => lines.push((vec![glyph], rect)),
+        }
+    }
+    let mut heights: Vec<f32> = lines.iter().map(|(_, b)| b[3] - b[1]).collect();
+    heights.sort_by(f32::total_cmp);
+    let height = heights.get(heights.len() / 2).copied().unwrap_or(0.0);
+    let mut paragraphs: Vec<Vec<String>> = Vec::new();
+    let mut previous: Option<PageRect> = None;
+    for (line, bounds) in &lines {
+        let gap = previous.map(|above| bounds[1] - above[3]);
+        if paragraphs.is_empty() || gap.is_some_and(|gap| gap > height) {
+            paragraphs.push(Vec::new());
+        }
+        if let Some(paragraph) = paragraphs.last_mut() {
+            paragraph.push(text.text_of_glyphs(line));
+        }
+        previous = Some(*bounds);
+    }
+    paragraphs
+        .iter()
+        .map(|lines| glyphst_core::text::join_lines(lines.iter().map(String::as_str)))
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_original_on_hover_reads_as_prose() {
+        let pdf = glyphst_pdf::test_pdf::text_pdf(&[
+            "this is the end",
+            "of the",
+            "semantic first",
+            "line",
+        ]);
+        let document = mupdf::Document::from_bytes(&pdf, "application/pdf").unwrap();
+        let text = PageText::from_page(&document.load_page(0).unwrap()).unwrap();
+        let glyphs: Vec<usize> = (0..text.glyphs.len()).collect();
+        assert_eq!(
+            reflowed_text(&text, &glyphs),
+            "this is the end of the semantic first line"
+        );
+    }
 
     fn tab(pages: usize) -> DocumentTab {
         test_tab(pages)

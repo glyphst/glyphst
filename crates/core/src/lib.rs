@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 pub mod paths;
+pub mod text;
 
 /// How long a `Retry-After` header asks to wait: seconds or an HTTP date,
 /// at most 15 minutes.

@@ -7219,6 +7219,17 @@ fn paint_partners(
         point[0] >= b.x0 && point[0] <= b.x1 && point[1] >= b.y0 && point[1] <= b.y1
     };
     let area = |b: &BoundingBox| (b.x1 - b.x0) * (b.y1 - b.y0);
+    // A block's original is one box around its lines.
+    let original = |region: &glyphst_pdf_translation_service::PdfTranslationHoverRegion| {
+        region.source_regions.iter().copied().reduce(|a, b| {
+            BoundingBox::new(
+                a.x0.min(b.x0),
+                a.y0.min(b.y0),
+                a.x1.max(b.x1),
+                a.y1.max(b.y1),
+            )
+        })
+    };
     let Some(region) = preview
         .hover
         .iter()
@@ -7227,7 +7238,7 @@ fn paint_partners(
             if face {
                 inside(&region.target_bounds)
             } else {
-                region.source_regions.iter().any(inside)
+                original(region).is_some_and(|original| inside(&original))
             }
         })
         .min_by(|a, b| area(&a.target_bounds).total_cmp(&area(&b.target_bounds)))
@@ -7248,10 +7259,10 @@ fn paint_partners(
     if let Some(face_map) = by_slot(translation_slot(page)) {
         outline(face_map, &region.target_bounds);
     }
-    if let Some(page_map) = by_slot(page) {
-        for source in &region.source_regions {
-            outline(page_map, source);
-        }
+    if let Some(page_map) = by_slot(page)
+        && let Some(original) = original(region)
+    {
+        outline(page_map, &original);
     }
 }
 

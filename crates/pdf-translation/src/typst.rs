@@ -768,22 +768,21 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
     if not fits(size-floor, leading-floor) {
       panic("GLYPHST_OVERFLOW:" + diagnostic)
     }
-    // The text shrinks before its lines close up: leading goes under
-    // min-leading only when even the smallest size needs it, so lines
-    // never run into each other while a smaller size would fit.
-    let readable = fits(size-floor, min-leading)
-    let size-leading = if readable { min-leading } else { leading-floor }
-    let chosen-size = if fits(max-size, max-leading) {
-      max-size
-    } else if not readable {
-      size-floor
+    // Text keeps its own line spacing while it shrinks to its minimum
+    // size; only then do its lines close up, to their minimum leading; then
+    // (adaptive only) it shrinks further; leading goes under the minimum
+    // only when even the smallest size needs it. Lines never crowd while a
+    // smaller size would fit.
+    let (chosen-size, chosen-leading) = if fits(max-size, max-leading) {
+      (max-size, max-leading)
+    } else if fits(min-size, max-leading) {
+      (glyphst_fit_size(min-size, max-size, 0.08pt, size => fits(size, max-leading)), max-leading)
+    } else if fits(min-size, min-leading) {
+      (min-size, glyphst_fit_leading(min-leading, max-leading, 0.01em, leading => fits(min-size, leading)))
+    } else if fits(size-floor, min-leading) {
+      (glyphst_fit_size(size-floor, min-size, 0.08pt, size => fits(size, min-leading)), min-leading)
     } else {
-      glyphst_fit_size(size-floor, max-size, 0.08pt, size => fits(size, size-leading))
-    }
-    let chosen-leading = if fits(chosen-size, max-leading) {
-      max-leading
-    } else {
-      glyphst_fit_leading(size-leading, max-leading, 0.01em, leading => fits(chosen-size, leading))
+      (size-floor, glyphst_fit_leading(leading-floor, min-leading, 0.01em, leading => fits(size-floor, leading)))
     }
     render(chosen-size, chosen-leading)
   })

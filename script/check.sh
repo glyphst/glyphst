@@ -229,6 +229,7 @@ if [[ ${tier} == screens ]]; then
         "02o-reveal-check @ --translate-fake --translate-follow --screenshot-reveal-check"
         "02o-reveal-reduced @ --translate-fake --translate-follow --reduce-motion --screenshot-translating-film"
         "02n-side-by-side @ --translate-fake --command translation.side_by_side"
+        "02n-partner-hover @ --translate-fake --command translation.side_by_side --pointer-demo move:972,504;wait*3"
         "02d-find @ --find the"
         "02d-find-empty @ --command text.find"
         "02e-overview @ --command view.page_overview"
