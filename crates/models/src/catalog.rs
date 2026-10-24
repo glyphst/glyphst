@@ -124,6 +124,16 @@ pub const CATALOG: &[ModelEntry] = &[
         default: false,
     },
     ModelEntry {
+        id: "paddleocr-vl-1.5",
+        task: Task::TextRecognition,
+        name: "paddleocr-vl 1.5",
+        note: "Layout, formulas and tables like Paddle online, on this computer (0.9B, with PP-DocLayoutV3). Experimental and slow: about 1.5 min a page on a laptop's CPU.",
+        files: PADDLEOCR_VL,
+        license: APACHE,
+        device_choice: false,
+        default: false,
+    },
+    ModelEntry {
         id: "embeddinggemma-2",
         task: Task::Embedding,
         name: "embeddinggemma 2",
@@ -378,6 +388,77 @@ pub const INDRA: &[Asset] = &[
         "lm_world.npz",
         "34df5e74a2fcbb9cf5e7f360a559375ffa2e04d2d2943a42308c177bcb444d5d",
         11_641_215
+    ),
+];
+
+macro_rules! hugging_face {
+    ($repo:literal, $revision:literal, $folder:literal, $name:literal, $sha256:literal, $size:literal) => {
+        Asset {
+            name: concat!($folder, "/", $name),
+            url: concat!(
+                "https://huggingface.co/",
+                $repo,
+                "/resolve/",
+                $revision,
+                "/",
+                $name
+            ),
+            sha256: $sha256,
+            size: $size,
+        }
+    };
+}
+
+/// PaddleOCR-VL 1.5 (its configuration, tokenizer and weights), then the
+/// PP-DocLayoutV3 layout detector that finds the regions it reads.
+pub const PADDLEOCR_VL: &[Asset] = &[
+    hugging_face!(
+        "PaddlePaddle/PaddleOCR-VL-1.5",
+        "2a4195faa5e7914c12f2fc601d72c81caf8d2da5",
+        "paddleocr-vl-1.5",
+        "config.json",
+        "ce7f4565f8b1db78532ad5d1b9ebe55c2139d49bd4cb04778b580a08a598f171",
+        2_059
+    ),
+    hugging_face!(
+        "PaddlePaddle/PaddleOCR-VL-1.5",
+        "2a4195faa5e7914c12f2fc601d72c81caf8d2da5",
+        "paddleocr-vl-1.5",
+        "preprocessor_config.json",
+        "111872ab1e8bb7fd040ac5087bfced7ab8f011f02139b088cba294964c3b1d0e",
+        641
+    ),
+    hugging_face!(
+        "PaddlePaddle/PaddleOCR-VL-1.5",
+        "2a4195faa5e7914c12f2fc601d72c81caf8d2da5",
+        "paddleocr-vl-1.5",
+        "tokenizer.json",
+        "c8a215a59183d0d0781adc33bacd3ce6162716f7fd568fb30234a74d69803a7d",
+        11_189_060
+    ),
+    hugging_face!(
+        "PaddlePaddle/PaddleOCR-VL-1.5",
+        "2a4195faa5e7914c12f2fc601d72c81caf8d2da5",
+        "paddleocr-vl-1.5",
+        "model.safetensors",
+        "d557c9d8997ae57ed3b1b33bdf347be878cc335687f32ca105341c16973f8958",
+        1_917_255_968
+    ),
+    hugging_face!(
+        "PaddlePaddle/PP-DocLayoutV3_safetensors",
+        "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+        "pp-doclayoutv3",
+        "config.json",
+        "3cf834b91d23a756b1519bce4db42c09e852f3e35c35092dd5a3e253a50c071a",
+        2_460
+    ),
+    hugging_face!(
+        "PaddlePaddle/PP-DocLayoutV3_safetensors",
+        "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+        "pp-doclayoutv3",
+        "model.safetensors",
+        "5ea422c6cc5fe759a47e1357c35639b58173508e025a3131cbe4b6ac59e2b85e",
+        133_270_468
     ),
 ];
 

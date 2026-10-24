@@ -7,8 +7,12 @@
 //! an NVIDIA card) is downloaded on request, pinned and checked (see
 //! [`manifest`]). Pages never leave the computer.
 //!
-//! PP-OCR finds lines, not layout; Indra adds blocks. Neither reads
-//! formulas; remote OCR providers stay for that.
+//! PaddleOCR-VL 1.5 runs on the CPU through Candle (oar-ocr-vl) with the
+//! PP-DocLayoutV3 layout detector: the online Paddle service's regions,
+//! formulas and tables, slowly.
+//!
+//! PP-OCR finds lines, not layout; Indra adds blocks; only PaddleOCR-VL
+//! reads formulas.
 
 pub mod manifest;
 
@@ -123,7 +127,11 @@ pub struct LocalOcr {
 enum Engine {
     PpOcr(Box<PpOcr>),
     Indra(Box<IndraOcr>),
+    /// One page at a time: the model keeps its decoding cache inside.
+    Vl(Box<Mutex<VlParser>>),
 }
+
+type VlParser = oar_ocr_vl::LayoutPageParser<oar_ocr_vl::PpDocLayout, oar_ocr_vl::PaddleOcrVl>;
 
 impl LocalOcr {
     /// Loads `model` from its `files` on `device`, the runtime library
@@ -134,6 +142,12 @@ impl LocalOcr {
         runtime: &Path,
         files: &[PathBuf],
     ) -> Result<Self> {
+        if model.id.starts_with("paddleocr-vl") {
+            return Ok(Self {
+                model: model.id,
+                engine: Engine::Vl(Box::new(Mutex::new(vl_parser(files)?))),
+            });
+        }
         load_runtime(runtime)?;
         let session = session_config(device);
         let engine = if model.id.starts_with("indra") {
@@ -187,8 +201,68 @@ impl LocalOcr {
                 blocks: Vec::new(),
             }),
             Engine::Indra(ocr) => indra_page(ocr, image),
+            Engine::Vl(parser) => vl_page(
+                &parser.lock().unwrap_or_else(|poison| poison.into_inner()),
+                &image,
+            ),
         }
     }
+}
+
+/// PaddleOCR-VL with its layout detector, from the catalog's files (the
+/// model's folder, then the detector's).
+fn vl_parser(files: &[PathBuf]) -> Result<VlParser> {
+    let folder = |name: &str| {
+        files
+            .iter()
+            .filter_map(|file| file.parent())
+            .find(|parent| parent.file_name().is_some_and(|folder| folder == name))
+            .ok_or_else(|| anyhow!("PaddleOCR-VL's {name} files are missing"))
+    };
+    let device = oar_ocr_vl::utils::parse_device("cpu")
+        .map_err(|error| anyhow!("no CPU device for PaddleOCR-VL: {error}"))?;
+    let layout = oar_ocr_vl::PpDocLayout::from_dir(folder("pp-doclayoutv3")?, device.clone())
+        .map_err(|error| anyhow!("could not load PP-DocLayoutV3: {error}"))?;
+    let backend = oar_ocr_vl::PaddleOcrVl::from_dir(folder("paddleocr-vl-1.5")?, device)
+        .map_err(|error| anyhow!("could not load PaddleOCR-VL: {error}"))?;
+    Ok(oar_ocr_vl::LayoutPageParser::new(layout, backend))
+}
+
+/// A page through PaddleOCR-VL: its regions in reading order, under the
+/// labels PaddleOCR gives them (`text`, `paragraph_title`, `table`,
+/// `display_formula`…), each a line of the page for the fusion.
+fn vl_page(parser: &VlParser, image: &RgbImage) -> Result<Recognized> {
+    use oar_ocr_vl::PageParser as _;
+    let page = parser
+        .parse_page(image, &oar_ocr_vl::LayoutPageParserOptions::default())
+        .map_err(|error| anyhow!("PaddleOCR-VL could not read the page: {error}"))?;
+    // Its boxes are fractions of the page; the payload's are pixels.
+    let (width, height) = (image.width() as f32, image.height() as f32);
+    let blocks: Vec<OcrBlock> = page
+        .blocks
+        .into_iter()
+        .filter_map(|block| {
+            let text = block.content.filter(|text| !text.trim().is_empty())?;
+            let [x0, y0, x1, y1] = block.bbox;
+            Some(OcrBlock {
+                label: block.block_type,
+                bbox: [x0 * width, y0 * height, x1 * width, y1 * height],
+                text,
+            })
+        })
+        .collect();
+    let lines = blocks
+        .iter()
+        .map(|block| {
+            let [x0, y0, x1, y1] = block.bbox;
+            OcrLine {
+                text: block.text.clone(),
+                quad: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                confidence: 1.0,
+            }
+        })
+        .collect();
+    Ok(Recognized { lines, blocks })
 }
 
 /// PP-OCRv6 at one size.

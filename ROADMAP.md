@@ -167,9 +167,10 @@ Known gaps:
   its block even at its minimum size and leading overflows downward (a
   heading's last line can touch the paragraph below).
 - Local OCR: PP-OCRv6 finds lines; Indra adds layout blocks and tables;
-  neither reads formulas (PaddleOCR-VL online does). The models ran by hand
-  on this Linux machine only (on a paper's first page: tiny 0.7 s, small
-  2.0 s, medium 10.2 s, Indra 0.4 s, CPU). The GPU paths (ONNX Runtime's
+  PaddleOCR-VL 1.5 (Candle, CPU only) adds formulas but is experimental: on
+  a paper's first page it took 95 s and found 10 regions, missing the right
+  column. The models ran by hand on this Linux machine only (the same page:
+  tiny 0.7 s, small 2.0 s, medium 10.2 s, Indra 0.4 s, CPU). The GPU paths (ONNX Runtime's
   CUDA 12 build, CoreML) are built but untested: no NVIDIA card or Mac
   here; Windows has no GPU path without NVIDIA (DirectML stops at ONNX
   Runtime 1.24). The downloaded runtime needs libstdc++ where it is not on

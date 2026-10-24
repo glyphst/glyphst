@@ -19,6 +19,8 @@ log.workspace = true
 # are downloaded by oar-ocr itself.
 oar-ocr = { version = "0.10.1", default-features = false, features = ["simd"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+# PaddleOCR-VL and PP-DocLayoutV3 on the CPU through Candle; Apache-2.0.
+oar-ocr-vl = { version = "0.10.1", default-features = false }
 
 # The GPU's execution provider: CUDA with an NVIDIA card (the runtime's
 # CUDA build), CoreML on a Mac.

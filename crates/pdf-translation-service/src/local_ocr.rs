@@ -65,7 +65,8 @@ pub(crate) fn recognize_page(ocr: &LocalOcr, pdf: &[u8]) -> Result<Value, String
     })
 }
 
-/// Indra's blocks, in reading order, under PaddleOCR's labels.
+/// Indra's (or PaddleOCR-VL's) blocks, in reading order, under
+/// PaddleOCR's labels.
 fn block_payload(blocks: &[OcrBlock], width: f32, height: f32) -> Value {
     let blocks: Vec<Value> = blocks
         .iter()
@@ -79,6 +80,8 @@ fn block_payload(blocks: &[OcrBlock], width: f32, height: f32) -> Value {
                 "Caption" => "figure_title",
                 "Footnote" => "footnote",
                 "Table-Of-Contents" => "content",
+                // PaddleOCR-VL's labels are PaddleOCR's own.
+                label if label.chars().all(|c| c.is_ascii_lowercase() || c == '_') => label,
                 _ => "text",
             };
             json!({
