@@ -701,6 +701,7 @@ impl PdfTranslationService {
                         },
                         message: error.message,
                         retryable: error.retryable,
+                        code: PageFailureCode::Layout,
                     };
                     restored_page_failures.retain(|current| {
                         current.page_index != failure.page_index || current.phase != failure.phase
@@ -897,8 +898,10 @@ impl PdfTranslationService {
 
         let document_path = prepared_directory.join("document.v1.json");
         let (mut document, reused_prepared_document) = if let Some(mut document) =
-            load_normalized_document(&document_path, &source_fingerprint)
-        {
+            load_normalized_document(&document_path, &source_fingerprint).filter(|document| {
+                let local_ready = || glyphst_ocr::setup().all_paths().is_some();
+                !recognize_again(document, settings, local_ready)
+            }) {
             document.metadata.source_path = pipeline_request.source_path.clone();
             progress.finish_stage(PdfTranslationStage::Ocr, "Reused extracted document");
             progress.finish_stage(
@@ -1718,16 +1721,22 @@ impl PdfTranslationService {
             Ok(client) => client,
             // Without local OCR set up, the pages keep their own text and
             // say what they need; nothing is sent elsewhere.
+            // The failures are kept with the prepared document, so a later
+            // run (once a model is installed) recognises those pages.
             Err(error) if settings.ocr.provider == OcrProvider::Local => {
+                let mut native = native;
+                let code = if error.message == LOCAL_OCR_MISSING {
+                    PageFailureCode::LocalOcrMissing
+                } else {
+                    PageFailureCode::LocalOcrFailed
+                };
                 for &page_index in &selected_pages {
-                    update_sink(PdfTranslationSessionUpdate::PageFailed(
-                        PdfTranslationPageFailure {
-                            page_index,
-                            phase: TranslationFailurePhase::Ocr,
-                            message: error.message.clone(),
-                            retryable: false,
-                        },
-                    ));
+                    if let Some(page) = native.pages.get_mut(page_index) {
+                        page.metadata.insert(
+                            "ocr_failure".to_string(),
+                            ocr_failure_metadata(&error.message, false, code),
+                        );
+                    }
                 }
                 progress.finish_stage(PdfTranslationStage::Ocr, "Native PDF text extracted");
                 progress.finish_stage(
@@ -1910,10 +1919,7 @@ impl PdfTranslationService {
             if let Some(failure) = result.failure {
                 page.metadata.insert(
                     "ocr_failure".to_string(),
-                    serde_json::json!({
-                        "message": failure.message,
-                        "retryable": failure.retryable,
-                    }),
+                    ocr_failure_metadata(&failure.message, failure.retryable, failure.code),
                 );
             } else {
                 page.metadata.remove("ocr_failure");
@@ -2025,6 +2031,92 @@ impl PageOcrClient {
     }
 }
 
+/// Seconds between asking a busy or unreachable OCR service again.
+const OCR_RETRY_WAITS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+];
+
+/// One page through `client`: its payload, or why not (with a code and
+/// whether a later run might succeed).
+fn recognize_with(
+    client: &PageOcrClient,
+    file_name: &str,
+    bytes: &[u8],
+    cancellation: &CancellationToken,
+) -> Result<serde_json::Value, (String, PageFailureCode, bool)> {
+    match client {
+        PageOcrClient::Paddle { client, model } => client
+            .run_document_bytes(file_name, bytes, model, cancellation, |_| {})
+            .map(|result| result.payload)
+            .map_err(|error| {
+                use crate::PaddleErrorCategory as Category;
+                let busy = matches!(
+                    error.category,
+                    Category::QueueFull
+                        | Category::ServiceUnavailable
+                        | Category::PollTimeout
+                        | Category::ResultDownloadFailed
+                );
+                let code = if busy {
+                    PageFailureCode::Network
+                } else {
+                    PageFailureCode::Provider
+                };
+                (error.to_string(), code, busy)
+            }),
+        PageOcrClient::Unlimited(client) => client
+            .run_document_bytes(file_name, bytes, cancellation, |_| {})
+            .map(|result| result.payload)
+            .map_err(|error| {
+                use crate::UnlimitedErrorCategory as Category;
+                let busy = matches!(
+                    error.category,
+                    Category::QueueFull
+                        | Category::ServiceUnavailable
+                        | Category::PollTimeout
+                        | Category::ResultDownloadFailed
+                );
+                let code = if busy {
+                    PageFailureCode::Network
+                } else {
+                    PageFailureCode::Provider
+                };
+                (error.to_string(), code, busy)
+            }),
+        PageOcrClient::Local(ocr) => crate::local_ocr::recognize_page(ocr, bytes)
+            .map_err(|error| (error, PageFailureCode::LocalOcrFailed, false)),
+    }
+}
+
+/// Waits `wait` unless the run is cancelled first; whether it waited.
+fn sleep_unless_cancelled(wait: Duration, cancellation: &CancellationToken) -> bool {
+    let until = Instant::now() + wait;
+    while Instant::now() < until {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        std::thread::sleep(
+            Duration::from_millis(100).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    !cancellation.is_cancelled()
+}
+
+/// A page's `ocr_failure` metadata, kept with the prepared document.
+fn ocr_failure_metadata(
+    message: &str,
+    retryable: bool,
+    code: PageFailureCode,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message": message,
+        "retryable": retryable,
+        "code": code.as_str(),
+    })
+}
+
 /// Why a page was not recognised while local OCR is not set up.
 const LOCAL_OCR_MISSING: &str =
     "This page needs text recognition: install local OCR in Settings · OCR.";
@@ -2051,7 +2143,7 @@ fn run_ocr_page(
     document_id: &str,
     cancellation: &CancellationToken,
 ) -> PageOcrWorkerResult {
-    let failed = |message: String, retryable: bool| PageOcrWorkerResult {
+    let failed = |message: String, retryable: bool, code: PageFailureCode| PageOcrWorkerResult {
         page_index: task.page_index,
         page: None,
         raw_payload: None,
@@ -2061,57 +2153,46 @@ fn run_ocr_page(
             phase: TranslationFailurePhase::Ocr,
             message,
             retryable,
+            code,
         }),
     };
     let bytes = match &task.pdf {
         Ok(bytes) => bytes,
-        Err(error) => return failed(error.message.clone(), error.retryable),
+        Err(error) => {
+            return failed(
+                error.message.clone(),
+                error.retryable,
+                PageFailureCode::Other,
+            );
+        }
     };
     if cancellation.is_cancelled() {
-        return failed("PDF translation was cancelled".to_string(), false);
+        return failed(
+            "PDF translation was cancelled".to_string(),
+            false,
+            PageFailureCode::Other,
+        );
     }
     let file_name = format!("page-{:04}.pdf", task.page_index + 1);
-    let payload = match client {
-        PageOcrClient::Paddle { client, model } => client
-            .run_document_bytes(&file_name, bytes, model, cancellation, |_| {})
-            .map(|result| result.payload)
-            .map_err(|error| {
-                (
-                    error.to_string(),
-                    matches!(
-                        error.category,
-                        crate::PaddleErrorCategory::QueueFull
-                            | crate::PaddleErrorCategory::ServiceUnavailable
-                            | crate::PaddleErrorCategory::PollTimeout
-                    ),
-                )
-            }),
-        PageOcrClient::Unlimited(client) => client
-            .run_document_bytes(&file_name, bytes, cancellation, |_| {})
-            .map(|result| result.payload)
-            .map_err(|error| {
-                (
-                    error.to_string(),
-                    matches!(
-                        error.category,
-                        crate::UnlimitedErrorCategory::QueueFull
-                            | crate::UnlimitedErrorCategory::ServiceUnavailable
-                            | crate::UnlimitedErrorCategory::PollTimeout
-                    ),
-                )
-            }),
-        PageOcrClient::Local(ocr) => {
-            crate::local_ocr::recognize_page(ocr, bytes).map_err(|error| (error, false))
+    // A busy or unreachable service is asked again a few times first.
+    let mut waits = OCR_RETRY_WAITS.iter();
+    let payload = loop {
+        let attempt = recognize_with(client, &file_name, bytes, cancellation);
+        match (attempt, waits.next()) {
+            (Err((_, PageFailureCode::Network, _)), Some(wait))
+                if sleep_unless_cancelled(*wait, cancellation) => {}
+            (attempt, _) => break attempt,
         }
     };
     let payload = match payload {
         Ok(payload) => payload,
-        Err((message, retryable)) => return failed(message, retryable),
+        Err((message, code, retryable)) => return failed(message, retryable, code),
     };
     let Some(geometry) = target_pages.get(task.page_index).copied() else {
         return failed(
             format!("page {} has no source geometry", task.page_index + 1),
             false,
+            PageFailureCode::Other,
         );
     };
     let normalized = match client {
@@ -2134,14 +2215,22 @@ fn run_ocr_page(
         Err(error) => {
             return PageOcrWorkerResult {
                 raw_payload: Some(payload),
-                ..failed(format!("Could not normalize OCR page: {error}"), false)
+                ..failed(
+                    format!("Could not normalize OCR page: {error}"),
+                    false,
+                    PageFailureCode::Provider,
+                )
             };
         }
     };
     let Some(page) = normalized.pages.pop() else {
         return PageOcrWorkerResult {
             raw_payload: Some(payload),
-            ..failed("OCR result did not contain a page".to_string(), false)
+            ..failed(
+                "OCR result did not contain a page".to_string(),
+                false,
+                PageFailureCode::Provider,
+            )
         };
     };
     let page = globalize_ocr_page(page, task.page_index);
@@ -2149,7 +2238,11 @@ fn run_ocr_page(
     let Some(native_page) = native.pages.get(task.page_index).cloned() else {
         return PageOcrWorkerResult {
             raw_payload: Some(payload),
-            ..failed("Native fallback page is unavailable".to_string(), false)
+            ..failed(
+                "Native fallback page is unavailable".to_string(),
+                false,
+                PageFailureCode::Other,
+            )
         };
     };
     let native_document = DocumentV1::new(native.metadata.clone(), vec![native_page]);
@@ -2280,6 +2373,7 @@ fn translate_ready_pages(
                             },
                             message: error.message,
                             retryable: error.retryable,
+                            code: PageFailureCode::Layout,
                         })
                     }
                 };
@@ -2297,6 +2391,26 @@ fn translate_ready_pages(
             );
         }
     }
+}
+
+/// Whether a prepared document's failed pages should be recognised again
+/// rather than reused: when asked to, or when they waited for a local OCR
+/// model that is now installed.
+fn recognize_again(
+    document: &DocumentV1,
+    settings: &PdfTranslationConfig,
+    local_ready: impl FnOnce() -> bool,
+) -> bool {
+    let failures = ocr_page_failures(document);
+    if failures.is_empty() {
+        return false;
+    }
+    settings.retry_failed_pages
+        || (settings.ocr.provider == OcrProvider::Local
+            && failures
+                .iter()
+                .any(|failure| failure.code == PageFailureCode::LocalOcrMissing)
+            && local_ready())
 }
 
 fn ocr_page_failures(document: &DocumentV1) -> Vec<PdfTranslationPageFailure> {
@@ -2317,6 +2431,11 @@ fn ocr_page_failures(document: &DocumentV1) -> Vec<PdfTranslationPageFailure> {
                     .get("retryable")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+                code: failure
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PageFailureCode::parse)
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -2537,6 +2656,7 @@ fn compile_dirty_page_previews<U>(
                 },
                 message: error.message,
                 retryable: error.retryable,
+                code: PageFailureCode::Layout,
             }),
         };
         let Ok(mut sink) = update_sink.lock() else {
@@ -2994,6 +3114,53 @@ pub struct PdfTranslationPageFailure {
     pub phase: TranslationFailurePhase,
     pub message: String,
     pub retryable: bool,
+    /// What went wrong, for the reader to say and offer a remedy.
+    #[serde(default)]
+    pub code: PageFailureCode,
+}
+
+/// Why a page could not be translated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageFailureCode {
+    /// A scan or broken text layer, and no local OCR model installed.
+    LocalOcrMissing,
+    /// The local OCR model failed on the page.
+    LocalOcrFailed,
+    /// The OCR service could not be reached, or was busy, or timed out.
+    Network,
+    /// The OCR service refused or failed the page (a key, a quota).
+    Provider,
+    /// The translation could not be laid out on the page.
+    Layout,
+    #[default]
+    Other,
+}
+
+impl PageFailureCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalOcrMissing => "local-ocr-missing",
+            Self::LocalOcrFailed => "local-ocr-failed",
+            Self::Network => "network",
+            Self::Provider => "provider",
+            Self::Layout => "layout",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        [
+            Self::LocalOcrMissing,
+            Self::LocalOcrFailed,
+            Self::Network,
+            Self::Provider,
+            Self::Layout,
+        ]
+        .into_iter()
+        .find(|code| code.as_str() == text)
+        .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4387,6 +4554,52 @@ mod tests {
         assert_eq!(bounded_ocr_worker_count(3), 3);
         assert_eq!(bounded_ocr_worker_count(4), 3);
         assert_eq!(bounded_ocr_worker_count(100), 3);
+    }
+
+    #[test]
+    fn failed_pages_are_recognised_again_when_asked_or_once_a_model_is_there() {
+        let page = |metadata: BTreeMap<String, serde_json::Value>| Page {
+            page_index: 0,
+            geometry: glyphst_pdf_translation::PageGeometry::new(240.0, 480.0),
+            blocks: Vec::new(),
+            inline_objects: Vec::new(),
+            protected_regions: Vec::new(),
+            metadata,
+        };
+        let document = |pages| {
+            DocumentV1::new(
+                DocumentMetadata {
+                    document_id: "failed-pages".to_string(),
+                    source_path: PathBuf::from("source.pdf"),
+                    provider: "test".to_string(),
+                    provider_version: "1".to_string(),
+                    extra: Default::default(),
+                },
+                pages,
+            )
+        };
+        let missing = BTreeMap::from([(
+            "ocr_failure".to_string(),
+            ocr_failure_metadata(LOCAL_OCR_MISSING, false, PageFailureCode::LocalOcrMissing),
+        )]);
+        let failed = document(vec![page(missing)]);
+        let fine = document(vec![page(BTreeMap::new())]);
+        // The failure survives the prepared document, with its code.
+        let failures = ocr_page_failures(&failed);
+        assert_eq!(failures[0].code, PageFailureCode::LocalOcrMissing);
+
+        let mut settings = Settings::default();
+        settings.ocr.provider = OcrProvider::Local;
+        let config = PdfTranslationConfig::from(&settings);
+        // Without a model the prepared document stands; once one is
+        // installed, the pages that waited for it are recognised.
+        assert!(!recognize_again(&failed, &config, || false));
+        assert!(recognize_again(&failed, &config, || true));
+        assert!(!recognize_again(&fine, &config, || true));
+        // A retry asks for it, whatever failed.
+        let retrying = config.retrying_failed_pages();
+        assert!(recognize_again(&failed, &retrying, || false));
+        assert!(!recognize_again(&fine, &retrying, || false));
     }
 
     #[test]

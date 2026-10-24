@@ -183,6 +183,14 @@ pub struct ProviderPages {
 }
 
 impl ProviderPages {
+    /// Starts (or resumes) downloading local OCR.
+    pub fn start_local_ocr(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        self.ocr_setup
+            .get_or_insert_with(glyphst_ocr::setup)
+            .start(move || ctx.request_repaint());
+    }
+
     /// Takes a finished model list and finished connection tests.
     pub fn poll(&mut self) {
         if let Some((provider, receiver)) = &self.fetching

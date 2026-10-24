@@ -867,6 +867,12 @@ impl SettingsWindow {
         self.section = Some(section);
     }
 
+    /// Opens `section` (OCR) and starts downloading local OCR there.
+    pub fn install_local_ocr(&mut self, ctx: &egui::Context, section: Section) {
+        self.show_section(section);
+        self.providers.start_local_ocr(ctx);
+    }
+
     /// Lists a provider's models, as its Fetch models button does.
     pub fn fetch_models(
         &mut self,

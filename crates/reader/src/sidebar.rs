@@ -8,7 +8,7 @@ use std::{
 };
 
 use glyphst_library::HighlightColor;
-use glyphst_pdf_translation_service::ExportLayout;
+use glyphst_pdf_translation_service::{ExportLayout, PageFailureCode};
 use glyphst_settings::TranslationProvider;
 use glyphst_ui::{
     Tip,
@@ -29,7 +29,7 @@ use crate::{
     find, icons,
     prefs::PageColumns,
     theme::{self, Tokens},
-    translation::{Export, PageProgress, SessionStatus},
+    translation::{DocSession, Export, PageProgress, SessionStatus},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -106,6 +106,10 @@ pub enum SidebarAction {
     StartTranslation,
     /// Translate every page of a session that follows the reader.
     TranslateRest,
+    /// Run the translation again, recognising the failed pages again.
+    RetryFailed,
+    /// Install local OCR (Settings · OCR), which failed pages need.
+    InstallLocalOcr,
     /// Show pages beside their translation, or in place.
     SetFacing(bool),
     CancelTranslation,
@@ -145,6 +149,8 @@ pub struct SidebarInfo<'a> {
     /// When the document was opened (`today 09:42`), for its card.
     pub opened: Option<String>,
     pub page_columns: PageColumns,
+    /// Local OCR is installed (looked up while a page needs it).
+    pub local_ocr_ready: bool,
 }
 
 /// A bookmark in another document.
@@ -507,7 +513,10 @@ fn translation_panel(
                 for (first, last, state) in
                     page_runs(total, current, |page| session.page_progress(page))
                 {
-                    page_status_row(ui, first, last, state, first == current);
+                    let why = session
+                        .failure(first)
+                        .map(|failure| failure.message.as_str());
+                    page_status_row(ui, first, last, state, first == current, why);
                 }
             });
         match &session.export {
@@ -653,6 +662,22 @@ fn scope_slot(
                 session.status_line().to_lowercase()
             ),
         ),
+        Some(session)
+            if !session.failed_pages().is_empty()
+                && !matches!(session.status, SessionStatus::Failed(_)) =>
+        {
+            let failed = session.failed_pages();
+            let total = session.page_count.max(tab.layout.len());
+            let label = match failed.len() {
+                1 => "retry the failed page".to_owned(),
+                count => format!("retry {count} failed pages"),
+            };
+            let note = format!(
+                "{} of {total} pages translated.",
+                total.saturating_sub(session.untranslated_pages())
+            );
+            (Some((label, SidebarAction::RetryFailed)), note)
+        }
         Some(session) => {
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(width, tokens.row(28.0)), egui::Sense::hover());
@@ -701,6 +726,97 @@ fn scope_slot(
     }
     ui.add_space(6.0);
     muted(ui, &note);
+    if let Some(session) = &tab.translation {
+        failures_box(ui, session, info, actions);
+    }
+}
+
+/// What went wrong with the pages that failed, and what fixes it (frame
+/// 03d): installing local OCR, or trying again.
+fn failures_box(
+    ui: &mut egui::Ui,
+    session: &DocSession,
+    info: &SidebarInfo<'_>,
+    actions: &mut Vec<SidebarAction>,
+) {
+    let failed = session.failed_pages();
+    let Some(&first) = failed.first() else {
+        return;
+    };
+    let tokens = Tokens::get(ui.ctx());
+    let pages = match failed.as_slice() {
+        [page] => format!("p.{}", page + 1),
+        [a, b] => format!("p.{} and p.{}", a + 1, b + 1),
+        _ => format!("{} pages", failed.len()),
+    };
+    let one = failed.len() == 1;
+    let code = session
+        .failure(first)
+        .map(|failure| failure.code)
+        .unwrap_or_default();
+    let missing = session.needs_local_ocr() && !info.local_ocr_ready;
+    let message = if missing {
+        if one {
+            format!(
+                "✕ {pages} is a scan: it needs text recognition, and no local model is installed."
+            )
+        } else {
+            format!(
+                "✕ {pages} are scans: they need text recognition, and no local model is installed."
+            )
+        }
+    } else if session.needs_local_ocr() {
+        format!("✕ {pages} waited for local OCR, now installed: try again to recognise them.")
+    } else {
+        let why = match code {
+            PageFailureCode::Network => "the OCR service stopped answering",
+            PageFailureCode::Provider => "the OCR service refused the page",
+            PageFailureCode::LocalOcrFailed => "local OCR could not read the page",
+            PageFailureCode::Layout => "the translation could not be laid out",
+            _ => "something went wrong",
+        };
+        format!("✕ {pages}: {why}.")
+    };
+    ui.add_space(10.0);
+    egui::Frame::new()
+        .fill(tokens.err_soft)
+        .corner_radius(tokens.ctl_radius())
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(message)
+                        .font(theme::mono(11.0))
+                        .color(tokens.text),
+                )
+                .wrap(),
+            );
+            let width = ui.available_width();
+            if missing {
+                if ui
+                    .add(Button::ghost("install pp-ocrv6 small · 31 MB").min_width(width))
+                    .clicked()
+                {
+                    actions.push(SidebarAction::InstallLocalOcr);
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("or pick paddle or unlimited in Settings · OCR.")
+                            .font(theme::mono(10.0))
+                            .color(tokens.muted),
+                    )
+                    .wrap(),
+                );
+            } else if session.is_running()
+                && ui
+                    .add(Button::ghost("try these pages again").min_width(width))
+                    .clicked()
+            {
+                actions.push(SidebarAction::RetryFailed);
+            }
+        });
 }
 
 /// The pages as rows: runs of three or more pages in the same state, away
@@ -741,10 +857,15 @@ fn page_status_row(
     last: usize,
     state: PageProgress,
     current: bool,
+    why: Option<&str>,
 ) {
     let tokens = Tokens::get(ui.ctx());
-    let (rect, _) =
+    let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), egui::Sense::hover());
+    // A failed page says why on hover.
+    if let Some(why) = why {
+        response.on_hover_text(why);
+    }
     if current {
         ui.painter().rect_filled(rect, 0, tokens.accent_soft);
     }
@@ -773,7 +894,18 @@ fn page_status_row(
             partial = format!("translating · {done}/{total} blocks");
             ("◌", partial.as_str(), tokens.accent_text)
         }
-        PageProgress::Failed => ("✕", "failed", tokens.err),
+        PageProgress::Failed(code) => (
+            "✕",
+            match code {
+                PageFailureCode::LocalOcrMissing => "scan · needs ocr",
+                PageFailureCode::LocalOcrFailed => "ocr failed",
+                PageFailureCode::Network => "network",
+                PageFailureCode::Provider => "ocr service",
+                PageFailureCode::Layout => "layout",
+                PageFailureCode::Other => "failed",
+            },
+            tokens.err,
+        ),
         PageProgress::Waiting => ("·", "waiting", tokens.muted),
         PageProgress::NotTranslated => ("·", "not translated", tokens.faint),
     };
@@ -793,6 +925,7 @@ fn page_status_row(
         match state {
             PageProgress::Done if current => tokens.ok,
             PageProgress::Partial { .. } => tokens.accent_text,
+            PageProgress::Failed(_) => tokens.err,
             PageProgress::Waiting => tokens.muted,
             _ => tokens.faint,
         },

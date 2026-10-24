@@ -21,10 +21,11 @@ use std::{
 use crate::reveal::RevealBlock;
 use glyphst_pdf::{DocumentSnapshot, vector::PageRect};
 use glyphst_pdf_translation_service::{
-    CancellationToken, ExportLayout, PdfTranslationConfig, PdfTranslationExportRequest,
-    PdfTranslationHoverRegion, PdfTranslationPageFailure, PdfTranslationPagePreview,
-    PdfTranslationProgress, PdfTranslationService, PdfTranslationSessionRequest,
-    PdfTranslationSessionResult, PdfTranslationSessionUpdate, TranslationScope,
+    CancellationToken, ExportLayout, PageFailureCode, PdfTranslationConfig,
+    PdfTranslationExportRequest, PdfTranslationHoverRegion, PdfTranslationPageFailure,
+    PdfTranslationPagePreview, PdfTranslationProgress, PdfTranslationService,
+    PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
+    TranslationScope,
 };
 use glyphst_settings::Settings;
 use glyphst_translation::{
@@ -224,6 +225,7 @@ impl Translator {
         path: &Path,
         target: Option<&str>,
         scope: Arc<TranslationScope>,
+        retry: bool,
         ctx: &egui::Context,
     ) -> Result<DocSession, String> {
         let settings = self
@@ -245,7 +247,11 @@ impl Translator {
                 .and_then(|language| LanguageCode::new(language).ok()),
             target_language,
         };
-        let config = PdfTranslationConfig::from_settings(&settings);
+        let mut config = PdfTranslationConfig::from_settings(&settings);
+        // A retry recognises again the pages that failed last time.
+        if retry {
+            config = config.retrying_failed_pages();
+        }
         let cancel = CancellationToken::new();
         let (events_tx, events) = mpsc::channel();
         let (service, worker_cancel, ctx) = (self.pdf.clone(), cancel.clone(), ctx.clone());
@@ -384,11 +390,9 @@ pub enum PageProgress {
     /// Every block to translate is translated.
     Done,
     /// Some blocks are in; `done` of `total`.
-    Partial {
-        done: usize,
-        total: usize,
-    },
-    Failed,
+    Partial { done: usize, total: usize },
+    /// It could not be translated, and why.
+    Failed(PageFailureCode),
     /// In scope and on its way.
     Waiting,
     /// Out of scope, or the session ended without it.
@@ -544,7 +548,13 @@ impl DocSession {
             _ if !self.is_running() => false,
             Some((first, last)) => {
                 self.page_count == 0
-                    || (first..=last).any(|page| self.page_progress(page) != PageProgress::Done)
+                    || (first..=last).any(|page| {
+                        // A page that failed is as far as it will get.
+                        !matches!(
+                            self.page_progress(page),
+                            PageProgress::Done | PageProgress::Failed(_)
+                        )
+                    })
             }
             None => true,
         }
@@ -626,14 +636,43 @@ impl DocSession {
         )
     }
 
-    /// How far `page` has come.
-    pub fn page_progress(&self, page: usize) -> PageProgress {
-        if self
+    /// Records that a page could not be translated (screens give some).
+    pub fn add_failure(&mut self, failure: PdfTranslationPageFailure) {
+        self.failures
+            .retain(|known| known.page_index != failure.page_index);
+        self.failures.push(failure);
+    }
+
+    /// Why `page` could not be translated, if it could not.
+    pub fn failure(&self, page: usize) -> Option<&PdfTranslationPageFailure> {
+        self.failures
+            .iter()
+            .find(|failure| failure.page_index == page)
+    }
+
+    /// The pages that could not be translated, in order.
+    pub fn failed_pages(&self) -> Vec<usize> {
+        let mut pages: Vec<usize> = self
             .failures
             .iter()
-            .any(|failure| failure.page_index == page)
-        {
-            return PageProgress::Failed;
+            .map(|failure| failure.page_index)
+            .collect();
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+    }
+
+    /// Whether a page failed for want of a local OCR model.
+    pub fn needs_local_ocr(&self) -> bool {
+        self.failures
+            .iter()
+            .any(|failure| failure.code == PageFailureCode::LocalOcrMissing)
+    }
+
+    /// How far `page` has come.
+    pub fn page_progress(&self, page: usize) -> PageProgress {
+        if let Some(failure) = self.failure(page) {
+            return PageProgress::Failed(failure.code);
         }
         let blocks = self.translatable.get(&page);
         let total = blocks.map_or(0, Vec::len);
@@ -1009,7 +1048,7 @@ mod tests {
         let ctx = egui::Context::default();
         let translator = translator(&ctx);
         let mut session = translator
-            .start_session(&path, None, TranslationScope::following(1, 1), &ctx)
+            .start_session(&path, None, TranslationScope::following(1, 1), false, &ctx)
             .unwrap();
         wait_until(|| {
             session.poll();
@@ -1075,7 +1114,7 @@ mod tests {
         let ctx = egui::Context::default();
         let translator = translator(&ctx);
         let mut session = translator
-            .start_session(&path, None, TranslationScope::whole(), &ctx)
+            .start_session(&path, None, TranslationScope::whole(), false, &ctx)
             .unwrap();
         assert_eq!(session.target, "fr");
         wait_until(|| {

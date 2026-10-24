@@ -272,6 +272,8 @@ if [[ ${tier} == screens ]]; then
         "03-translation @ --sidebar translation --translate-fake"
         "03-translation-following @ --sidebar translation --translate-fake --translate-follow"
         "03-translation-done @ --sidebar translation --translate-fake --translate-document"
+        "03-translation-failed @ --sidebar translation --translate-fake --translate-document --translate-failures network,network"
+        "03-translation-failed-install @ --sidebar translation --translate-fake --translate-follow --translate-failures local-ocr-missing"
         "03-effects @ --sidebar effects"
         "04-home"
         "04-home-pad --pad-demo tap:right;wait;tap:down"

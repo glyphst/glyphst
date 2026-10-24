@@ -14,6 +14,9 @@ pub struct PdfTranslationConfig {
     pub(crate) translation: TranslationExecutionConfig,
     pub(crate) ocr: OcrSettings,
     pub(crate) content_review: PdfContentReviewConfig,
+    /// Recognise again pages whose recognition failed before, instead of
+    /// reusing the document prepared then.
+    pub(crate) retry_failed_pages: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +40,14 @@ impl PdfTranslationConfig {
                 model: review_model,
                 resolved: resolved_review_model,
             },
+            retry_failed_pages: false,
         }
+    }
+
+    /// The same, recognising again the pages that failed last time.
+    pub fn retrying_failed_pages(mut self) -> Self {
+        self.retry_failed_pages = true;
+        self
     }
 }
 
@@ -49,13 +59,13 @@ impl From<&Settings> for PdfTranslationConfig {
 
 pub use glyphst_pdf_translation::*;
 pub use job::{
-    ArtifactGeometry, ExportLayout, PdfTranslationArtifactManifest, PdfTranslationError,
-    PdfTranslationExportRequest, PdfTranslationHoverRegion, PdfTranslationHoverRegionKind,
-    PdfTranslationPageFailure, PdfTranslationPageGlyph, PdfTranslationPagePoint,
-    PdfTranslationPagePreview, PdfTranslationPageQuad, PdfTranslationPageTextBlock,
-    PdfTranslationPageTextLayer, PdfTranslationPageTextLine, PdfTranslationRequest,
-    PdfTranslationRestoredSession, PdfTranslationResult, PdfTranslationService,
-    PdfTranslationSessionCacheKey, PdfTranslationSessionRequest, PdfTranslationSessionResult,
-    PdfTranslationSessionUpdate, PdfTranslationWarning,
+    ArtifactGeometry, ExportLayout, PageFailureCode, PdfTranslationArtifactManifest,
+    PdfTranslationError, PdfTranslationExportRequest, PdfTranslationHoverRegion,
+    PdfTranslationHoverRegionKind, PdfTranslationPageFailure, PdfTranslationPageGlyph,
+    PdfTranslationPagePoint, PdfTranslationPagePreview, PdfTranslationPageQuad,
+    PdfTranslationPageTextBlock, PdfTranslationPageTextLayer, PdfTranslationPageTextLine,
+    PdfTranslationRequest, PdfTranslationRestoredSession, PdfTranslationResult,
+    PdfTranslationService, PdfTranslationSessionCacheKey, PdfTranslationSessionRequest,
+    PdfTranslationSessionResult, PdfTranslationSessionUpdate, PdfTranslationWarning,
 };
 pub use ocr_probe::{OcrProbeError, test_ocr_connection};

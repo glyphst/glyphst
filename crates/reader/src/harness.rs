@@ -322,6 +322,22 @@ impl ReaderApp {
             self.prefs.translate_as_read = true;
             self.start_following_translation(ctx);
         }
+        let current = self.tabs[active].current_page();
+        if let Some(codes) = &self.launch_translate_failures
+            && let Some(session) = self.tabs[active].translation.as_mut()
+        {
+            for (index, code) in codes.split(',').enumerate() {
+                let code = glyphst_pdf_translation_service::PageFailureCode::parse(code.trim());
+                session.add_failure(glyphst_pdf_translation_service::PdfTranslationPageFailure {
+                    page_index: current + 2 * index,
+                    phase: glyphst_pdf_translation_service::TranslationFailurePhase::Ocr,
+                    message: format!("A {} failure, for the screens.", code.as_str()),
+                    retryable: code == glyphst_pdf_translation_service::PageFailureCode::Network,
+                    code,
+                });
+            }
+            self.launch_translate_failures = None;
+        }
         if self.launch_translate_selection && self.launch_select.is_none() {
             if self.tabs[active].selection.is_none() {
                 return true;

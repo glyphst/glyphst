@@ -842,6 +842,12 @@ impl ReaderApp {
             bookmark_key: self.keymap.label(Command::Bookmark).unwrap_or_default(),
             opened: self.opened_label(active),
             page_columns: self.prefs.page_columns,
+            // Looked up only while a page waits for it.
+            local_ocr_ready: self.tabs[active]
+                .translation
+                .as_ref()
+                .is_some_and(|session| session.needs_local_ocr())
+                && glyphst_ocr::setup().all_paths().is_some(),
         };
         // The Effects tab edits a copy of this book's choices.
         let showing_effects = self.prefs.sidebar == SidebarTab::Effects;

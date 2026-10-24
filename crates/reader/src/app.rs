@@ -156,6 +156,9 @@ pub struct Launch {
     pub translate_document: bool,
     /// Scripted runs: translate the first document as it is read.
     pub translate_follow: bool,
+    /// Screens: failures (codes, comma-separated) given to the pages from
+    /// the current one on, every other page, once a translation runs.
+    pub translate_failures: Option<String>,
     pub translate_selection: bool,
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
@@ -386,6 +389,7 @@ pub struct ReaderApp {
     pub(crate) launch_select: Option<(usize, usize)>,
     pub(crate) launch_translate_document: bool,
     pub(crate) launch_translate_follow: bool,
+    pub(crate) launch_translate_failures: Option<String>,
     /// Scripted runs: the time translated blocks' reveals are held at,
     /// how they show, and where the pages were last drawn.
     pub(crate) reveal_clock: Option<f64>,
@@ -734,6 +738,7 @@ impl ReaderApp {
             launch_select: launch.select_pages,
             launch_translate_document: launch.translate_document,
             launch_translate_follow: launch.translate_follow,
+            launch_translate_failures: launch.translate_failures.clone(),
             reveal_clock: None,
             reveal_view: RevealView::Normal,
             reveal_maps: Vec::new(),
@@ -2771,6 +2776,11 @@ impl ReaderApp {
             }
             SidebarAction::StartTranslation => self.start_document_translation(ctx),
             SidebarAction::TranslateRest => self.start_document_translation(ctx),
+            SidebarAction::RetryFailed => self.retry_failed_translation(ctx),
+            SidebarAction::InstallLocalOcr => {
+                self.settings_window
+                    .install_local_ocr(ctx, crate::settings_window::Section::Ocr);
+            }
             SidebarAction::SetFacing(facing) => self.set_facing(facing),
             SidebarAction::CancelTranslation => {
                 if let Some(session) = self
@@ -2981,7 +2991,28 @@ impl ReaderApp {
         self.start_translation(
             ctx,
             glyphst_pdf_translation_service::TranslationScope::whole(),
+            false,
         );
+    }
+
+    /// Runs the active document's translation again over the same pages,
+    /// recognising again the pages that failed; translated text comes back
+    /// from the cache.
+    pub(crate) fn retry_failed_translation(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(session) = self.tabs[active].translation.take() else {
+            return;
+        };
+        let scope = if session.is_following() {
+            let page = self.tabs[active].current_page();
+            glyphst_pdf_translation_service::TranslationScope::following(page, FOLLOW_AHEAD)
+        } else {
+            glyphst_pdf_translation_service::TranslationScope::whole()
+        };
+        drop(session);
+        self.start_translation(ctx, scope, true);
     }
 
     /// Translates the page being read and the next ones, following the
@@ -2994,6 +3025,7 @@ impl ReaderApp {
         self.start_translation(
             ctx,
             glyphst_pdf_translation_service::TranslationScope::following(page, FOLLOW_AHEAD),
+            false,
         );
     }
 
@@ -3001,14 +3033,19 @@ impl ReaderApp {
         &mut self,
         ctx: &egui::Context,
         scope: std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>,
+        retry: bool,
     ) {
         let Some(active) = self.active else {
             return;
         };
         let target = self.prefs.target_language.clone();
-        let started =
-            self.translator
-                .start_session(&self.tabs[active].path, target.as_deref(), scope, ctx);
+        let started = self.translator.start_session(
+            &self.tabs[active].path,
+            target.as_deref(),
+            scope,
+            retry,
+            ctx,
+        );
         match started {
             Ok(session) => {
                 let detail = format!("→ {}", session.target.to_lowercase());
