@@ -23,8 +23,8 @@ use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor
 use glyphst_effects::{EffectInputs, EffectRegistry, PRESENT, PreparedEffect, SOLID};
 use glyphst_pdf::vector::{LayerImage, PageRect};
 use glyphst_pdf_gpu::{
-    Camera, DrawStats, GpuPage, LayerUpload, OffscreenTarget, OverviewJob, PageUpload,
-    PreparedPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT,
+    Camera, DrawOptions, DrawStats, GpuPage, LayerUpload, OffscreenTarget, OverviewJob, PageUpload,
+    PreparedPage, Renderer, SAMPLE_COUNT, STENCIL_FORMAT, STENCIL_REVEAL_BIT,
 };
 use wgpu::util::DeviceExt as _;
 
@@ -125,13 +125,32 @@ struct Resident {
     last_drawn: u64,
 }
 
-/// Part of a page revealing its new version: below the scan line, paper
-/// covers the new drawing and the version it replaced shows through
-/// (`below`, in page points).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RevealClip {
+/// A page's blocks revealing its new version (see `reveal`), in page
+/// points. Unresolved characters are masked: the page's base (its drawing
+/// without the translation) shows there instead of the new drawing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageReveal {
     pub page: usize,
-    pub below: PageRect,
+    /// Areas marked with the reveal bit, then the resolved cells inside
+    /// them cleared again.
+    pub mask: Vec<PageRect>,
+    pub unmask: Vec<PageRect>,
+    /// Blocks not started (also masked): the replaced drawing at full
+    /// strength over their originals…
+    pub hold: Vec<PageRect>,
+    /// …and fading over these at these opacities…
+    pub fade_out: Vec<(PageRect, f32)>,
+    /// …and the new drawing over the masked parts of these.
+    pub fade_in: Vec<(PageRect, f32)>,
+}
+
+impl PageReveal {
+    pub fn is_empty(&self) -> bool {
+        self.mask.is_empty()
+            && self.hold.is_empty()
+            && self.fade_out.is_empty()
+            && self.fade_in.is_empty()
+    }
 }
 
 /// Something being written to the GPU a chunk per frame: a page (with its
@@ -154,6 +173,12 @@ enum Upload {
     /// A part of a page's preview, drawn until the page itself is.
     Part {
         key: PageKey,
+        upload: Box<PageUpload<Box<PreparedPage>>>,
+    },
+    /// A page's base, for a reveal.
+    Base {
+        key: PageKey,
+        version: u64,
         upload: Box<PageUpload<Box<PreparedPage>>>,
     },
 }
@@ -179,7 +204,10 @@ fn partial_page(uploads: &VecDeque<Upload>, key: PageKey) -> Option<&GpuPage> {
 impl Upload {
     fn key(&self) -> PageKey {
         match self {
-            Self::Page { key, .. } | Self::Layer { key, .. } | Self::Part { key, .. } => *key,
+            Self::Page { key, .. }
+            | Self::Layer { key, .. }
+            | Self::Part { key, .. }
+            | Self::Base { key, .. } => *key,
         }
     }
 }
@@ -238,6 +266,9 @@ pub struct ReaderGpu {
     keep_replaced: HashSet<PageKey>,
     /// …and the drawings kept, until the reveal ends.
     retired: HashMap<PageKey, GpuPage>,
+    /// Revealing pages' bases (their drawing without the translation) and
+    /// the version each is the base of.
+    bases: HashMap<PageKey, (u64, GpuPage)>,
     /// Preview parts of pages still loading, drawn in order until the page
     /// itself is written.
     parts: HashMap<PageKey, Vec<GpuPage>>,
@@ -373,6 +404,7 @@ impl ReaderGpu {
             pages: HashMap::new(),
             keep_replaced: HashSet::new(),
             retired: HashMap::new(),
+            bases: HashMap::new(),
             parts: HashMap::new(),
             overviews: HashMap::new(),
             uploads: VecDeque::new(),
@@ -470,10 +502,48 @@ impl ReaderGpu {
         self.keep_replaced.insert(key);
     }
 
-    /// Lets `key`'s replaced drawing go once its reveal is over.
+    /// Lets `key`'s replaced drawing and base go once its reveal is over.
     pub fn release_retired(&mut self, key: PageKey) {
         self.retired.remove(&key);
+        self.bases.remove(&key);
         self.keep_replaced.remove(&key);
+    }
+
+    /// The version `key`'s base is drawn for, once wholly on the GPU.
+    pub fn base_version(&self, key: PageKey) -> Option<u64> {
+        self.bases.get(&key).map(|(version, _)| *version)
+    }
+
+    /// Whether `key` and its base clip shallowly enough to be masked.
+    pub fn maskable(&self, key: PageKey) -> bool {
+        let shallow = |page: &GpuPage| page.max_clip_depth() < STENCIL_REVEAL_BIT - 1;
+        self.pages
+            .get(&key)
+            .is_some_and(|resident| shallow(&resident.page))
+            && self.bases.get(&key).is_none_or(|(_, base)| shallow(base))
+    }
+
+    /// Starts writing `key`'s base for `version` (see [`PageReveal`]).
+    pub fn begin_base(
+        &mut self,
+        device: &wgpu::Device,
+        key: PageKey,
+        version: u64,
+        prepared: Box<PreparedPage>,
+        layers: Vec<(usize, LayerImage)>,
+    ) {
+        let mut upload = self.renderer.begin_upload(device, prepared);
+        for (index, image) in layers {
+            upload.add_layer(
+                self.renderer
+                    .begin_layer(device, index, image.rect, image.rgba, image.size),
+            );
+        }
+        self.uploads.push_back(Upload::Base {
+            key,
+            version,
+            upload: Box::new(upload),
+        });
     }
 
     /// Whether `key` is on the GPU or being written to it.
@@ -629,7 +699,9 @@ impl ReaderGpu {
                 done
             }
             Upload::Layer { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
-            Upload::Part { upload, .. } => upload.step(device, queue, &mut self.belt, budget),
+            Upload::Part { upload, .. } | Upload::Base { upload, .. } => {
+                upload.step(device, queue, &mut self.belt, budget)
+            }
         };
         if !done {
             return None;
@@ -645,6 +717,24 @@ impl ReaderGpu {
                 let page = self.renderer.finish_upload(*upload);
                 if !self.is_resident(key) {
                     self.parts.entry(key).or_default().push(page);
+                }
+                None
+            }
+            Upload::Base {
+                key,
+                version,
+                upload,
+            } => {
+                let page = self.renderer.finish_upload(*upload);
+                // A base for a version no longer revealing waits for none.
+                if self.keep_replaced.contains(&key) || self.retired.contains_key(&key) {
+                    let newer = self
+                        .bases
+                        .get(&key)
+                        .is_none_or(|(kept, _)| *kept <= version);
+                    if newer {
+                        self.bases.insert(key, (version, page));
+                    }
                 }
                 None
             }
@@ -735,6 +825,7 @@ impl ReaderGpu {
             self.pages.remove(&key);
             self.overviews.remove(&key);
             self.retired.remove(&key);
+            self.bases.remove(&key);
             dropped.push(key);
         }
         dropped
@@ -744,6 +835,7 @@ impl ReaderGpu {
     pub fn drop_tab(&mut self, tab: u64) {
         self.pages.retain(|key, _| key.tab != tab);
         self.retired.retain(|key, _| key.tab != tab);
+        self.bases.retain(|key, _| key.tab != tab);
         self.keep_replaced.retain(|key| key.tab != tab);
         self.parts.retain(|key, _| key.tab != tab);
         self.overviews.retain(|key, _| key.tab != tab);
@@ -814,6 +906,7 @@ impl ReaderGpu {
             .values()
             .map(|resident| resident.page.gpu_bytes)
             .chain(self.retired.values().map(|page| page.gpu_bytes))
+            .chain(self.bases.values().map(|(_, page)| page.gpu_bytes))
             .sum()
     }
 
@@ -924,8 +1017,8 @@ pub struct ViewCallback {
     /// Seconds for animated effects.
     pub time: f32,
     pub pointer: Option<[f32; 2]>,
-    /// Blocks revealing their translation over the page they replace.
-    pub reveals: Vec<RevealClip>,
+    /// Pages revealing their translation over the drawing they replace.
+    pub reveals: Vec<PageReveal>,
 }
 
 impl ViewCallback {
@@ -950,28 +1043,48 @@ impl ViewCallback {
 }
 
 impl ViewCallback {
-    /// Paper quads over the revealing blocks, from each page's camera.
-    fn cover_vertices(&self, size: [u32; 2]) -> Vec<u8> {
-        let clip = |x: f32, y: f32| {
+    /// Clip-space triangles over page rectangles (by page), from each
+    /// page's camera; turned pages give turned quads.
+    fn quad_vertices<'a>(
+        &self,
+        size: [u32; 2],
+        rects: impl Iterator<Item = (usize, &'a PageRect)>,
+    ) -> Vec<u8> {
+        let clip = |[x, y]: [f32; 2]| {
             [
                 x / size[0] as f32 * 2.0 - 1.0,
                 1.0 - y / size[1] as f32 * 2.0,
             ]
         };
-        self.reveals
-            .iter()
-            .filter_map(|reveal| {
-                let draw = self.draws.iter().find(|draw| draw.page == reveal.page)?;
-                let [x, y, width, height] = draw.camera.scissor(reveal.below)?;
-                let (x0, y0) = (x as f32, y as f32);
-                let (x1, y1) = (x0 + width as f32, y0 + height as f32);
-                let (a, b, c, d) = (clip(x0, y0), clip(x1, y0), clip(x0, y1), clip(x1, y1));
+        rects
+            .filter_map(|(page, rect)| {
+                let draw = self.draws.iter().find(|draw| draw.page == page)?;
+                let [x0, y0, x1, y1] = *rect;
+                let corner = |x, y| clip(draw.camera.to_pixels([x, y]));
+                let (a, b, c, d) = (
+                    corner(x0, y0),
+                    corner(x1, y0),
+                    corner(x0, y1),
+                    corner(x1, y1),
+                );
                 Some([a, b, c, c, b, d])
             })
             .flatten()
             .flat_map(|[x, y]| x.to_ne_bytes().into_iter().chain(y.to_ne_bytes()))
             .collect()
     }
+}
+
+/// A vertex buffer of `bytes` (two f32 a vertex) and its vertex count.
+fn vertex_buffer(device: &wgpu::Device, label: &str, bytes: &[u8]) -> Option<(wgpu::Buffer, u32)> {
+    (!bytes.is_empty()).then(|| {
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        (buffer, (bytes.len() / 8) as u32)
+    })
 }
 
 impl CallbackTrait for ViewCallback {
@@ -1120,20 +1233,30 @@ impl CallbackTrait for ViewCallback {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
-        let covers = self.cover_vertices(target);
-        let cover_vertices = (covers.len() / 8) as u32;
-        let covers = (!covers.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("reveal covers"),
-                contents: &covers,
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        });
+        // Reveals: the unresolved characters to mask, the resolved ones
+        // inside them, and the blocks still holding their original.
+        let rects = |of: fn(&PageReveal) -> &Vec<PageRect>| {
+            self.reveals
+                .iter()
+                .flat_map(move |reveal| of(reveal).iter().map(move |rect| (reveal.page, rect)))
+        };
+        let marks = vertex_buffer(
+            device,
+            "reveal marks",
+            &self.quad_vertices(target, rects(|reveal| &reveal.mask)),
+        );
+        let unmarks = vertex_buffer(
+            device,
+            "reveal unmarks",
+            &self.quad_vertices(target, rects(|reveal| &reveal.unmask)),
+        );
+
         let mut stats = DrawStats::default();
         let ReaderGpu {
             views,
             pages,
             retired,
+            bases,
             parts,
             uploads,
             renderer,
@@ -1156,6 +1279,14 @@ impl CallbackTrait for ViewCallback {
                 pass.set_bind_group(0, &*paper_bind_group, &[]);
                 pass.set_vertex_buffer(0, paper.slice(..));
                 pass.draw(0..paper_vertices, 0..1);
+            }
+            // Unresolved characters keep the pages out: only their bases
+            // draw there.
+            if let Some((marks, count)) = &marks {
+                renderer.mark(&mut pass, marks, *count, true);
+            }
+            if let Some((unmarks, count)) = &unmarks {
+                renderer.mark(&mut pass, unmarks, *count, false);
             }
             for draw in &self.draws {
                 let key = PageKey {
@@ -1182,16 +1313,53 @@ impl CallbackTrait for ViewCallback {
                     stats.used_overview |= page_stats.used_overview;
                 }
             }
-            // Revealing blocks: paper over the block from the scramble band
-            // down, then the replaced drawing below the scan line. Page
-            // draws leave their last batch's scissor set; the covers span
-            // every page.
+            // Revealing pages: their bases in the masked characters (and
+            // with Reduce motion the translation fading in over them), then
+            // the mask cleared; blocks not started show their original, and
+            // originals fade out. Page draws leave their last batch's
+            // scissor set.
+            for reveal in &self.reveals {
+                let key = PageKey {
+                    tab: self.tab,
+                    page: reveal.page,
+                };
+                let Some(draw) = self.draws.iter().find(|draw| draw.page == reveal.page) else {
+                    continue;
+                };
+                let mut add = |page_stats: DrawStats| {
+                    stats.draw_calls += page_stats.draw_calls;
+                    stats.triangles += page_stats.triangles;
+                };
+                if !reveal.mask.is_empty()
+                    && let Some((_, base)) = bases.get(&key)
+                {
+                    let options = DrawOptions {
+                        stencil: STENCIL_REVEAL_BIT,
+                        ..DrawOptions::default()
+                    };
+                    add(renderer.draw_with(queue, base, &draw.camera, options, &mut pass));
+                }
+                if let Some(resident) = pages.get(&key) {
+                    for (slot, (area, opacity)) in (1..).zip(&reveal.fade_in) {
+                        let options = DrawOptions {
+                            clip: Some(*area),
+                            opacity: *opacity,
+                            stencil: STENCIL_REVEAL_BIT,
+                            slot,
+                        };
+                        add(renderer.draw_with(
+                            queue,
+                            &resident.page,
+                            &draw.camera,
+                            options,
+                            &mut pass,
+                        ));
+                    }
+                }
+            }
             pass.set_scissor_rect(0, 0, full[0], full[1]);
-            if let Some(covers) = &covers {
-                pass.set_pipeline(paper_pipeline);
-                pass.set_bind_group(0, &*paper_bind_group, &[]);
-                pass.set_vertex_buffer(0, covers.slice(..));
-                pass.draw(0..cover_vertices, 0..1);
+            if let Some((marks, count)) = &marks {
+                renderer.mark(&mut pass, marks, *count, false);
             }
             for reveal in &self.reveals {
                 let key = PageKey {
@@ -1204,10 +1372,26 @@ impl CallbackTrait for ViewCallback {
                 ) else {
                     continue;
                 };
-                let page_stats =
-                    renderer.draw_clipped(queue, old, &draw.camera, reveal.below, &mut pass);
-                stats.draw_calls += page_stats.draw_calls;
-                stats.triangles += page_stats.triangles;
+                // Held blocks share a slot: their drawings are alike.
+                let held = reveal.hold.iter().map(|area| (0, area, 1.0));
+                let fading = (1..)
+                    .zip(&reveal.fade_out)
+                    .map(|(slot, (area, opacity))| (slot, area, *opacity));
+                for (slot, area, opacity) in held.chain(fading) {
+                    if opacity <= 0.0 {
+                        continue;
+                    }
+                    let options = DrawOptions {
+                        clip: Some(*area),
+                        opacity,
+                        slot,
+                        ..DrawOptions::default()
+                    };
+                    let page_stats =
+                        renderer.draw_with(queue, old, &draw.camera, options, &mut pass);
+                    stats.draw_calls += page_stats.draw_calls;
+                    stats.triangles += page_stats.triangles;
+                }
             }
         }
 

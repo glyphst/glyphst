@@ -242,6 +242,8 @@ pub struct DocumentTab {
     loading_since: HashMap<usize, Instant>,
     /// Preview parts of pages still loading, waiting for the GPU.
     pub ready_parts: VecDeque<(usize, Box<PreparedPage>)>,
+    /// Translated pages' bases, for their reveals, waiting for the GPU.
+    pub ready_bases: VecDeque<ReadyPage>,
     /// Re-rasterized layers waiting for the GPU: page, layer, image.
     pub ready_layers: VecDeque<(usize, usize, LayerImage)>,
     layers: HashMap<usize, Vec<LayerState>>,
@@ -347,6 +349,7 @@ impl DocumentTab {
             ready: VecDeque::new(),
             loading_since: HashMap::new(),
             ready_parts: VecDeque::new(),
+            ready_bases: VecDeque::new(),
             ready_layers: VecDeque::new(),
             layers: HashMap::new(),
             last_view: ([0.0; 2], 0.0, None),
@@ -442,6 +445,11 @@ impl DocumentTab {
         self.restore = Some(position);
         self.fitted = false;
         Ok(())
+    }
+
+    /// Asks for the base of `slot`'s `version`, for its reveal.
+    pub fn load_base(&self, slot: usize, version: u64, pdf: Arc<[u8]>) {
+        self.loader.load_base(slot, version, pdf);
     }
 
     /// Takes the loader's results: thumbnails become textures, prepared
@@ -557,6 +565,17 @@ impl DocumentTab {
                 Loaded::ThumbnailSkipped { page } => {
                     self.dense_pages.insert(page);
                 }
+                Loaded::Base {
+                    page,
+                    version,
+                    prepared,
+                    layers,
+                } => self.ready_bases.push_back(ReadyPage {
+                    page,
+                    version,
+                    prepared,
+                    layers,
+                }),
                 Loaded::Layer {
                     page,
                     version,
@@ -1860,6 +1879,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         ready: VecDeque::new(),
         loading_since: HashMap::new(),
         ready_parts: VecDeque::new(),
+        ready_bases: VecDeque::new(),
         ready_layers: VecDeque::new(),
         layers: HashMap::new(),
         last_view: ([0.0; 2], 0.0, None),

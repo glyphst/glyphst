@@ -149,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &source_path,
             &sanitized,
             &layout,
+            false,
             &job_directory,
             &cancellation,
         )?;

@@ -108,7 +108,7 @@ const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--t
                      [--translate-fake] [--translate-document] [--translate-follow] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
                      [--assistant-demo STATE] [--library-demo all|item|duplicate|merged|review|backfill|folder|identifier|zotero|zotero-done] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
-                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-translating PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
+                     [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-translating PATH | --screenshot-translating-film PATH | --screenshot-reveal-check PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
 fn parse_args() -> Result<Launch> {
     let mut launch = Launch {
@@ -193,6 +193,10 @@ fn parse_args() -> Result<Launch> {
             "--screenshot-generating" => launch.harness = shot(ShotKind::Generating, value()?),
             "--screenshot-revealing" => launch.harness = shot(ShotKind::Revealing, value()?),
             "--screenshot-translating" => launch.harness = shot(ShotKind::Translating, value()?),
+            "--screenshot-translating-film" => {
+                launch.harness = shot(ShotKind::TranslatingFilm, value()?)
+            }
+            "--screenshot-reveal-check" => launch.harness = shot(ShotKind::RevealCheck, value()?),
             "--screenshot-present-tools" => launch.harness = shot(ShotKind::PresentTools, value()?),
             "--screenshot-slide" => launch.harness = shot(ShotKind::SidebarSlide, value()?),
             "--background" => launch.background = Some(value()?),

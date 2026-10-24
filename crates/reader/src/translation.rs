@@ -360,6 +360,16 @@ pub enum SessionStatus {
     Failed(String),
 }
 
+/// Blocks a page's new preview shows translated, to reveal.
+pub struct RevealArrival {
+    pub page: usize,
+    pub revision: u64,
+    pub blocks: Vec<RevealBlock>,
+    /// The page without its translation, shown under unresolved
+    /// characters.
+    pub base: Option<Arc<[u8]>>,
+}
+
 /// A translated page: its typeset PDF and where its blocks came from.
 #[derive(Clone, Debug)]
 pub struct Preview {
@@ -414,7 +424,7 @@ pub struct DocSession {
     pub export_layout: ExportLayout,
     /// Blocks newly translated by a page's revision, for the page to
     /// reveal (see `take_reveals`).
-    reveals: Vec<(usize, u64, Vec<RevealBlock>)>,
+    reveals: Vec<RevealArrival>,
     /// The pages the session may translate; it follows the reader until
     /// it is made whole.
     scope: Arc<TranslationScope>,
@@ -461,8 +471,12 @@ impl DocSession {
                             let blocks =
                                 reveal_blocks(self.previews.get(&preview.page_index), &preview);
                             if !blocks.is_empty() {
-                                self.reveals
-                                    .push((preview.page_index, preview.revision, blocks));
+                                self.reveals.push(RevealArrival {
+                                    page: preview.page_index,
+                                    revision: preview.revision,
+                                    blocks,
+                                    base: preview.base_pdf.clone(),
+                                });
                             }
                             self.previews.insert(
                                 preview.page_index,
@@ -538,7 +552,7 @@ impl DocSession {
 
     /// The newly translated blocks of each page's latest revisions: the
     /// page, the revision showing them, and the blocks.
-    pub fn take_reveals(&mut self) -> Vec<(usize, u64, Vec<RevealBlock>)> {
+    pub fn take_reveals(&mut self) -> Vec<RevealArrival> {
         std::mem::take(&mut self.reveals)
     }
 
@@ -766,7 +780,21 @@ fn reveal_blocks(
         .iter()
         .partition(|region| region.translated && !before.contains(region.id.as_str()));
     let old: Vec<PageRect> = old.into_iter().map(area_of).collect();
-    let mut areas: Vec<PageRect> = new.into_iter().map(area_of).collect();
+    // Where each new block's original was: its translation shows it there
+    // until the block is revealed.
+    let originals: Vec<PageRect> = new
+        .iter()
+        .map(|region| {
+            let t = region.target_bounds;
+            let mut boxes = region
+                .source_regions
+                .iter()
+                .map(|b| [b.x0, b.y0, b.x1, b.y1]);
+            let first = boxes.next().unwrap_or([t.x0, t.y0, t.x1, t.y1]);
+            boxes.fold(first, union)
+        })
+        .collect();
+    let areas: Vec<PageRect> = new.into_iter().map(area_of).collect();
     let centre = |g: &PageRect| ((g[0] + g[2]) / 2.0, (g[1] + g[3]) / 2.0);
     let contains = |a: &PageRect, (x, y): (f32, f32), margin: f32| {
         x >= a[0] - margin && x <= a[2] + margin && y >= a[1] - margin && y <= a[3] + margin
@@ -809,24 +837,20 @@ fn reveal_blocks(
         }
     }
     let mut blocks: Vec<RevealBlock> = areas
-        .iter_mut()
+        .into_iter()
+        .zip(originals)
         .zip(glyphs)
-        .map(|(area, glyphs)| {
-            for (_, glyph) in &glyphs {
-                *area = [
-                    area[0].min(glyph[0]),
-                    area[1].min(glyph[1]),
-                    area[2].max(glyph[2]),
-                    area[3].max(glyph[3]),
-                ];
+        .map(|((area, original), glyphs)| {
+            // The block's glyphs by text line, in reading order.
+            let mut by_line: Vec<(usize, Vec<PageRect>)> = Vec::new();
+            for (line, glyph) in glyphs {
+                match by_line.last_mut() {
+                    Some((last, glyphs)) if *last == line => glyphs.push(glyph),
+                    _ => by_line.push((line, vec![glyph])),
+                }
             }
-            let mut lines: Vec<usize> = glyphs.iter().map(|(line, _)| *line).collect();
-            lines.dedup();
-            RevealBlock {
-                area: *area,
-                glyphs: glyphs.into_iter().map(|(_, glyph)| glyph).collect(),
-                lines: lines.len().max(1),
-            }
+            let lines = by_line.into_iter().map(|(_, glyphs)| glyphs).collect();
+            RevealBlock::from_glyphs(area, original, lines)
         })
         .collect();
     blocks.sort_by(|a, b| a.area[1].total_cmp(&b.area[1]));
@@ -931,12 +955,14 @@ mod tests {
                 }],
             },
             pdf: Arc::from(Vec::new()),
+            base_pdf: None,
             layout_failures: Vec::new(),
         };
         let blocks = reveal_blocks(None, &preview);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].glyphs.len(), 2, "{blocks:?}");
-        assert_eq!(blocks[0].lines, 2);
+        let glyphs: usize = blocks[0].lines.iter().map(|line| line.glyphs.len()).sum();
+        assert_eq!(glyphs, 2, "{blocks:?}");
+        assert_eq!(blocks[0].lines.len(), 2);
         assert!(blocks[0].area[3] >= 43.0, "{:?}", blocks[0].area);
     }
 
@@ -1070,6 +1096,26 @@ mod tests {
         assert!(
             text.contains('«'),
             "the translated page shows the translation: {text}"
+        );
+        // Its base is the page with neither the translation nor the
+        // original text it replaces.
+        let arrival = session
+            .take_reveals()
+            .into_iter()
+            .rfind(|arrival| arrival.page == 0)
+            .expect("page 1's blocks are revealed");
+        let base = arrival
+            .base
+            .as_ref()
+            .expect("reveals carry the page's base");
+        let base = mupdf::Document::from_bytes(base, "application/pdf").unwrap();
+        assert_eq!(base.page_count().unwrap(), 1);
+        let base_text = glyphst_pdf::text::PageText::from_page(&base.load_page(0).unwrap())
+            .unwrap()
+            .plain_text();
+        assert!(
+            !base_text.contains('«') && !base_text.contains("short document"),
+            "the base is blank where the translation goes: {base_text}"
         );
         session.show_translated = false;
         assert!(session.shown_preview(0).is_none(), "the original is shown");

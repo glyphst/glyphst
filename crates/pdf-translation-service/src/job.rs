@@ -1334,11 +1334,12 @@ impl PdfTranslationService {
             None,
             None,
         );
-        let composed_path = self.finalize_layout_pdf(
+        let (composed_path, _) = self.finalize_layout_pdf(
             source_snapshot_path,
             source_snapshot_path,
             &layout,
             &session.inspection,
+            false,
             job_directory,
             cancellation,
         )?;
@@ -1412,15 +1413,20 @@ impl PdfTranslationService {
         })
     }
 
+    /// Typesets `layout` over the source and composes the translated PDF;
+    /// with `with_base` (a one-page preview) also the page's base, the page
+    /// without its translation, as PDF bytes.
+    #[allow(clippy::too_many_arguments)]
     fn finalize_layout_pdf(
         &self,
         original_source_path: &Path,
         render_source_path: &Path,
         layout: &LayoutDocument,
         inspection: &PdfInspection,
+        with_base: bool,
         work_directory: &Path,
         cancellation: &CancellationToken,
-    ) -> Result<PathBuf, PdfTranslationError> {
+    ) -> Result<(PathBuf, Option<Vec<u8>>), PdfTranslationError> {
         create_private_directory(work_directory).map_err(|error| {
             PdfTranslationError::stage(
                 PdfTranslationStage::Compiling,
@@ -1447,6 +1453,7 @@ impl PdfTranslationService {
                 original_source_path,
                 &sanitized_source_path,
                 layout,
+                with_base,
                 work_directory,
                 cancellation,
             )
@@ -1456,11 +1463,27 @@ impl PdfTranslationService {
                 retryable: false,
                 detailed_message: None,
             })?;
+        // The preview's Typst output is the page then its base.
+        let (translated_path, base) = if with_base {
+            let page = extract_single_pdf_page(&typst_output.pdf_path, 0)?;
+            let base = extract_single_pdf_page(&typst_output.pdf_path, 1)?;
+            let page_path = work_directory.join("translated-page.pdf");
+            fs::write(&page_path, page).map_err(|error| {
+                PdfTranslationError::stage(
+                    PdfTranslationStage::Compiling,
+                    "Could not stage the typeset preview page",
+                    error,
+                )
+            })?;
+            (page_path, Some(base))
+        } else {
+            (typst_output.pdf_path.clone(), None)
+        };
         let composed_path = work_directory.join("translated-final.pdf");
         self.composer
             .compose(
                 original_source_path,
-                &typst_output.pdf_path,
+                &translated_path,
                 &composed_path,
                 layout,
                 inspection,
@@ -1476,7 +1499,7 @@ impl PdfTranslationService {
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
-        Ok(composed_path)
+        Ok((composed_path, base))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1536,11 +1559,12 @@ impl PdfTranslationService {
             pages: vec![page_profile],
         };
         let preview_layout = reindex_preview_layout(&page);
-        let output_path = self.finalize_layout_pdf(
+        let (output_path, base) = self.finalize_layout_pdf(
             &page_source_path,
             &page_source_path,
             &preview_layout,
             &page_inspection,
+            true,
             &work_directory,
             cancellation,
         )?;
@@ -1581,6 +1605,7 @@ impl PdfTranslationService {
             hover_regions,
             text_layer,
             pdf: Arc::from(pdf),
+            base_pdf: base.map(Arc::from),
             layout_failures,
         })
     }
@@ -2834,6 +2859,9 @@ pub struct PdfTranslationPagePreview {
     pub hover_regions: Vec<PdfTranslationHoverRegion>,
     pub text_layer: PdfTranslationPageTextLayer,
     pub pdf: Arc<[u8]>,
+    /// The page without its translation (its translated regions cleared
+    /// to their background), for reveals.
+    pub base_pdf: Option<Arc<[u8]>>,
     pub layout_failures: Vec<TranslationFailureDiagnostic>,
 }
 

@@ -15,6 +15,7 @@ use crate::{
     app::ReaderApp,
     document::percentile_ms,
     document_tab::{MAX_ZOOM, ViewAction},
+    reveal::RevealView,
 };
 
 const BENCH_ZOOM_FRAMES: usize = 240;
@@ -57,9 +58,15 @@ pub enum ShotKind {
     Generating,
     /// The loading animation's reveal, halfway down the page.
     Revealing,
-    /// A translation's blocks sweeping in (frame 02m), held shortly after
-    /// the first one starts.
+    /// A translation's blocks decoding in place (frame 02m), held shortly
+    /// after the first one starts.
     Translating,
+    /// The blocks in view decoding (frame 02o): five moments of their
+    /// reveal in one strip.
+    TranslatingFilm,
+    /// `TranslatingFilm`, saved only when no translated character showed
+    /// before it resolved and every resolved one shows the translation.
+    RevealCheck,
     /// Presenting's tools (frame 02h): ink on the page, the laser's
     /// toolbox with the pen's colours, and the ring open.
     PresentTools,
@@ -73,6 +80,15 @@ pub enum ShotKind {
 const GENERATING_AT: f32 = 0.6;
 /// Seconds into the first block's sweep at which `Translating` is taken.
 const TRANSLATING_AT: f64 = 0.3;
+/// Seconds into the reveals at which `TranslatingFilm` takes its frames…
+const FILM_AT: [f64; 5] = [0.0, 0.06, 0.15, 0.3, 0.6];
+/// …and at which `RevealCheck` checks characters decoding.
+const CHECK_AT: [f64; 4] = [0.15, 0.25, 0.35, 0.5];
+/// The largest difference of a checked pixel's channels from its expected
+/// image.
+const CHECK_TOLERANCE: u8 = 2;
+/// Frames shown at each film step before its picture is taken.
+const FILM_FRAMES: u32 = 3;
 /// Frames into the sidebar's slide at which `SidebarSlide` is taken.
 const SLIDE_SHOT_FRAMES: u32 = 4;
 /// The reveal's progress (in the animation's ending) at which
@@ -92,6 +108,38 @@ pub struct Screenshot {
     /// Tabs shown and settled so far (`TabClose` shows both before
     /// closing one).
     visited: usize,
+    film: Film,
+}
+
+/// What a film shows at a step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FilmStep {
+    /// The reveals this many seconds in, as they are.
+    Moment(f64),
+    /// Every block's characters masked: the pages' bases there.
+    Base,
+    /// The reveals this many seconds in, without the scrambled characters.
+    Check(f64),
+    /// The reveals over: the translations.
+    Done,
+}
+
+/// A decoding cell in a check's picture (pixels) and whether it resolved.
+type CheckedCell = (egui::Rect, bool);
+
+/// The pictures of a `TranslatingFilm` or `RevealCheck`.
+#[derive(Default)]
+struct Film {
+    settled: u32,
+    steps: Vec<FilmStep>,
+    step: usize,
+    frames: u32,
+    moments: Vec<Arc<egui::ColorImage>>,
+    base: Option<Arc<egui::ColorImage>>,
+    done: Option<Arc<egui::ColorImage>>,
+    /// Each check's picture and its decoding cells (pixels, resolved).
+    checks: Vec<(Arc<egui::ColorImage>, Vec<CheckedCell>)>,
+    cells: Vec<CheckedCell>,
 }
 
 impl Screenshot {
@@ -105,6 +153,7 @@ impl Screenshot {
             slide_frames: 0,
             image: Arc::default(),
             visited: 0,
+            film: Film::default(),
         }
     }
 
@@ -472,6 +521,99 @@ impl ReaderApp {
         true
     }
 
+    /// A film of the reveals: every reveal is held at its start until the
+    /// translation in view is done and drawn, then pictures are taken at
+    /// `FILM_AT` seconds (and, checking, of the bases, at `CHECK_AT` and
+    /// at the end). Returns whether the run is over.
+    fn film_step(&mut self, ctx: &egui::Context, shot: &mut Screenshot, now: Instant) -> bool {
+        let check = shot.kind == ShotKind::RevealCheck;
+        if self.reveal_clock.is_none() {
+            self.prepare_text_shot(ctx, now);
+            self.reveal_clock = Some(0.0);
+            return false;
+        }
+        let film = &mut shot.film;
+        if !film.steps.is_empty() && film.step == film.steps.len() {
+            return true;
+        }
+        if film.steps.is_empty() {
+            let Some(active) = self.active else {
+                return false;
+            };
+            let tab = &self.tabs[active];
+            let idle = tab
+                .translation
+                .as_ref()
+                .is_some_and(|session| !session.is_busy());
+            let held = tab.reveals.is_active() && tab.reveals.all_started();
+            let drawn = !self.with_gpu(|gpu| gpu.has_pending_work()).unwrap_or(true);
+            film.settled = if idle && held && drawn {
+                film.settled + 1
+            } else {
+                0
+            };
+            if film.settled < SETTLE_FRAMES {
+                return false;
+            }
+            film.steps = FILM_AT.iter().map(|&at| FilmStep::Moment(at)).collect();
+            if check {
+                film.steps.push(FilmStep::Base);
+                film.steps
+                    .extend(CHECK_AT.iter().map(|&at| FilmStep::Check(at)));
+                film.steps.push(FilmStep::Done);
+            }
+        }
+        let captured = shot.image.lock().ok().and_then(|mut image| image.take());
+        if let Some(image) = captured {
+            match film.steps[film.step] {
+                FilmStep::Moment(_) => film.moments.push(image),
+                FilmStep::Base => film.base = Some(image),
+                FilmStep::Check(_) => film.checks.push((image, std::mem::take(&mut film.cells))),
+                FilmStep::Done => film.done = Some(image),
+            }
+            film.step += 1;
+            film.frames = 0;
+            if film.step == film.steps.len() {
+                return finish_film(&shot.path, film, check);
+            }
+        }
+        let step = film.steps[film.step];
+        let (clock, view) = match step {
+            FilmStep::Moment(at) => (at, RevealView::Normal),
+            FilmStep::Base => (0.0, RevealView::Base),
+            FilmStep::Check(at) => (at, RevealView::Bare),
+            FilmStep::Done => (60.0, RevealView::Bare),
+        };
+        self.reveal_clock = Some(clock);
+        self.reveal_view = view;
+        film.frames += 1;
+        if film.frames == FILM_FRAMES {
+            if let FilmStep::Check(at) = step
+                && let Some(active) = self.active
+            {
+                let ppp = ctx.pixels_per_point();
+                film.cells = self.tabs[active]
+                    .reveals
+                    .cells_at(at)
+                    .into_iter()
+                    .filter_map(|(page, cell, resolved)| {
+                        let map = self.reveal_maps.iter().find(|map| map.page == page)?;
+                        let rect = map.rect_to_screen(cell);
+                        Some((
+                            egui::Rect::from_min_max(
+                                (rect.min.to_vec2() * ppp).to_pos2(),
+                                (rect.max.to_vec2() * ppp).to_pos2(),
+                            ),
+                            resolved,
+                        ))
+                    })
+                    .collect();
+            }
+            shot.request(ctx);
+        }
+        false
+    }
+
     fn screenshot_step(
         &mut self,
         ctx: &egui::Context,
@@ -479,6 +621,9 @@ impl ReaderApp {
         pages_drawn: bool,
         now: Instant,
     ) -> bool {
+        if matches!(shot.kind, ShotKind::TranslatingFilm | ShotKind::RevealCheck) {
+            return self.film_step(ctx, shot, now);
+        }
         let captured = shot.image.lock().ok().and_then(|mut image| image.take());
         if let Some(image) = captured {
             let rgba: Vec<u8> = image
@@ -547,7 +692,10 @@ impl ReaderApp {
         };
         shot.requested = match shot.kind {
             // Taken above, while the translation runs.
-            ShotKind::View | ShotKind::Translating => true,
+            ShotKind::View
+            | ShotKind::Translating
+            | ShotKind::TranslatingFilm
+            | ShotKind::RevealCheck => true,
             ShotKind::PageTurn => {
                 if !shot.started {
                     self.pending_actions
@@ -645,4 +793,124 @@ impl ReaderApp {
         }
         false
     }
+}
+
+/// Saves a film's moments side by side at half size; checking, only when
+/// every decoding cell matched: unresolved ones the pages' bases, resolved
+/// ones the finished translation. Always ends the run.
+fn finish_film(path: &std::path::Path, film: &Film, check: bool) -> bool {
+    if check {
+        let (Some(base), Some(done)) = (&film.base, &film.done) else {
+            eprintln!("reveal check: missing the base or finished picture");
+            return true;
+        };
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for (index, (image, cells)) in film.checks.iter().enumerate() {
+            for (cell, resolved) in cells {
+                let expected = if *resolved { done } else { base };
+                checked += 1;
+                if let Some(difference) = cell_difference(image, expected, *cell) {
+                    failures.push(format!(
+                        "check {index} at {:?}: a {} cell differs by {difference}",
+                        CHECK_AT[index],
+                        if *resolved { "resolved" } else { "unresolved" }
+                    ));
+                }
+            }
+        }
+        println!("reveal check: {checked} cells, {} wrong", failures.len());
+        // GLYPHST_REVEAL_DUMP names a folder for the pictures checked.
+        if let Some(folder) = std::env::var_os("GLYPHST_REVEAL_DUMP") {
+            let folder = std::path::PathBuf::from(folder);
+            let save = |name: &str, image: &egui::ColorImage| {
+                let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                if let Some(image) =
+                    image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, rgba)
+                {
+                    let _ = image.save(folder.join(name));
+                }
+            };
+            save("base.png", base);
+            save("done.png", done);
+            for (index, (image, cells)) in film.checks.iter().enumerate() {
+                save(&format!("check-{index}.png"), image);
+                let wrong: Vec<String> = cells
+                    .iter()
+                    .filter(|(cell, resolved)| {
+                        cell_difference(image, if *resolved { done } else { base }, *cell).is_some()
+                    })
+                    .map(|(cell, resolved)| format!("{cell:?} {resolved}"))
+                    .collect();
+                let _ = std::fs::write(folder.join(format!("check-{index}.txt")), wrong.join("\n"));
+            }
+        }
+        if checked == 0 {
+            eprintln!("reveal check: no characters were decoding");
+            return true;
+        }
+        if !failures.is_empty() {
+            for failure in failures.iter().take(20) {
+                eprintln!("reveal check: {failure}");
+            }
+            return true;
+        }
+    }
+    let Some(first) = film.moments.first() else {
+        return true;
+    };
+    let [width, height] = first.size;
+    let (half_width, half_height) = (width as u32 / 2, height as u32 / 2);
+    let mut strip = image::RgbaImage::new(half_width * film.moments.len() as u32, half_height);
+    for (index, moment) in film.moments.iter().enumerate() {
+        let rgba: Vec<u8> = moment
+            .pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_array())
+            .collect();
+        let Some(full) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) else {
+            continue;
+        };
+        let half = image::imageops::resize(
+            &full,
+            half_width,
+            half_height,
+            image::imageops::FilterType::Triangle,
+        );
+        image::imageops::replace(&mut strip, &half, i64::from(half_width) * index as i64, 0);
+    }
+    match strip.save(path) {
+        Ok(()) => println!("saved {}", path.display()),
+        Err(error) => eprintln!("screenshot: {error}"),
+    }
+    true
+}
+
+/// The largest channel difference between `image` and `expected` inside
+/// `cell` (pixels, a pixel in from its edges), if over the tolerance.
+fn cell_difference(
+    image: &egui::ColorImage,
+    expected: &egui::ColorImage,
+    cell: egui::Rect,
+) -> Option<u8> {
+    let [width, height] = image.size;
+    let x0 = (cell.min.x + 1.0).ceil().max(0.0) as usize;
+    let y0 = (cell.min.y + 1.0).ceil().max(0.0) as usize;
+    let x1 = ((cell.max.x - 1.0).floor().max(0.0) as usize).min(width);
+    let y1 = ((cell.max.y - 1.0).floor().max(0.0) as usize).min(height);
+    let mut worst = 0u8;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (a, b) = (image.pixels[y * width + x], expected.pixels[y * width + x]);
+            let difference = a
+                .to_array()
+                .iter()
+                .zip(b.to_array())
+                .map(|(a, b)| a.abs_diff(b))
+                .max()
+                .unwrap_or(0);
+            worst = worst.max(difference);
+        }
+    }
+    (worst > CHECK_TOLERANCE).then_some(worst)
 }

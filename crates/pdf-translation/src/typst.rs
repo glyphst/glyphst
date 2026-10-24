@@ -95,6 +95,7 @@ impl TypstCompiler {
         original_pdf: &Path,
         source_pdf: &Path,
         layout: &LayoutDocument,
+        bases: bool,
         job_directory: &Path,
         cancellation: &CancellationToken,
     ) -> Result<TypstOutput, TypstError> {
@@ -114,7 +115,7 @@ impl TypstCompiler {
         })?;
         let colors = sample_layout_background_colors(source_pdf, layout)?;
         self.compile_source(
-            generate_translated_pdf_source(layout, "source.pdf", &colors),
+            generate_translated_pdf_source(layout, "source.pdf", &colors, bases),
             "translated-document",
             job_directory,
             cancellation,
@@ -767,15 +768,22 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
     if not fits(size-floor, leading-floor) {
       panic("GLYPHST_OVERFLOW:" + diagnostic)
     }
+    // The text shrinks before its lines close up: leading goes under
+    // min-leading only when even the smallest size needs it, so lines
+    // never run into each other while a smaller size would fit.
+    let readable = fits(size-floor, min-leading)
+    let size-leading = if readable { min-leading } else { leading-floor }
     let chosen-size = if fits(max-size, max-leading) {
       max-size
+    } else if not readable {
+      size-floor
     } else {
-      glyphst_fit_size(size-floor, max-size, 0.08pt, size => fits(size, leading-floor))
+      glyphst_fit_size(size-floor, max-size, 0.08pt, size => fits(size, size-leading))
     }
     let chosen-leading = if fits(chosen-size, max-leading) {
       max-leading
     } else {
-      glyphst_fit_leading(leading-floor, max-leading, 0.01em, leading => fits(chosen-size, leading))
+      glyphst_fit_leading(size-leading, max-leading, 0.01em, leading => fits(chosen-size, leading))
     }
     render(chosen-size, chosen-leading)
   })
@@ -803,60 +811,70 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
     source
 }
 
+/// The Typst source of the translated document: each source page (with
+/// its translated regions removed) under its translation. With `bases`,
+/// each page is followed by its base: the same page without the
+/// translation, which reveals draw where a translated glyph has not
+/// arrived yet.
 pub fn generate_translated_pdf_source(
     layout: &LayoutDocument,
     source_pdf_name: &str,
     background_colors: &[Vec<[u8; 3]>],
+    bases: bool,
 ) -> String {
     let overlay = generate_typst_source(layout);
     let preamble_end = overlay.find("#set page(").unwrap_or(overlay.len());
     let mut source = overlay[..preamble_end].to_string();
     for (page_position, page) in layout.pages.iter().enumerate() {
-        if page_position > 0 {
-            source.push_str("#pagebreak()\n");
-        }
-        source.push_str(&format!(
-            "#set page(width: {:.3}pt, height: {:.3}pt, margin: 0pt, fill: none)\n",
-            page.geometry.width, page.geometry.height
-        ));
-        source.push_str(&format!(
-            "#place(top + left, image(\"{}\", page: {}, width: {:.3}pt, height: {:.3}pt, fit: \"stretch\"))\n",
-            escape_typst_string(source_pdf_name),
-            page.page_index + 1,
-            page.geometry.width,
-            page.geometry.height
-        ));
-        for (item_index, item) in page.items.iter().enumerate() {
-            let color = background_colors
-                .get(page.page_index)
-                .and_then(|colors| colors.get(item_index))
-                .copied()
-                .unwrap_or([255, 255, 255]);
-            let fallback_regions = [item.source_bbox];
-            let regions = if item.source_regions.is_empty() {
-                fallback_regions.as_slice()
-            } else {
-                item.source_regions.as_slice()
-            };
-            for region in regions {
-                source.push_str(&format!(
-                    "#place(top + left, dx: {:.3}pt, dy: {:.3}pt, rect(width: {:.3}pt, height: {:.3}pt, fill: rgb({}, {}, {}), stroke: none))\n",
-                    region.x0,
-                    region.y0,
-                    region.width(),
-                    region.height(),
-                    color[0],
-                    color[1],
-                    color[2]
-                ));
+        for translated in std::iter::once(true).chain(bases.then_some(false)) {
+            if page_position > 0 || !translated {
+                source.push_str("#pagebreak()\n");
             }
-            append_typst_layout_item(
-                &mut source,
-                page.page_index,
-                item_index,
-                item,
-                layout.overflow_policy,
-            );
+            source.push_str(&format!(
+                "#set page(width: {:.3}pt, height: {:.3}pt, margin: 0pt, fill: none)\n",
+                page.geometry.width, page.geometry.height
+            ));
+            source.push_str(&format!(
+                "#place(top + left, image(\"{}\", page: {}, width: {:.3}pt, height: {:.3}pt, fit: \"stretch\"))\n",
+                escape_typst_string(source_pdf_name),
+                page.page_index + 1,
+                page.geometry.width,
+                page.geometry.height
+            ));
+            for (item_index, item) in page.items.iter().enumerate() {
+                let color = background_colors
+                    .get(page.page_index)
+                    .and_then(|colors| colors.get(item_index))
+                    .copied()
+                    .unwrap_or([255, 255, 255]);
+                let fallback_regions = [item.source_bbox];
+                let regions = if item.source_regions.is_empty() {
+                    fallback_regions.as_slice()
+                } else {
+                    item.source_regions.as_slice()
+                };
+                for region in regions {
+                    source.push_str(&format!(
+                        "#place(top + left, dx: {:.3}pt, dy: {:.3}pt, rect(width: {:.3}pt, height: {:.3}pt, fill: rgb({}, {}, {}), stroke: none))\n",
+                        region.x0,
+                        region.y0,
+                        region.width(),
+                        region.height(),
+                        color[0],
+                        color[1],
+                        color[2]
+                    ));
+                }
+                if translated {
+                    append_typst_layout_item(
+                        &mut source,
+                        page.page_index,
+                        item_index,
+                        item,
+                        layout.overflow_policy,
+                    );
+                }
+            }
         }
     }
     source
@@ -2164,6 +2182,82 @@ mod tests {
         let result = root.load(&VirtualPath::new("source.pdf").unwrap());
 
         assert!(matches!(result, Err(FileError::AccessDenied)));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn crowded_translations_shrink_before_their_lines_collide() {
+        // Three lines' worth of text in a one-line box, adaptive: the text
+        // goes small, its lines stay apart.
+        let mut layout = LayoutDocument {
+            pages: vec![LayoutPage {
+                page_index: 0,
+                geometry: PageGeometry::new(240.0, 120.0),
+                items: Vec::new(),
+            }],
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Adaptive,
+        };
+        let bounds = BoundingBox::new(10.0, 10.0, 160.0, 24.0);
+        layout.pages[0].items.push(LayoutItem {
+            unit_id: "unit".to_string(),
+            block_id: "block".to_string(),
+            page_index: 0,
+            source_bbox: bounds,
+            source_regions: vec![bounds],
+            structure_group_id: None,
+            toc: None,
+            bbox: bounds,
+            text: "Les pompes à chaleur tirent leur énergie de l'air ambiant, de façon \
+                   écologique, et la transforment en chaleur agréable pour la maison."
+                .to_string(),
+            role: crate::BlockRole::Body,
+            source_font_size_pt: 10.0,
+            font_size_pt: 10.0,
+            minimum_font_size_pt: 7.0,
+            emergency_minimum_font_size_pt: 5.5,
+            leading_em: 0.58,
+            minimum_leading_em: 0.45,
+            font_weight: FontWeight::Regular,
+            font_class: FontFamilyClass::Serif,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            color_argb: 0xff00_0000,
+            styled_runs: Vec::new(),
+            inline_objects: Vec::new(),
+            first_line_indent_pt: 0.0,
+            justify: false,
+            preserve_line_breaks: false,
+        });
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-typst-crowded-{nonce:x}"));
+        let output = TypstCompiler::new(TypstCompilerConfig::default())
+            .compile(&layout, &directory, &CancellationToken::new())
+            .unwrap();
+        let document = mupdf::Document::open(output.pdf_path.to_str().unwrap()).unwrap();
+        let page = document.load_page(0).unwrap();
+        let text = page.to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+        // Each line's top and its glyphs' height.
+        let mut lines: Vec<(f32, f32)> = Vec::new();
+        for block in text.blocks() {
+            for line in block.lines() {
+                let bounds = line.bounds();
+                lines.push((bounds.y0, bounds.y1 - bounds.y0));
+            }
+        }
+        assert!(lines.len() >= 2, "{lines:?}");
+        for pair in lines.windows(2) {
+            let ((top, height), (next, _)) = (pair[0], pair[1]);
+            assert!(
+                next - top >= 0.8 * height,
+                "lines {top} and {next} ({height} tall) run into each other: {lines:?}"
+            );
+        }
         let _ = fs::remove_dir_all(directory);
     }
 

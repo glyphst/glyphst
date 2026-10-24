@@ -1208,6 +1208,7 @@ mod tests {
                 &source_path,
                 &sanitized_source,
                 &layout,
+                false,
                 &directory,
                 &cancellation,
             )
@@ -1290,6 +1291,7 @@ mod tests {
                 &source_path,
                 &sanitized_source,
                 &layout,
+                false,
                 &directory,
                 &cancellation,
             )

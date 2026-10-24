@@ -480,6 +480,14 @@ pub enum Loaded {
         layer: usize,
         image: LayerImage,
     },
+    /// A translated page's base, for its reveal: `version` is the page's
+    /// source version it is the base of.
+    Base {
+        page: usize,
+        version: u64,
+        prepared: Box<PreparedPage>,
+        layers: Vec<(usize, LayerImage)>,
+    },
 }
 
 /// Work for the loader thread.
@@ -495,6 +503,11 @@ enum Request {
         ops: Range<u32>,
         rect: PageRect,
         scale: f32,
+    },
+    Base {
+        page: usize,
+        version: u64,
+        pdf: Arc<[u8]>,
     },
 }
 
@@ -572,7 +585,25 @@ impl Loader {
                     ctx.request_repaint();
                     sent
                 };
-                while let Ok(request) = request_rx.recv() {
+                // Requests waiting; bases go first, since a reveal waits
+                // on its page's base while the page shows its original.
+                let mut pending: VecDeque<Request> = VecDeque::new();
+                loop {
+                    pending.extend(request_rx.try_iter());
+                    let request = match pending
+                        .iter()
+                        .position(|request| matches!(request, Request::Base { .. }))
+                    {
+                        Some(base) => pending.remove(base),
+                        None => pending.pop_front(),
+                    };
+                    let request = match request {
+                        Some(request) => request,
+                        None => match request_rx.recv() {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        },
+                    };
                     match request {
                         Request::Page { page, source } => {
                             if !worker_wanted
@@ -626,6 +657,22 @@ impl Loader {
                                 return;
                             }
                         }
+                        Request::Base { page, version, pdf } => match load_base(&pdf) {
+                            Ok((prepared, layers)) => {
+                                if !send(Loaded::Base {
+                                    page,
+                                    version,
+                                    prepared: Box::new(prepared),
+                                    layers,
+                                }) {
+                                    return;
+                                }
+                            }
+                            Err(error) => log::warn!(
+                                "could not draw the base of page {}: {error:#}",
+                                slot_page(page).0 + 1
+                            ),
+                        },
                     }
                 }
             })
@@ -687,6 +734,12 @@ impl Loader {
             rect,
             scale,
         });
+    }
+
+    /// Prepares the base of `page`'s `version` (a one-page PDF), for its
+    /// reveal.
+    pub fn load_base(&self, page: usize, version: u64, pdf: Arc<[u8]>) {
+        let _ = self.requests.send(Request::Base { page, version, pdf });
     }
 
     /// Marks `page` as no longer loaded, so it can be requested again.
@@ -916,6 +969,29 @@ fn load_page(
             None
         }
     }
+}
+
+/// The drawing of a translated page's base (a one-page PDF), with its
+/// raster layers.
+fn load_base(pdf: &[u8]) -> Result<(PreparedPage, Vec<(usize, LayerImage)>)> {
+    let page = mupdf::Document::from_bytes(pdf, "application/pdf")
+        .and_then(|base| base.load_page(0))
+        .context("failed to open a translated page's base")?;
+    let list = page.to_display_list(true)?;
+    let prepared = PreparedPage::new(&capture_display_list(&list)?);
+    let mut layers = Vec::new();
+    for (index, layer) in prepared.raster_layers.iter().enumerate() {
+        if let Some(image) = rasterize_layer(
+            &list,
+            layer.ops.clone(),
+            layer.bounds,
+            LAYER_SCALE,
+            MAX_LAYER_DIMENSION,
+        )? {
+            layers.push((index, image));
+        }
+    }
+    Ok((prepared, layers))
 }
 
 /// The MuPDF page a source draws: the document's page, or the first page

@@ -51,6 +51,7 @@ use crate::{
     prefs::{Colours, LastSession, Prefs, SessionFile, SessionPage},
     quick_ask::{self, QuickAsk},
     region::{self, Region},
+    reveal::{PageState as RevealState, RevealView},
     settings_window::{Section, SettingsContext, SettingsWindow},
     sidebar::{self, OtherBookmark, SidebarAction, SidebarInfo, SidebarState, SidebarTab},
     text_overlay::{PageMap, Selection, TextPos, fill_rects, nearest_page, page_at},
@@ -385,8 +386,11 @@ pub struct ReaderApp {
     pub(crate) launch_select: Option<(usize, usize)>,
     pub(crate) launch_translate_document: bool,
     pub(crate) launch_translate_follow: bool,
-    /// Scripted runs: the time translated blocks' reveals are held at.
+    /// Scripted runs: the time translated blocks' reveals are held at,
+    /// how they show, and where the pages were last drawn.
     pub(crate) reveal_clock: Option<f64>,
+    pub(crate) reveal_view: RevealView,
+    pub(crate) reveal_maps: Vec<PageMap>,
     pub(crate) launch_translate_selection: bool,
     font_size: Option<f32>,
     pub(crate) translator: Translator,
@@ -731,6 +735,8 @@ impl ReaderApp {
             launch_translate_document: launch.translate_document,
             launch_translate_follow: launch.translate_follow,
             reveal_clock: None,
+            reveal_view: RevealView::Normal,
+            reveal_maps: Vec::new(),
             launch_translate_selection: launch.translate_selection,
             font_size: launch.font_size,
             translator,
@@ -3805,6 +3811,15 @@ impl ReaderApp {
                 let key = PageKey { tab, page };
                 self.with_gpu(|gpu| gpu.begin_part(&device, key, prepared));
             }
+            while let Some(base) = self.tabs[index].ready_bases.pop_front() {
+                let key = PageKey {
+                    tab,
+                    page: base.page,
+                };
+                self.with_gpu(|gpu| {
+                    gpu.begin_base(&device, key, base.version, base.prepared, base.layers)
+                });
+            }
         }
         if !self.with_gpu(|gpu| gpu.is_uploading()).unwrap_or(false) {
             let order: Vec<usize> = self.active.into_iter().chain(0..self.tabs.len()).collect();
@@ -5337,8 +5352,9 @@ impl ReaderApp {
         for draw in &mut draws {
             draw.camera.viewport = target;
         }
-        // Translated blocks sweep in as their page's new version is drawn,
-        // over the drawing it replaces (kept by the GPU meanwhile).
+        // Translated blocks decode in place once their page's new version
+        // and its base are drawn, over the drawing they replace (kept by
+        // the GPU meanwhile).
         let reveal_seconds = self
             .reveal_clock
             .unwrap_or_else(|| self.started.elapsed().as_secs_f64());
@@ -5348,18 +5364,21 @@ impl ReaderApp {
                 frame.draws.iter().map(|draw| draw.page).collect();
             let watched = self.tabs[active].reveals.watch();
             let pages = self.tabs[active].reveals.pages();
-            let drawn: HashMap<usize, u64> = self
+            let states: HashMap<usize, RevealState> = self
                 .with_gpu(|gpu| {
-                    if !reduce_motion {
-                        for page in watched {
-                            gpu.keep_replaced(PageKey { tab: tab_id, page });
-                        }
+                    for page in watched {
+                        gpu.keep_replaced(PageKey { tab: tab_id, page });
                     }
                     pages
                         .iter()
-                        .filter_map(|&page| {
-                            gpu.resident_version(PageKey { tab: tab_id, page })
-                                .map(|version| (page, version))
+                        .map(|&page| {
+                            let key = PageKey { tab: tab_id, page };
+                            let state = RevealState {
+                                drawn: gpu.resident_version(key),
+                                base: gpu.base_version(key),
+                                maskable: gpu.maskable(key),
+                            };
+                            (page, state)
                         })
                         .collect()
                 })
@@ -5367,7 +5386,7 @@ impl ReaderApp {
             let done = self.tabs[active].reveals.step(
                 reveal_seconds,
                 reduce_motion,
-                |page| drawn.get(&page).copied(),
+                |page| states.get(&page).copied().unwrap_or_default(),
                 |page| visible.contains(&page),
             );
             self.with_gpu(|gpu| {
@@ -5376,9 +5395,12 @@ impl ReaderApp {
                 }
             });
             ctx.request_repaint();
-            self.tabs[active]
-                .reveals
-                .clips(reveal_seconds, reduce_motion)
+            match self.reveal_view {
+                RevealView::Base => self.tabs[active].reveals.frame_masked(),
+                _ => self.tabs[active]
+                    .reveals
+                    .frame(reveal_seconds, reduce_motion),
+            }
         } else {
             Vec::new()
         };
@@ -5410,6 +5432,9 @@ impl ReaderApp {
             .filter(|map| !slot_page(map.page).1)
             .copied()
             .collect();
+        if self.harness.is_some() {
+            self.reveal_maps.clone_from(&all_maps);
+        }
         let blank_faces: Vec<PageMap> = self.tabs[active]
             .blank_faces(target)
             .iter()
@@ -5449,7 +5474,7 @@ impl ReaderApp {
         }
         self.page_chrome(ui, &painter, rect, &maps, active, now);
         let focused = self.active == Some(active);
-        if self.show_stats && focused {
+        if self.show_stats && focused && self.reveal_view == RevealView::Normal {
             self.stats_overlay(&painter, rect, active);
         }
         let enter_leaves = self.keymap.preset() == KeymapPreset::Vim;
@@ -5903,14 +5928,15 @@ impl ReaderApp {
         {
             paint_partners(painter, maps, session, pos, tokens);
         }
-        tab.reveals.paint(
-            painter,
-            maps,
-            seconds,
-            self.prefs.reduce_motion,
-            tokens.accent,
-            tokens.page,
-        );
+        if self.reveal_view == RevealView::Normal {
+            tab.reveals.paint(
+                painter,
+                maps,
+                seconds,
+                self.prefs.reduce_motion,
+                tokens.accent,
+            );
+        }
     }
 
     fn paint_text_overlays(
@@ -6570,12 +6596,17 @@ impl eframe::App for ReaderApp {
                 let facing = tab.layout.arrangement.facing;
                 let shown = session.show_translated || facing;
                 let seconds = self.started.elapsed().as_secs_f64();
-                for (page, revision, blocks) in session.take_reveals() {
+                for arrival in session.take_reveals() {
                     if shown {
-                        // Facing, the translation sweeps in on its face.
+                        // Facing, the translation decodes on its face.
+                        let page = arrival.page;
                         let slot = if facing { translation_slot(page) } else { page };
                         // The page's source version for the revision.
-                        tab.reveals.add(slot, revision + 1, blocks, seconds);
+                        let version = arrival.revision + 1;
+                        if let Some(base) = arrival.base {
+                            tab.load_base(slot, version, base);
+                        }
+                        tab.reveals.add(slot, version, arrival.blocks, seconds);
                     }
                 }
             }
