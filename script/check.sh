@@ -24,6 +24,12 @@
 #                           the CJK faces come from GLYPHST_FONTS_DIR
 #                           (default: ../fonts, the glyphst-fonts checkout;
 #                           an empty folder: none)
+#   script/check.sh screens --set site [NAME...]
+#                           the website's shots instead: a book, a paper and
+#                           a drawing (GLYPHST_SITE_BOOK, GLYPHST_SITE_PAPER,
+#                           GLYPHST_SITE_CAD) over a library seeded with just
+#                           those three, so no personal history shows,
+#                           translating from GLYPHST_SITE_TRANSLATIONS
 #
 # Options:
 #   --keep-going      run every step and report all failures
@@ -31,6 +37,7 @@
 #   --jobs N          screens: Readers running at once (default: 4 headless,
 #                     1 on the desktop)
 #   --desktop         screens: run on the desktop session instead
+#   --set S           screens: design (default) or site
 #
 # Each run writes step logs and summary.json to target/check-reports/<tier>-<time>/;
 # the newest ten runs of each tier are kept.
@@ -50,6 +57,7 @@ keep_going=0
 desktop=0
 parallel=
 themes=(dark light)
+set=design
 names=()
 while (($# > 0)); do
     case $1 in
@@ -69,6 +77,14 @@ while (($# > 0)); do
                 exit 2
             }
             parallel=$2
+            shift
+            ;;
+        --set)
+            [[ ${2:-} == design || ${2:-} == site ]] || {
+                printf -- '--set takes design or site\n' >&2
+                exit 2
+            }
+            set=$2
             shift
             ;;
         -*) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
@@ -215,7 +231,8 @@ if [[ ${tier} == screens ]]; then
     fi
     shots="${run_dir}/screens"
     mkdir -p "${shots}"
-    reader="${repo}/target/debug/glyphst-reader"
+    target=${CARGO_TARGET_DIR:-${repo}/target}
+    reader="${target}/debug/glyphst-reader"
     dense=${GLYPHST_SCREENS_DENSE:-${repo}/../pdf-samples/Murietta_Level1.pdf}
     # A long document, for the translation's page map: 240 pages of text,
     # written here so no sample needs to be a book.
@@ -439,6 +456,42 @@ if [[ ${tier} == screens ]]; then
         "09i-gamepad-menu @ --gamepad-mode --command app.gamepad_menu"
         "09j-gamepad-disconnected --gamepad-mode --fixed-clock --pad-demo connect;disconnect"
     )
+    # The website's shots (`--set site`): `@book`, `@paper` and `@cad`
+    # stand for its documents, which may have spaces in their paths.
+    book=${GLYPHST_SITE_BOOK:-${HOME}/Documents/books/Technical/zero2prod_20240903.pdf}
+    paper=${GLYPHST_SITE_PAPER:-${repo}/../pdf-samples/site/mamba-2312.00752.pdf}
+    cad=${GLYPHST_SITE_CAD:-${repo}/../pdf-samples/Murietta_Level1.pdf}
+    if [[ ${set} == site ]]; then
+        # The paper's Chinese, recorded once, stands in for a provider; texts
+        # it lacks land in mamba.zh.missing to be added.
+        export GLYPHST_FAKE_TRANSLATIONS=${GLYPHST_SITE_TRANSLATIONS:-${repo}/../pdf-samples/site/mamba.zh.json}
+        for file in "${book}" "${paper}" "${cad}"; do
+            [[ -f ${file} ]] || {
+                printf 'error: no document at %s\n' "${file}" >&2
+                exit 1
+            }
+        done
+        states=(
+            "site-hero @book --page 290 --sidebar outline --assistant-demo done:zero2prod"
+            "site-zoom-cad @cad --zoom 5 --scroll 1080,1360 --command app.sidebar"
+            "site-translate @paper --page 1 --sidebar translation --translate-fake --translate-follow"
+            "site-translating @paper --page 1 --sidebar translation --translate-fake --translate-follow --screenshot-translating"
+            "site-side-by-side @paper --page 1 --translate-fake --translate-follow --command translation.side_by_side"
+            "site-assistant @paper --page 6 --assistant-demo done:mamba"
+            "site-library --library-demo item"
+            "site-library-search --library-demo search"
+            "site-pad-home --gamepad-mode --fixed-clock --pad-demo connect"
+            "site-pad-ring @book --gamepad-mode --pad-demo stick:R:0.65,-0.65"
+            "site-present @paper --page 6 --command view.present --screenshot-present-tools"
+            "site-zen @book --command view.zen"
+            "site-overview @paper --command view.page_overview"
+            "site-switcher @book @paper @cad --switcher-layout carousel --command app.book_switcher"
+            "site-wallpaper @book --background image --wallpaper ^ --colours background"
+            "site-colours @book --settings appearance:colours --background image --wallpaper ^ --colours background"
+            "site-palette @book --palette go"
+            "site-split @book @paper --split right"
+        )
+    fi
     if ((${#names[@]} > 0)); then
         chosen=()
         for wanted in "${names[@]}"; do
@@ -471,7 +524,12 @@ if [[ ${tier} == screens ]]; then
     seed="${run_dir}/data-seed"
     mkdir -p "${seed}/glyphst-reader"
     data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
-    if [[ -d ${data_home}/glyphst-reader ]]; then
+    if [[ ${set} == site ]]; then
+        # Only the website's documents, read in this order (newest last).
+        step seed-build cargo build --locked -p glyphst-library --example seed_history
+        step seed-history env XDG_DATA_HOME="${seed}" \
+            "${target}/debug/examples/seed_history" "${cad}:1" "${paper}:6" "${book}:290"
+    elif [[ -d ${data_home}/glyphst-reader ]]; then
         cp -a "${data_home}/glyphst-reader/." "${seed}/glyphst-reader/"
     fi
     # User fonts stay where fontconfig finds them.
@@ -533,6 +591,9 @@ if [[ ${tier} == screens ]]; then
             for arg in ${rest}; do
                 case ${arg} in
                     @) args+=("${document}") ;;
+                    @book) args+=("${book}") ;;
+                    @paper) args+=("${paper}") ;;
+                    @cad) args+=("${cad}") ;;
                     @@) args+=("@") ;;
                     \#) args+=("${second}") ;;
                     %) args+=("${dense}") ;;

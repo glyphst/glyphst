@@ -1080,6 +1080,10 @@ impl ReaderApp {
             }
             None => (Vec::new(), None),
         };
+        let (models, model) = match &self.assistant.demo_model {
+            Some((demo, label)) => (vec![(demo.clone(), label.clone())], Some(demo.clone())),
+            None => (models, model),
+        };
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(rect)

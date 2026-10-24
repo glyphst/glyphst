@@ -55,7 +55,9 @@ pub fn show<T: PartialEq + Copy>(
         x += width + 2.0;
         let response = ui.interact(
             cell,
-            ui.scope_id().with(("segment", *label)),
+            // Keyed on this control, so two controls with the same
+            // labels in one scope (light | dark) never share an id.
+            outer.id.with(("segment", *label)),
             Sense::click(),
         );
         let selected = *value == *option;

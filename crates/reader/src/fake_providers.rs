@@ -1,6 +1,11 @@
 //! Local stand-ins for providers, for scripted runs and tests: no network
 //! and no keys. The translation server speaks the Google Translation API
 //! (as `translation/src/tests.rs` fakes it) and returns each text in «».
+//! With `GLYPHST_FAKE_TRANSLATIONS` naming a JSON object of texts and their
+//! Chinese translations (the website's shots), it translates into Chinese
+//! from that file instead; a text it lacks stays as it is and is appended
+//! to the file's `.missing` neighbour as a JSON line, so the file can be
+//! completed.
 //! The AI server speaks OpenAI's streaming chat completions: it first asks
 //! for a `search_document` call, then answers in Markdown. Asked for a
 //! concept page, it searches the library and writes one that cites the
@@ -8,7 +13,7 @@
 //! exist (which the page writer must drop). It lists [`FAKE_MODELS`] as
 //! its models.
 
-use std::thread;
+use std::{collections::HashMap, io::Write as _, path::PathBuf, thread};
 
 use anyhow::{Result, anyhow};
 use glyphst_settings::{
@@ -32,9 +37,18 @@ pub fn fake_translation(text: &str, target: &str) -> String {
     }
 }
 
+/// The recorded translations `GLYPHST_FAKE_TRANSLATIONS` names, if any.
+fn recorded_translations() -> Option<(PathBuf, HashMap<String, String>)> {
+    let path = PathBuf::from(std::env::var_os("GLYPHST_FAKE_TRANSLATIONS")?);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let recorded = serde_json::from_str(&text).unwrap_or_default();
+    Some((path, recorded))
+}
+
 /// Starts the fake translation server; returns its port. It runs until the
 /// process exits.
 pub fn start_translation_server() -> Result<u16> {
+    let recorded = recorded_translations();
     let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
     let port = server
         .server_addr()
@@ -57,7 +71,26 @@ pub fn start_translation_server() -> Result<u16> {
                     .into_iter()
                     .map(|text| {
                         let target = query["target"].as_str().unwrap_or_default();
-                        json!({ "translatedText": fake_translation(text, target) })
+                        let translation = match &recorded {
+                            Some((path, recorded)) => {
+                                recorded.get(text).cloned().unwrap_or_else(|| {
+                                    let missing = path.with_extension("missing");
+                                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(missing)
+                                    {
+                                        // One write per line, so Readers sharing the
+                                        // file never interleave.
+                                        let _ =
+                                            file.write_all(format!("{}\n", json!(text)).as_bytes());
+                                    }
+                                    text.to_string()
+                                })
+                            }
+                            None => fake_translation(text, target),
+                        };
+                        json!({ "translatedText": translation })
                     })
                     .collect();
                 let response = tiny_http::Response::from_string(
@@ -88,8 +121,14 @@ pub fn translation_settings(port: u16) -> Settings {
 pub fn use_fake_translation(settings: &mut Settings, port: u16, target: Option<&str>) {
     settings.ocr.mode = OcrMode::Off;
     settings.translation.active_provider = TranslationProvider::Google;
+    // The recorded translations are Chinese; otherwise French.
+    let fallback = if std::env::var_os("GLYPHST_FAKE_TRANSLATIONS").is_some() {
+        "zh-hans"
+    } else {
+        "fr"
+    };
     settings.translation.target_language =
-        TranslationTargetLanguage::Explicit(target.unwrap_or("fr").into());
+        TranslationTargetLanguage::Explicit(target.unwrap_or(fallback).into());
     let google = settings
         .translation
         .provider_config_mut(TranslationProvider::Google);

@@ -17,7 +17,7 @@ mod demo;
 mod header;
 mod thread;
 
-pub use demo::DEMO_STATES;
+pub use demo::{DEMO_SCRIPTS, DEMO_STATES};
 
 use std::{
     path::PathBuf,
@@ -307,6 +307,9 @@ pub struct Assistant {
     demo: Option<mpsc::Sender<RunEvent>>,
     /// The canned state shows the composer's first chip's preview.
     demo_hover: bool,
+    /// The canned state's model, shown in the composer instead of the
+    /// settings' main model.
+    pub demo_model: Option<(glyphst_settings::ModelRef, String)>,
 }
 
 /// What an external agent's turn needs from the app.
@@ -392,6 +395,7 @@ impl Default for Assistant {
             jump_to_bottom: false,
             demo: None,
             demo_hover: false,
+            demo_model: None,
             show_sessions: false,
             sessions: Vec::new(),
             sessions_query: String::new(),

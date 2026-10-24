@@ -2,12 +2,14 @@
 //! (`--assistant-demo STATE`): a chat about the open document with chips,
 //! a folded and a running answer, the menu, a chip's preview, an edit, an
 //! error, the history and one answer using every kind of Markdown block.
-//! Nothing reaches a model.
+//! `STATE:SCRIPT` picks the chat's script (`transformer` by default, or
+//! `zero2prod` and `mamba` for the website's shots). Nothing reaches a model.
 
 use std::{sync::mpsc, time::Instant};
 
 use glyphst_ai::{agent::AgentCancellationToken, ai_chat::ChatMessage};
 use glyphst_library::{AiSession, AiSessionAgent, current_timestamp};
+use glyphst_settings::{AiProvider, ModelRef};
 
 use super::{Assistant, Editing, MessageView, Run, Segment, ToolRow, ToolState};
 use crate::{
@@ -19,6 +21,164 @@ use crate::{
 pub const DEMO_STATES: [&str; 10] = [
     "empty", "menu", "hover", "running", "done", "edit", "error", "history", "markdown", "library",
 ];
+
+/// The scripts `--assistant-demo STATE:SCRIPT` takes.
+pub const DEMO_SCRIPTS: [&str; 3] = ["transformer", "zero2prod", "mamba"];
+
+/// A tool call shown done: name, arguments, output.
+type Call = (&'static str, &'static str, &'static str);
+
+/// One canned chat about a document: two questions with page chips (pages
+/// count from 0), their answers and tool calls, and the drafts the other
+/// states leave in the composer.
+struct Script {
+    title: &'static str,
+    /// Who answers, and the composer's model; `None` keeps the settings'.
+    model: Option<(AiProvider, &'static str)>,
+    first: (&'static str, usize, &'static str),
+    first_thought: &'static str,
+    first_calls: &'static [Call],
+    answer: &'static str,
+    first_ms: u64,
+    second: (&'static str, usize),
+    second_thought: &'static str,
+    second_search: Call,
+    /// The read that runs in the `running` state.
+    second_read: (&'static str, &'static str),
+    highlight: &'static str,
+    follow_up: &'static str,
+    second_ms: u64,
+    /// The `menu`, `hover` and queued (`running`) drafts.
+    menu: &'static str,
+    hover: (&'static str, usize),
+    queued: (&'static str, usize),
+    error_question: &'static str,
+}
+
+const TRANSFORMER: Script = Script {
+    title: "Summary of the Transformer paper",
+    model: None,
+    first: (
+        "Summarize ",
+        0,
+        " and explain the main idea in simple terms.",
+    ),
+    first_thought: "The user wants a summary of the first page. I should search for the model's name, then read the abstract and the introduction before answering.",
+    first_calls: &[
+        (
+            "search_document",
+            r#"{"query":"Transformer"}"#,
+            "Page 1: … the Transformer, a model architecture eschewing recurrence …",
+        ),
+        (
+            "read_document",
+            r#"{"start_page":1,"end_page":3}"#,
+            "## Page 1\nAttention Is All You Need …",
+        ),
+        ("render_document_pages", r#"{"pages":[3]}"#, "[image]"),
+    ],
+    answer: ANSWER,
+    first_ms: 12_400,
+    second: ("Why is self-attention faster than recurrence? See ", 5),
+    second_thought: "Section 4 compares self-attention with recurrent and convolutional layers; table 1 lists the complexity per layer.",
+    second_search: (
+        "search_document",
+        r#"{"query":"complexity per layer"}"#,
+        "Page 6: Table 1 …",
+    ),
+    second_read: (r#"{"start_page":6,"end_page":7}"#, "## Page 6 …"),
+    highlight: r#"{"page":6,"quote":"constant number of sequentially executed operations"}"#,
+    follow_up: FOLLOW_UP,
+    second_ms: 8_200,
+    menu: "Compare it with ",
+    hover: ("Now explain ", 0),
+    queued: ("And the decoder? ", 3),
+    error_question: "Now list every equation in section 3.",
+};
+
+const ZERO2PROD: Script = Script {
+    title: "Sharing startup logic with the tests",
+    model: Some((AiProvider::DeepSeek, "DeepSeek-V4.1-Flash-1017")),
+    first: (
+        "Summarize ",
+        289,
+        " and explain why the book moves startup into `build`.",
+    ),
+    first_thought: "The page starts 7.3.8.1 Extracting Our Startup Code. I should compare spawn_app with main on the pages before it, then read the extraction itself.",
+    first_calls: &[
+        (
+            "search_document",
+            r#"{"query":"spawn_app"}"#,
+            "Page 288: 7.3.8 Sharing Startup Logic … pub async fn spawn_app() -> TestApp …",
+        ),
+        (
+            "read_document",
+            r#"{"start_page":288,"end_page":291}"#,
+            "## Page 288\n7.3.8 Sharing Startup Logic …",
+        ),
+    ],
+    answer: ZERO2PROD_ANSWER,
+    first_ms: 9_600,
+    second: (
+        "How do the tests learn the random port once `build` binds it? See ",
+        294,
+    ),
+    second_thought: "Section 7.3.8.2 sets the port to 0 and then needs the port back; the book wraps the server in an Application type.",
+    second_search: (
+        "search_document",
+        r#"{"query":"random port"}"#,
+        "Page 292: let listener = TcpListener::bind(\"127.0.0.1:0\") …",
+    ),
+    second_read: (r#"{"start_page":294,"end_page":296}"#, "## Page 295 …"),
+    highlight: r#"{"page":295,"quote":"does not allow us to retrieve the application port"}"#,
+    follow_up: ZERO2PROD_FOLLOW_UP,
+    second_ms: 7_300,
+    menu: "Compare it with ",
+    hover: ("Now explain ", 289),
+    queued: ("And the API client? ", 296),
+    error_question: "Now list every test helper in section 7.3.",
+};
+
+const MAMBA: Script = Script {
+    title: "What makes Mamba selective",
+    model: Some((AiProvider::DeepSeek, "DeepSeek-V4.1-Flash-1017")),
+    first: (
+        "Summarize ",
+        0,
+        " and explain the main idea in simple terms.",
+    ),
+    first_thought: "The user wants a summary of the first page. I should read the abstract and the introduction, then look at the overview figure.",
+    first_calls: &[
+        (
+            "search_document",
+            r#"{"query":"selective state space"}"#,
+            "Page 1: Mamba: Linear-Time Sequence Modeling with Selective State Spaces …",
+        ),
+        (
+            "read_document",
+            r#"{"start_page":1,"end_page":2}"#,
+            "## Page 1\nAbstract: Foundation models, now powering …",
+        ),
+        ("render_document_pages", r#"{"pages":[3]}"#, "[image]"),
+    ],
+    answer: MAMBA_ANSWER,
+    first_ms: 11_200,
+    second: ("What changes between S4 and S6? See ", 5),
+    second_thought: "Algorithms 1 and 2 on page 6 put S4 and S6 side by side; section 3.2 on page 5 names the projections.",
+    second_search: (
+        "search_document",
+        r#"{"query":"Algorithm 2"}"#,
+        "Page 6: Algorithm 2 SSM + Selection (S6) …",
+    ),
+    second_read: (r#"{"start_page":5,"end_page":6}"#, "## Page 5 …"),
+    highlight: r#"{"page":5,"quote":"making several parameters functions of the input"}"#,
+    follow_up: MAMBA_FOLLOW_UP,
+    second_ms: 6_900,
+    menu: "Compare it with ",
+    hover: ("Now explain ", 0),
+    queued: ("And the hardware-aware scan? ", 6),
+    error_question: "Now list every equation in section 2.",
+};
 
 /// The `library` state's answer: passages from two papers, cited.
 const LIBRARY_ANSWER: &str = "Two of them take it on directly. Mamba replaces attention with a selective state space, so its cost grows linearly with the length of the sequence rather than quadratically. [Mamba · p.1](glyphst://open?id=9&page=1&chunk=412)\n\nRetrieval-Augmented Generation sidesteps it: the generator reads a few retrieved passages instead of the whole corpus. [RAG · p.4](glyphst://open?id=8&page=4&chunk=88)";
@@ -68,6 +228,48 @@ flowchart LR
 | Transformer (base) | 27.3 | $3.3 \cdot 10^{18}$ |
 | Transformer (big) | **28.4** | $2.3 \cdot 10^{19}$ |"#;
 
+const ZERO2PROD_ANSWER: &str = "Until this section `main` and the tests' `spawn_app` each wire the application together by hand: the configuration, the connection pool, the `EmailClient` and the `TcpListener`.\n\n- **Two places to change:** every new dependency or change to the server's constructor has to be made in both, as it just was for `EmailClient`.\n- **Untested startup:** the code in `main` never runs under `cargo test`, so the two paths can drift apart and the tests stop describing production.\n- **The fix:** `build(configuration: Settings)` takes the settings and returns the `Server`, and `main` shrinks to telemetry, `get_configuration()` and `build(configuration).await?`.\n\nThe tests can then start the application through the same code path as production.";
+
+const ZERO2PROD_FOLLOW_UP: &str = r#"Setting `c.application.port = 0` lets the OS pick a free port, but `build` keeps the listener to itself and `actix_web::dev::Server` cannot tell you which port it got. The book wraps both in a new type:
+
+```rust
+pub struct Application {
+    port: u16,
+    server: Server,
+}
+
+impl Application {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+```
+
+`Application::build` reads `listener.local_addr()` before handing the listener to `run`, so `spawn_app` can format the address first and then spawn `run_until_stopped`:
+
+| Before | After |
+|:--|:--|
+| `build() -> Server` | `Application::build()` |
+| port unknown | `app.port()` |
+| `server.await` | `run_until_stopped()` |"#;
+
+const MAMBA_ANSWER: &str = "Mamba is a sequence model without attention. It builds on **structured state space models** (SSMs), which run in linear time but fell short on language because they cannot reason about content.\n\n- **Selection:** the SSM's parameters Δ, B and C become functions of the input, so each token decides what the state keeps and what it forgets.\n- **A hardware-aware scan:** that rules out the fast convolution, so the recurrence runs as a parallel scan kept in fast GPU memory.\n- **One simple block:** selective SSMs replace both attention and the MLP.\n\nThe result is `5×` the inference throughput of a Transformer, linear scaling up to million-length sequences, and a 3B model that matches Transformers twice its size.";
+
+const MAMBA_FOLLOW_UP: &str = r"Algorithm 2 keeps the S4 recipe but makes three parameters depend on the input $x$, which gives them a length dimension $L$:
+
+| | S4 | S6 · selective |
+|:--|:--|:--|
+| $B$ | $(D, N)$ | $(B, L, N)$ from $s_B(x)$ |
+| $C$ | $(D, N)$ | $(B, L, N)$ from $s_C(x)$ |
+| $\Delta$ | $\,(D)$ | $(B, L, D)$ from $s_\Delta(x)$ |
+| runs as | convolution | scan |
+
+with $\tau_\Delta = \mathrm{softplus}$, $s_B(x) = \mathrm{Linear}_N(x)$ and
+
+$$s_\Delta(x) = \mathrm{Broadcast}_D(\mathrm{Linear}_1(x))$$
+
+**简而言之**：参数随输入变化，模型才能按内容决定记住或忽略哪些 token；代价是不能再用卷积，只能用扫描来计算。";
+
 fn tool(name: &str, arguments: &str, output: &str, state: ToolState) -> Segment {
     Segment::Tool(ToolRow {
         id: format!("demo-{name}-{}", arguments.len()),
@@ -87,6 +289,12 @@ impl Assistant {
     /// Puts the panel in `state`, with chips on the active document of
     /// `sources`.
     pub fn demo(&mut self, state: &str, ctx: &egui::Context, sources: Sources) {
+        let (state, script) = state.split_once(':').unwrap_or((state, "transformer"));
+        let script = match script {
+            "zero2prod" => &ZERO2PROD,
+            "mamba" => &MAMBA,
+            _ => &TRANSFORMER,
+        };
         self.new_session();
         let (sender, events) = mpsc::channel();
         self.demo = Some(sender);
@@ -199,9 +407,21 @@ impl Assistant {
         if state == "empty" {
             return;
         }
-        self.title = Some("Summary of the Transformer paper".into());
-        self.answerer = "claude-opus-5-5".into();
-        self.context_tokens = (68_000, "claude-opus-5-5".into());
+        self.title = Some(script.title.into());
+        match script.model {
+            Some((provider, model)) => {
+                self.answerer = model.to_lowercase();
+                self.context_tokens = (68_000, model.to_lowercase());
+                self.demo_model = Some((
+                    ModelRef::new(provider, model),
+                    format!("{} · {model}", provider.label()),
+                ));
+            }
+            None => {
+                self.answerer = "claude-opus-5-5".into();
+                self.context_tokens = (68_000, "claude-opus-5-5".into());
+            }
+        }
         let push_user = |assistant: &mut Self, draft: Draft, ago: u64| {
             let (text, _) = draft.prompt();
             assistant.messages.push(ChatMessage::user_text(text));
@@ -211,42 +431,47 @@ impl Assistant {
                 ..MessageView::default()
             });
         };
-        let mut first = Draft::plain("Summarize ");
-        first.push_chip(page(0, 0));
-        first
-            .text
-            .push_str(" and explain the main idea in simple terms.");
+        let (before, first_page, after) = script.first;
+        let mut first = Draft::plain(before);
+        first.push_chip(page(first_page, first_page));
+        first.text.push_str(after);
         push_user(self, first, 420);
-        self.messages.push(ChatMessage::assistant(ANSWER.into()));
+        self.messages
+            .push(ChatMessage::assistant(script.answer.into()));
+        let mut segments = vec![Segment::Thought(script.first_thought.into())];
+        segments.extend(
+            script
+                .first_calls
+                .iter()
+                .map(|&(name, arguments, output)| tool(name, arguments, output, ToolState::Done)),
+        );
+        segments.push(Segment::Text(script.answer.into()));
         self.views.push(MessageView {
-            segments: vec![
-                Segment::Thought("The user wants a summary of the first page. I should search for the model's name, then read the abstract and the introduction before answering.".into()),
-                tool("search_document", r#"{"query":"Transformer"}"#, "Page 1: … the Transformer, a model architecture eschewing recurrence …", ToolState::Done),
-                tool("read_document", r#"{"start_page":1,"end_page":3}"#, "## Page 1\nAttention Is All You Need …", ToolState::Done),
-                tool("render_document_pages", r#"{"pages":[3]}"#, "[image]", ToolState::Done),
-                Segment::Text(ANSWER.into()),
-            ],
-            duration_ms: Some(12_400),
+            segments,
+            duration_ms: Some(script.first_ms),
             ..MessageView::default()
         });
-        let mut second = Draft::plain("Why is self-attention faster than recurrence? See ");
-        second.push_chip(page(5, 5));
+        let (before, second_page) = script.second;
+        let mut second = Draft::plain(before);
+        second.push_chip(page(second_page, second_page));
         push_user(self, second, 120);
         let answer = self.messages.len();
         let running = state == "running";
         self.messages.push(ChatMessage::assistant(if running {
             String::new()
         } else {
-            FOLLOW_UP.into()
+            script.follow_up.into()
         }));
+        let (name, arguments, output) = script.second_search;
         let mut segments = vec![
-            Segment::Thought("Section 4 compares self-attention with recurrent and convolutional layers; table 1 lists the complexity per layer.".into()),
-            tool("search_document", r#"{"query":"complexity per layer"}"#, "Page 6: Table 1 …", ToolState::Done),
+            Segment::Thought(script.second_thought.into()),
+            tool(name, arguments, output, ToolState::Done),
         ];
+        let (read_arguments, read_output) = script.second_read;
         if running {
             segments.push(tool(
                 "read_document",
-                r#"{"start_page":6,"end_page":7}"#,
+                read_arguments,
                 "",
                 ToolState::Running,
             ));
@@ -259,39 +484,41 @@ impl Assistant {
         } else {
             segments.push(tool(
                 "read_document",
-                r#"{"start_page":6,"end_page":7}"#,
-                "## Page 6 …",
+                read_arguments,
+                read_output,
                 ToolState::Done,
             ));
             segments.push(tool(
                 "add_highlight",
-                r#"{"page":6,"quote":"constant number of sequentially executed operations"}"#,
+                script.highlight,
                 "Highlighted.",
                 ToolState::Done,
             ));
-            segments.push(Segment::Text(FOLLOW_UP.into()));
+            segments.push(Segment::Text(script.follow_up.into()));
         }
         self.views.push(MessageView {
             segments,
-            duration_ms: (!running).then_some(8_200),
+            duration_ms: (!running).then_some(script.second_ms),
             ..MessageView::default()
         });
         match state {
             "menu" => {
-                let mut draft = Draft::plain("Compare it with ");
+                let mut draft = Draft::plain(script.menu);
                 draft.text.push('@');
                 self.editor.set(ctx, draft);
                 ctx.memory_mut(|memory| memory.request_focus(self.editor.id));
             }
             "hover" => {
-                let mut draft = Draft::plain("Now explain ");
-                draft.push_chip(page(0, 0));
+                let (before, at) = script.hover;
+                let mut draft = Draft::plain(before);
+                draft.push_chip(page(at, at));
                 self.editor.set(ctx, draft);
                 self.demo_hover = true;
             }
             "running" => {
-                let mut draft = Draft::plain("And the decoder? ");
-                draft.push_chip(page(3, 3));
+                let (before, at) = script.queued;
+                let mut draft = Draft::plain(before);
+                draft.push_chip(page(at, at));
                 self.queue.push(draft);
             }
             "edit" => {
@@ -302,11 +529,7 @@ impl Assistant {
                 self.editing = Some(Editing { index, editor });
             }
             "error" => {
-                push_user(
-                    self,
-                    Draft::plain("Now list every equation in section 3."),
-                    30,
-                );
+                push_user(self, Draft::plain(script.error_question), 30);
                 self.error = Some(
                     "Anthropic: 529 Overloaded — the API is temporarily overloaded. Your message was kept; try again in a moment."
                         .into(),

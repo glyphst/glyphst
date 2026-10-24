@@ -1,7 +1,7 @@
 //! Glyphst Reader: GPU vector pages, tabs and split panes, a library home
 //! and shader effects for transitions and backgrounds.
 //!
-//! glyphst-reader [documents…] [--background ID] [--book-background N:ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z]
+//! glyphst-reader [documents…] [--background ID] [--book-background N:ID] [--transition ID|random|none] [--reduce-motion] [--switcher-layout fan|carousel|grid|slices] [--zoom Z] [--scroll X,Y]
 //!     [--split right|down] [--rotate 90|180|270] [--spread] [--overlay ID]
 //!     [--wallpaper PATH] [--opacity O] [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar TAB] [--font-size PT]
 //!     [--translate-fake] [--translate-to LANG] [--translate-reopened] [--cjk-fonts system|none] [--cjk-fonts-download] [--translate-document] [--translate-follow] [--translate-failures CODES] [--translate-kept N] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME]
@@ -111,9 +111,9 @@ use anyhow::{Context as _, Result, bail};
 use app::{Launch, ReaderApp};
 use harness::{Bench, Harness, Screenshot, ShotKind};
 
-const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--background-params A,B,C,D] [--opacity O] [--colours preset|background|custom] \
+const USAGE: &str = "usage: glyphst-reader [documents…] [--background ID] [--transition ID|none] [--theme system|light|dark] [--zoom Z] [--scroll X,Y] [--window WxH] [--split right|down] [--rotate DEGREES] [--spread] [--overlay ID] [--wallpaper PATH] [--background-params A,B,C,D] [--opacity O] [--colours preset|background|custom] \
                      [--translate-fake] [--translate-to LANG] [--translate-reopened] [--cjk-fonts system|none] [--cjk-fonts-download] [--translate-document] [--translate-follow] [--translate-failures CODES] [--translate-kept N] [--translate-selection] [--ai-fake] [--ask TEXT] [--agent claude-code|codex|pi|acp:NAME] \
-                     [--assistant-demo STATE] [--library-demo all|item|duplicate|merged|review|backfill|folder|identifier|zotero|zotero-done] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
+                     [--assistant-demo STATE[:SCRIPT]] [--library-demo all|item|duplicate|merged|review|backfill|folder|identifier|zotero|zotero-done] [--gallery] [--palette QUERY] [--settings appearance|reading|effects|translation|ocr|ai|shortcuts[:GROUP]] [--command ID]… [--select-region PAGE:X0,Y0,X1,Y1] [--pad-demo STEPS] [--pad-family generic|xbox|ps|nintendo|steam] [--gamepad-mode] [--fixed-clock] \
                      [--page N] [--find TEXT] [--select-page N] [--select-pages A-B] [--sidebar outline|pages|bookmarks|notes|search] [--font-size PT] \
                      [--bench | --screenshot PATH | --screenshot-turn PATH | --screenshot-switch PATH | --screenshot-close PATH | --screenshot-open PATH | --screenshot-peek PATH | --screenshot-generating PATH | --screenshot-revealing PATH | --screenshot-translating PATH | --screenshot-translating-film PATH | --screenshot-reveal-check PATH | --screenshot-present-tools PATH | --screenshot-slide PATH]";
 
@@ -129,6 +129,7 @@ fn parse_args() -> Result<Launch> {
         book_backgrounds: Vec::new(),
         theme: None,
         zoom: None,
+        scroll: None,
         window: None,
         split: None,
         overlay: None,
@@ -274,6 +275,16 @@ fn parse_args() -> Result<Launch> {
             }
             "--transition" => launch.transition = Some(value()?),
             "--zoom" => launch.zoom = Some(value()?.parse().context("--zoom takes a number")?),
+            "--scroll" => {
+                let point = value()?;
+                let (x, y) = point
+                    .split_once(',')
+                    .context("--scroll takes X,Y in document points")?;
+                launch.scroll = Some([
+                    x.parse().context("--scroll takes X,Y in document points")?,
+                    y.parse().context("--scroll takes X,Y in document points")?,
+                ]);
+            }
             "--window" => {
                 let size = value()?;
                 let (width, height) = size
@@ -311,10 +322,17 @@ fn parse_args() -> Result<Launch> {
             "--ask" => launch.ask = Some(value()?),
             "--assistant-demo" => {
                 let state = value()?;
-                if !crate::ai::DEMO_STATES.contains(&state.as_str()) {
+                let (name, script) = state.split_once(':').unwrap_or((&state, "transformer"));
+                if !crate::ai::DEMO_STATES.contains(&name) {
                     bail!(
-                        "unknown assistant state {state} ({})",
+                        "unknown assistant state {name} ({})",
                         crate::ai::DEMO_STATES.join(", ")
+                    );
+                }
+                if !crate::ai::DEMO_SCRIPTS.contains(&script) {
+                    bail!(
+                        "unknown assistant script {script} ({})",
+                        crate::ai::DEMO_SCRIPTS.join(", ")
                     );
                 }
                 launch.assistant_demo = Some(state);

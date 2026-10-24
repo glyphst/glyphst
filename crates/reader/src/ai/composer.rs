@@ -356,10 +356,18 @@ impl Assistant {
                         *send = true;
                     }
                 }
+                // The meter only shows beside the model's whole name, so a
+                // long name never pushes it over the suggestion.
+                let name =
+                    glyphst_ui::text::width(ui, &self.selector_label(composer), &theme::mono(11.0));
+                let meter = self.meter_shown()
+                    && ui.available_width() >= name + SELECTOR_PADDING + 8.0 + METER_WIDTH;
                 if let Some(chosen) = self.selector(ui, composer) {
                     action = Some(chosen);
                 }
-                self.context_meter(ui, &tokens);
+                if meter {
+                    self.context_meter(ui, &tokens);
+                }
             });
         });
         action
@@ -399,12 +407,14 @@ impl Assistant {
         .then(|| (format!("p.{}", page + 1), "This page"))
     }
 
+    /// Whether the context meter has something to show.
+    fn meter_shown(&self) -> bool {
+        self.context_tokens.0 > 0 && self.agent.is_none()
+    }
+
     /// How much of the model's context the chat uses, as a meter.
     fn context_meter(&self, ui: &mut egui::Ui, tokens: &Tokens) {
         let (used, model) = &self.context_tokens;
-        if *used == 0 || self.agent.is_some() {
-            return;
-        }
         let window = ModelLimits::for_model(model).context_window.max(1);
         let fraction = *used as f32 / window as f32;
         let color = if fraction >= 0.85 {
@@ -416,7 +426,7 @@ impl Assistant {
         let response = ui.add(
             Meter::new(fraction)
                 .bar()
-                .width(64.0)
+                .width(METER_WIDTH)
                 .color(color)
                 .label(&label),
         );
@@ -428,11 +438,9 @@ impl Assistant {
         ));
     }
 
-    /// The model or agent that answers, and its menu.
-    fn selector(&mut self, ui: &mut egui::Ui, composer: &Composer<'_>) -> Option<PanelAction> {
-        let tokens = Tokens::get(ui.ctx());
-        let mut action = None;
-        let current = match self.agent.as_deref() {
+    /// The selector's text: the agent's or the model's name.
+    fn selector_label(&self, composer: &Composer<'_>) -> String {
+        match self.agent.as_deref() {
             Some(id) => composer
                 .agents
                 .iter()
@@ -444,18 +452,22 @@ impl Assistant {
                 .and_then(|chosen| composer.models.iter().find(|(model, _)| model == chosen))
                 .map(|(_, label)| model_name(label).to_lowercase())
                 .unwrap_or_else(|| "choose a model".into()),
-        };
+        }
+    }
+
+    /// The model or agent that answers, and its menu.
+    fn selector(&mut self, ui: &mut egui::Ui, composer: &Composer<'_>) -> Option<PanelAction> {
+        let tokens = Tokens::get(ui.ctx());
+        let mut action = None;
+        let current = self.selector_label(composer);
         let font = theme::mono(11.0);
-        let galley = ui.painter().layout_no_wrap(
-            current,
-            font,
-            if self.selector_open {
-                tokens.accent_text
-            } else {
-                tokens.muted
-            },
-        );
-        let width = (galley.size().x + 22.0).min(ui.available_width().max(60.0));
+        let color = if self.selector_open {
+            tokens.accent_text
+        } else {
+            tokens.muted
+        };
+        let natural = glyphst_ui::text::width(ui, &current, &font);
+        let width = (natural + SELECTOR_PADDING).min(ui.available_width().max(60.0));
         let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
         if response.hovered() || self.selector_open {
             ui.painter()
@@ -465,10 +477,14 @@ impl Assistant {
             rect.left_top() + vec2(4.0, 0.0),
             rect.right_bottom() - vec2(14.0, 0.0),
         );
-        ui.painter().with_clip_rect(text_rect).galley(
-            egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0),
-            galley,
-            tokens.muted,
+        // A name too long for the row ends in "…".
+        glyphst_ui::text::row(
+            ui,
+            egui::pos2(text_rect.left(), rect.center().y),
+            current,
+            font,
+            color,
+            text_rect.width(),
         );
         ui.painter().text(
             rect.right_center() - vec2(6.0, 0.0),
@@ -647,6 +663,11 @@ fn send_button(ui: &mut egui::Ui, icon: &str, enabled: bool, tokens: &Tokens) ->
     }
     response
 }
+
+/// The context meter's width, its percentage included.
+const METER_WIDTH: f32 = 64.0;
+/// The selector's room around its name: margins and the `▾`.
+const SELECTOR_PADDING: f32 = 22.0;
 
 /// The model part of a "Provider · Model" label.
 fn model_name(label: &str) -> &str {

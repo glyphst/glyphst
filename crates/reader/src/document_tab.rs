@@ -213,6 +213,9 @@ pub struct DocumentTab {
     pub inset_right: f64,
     fitted: bool,
     restore: Option<DocumentPosition>,
+    /// The view's top left in document points once the position is
+    /// restored (`--scroll`, for screenshots of a part of a page).
+    initial_origin: Option<[f64; 2]>,
     /// The file's modification time when it was opened, to reload it when
     /// it changes.
     pub modified: Option<std::time::SystemTime>,
@@ -336,6 +339,7 @@ impl DocumentTab {
             inset_right: 0.0,
             fitted: false,
             restore,
+            initial_origin: None,
             modified,
             loader: Loader::new(path.to_path_buf(), info.layout, ctx.clone()),
             indexer: Indexer::new(path.to_path_buf(), info.layout, ctx.clone()),
@@ -734,6 +738,11 @@ impl DocumentTab {
             .unwrap_or_else(|| DocumentPosition::fixed(0.0, 0.0, 1.0, 0));
         position.zoom = zoom;
         self.restore = Some(position);
+    }
+
+    /// Opens with the view's top left at `origin` (document points).
+    pub fn set_initial_origin(&mut self, origin: [f64; 2]) {
+        self.initial_origin = Some(origin);
     }
 
     /// Whether raster layers are being re-rasterized or wait for the GPU.
@@ -1456,6 +1465,9 @@ impl DocumentTab {
                 self.view.origin,
             ));
         }
+        if let Some(origin) = self.initial_origin.take() {
+            self.view.origin = origin;
+        }
     }
 
     fn zoom_limits(&self) -> (f64, f64) {
@@ -1867,6 +1879,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         inset_right: 0.0,
         fitted: false,
         restore: None,
+        initial_origin: None,
         modified: None,
         loader: Loader::new(path.clone(), DocumentLayout::Fixed, ctx.clone()),
         indexer: Indexer::new(path, DocumentLayout::Fixed, ctx),

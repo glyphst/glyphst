@@ -133,6 +133,9 @@ pub struct Launch {
     pub theme: Option<ThemePreference>,
     /// Opens the documents at this zoom (relative to fit width).
     pub zoom: Option<f32>,
+    /// Opens the documents with the view's top left here, in document
+    /// points (`--scroll X,Y`).
+    pub scroll: Option<[f64; 2]>,
     /// The window's size in points, fixed (`--window`, for screenshots of
     /// narrow layouts).
     pub window: Option<[f32; 2]>,
@@ -777,7 +780,8 @@ impl ReaderApp {
             repaints: 0,
             fullscreen: false,
             notices: Default::default(),
-            show_stats: launch.harness.is_some(),
+            // Benchmarks show the frame statistics; screenshots never do.
+            show_stats: matches!(launch.harness, Some(Harness::Bench(_))),
             zen: false,
             region_tool: false,
             region: None,
@@ -1238,6 +1242,9 @@ impl ReaderApp {
                     }
                     if let Some(zoom) = launch.zoom {
                         tab.set_initial_zoom(zoom);
+                    }
+                    if let Some(origin) = launch.scroll {
+                        tab.set_initial_origin(origin);
                     }
                 }
             }
