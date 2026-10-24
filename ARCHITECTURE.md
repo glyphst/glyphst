@@ -572,7 +572,10 @@ and theme provenance independently of renames.
 ## Dependency audit
 
 [The audit policy](.cargo/audit.toml) records the reviewed quick-xml exceptions
-RUSTSEC-2026-0194 and RUSTSEC-2026-0195. At the October 11, 2026 checkpoint,
+RUSTSEC-2026-0194 and RUSTSEC-2026-0195, and the zip 8.6.0 exceptions
+RUSTSEC-2026-0367 to -0369 (oar-ocr reads Indra's pinned `.npz` language
+models with `ZipArchive::new` and `by_name`, never the extract functions the
+advisories concern). At the October 11, 2026 checkpoint,
 `quick-xml 0.38.4` remains through `citationberg 0.7.0 -> hayagriva 0.10.1 ->
 typst-library 0.15.1`; Typst 0.15.1 is still the latest release. This is runtime CSL parsing. The Typst file loader limits
 project/package access but does not generally bound XML CPU or allocation work.

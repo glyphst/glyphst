@@ -7,4 +7,12 @@ ignore = [
   # see ARCHITECTURE.md#dependency-audit and ROADMAP.md.
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
+  # Reviewed 2026-10-24: zip 8.6.0 comes through oar-ocr 0.10.1, which only
+  # reads Indra OCR's language models (`.npz`, SHA-256-pinned downloads)
+  # with ZipArchive::new and by_name; it never calls ZipArchive::extract or
+  # ZipStreamReader::extract, the functions these advisories are about.
+  # Drop them once oar-ocr moves to zip >=9; see ROADMAP.md.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]

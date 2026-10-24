@@ -324,6 +324,10 @@ allowed warnings: unmaintained `bincode`, `cgmath`, `paste`, `rustybuzz`,
 `ttf-parser`, `unsafe-libyaml` and `yaml-rust`, plus cgmath advisory
 RUSTSEC-2026-0197 (`instant` and `rustls-pemfile` went with GPUI). quick-xml
 0.38.4 is still reachable only through Typst 0.15.1, the latest release.
+Since 2026-10-24 three zip 8.6.0 exceptions (RUSTSEC-2026-0367, -0368,
+-0369) cover oar-ocr 0.10.1, which only reads Indra's pinned `.npz` files and
+never calls the extract functions they concern; remove them when oar-ocr
+moves to zip 9.
 
 **Next step:** Refresh advisories and identify the currently reachable dependency
 paths. When the pinned Typst chain supports a fixed quick-xml version (at least
