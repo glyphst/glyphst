@@ -162,13 +162,23 @@ Known gaps:
   until the whole document is (`document.v1.json` and the per-page OCR
   results are written only then). A session following the reader keeps
   its window when Reduce motion is on, but its reveal is a fade.
-- The block reveal hides not-yet-settled glyphs with paper-coloured
-  patches, which show on pages with coloured backgrounds; side by side has
-  no text selection on the translation face, and its export keeps no
-  links or outline. Local OCR finds lines, not formulas, tables or
-  figures (those pages read better through PaddleOCR-VL); it has run by
-  hand on this Linux machine only. The OCR path has no end-to-end test
-  against a fake provider.
+- Side by side has no text selection on the translation face, and its
+  export keeps no links or outline. A typeset translation that cannot fit
+  its block even at its minimum size and leading overflows downward (a
+  heading's last line can touch the paragraph below).
+- Local OCR: PP-OCRv6 finds lines; Indra adds layout blocks and tables;
+  neither reads formulas (PaddleOCR-VL online does). The models ran by hand
+  on this Linux machine only (on a paper's first page: tiny 0.7 s, small
+  2.0 s, medium 10.2 s, Indra 0.4 s, CPU). The GPU paths (ONNX Runtime's
+  CUDA 12 build, CoreML) are built but untested: no NVIDIA card or Mac
+  here; Windows has no GPU path without NVIDIA (DirectML stops at ONNX
+  Runtime 1.24). The downloaded runtime needs libstdc++ where it is not on
+  the library path (NixOS without nix-ld). The OCR path has no end-to-end
+  test against a fake provider, and the in-session retries of a busy OCR
+  service show no countdown in the page list.
+- Search by meaning's Qwen3 models have no measurement on the labelled set
+  yet (Qwen3-Embedding-0.6B ran by hand); a newly chosen embedder reads
+  the whole library again.
 - A region is one page's; the overview selects no pages for it.
   The change log of agents' edits lives while the app runs (saved chats
   keep their trace, not their undo list), and picture pasting needs
