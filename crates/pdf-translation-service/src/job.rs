@@ -1337,7 +1337,7 @@ impl PdfTranslationService {
             None,
             None,
         );
-        let (composed_path, _) = self.finalize_layout_pdf(
+        let finalized = self.finalize_layout_pdf(
             source_snapshot_path,
             source_snapshot_path,
             &layout,
@@ -1346,6 +1346,17 @@ impl PdfTranslationService {
             job_directory,
             cancellation,
         )?;
+        if !finalized.unsearchable.is_empty() {
+            warnings.push(PdfTranslationWarning {
+                code: "translation_text_not_searchable".to_string(),
+                message: format!(
+                    "{} translated block(s) show but can't be found by search.",
+                    finalized.unsearchable.len()
+                ),
+                affected_block_ids: finalized.unsearchable.clone(),
+            });
+        }
+        let composed_path = finalized.path;
         write_json(job_directory.join("layout.json"), &layout)?;
         progress.finish_stage(PdfTranslationStage::Compiling, "Typst PDF compiled");
 
@@ -1429,7 +1440,7 @@ impl PdfTranslationService {
         with_base: bool,
         work_directory: &Path,
         cancellation: &CancellationToken,
-    ) -> Result<(PathBuf, Option<Vec<u8>>), PdfTranslationError> {
+    ) -> Result<Finalized, PdfTranslationError> {
         create_private_directory(work_directory).map_err(|error| {
             PdfTranslationError::stage(
                 PdfTranslationStage::Compiling,
@@ -1498,15 +1509,55 @@ impl PdfTranslationService {
                 retryable: false,
                 detailed_message: None,
             })?;
-        validate_rendered_output(original_source_path, &composed_path, layout)?;
+        let unsearchable = validate_rendered_output(original_source_path, &composed_path, layout)?;
         cancellation
             .check()
             .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Validating))?;
-        Ok((composed_path, base))
+        Ok(Finalized {
+            path: composed_path,
+            base,
+            unsearchable,
+        })
+    }
+
+    /// Typesets one page's translation; units that break the page keep
+    /// their original and are listed in its `layout_failures`.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_page_preview(
+        &self,
+        translated: &TranslatedDocument,
+        source_path: &Path,
+        inspection: &PdfInspection,
+        job_directory: &Path,
+        page_index: usize,
+        revision: u64,
+        original_unit_ids: &HashSet<String>,
+        cancellation: &CancellationToken,
+    ) -> Result<PdfTranslationPagePreview, PdfTranslationError> {
+        let (mut preview, fallbacks) = keep_breaking_units_original(
+            translated,
+            page_index,
+            original_unit_ids,
+            cancellation,
+            |kept| {
+                self.compile_page_preview_once(
+                    translated,
+                    source_path,
+                    inspection,
+                    job_directory,
+                    page_index,
+                    revision,
+                    kept,
+                    cancellation,
+                )
+            },
+        )?;
+        preview.layout_failures.extend(fallbacks);
+        Ok(preview)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn compile_page_preview(
+    fn compile_page_preview_once(
         &self,
         translated: &TranslatedDocument,
         source_path: &Path,
@@ -1562,7 +1613,11 @@ impl PdfTranslationService {
             pages: vec![page_profile],
         };
         let preview_layout = reindex_preview_layout(&page);
-        let (output_path, base) = self.finalize_layout_pdf(
+        let Finalized {
+            path: output_path,
+            base,
+            ..
+        } = self.finalize_layout_pdf(
             &page_source_path,
             &page_source_path,
             &preview_layout,
@@ -3611,11 +3666,14 @@ fn build_manifest(
     }
 }
 
+/// Checks the translated PDF's structure and returns the blocks whose
+/// translation can't be found in its text (math set in other glyphs, a
+/// font without a usable text map): they show, but don't search.
 fn validate_rendered_output(
     source_path: &Path,
     output_path: &Path,
     layout: &LayoutDocument,
-) -> Result<(), PdfTranslationError> {
+) -> Result<Vec<String>, PdfTranslationError> {
     let source = Document::open(source_path).map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -3695,9 +3753,8 @@ fn validate_rendered_output(
                 error,
             )
         })?;
-        let text = page
+        let text_page = page
             .to_text_page(TextPageFlags::PRESERVE_WHITESPACE)
-            .and_then(|page| page.to_text())
             .map_err(|error| {
                 PdfTranslationError::stage(
                     PdfTranslationStage::Validating,
@@ -3705,8 +3762,18 @@ fn validate_rendered_output(
                     error,
                 )
             })?;
+        // Character by character: a font carried over from the source may
+        // map glyphs to code points that aren't text (a lone surrogate),
+        // which make the whole page's text invalid UTF-8.
+        let mut text = String::new();
+        for block in text_page.blocks() {
+            for line in block.lines() {
+                text.extend(line.chars().filter_map(|character| character.char()));
+            }
+        }
         extracted_pages.push(normalize_searchable_text(&text));
     }
+    let mut unsearchable = Vec::new();
     for page in &layout.pages {
         let Some(extracted) = extracted_pages.get(page.page_index) else {
             continue;
@@ -3716,17 +3783,10 @@ fn validate_rendered_output(
             if expected.chars().count() < 2 || extracted.contains(&expected) {
                 continue;
             }
-            let preview = expected.chars().take(48).collect::<String>();
-            return Err(PdfTranslationError::message(
-                PdfTranslationStage::Validating,
-                format!(
-                    "Translated PDF is missing searchable content for block {} ({preview})",
-                    item.block_id
-                ),
-            ));
+            unsearchable.push(item.block_id.clone());
         }
     }
-    Ok(())
+    Ok(unsearchable)
 }
 
 fn validate_layout_completeness(
@@ -3809,6 +3869,156 @@ fn layout_fallback_unit_ids(
     let mut fallback = fallback.into_iter().collect::<Vec<_>>();
     fallback.sort();
     fallback
+}
+
+/// Runs `attempt` (a page's compile, given the units kept original) until
+/// it succeeds. A unit that breaks the page (its text can't be typeset, or
+/// the composed page is rejected) keeps its original, with the reason
+/// returned: the page fails only when even its original can't be shown.
+fn keep_breaking_units_original<T>(
+    translated: &TranslatedDocument,
+    page_index: usize,
+    original_unit_ids: &HashSet<String>,
+    cancellation: &CancellationToken,
+    mut attempt: impl FnMut(&HashSet<String>) -> Result<T, PdfTranslationError>,
+) -> Result<(T, Vec<TranslationFailureDiagnostic>), PdfTranslationError> {
+    let mut kept = original_unit_ids.clone();
+    let mut fallbacks = Vec::new();
+    loop {
+        let error = match attempt(&kept) {
+            Ok(done) => return Ok((done, fallbacks)),
+            Err(error) => error,
+        };
+        cancellation
+            .check()
+            .map_err(|_| PdfTranslationError::cancelled(PdfTranslationStage::Compiling))?;
+        let candidates = page_unit_ids(translated, page_index)
+            .into_iter()
+            .filter(|id| !kept.contains(id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(error);
+        }
+        let with_originals = |translating: &[String]| {
+            let mut kept = kept.clone();
+            kept.extend(
+                candidates
+                    .iter()
+                    .filter(|id| !translating.contains(id))
+                    .cloned(),
+            );
+            kept
+        };
+        // A block that doesn't fit names itself; otherwise the page
+        // must show with every block kept original, and halving the
+        // blocks still translated finds one that breaks it.
+        let named =
+            overflowing_unit(translated, &error.message).filter(|id| candidates.contains(id));
+        let culprit = match named {
+            Some(id) => id,
+            None if fallbacks.len() >= MAX_PAGE_FALLBACKS => {
+                // Too many breaking blocks to look for one by one.
+                for id in &candidates {
+                    fallbacks.push(layout_fallback(translated, id, &error.message));
+                }
+                kept.extend(candidates);
+                continue;
+            }
+            None => {
+                if attempt(&with_originals(&[])).is_err() {
+                    return Err(error);
+                }
+                let mut suspects = candidates.as_slice();
+                while suspects.len() > 1 {
+                    let (first, second) = suspects.split_at(suspects.len() / 2);
+                    suspects = if attempt(&with_originals(first)).is_err() {
+                        first
+                    } else {
+                        second
+                    };
+                }
+                suspects[0].clone()
+            }
+        };
+        fallbacks.push(layout_fallback(translated, &culprit, &error.message));
+        kept.insert(culprit);
+    }
+}
+
+/// A composed translated PDF: its file, the base of a one-page preview
+/// and the blocks whose text it doesn't carry searchably.
+struct Finalized {
+    path: PathBuf,
+    base: Option<Vec<u8>>,
+    unsearchable: Vec<String>,
+}
+
+/// The most blocks of one page looked for one at a time before the rest of
+/// the page keeps its original.
+const MAX_PAGE_FALLBACKS: usize = 4;
+
+/// The translated units with a block on `page_index`.
+fn page_unit_ids(translated: &TranslatedDocument, page_index: usize) -> Vec<String> {
+    let blocks = translated
+        .document
+        .pages
+        .get(page_index)
+        .map(|page| {
+            page.blocks
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    translated
+        .units
+        .iter()
+        .filter(|unit| {
+            unit.member_block_ids
+                .iter()
+                .any(|id| blocks.contains(id.as_str()))
+        })
+        .map(|unit| unit.id.clone())
+        .collect()
+}
+
+/// The unit whose block Typst reported as not fitting
+/// (`GLYPHST_OVERFLOW:<block id>`).
+fn overflowing_unit(translated: &TranslatedDocument, message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("GLYPHST_OVERFLOW:")?;
+    let block: String = rest
+        .chars()
+        .take_while(|character| !character.is_whitespace() && *character != '"')
+        .collect();
+    translated
+        .units
+        .iter()
+        .find(|unit| unit.member_block_ids.contains(&block))
+        .map(|unit| unit.id.clone())
+}
+
+/// Why a unit keeps its original on a page that broke with it translated.
+fn layout_fallback(
+    translated: &TranslatedDocument,
+    unit_id: &str,
+    reason: &str,
+) -> TranslationFailureDiagnostic {
+    let unit = translated.units.iter().find(|unit| unit.id == unit_id);
+    TranslationFailureDiagnostic {
+        id: unit_id.to_string(),
+        phase: TranslationFailurePhase::Layout,
+        reason: reason.to_string(),
+        attempts: 1,
+        retryable: false,
+        category: Some("layout".to_string()),
+        status: None,
+        member_block_ids: unit
+            .map(|unit| unit.member_block_ids.clone())
+            .unwrap_or_default(),
+        role: unit.map(|unit| unit.role),
+        source_excerpt: unit.map(|unit| unit.source_text.chars().take(480).collect()),
+        rejected_output_excerpt: unit.map(|unit| unit.translated_text.chars().take(480).collect()),
+    }
 }
 
 struct PreparedTranslationLayout {
@@ -3961,7 +4171,8 @@ fn normalize_layout_text(text: &str) -> String {
 }
 
 fn normalize_searchable_text(text: &str) -> String {
-    text.chars()
+    use unicode_normalization::UnicodeNormalization as _;
+    text.nfkc()
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
@@ -4894,6 +5105,217 @@ mod tests {
 
         assert!(error.message.contains("must not require a password"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A one-page PDF whose font maps `A` to half a surrogate pair, as an
+    /// Office export's CambriaMath does: its page text isn't valid UTF-8.
+    fn lone_surrogate_pdf_bytes() -> Vec<u8> {
+        let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def \
+/CMapName /Adobe-Identity-UCS def /CMapType 2 def \
+1 begincodespacerange <00> <FF> endcodespacerange \
+1 beginbfchar <41> <D835> endbfchar \
+endcmap CMapName currentdict /CMap defineresource pop end end";
+        let content = "BT /F1 24 Tf 72 700 Td (AHello world) Tj ET";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+                .to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+/Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>"
+                .to_string(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n{object}\nendobj\n", index + 1).bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for offset in offsets {
+            pdf.extend(format!("{offset:010} 00000 n \n").bytes());
+        }
+        pdf.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn a_font_mapping_glyphs_to_half_a_character_does_not_fail_the_page() {
+        let directory = temporary_test_directory("lone-surrogate");
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("page.pdf");
+        fs::write(&path, lone_surrogate_pdf_bytes()).unwrap();
+        // The whole-page text MuPDF gives is not UTF-8…
+        let document = MuPdfDocument::open(path.to_str().unwrap()).unwrap();
+        let whole = document
+            .load_page(0)
+            .unwrap()
+            .to_text_page(TextPageFlags::PRESERVE_WHITESPACE)
+            .unwrap()
+            .to_text();
+        assert!(
+            whole.is_err(),
+            "the fixture no longer reproduces: {whole:?}"
+        );
+        let bounds = BoundingBox::new(72.0, 60.0, 400.0, 100.0);
+        let mut item = hover_test_layout_item("hello", bounds);
+        item.text = "Hello world".to_string();
+        let mut missing = hover_test_layout_item("missing", bounds);
+        missing.text = "Nowhere here".to_string();
+        let layout = LayoutDocument {
+            pages: vec![LayoutPage {
+                page_index: 0,
+                geometry: glyphst_pdf_translation::PageGeometry::new(612.0, 792.0),
+                items: vec![item, missing],
+            }],
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: LayoutOptions::application_default().overflow_policy,
+        };
+
+        // …but its text still reads character by character, and a block
+        // that can't be found only stops being searchable.
+        let unsearchable = validate_rendered_output(&path, &path, &layout).unwrap();
+
+        assert_eq!(unsearchable, vec!["missing".to_string()]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A page of `units` one-block units, all translated.
+    fn fallback_test_document(units: &[&str]) -> TranslatedDocument {
+        let bounds = BoundingBox::new(10.0, 10.0, 100.0, 20.0);
+        let mut blocks = units
+            .iter()
+            .map(|id| hover_test_block(&format!("{id}-block"), BlockKind::Text, bounds))
+            .collect::<Vec<_>>();
+        for block in &mut blocks {
+            block.page_index = 0;
+        }
+        TranslatedDocument {
+            document: DocumentV1::new(
+                DocumentMetadata {
+                    document_id: "fallbacks".to_string(),
+                    source_path: PathBuf::from("source.pdf"),
+                    provider: "test".to_string(),
+                    provider_version: "1".to_string(),
+                    extra: Default::default(),
+                },
+                vec![Page {
+                    page_index: 0,
+                    geometry: glyphst_pdf_translation::PageGeometry::new(240.0, 480.0),
+                    blocks,
+                    inline_objects: Vec::new(),
+                    protected_regions: Vec::new(),
+                    metadata: Default::default(),
+                }],
+            ),
+            units: units
+                .iter()
+                .map(|id| TranslatedUnit {
+                    id: id.to_string(),
+                    member_block_ids: vec![format!("{id}-block")],
+                    role: crate::BlockRole::Body,
+                    source_text: "Source".to_string(),
+                    translated_text: "Translated".to_string(),
+                    styled_runs: Vec::new(),
+                    style_fallback: false,
+                    semantic_hash: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn compile_error(message: &str) -> PdfTranslationError {
+        PdfTranslationError::message(PdfTranslationStage::Compiling, message)
+    }
+
+    #[test]
+    fn the_unit_that_breaks_a_page_keeps_its_original_and_the_rest_show() {
+        let units = ["u1", "u2", "u3", "u4", "u5", "u6"];
+        let translated = fallback_test_document(&units);
+        let mut attempts = 0;
+
+        let (kept, fallbacks) = keep_breaking_units_original(
+            &translated,
+            0,
+            &HashSet::new(),
+            &CancellationToken::default(),
+            |kept| {
+                attempts += 1;
+                if kept.contains("u4") {
+                    Ok(kept.clone())
+                } else {
+                    Err(compile_error("Could not extract translated text"))
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(kept, HashSet::from(["u4".to_string()]));
+        assert_eq!(fallbacks.len(), 1);
+        assert_eq!(fallbacks[0].id, "u4");
+        assert_eq!(fallbacks[0].member_block_ids, vec!["u4-block".to_string()]);
+        assert!(fallbacks[0].reason.contains("Could not extract"));
+        // The failure, every block kept, two halvings and the page.
+        assert_eq!(attempts, 5);
+    }
+
+    #[test]
+    fn a_block_that_does_not_fit_names_its_unit() {
+        let translated = fallback_test_document(&["u1", "u2", "u3"]);
+        let mut attempts = 0;
+
+        let (_, fallbacks) = keep_breaking_units_original(
+            &translated,
+            0,
+            &HashSet::from(["u1".to_string()]),
+            &CancellationToken::default(),
+            |kept| {
+                attempts += 1;
+                if kept.contains("u2") {
+                    Ok(())
+                } else {
+                    Err(compile_error(
+                        "error: panicked with: \"GLYPHST_OVERFLOW:u2-block\"",
+                    ))
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fallbacks.len(), 1);
+        assert_eq!(fallbacks[0].id, "u2");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn a_page_that_breaks_even_in_its_original_still_fails() {
+        let translated = fallback_test_document(&["u1", "u2"]);
+
+        let error = keep_breaking_units_original(
+            &translated,
+            0,
+            &HashSet::new(),
+            &CancellationToken::default(),
+            |_| Err::<(), _>(compile_error("Could not copy a source PDF page")),
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("Could not copy"));
     }
 
     #[test]

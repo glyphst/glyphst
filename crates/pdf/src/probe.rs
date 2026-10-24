@@ -59,11 +59,22 @@ pub fn probe_document(path: &Path, pages: usize) -> Result<DocumentProbe> {
     .unwrap_or(0);
     let mut page_text = Vec::new();
     for index in 0..page_count.min(pages) {
-        let text = inner
+        // Character by character, not `to_text`: one glyph mapped to a code
+        // point that isn't text (half a surrogate pair) would make the whole
+        // page's text unreadable.
+        let mut text = String::new();
+        if let Ok(page) = inner
             .load_page(index as i32)
             .and_then(|page| page.to_text_page(TextPageFlags::empty()))
-            .and_then(|text| text.to_text())
-            .unwrap_or_default();
+        {
+            for block in page.blocks() {
+                for line in block.lines() {
+                    text.extend(line.chars().filter_map(|character| character.char()));
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+        }
         page_text.push(text);
     }
     Ok(DocumentProbe {

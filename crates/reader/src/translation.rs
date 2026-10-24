@@ -393,6 +393,8 @@ pub struct Preview {
     pub revision: u64,
     pub pdf: Arc<[u8]>,
     pub hover: Vec<PdfTranslationHoverRegion>,
+    /// Why each translated block that broke the page keeps its original.
+    pub kept_original: Vec<String>,
 }
 
 /// How far a page's translation has come, for the Translation panel.
@@ -499,6 +501,11 @@ impl DocSession {
                                     revision: preview.revision,
                                     pdf: preview.pdf.clone(),
                                     hover: preview.hover_regions.clone(),
+                                    kept_original: preview
+                                        .layout_failures
+                                        .iter()
+                                        .map(|failure| failure.reason.clone())
+                                        .collect(),
                                 },
                             );
                             changed = true;
@@ -1053,6 +1060,45 @@ mod tests {
             panic!("a card without settings fails");
         };
         assert!(message.contains("loading"));
+    }
+
+    /// By hand, on a real document: `GLYPHST_TEST_PDF` (its path) and
+    /// `GLYPHST_TEST_PAGE` (from 1), then
+    /// `cargo test -p glyphst-reader a_real_page -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs a PDF named by GLYPHST_TEST_PDF"]
+    fn a_real_page_translates_without_failing() {
+        let Some(path) = std::env::var_os("GLYPHST_TEST_PDF").map(std::path::PathBuf::from) else {
+            eprintln!("GLYPHST_TEST_PDF is not set");
+            return;
+        };
+        let page = std::env::var("GLYPHST_TEST_PAGE")
+            .ok()
+            .and_then(|page| page.parse::<usize>().ok())
+            .unwrap_or(1)
+            .saturating_sub(1);
+        let ctx = egui::Context::default();
+        let translator = translator(&ctx);
+        let mut session = translator
+            .start_session(
+                &path,
+                None,
+                TranslationScope::following(page, 0),
+                SessionOptions::default(),
+                &ctx,
+            )
+            .unwrap();
+        wait_until(|| {
+            session.poll();
+            session.failure(page).is_some()
+                || session.page_progress(page) == PageProgress::Done
+                || !session.is_running()
+        });
+        assert_eq!(session.failure(page), None);
+        let preview = session.previews.get(&page).expect("the page has a preview");
+        for reason in &preview.kept_original {
+            eprintln!("kept original: {reason}");
+        }
     }
 
     #[test]

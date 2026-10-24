@@ -581,10 +581,19 @@ fn translation_panel(
                 for (first, last, state) in
                     page_runs(total, current, |page| session.page_progress(page))
                 {
+                    // A page alone says which of its blocks kept their
+                    // original, and why.
+                    let kept = (first == last)
+                        .then(|| session.previews.get(&first))
+                        .flatten()
+                        .map(|preview| preview.kept_original.as_slice())
+                        .unwrap_or_default();
+                    let reasons = kept.join("\n");
                     let why = session
                         .failure(first)
-                        .map(|failure| failure.message.as_str());
-                    page_status_row(ui, first, last, state, first == current, why);
+                        .map(|failure| failure.message.as_str())
+                        .or((!kept.is_empty()).then_some(reasons.as_str()));
+                    page_status_row(ui, first, last, state, first == current, why, kept.len());
                 }
             });
         match &session.export {
@@ -840,7 +849,7 @@ fn failures_box(
             PageFailureCode::Network => "the OCR service stopped answering",
             PageFailureCode::Provider => "the OCR service refused the page",
             PageFailureCode::LocalOcrFailed => "local OCR could not read the page",
-            PageFailureCode::Layout => "the translation could not be laid out",
+            PageFailureCode::Layout => "the page could not be rebuilt",
             _ => "something went wrong",
         };
         format!("✕ {pages}: {why}.")
@@ -853,7 +862,7 @@ fn failures_box(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 8.0;
-            ui.add(
+            let label = ui.add(
                 egui::Label::new(
                     egui::RichText::new(message)
                         .font(theme::mono(11.0))
@@ -861,6 +870,9 @@ fn failures_box(
                 )
                 .wrap(),
             );
+            if let Some(failure) = session.failure(first) {
+                label.on_hover_text(&failure.message);
+            }
             let width = ui.available_width();
             if missing {
                 if ui
@@ -1014,11 +1026,12 @@ fn page_status_row(
     state: PageProgress,
     current: bool,
     why: Option<&str>,
+    kept: usize,
 ) {
     let tokens = Tokens::get(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), egui::Sense::hover());
-    // A failed page says why on hover.
+    // A failed page, or one with blocks kept original, says why on hover.
     if let Some(why) = why {
         response.on_hover_text(why);
     }
@@ -1044,7 +1057,12 @@ fn page_status_row(
         },
     );
     let partial;
+    let done;
     let (glyph, label, color) = match state {
+        PageProgress::Done if kept > 0 => {
+            done = format!("translated · {kept} kept original");
+            ("✓", done.as_str(), tokens.ok)
+        }
         PageProgress::Done => ("✓", "translated", tokens.ok),
         PageProgress::Partial { done, total } => {
             partial = format!("translating · {done}/{total} blocks");
@@ -1057,7 +1075,7 @@ fn page_status_row(
                 PageFailureCode::LocalOcrFailed => "ocr failed",
                 PageFailureCode::Network => "network",
                 PageFailureCode::Provider => "ocr service",
-                PageFailureCode::Layout => "layout",
+                PageFailureCode::Layout => "page error",
                 PageFailureCode::Other => "failed",
             },
             tokens.err,
