@@ -266,6 +266,11 @@ in place of the originals as they arrive. Each page has a source version
 version shown, and a page's GPU drawing is replaced only when the new version
 is ready, so the original stays visible meanwhile. Selection, copy and search
 use the translated text; hovering a translated block shows the original.
+An AI provider's reply streams: each unit is taken as soon as its JSON
+entry closes, and its page previews again. A unit that breaks its page's
+typesetting or final check keeps its original (the page fails only when its
+original can't be rebuilt). Clearing a document removes its runs (found by
+the source's SHA-256) and their cached text, and keeps what OCR read.
 
 The assistant runs the `ai` crate's agent on a worker thread with the main
 model from the settings. The system prompt stays the same for a whole

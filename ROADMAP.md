@@ -166,6 +166,14 @@ Known gaps:
   export keeps no links or outline. A typeset translation that cannot fit
   its block even at its minimum size and leading overflows downward (a
   heading's last line can touch the paragraph below).
+- Blocks stream in only from AI providers; DeepL, Google and Microsoft
+  answer a page's batch at once, and so does the fake provider, so the
+  screens never show a page's blocks landing one by one. Fonts Typst carries
+  over from the source can map glyphs to code points that aren't text (an
+  Office export's CambriaMath); their characters are left out of the
+  translated page's text. Clearing a document forgets cached text only for
+  the provider in use (other providers' entries stay until their keys are
+  rebuilt with their settings).
 - Local OCR: PP-OCRv6 finds lines; Indra adds layout blocks and tables;
   PaddleOCR-VL 1.5 (Candle, CPU only) adds formulas but is experimental: on
   a paper's first page it took 95 s and found 10 regions, missing the right
