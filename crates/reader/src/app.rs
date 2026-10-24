@@ -1111,6 +1111,9 @@ impl ReaderApp {
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
+            if section == Section::Models && launch.settings_group.as_deref() == Some("downloads") {
+                app.settings_window.show_model_downloads();
+            }
             app.settings_window.scroll_to = launch.settings_group;
             // Scripted runs show the fake model's list.
             if section == Section::Ai

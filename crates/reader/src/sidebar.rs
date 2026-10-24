@@ -875,10 +875,18 @@ fn failures_box(
             }
             let width = ui.available_width();
             if missing {
-                if ui
-                    .add(Button::ghost("install pp-ocrv6 small · 31 MB").min_width(width))
-                    .clicked()
-                {
+                // The model Settings · OCR names, as Models would download it.
+                let model = info
+                    .ocr
+                    .as_ref()
+                    .and_then(|ocr| glyphst_models::catalog::entry(&ocr.settings.local.model))
+                    .unwrap_or_else(|| {
+                        glyphst_models::catalog::default_for(
+                            glyphst_models::catalog::Task::TextRecognition,
+                        )
+                    });
+                let install = format!("install {} · {}", model.name, format_size(model.size()));
+                if ui.add(Button::ghost(&install).min_width(width)).clicked() {
                     actions.push(SidebarAction::InstallLocalOcr);
                 }
                 ui.add(

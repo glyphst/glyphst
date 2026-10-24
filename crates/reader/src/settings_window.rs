@@ -887,6 +887,11 @@ impl SettingsWindow {
 
     /// Opens Settings · Models and starts downloading the local OCR model
     /// `settings` use.
+    /// Shows Models' downloads in each state, for screenshots.
+    pub fn show_model_downloads(&mut self) {
+        self.models.show_downloads();
+    }
+
     pub fn install_local_ocr(
         &mut self,
         ctx: &egui::Context,

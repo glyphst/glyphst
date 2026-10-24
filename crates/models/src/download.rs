@@ -134,6 +134,9 @@ pub fn fetch(
         let mut file = File::open(&partial).map_err(disk)?;
         let mut buffer = vec![0; 1 << 20];
         loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err(DownloadError::Cancelled);
+            }
             let read = file.read(&mut buffer).map_err(disk)?;
             if read == 0 {
                 break;

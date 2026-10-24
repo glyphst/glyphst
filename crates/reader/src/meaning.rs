@@ -90,6 +90,7 @@ pub fn card(state: &SetupState) -> MeaningCard {
             ..
         } => MeaningCard::Downloading {
             what: match phase {
+                Phase::Checking => "checking what was kept",
                 Phase::Engine => "engine",
                 Phase::Unpack => "unpacking the engine",
                 Phase::Model => "model",

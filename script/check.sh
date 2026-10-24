@@ -340,6 +340,7 @@ if [[ ${tier} == screens ]]; then
         "07-translation @ --settings translation"
         "07-ocr @ --settings ocr"
         "07c-models @ --settings models"
+        "07c-models-downloading @ --settings models:downloads"
         "07-ai @ --settings ai"
         "07-shortcuts --settings shortcuts"
         "07-shortcuts-glass --settings shortcuts --opacity 0.5"
@@ -366,8 +367,13 @@ if [[ ${tier} == screens ]]; then
             found=0
             for state in "${states[@]}"; do
                 if [[ ${state%% *} == "${wanted}"* ]]; then
-                    chosen+=("${state}")
                     found=1
+                    # Named twice (07c and 07c-models), a state runs once:
+                    # two runs would share its data folder.
+                    for taken in "${chosen[@]}"; do
+                        [[ ${taken} == "${state}" ]] && continue 2
+                    done
+                    chosen+=("${state}")
                 fi
             done
             if ((found == 0)); then
@@ -405,7 +411,16 @@ if [[ ${tier} == screens ]]; then
         shift 2
         begin=$(date +%s)
         mkdir -p "${data}"
-        cp -a "${seed}/." "${data}/"
+        # Once more on a failed copy; then the shot fails rather than ending
+        # without a status.
+        if ! cp -a "${seed}/." "${data}/" 2> "${run_dir}/${name}.log"; then
+            rm -rf "${data}"
+            mkdir -p "${data}"
+            if ! cp -a "${seed}/." "${data}/" 2>> "${run_dir}/${name}.log"; then
+                printf '1 %d\n' "$(($(date +%s) - begin))" > "${run_dir}/${name}.status"
+                return
+            fi
+        fi
         XDG_DATA_HOME="${data}" timeout --kill-after=10 "${shot_seconds}" "$@" \
             > "${run_dir}/${name}.log" 2>&1 || status=$?
         rm -rf "${data}"
@@ -462,6 +477,14 @@ if [[ ${tier} == screens ]]; then
     done
     wait
     report
+    # A shot that left no status failed.
+    while ((reported < ${#shot_names[@]})); do
+        printf '%-22s ' "${shot_names[reported]}"
+        printf 'no status\n' >> "${run_dir}/${shot_names[reported]}.log"
+        record "${shot_names[reported]}" 1 0
+        reported=$((reported + 1))
+        report
+    done
     rm -rf "${seed}" "${run_dir}/data"
     finish
 fi

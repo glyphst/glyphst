@@ -103,6 +103,10 @@ wgpu = "30"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 
+# Hashing a resumed download of a 2 GB model takes minutes unoptimised.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Quick to build for local runs: parallel codegen, no cross-crate LTO, and
 # only line tables for backtraces.
 [profile.release]

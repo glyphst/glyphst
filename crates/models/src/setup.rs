@@ -25,6 +25,8 @@ const RETRIES: [u64; 3] = [5, 30, 120];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    /// Reading back what an earlier run kept (its hash), and connecting.
+    Checking,
     Engine,
     Unpack,
     Model,
@@ -266,13 +268,15 @@ impl Setup {
 
     /// Downloads (or resumes) on a thread; `notify` is called as it goes.
     pub fn start(&mut self, notify: impl Fn() + Send + 'static) {
-        if self
+        let running = self
             .worker
             .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
+            .is_some_and(|worker| !worker.is_finished());
+        if running && !self.cancel.load(Ordering::Acquire) {
             return;
         }
+        // A worker still stopping from a pause is waited for by the next.
+        let previous = self.worker.take().filter(|_| running);
         if self.plan.engine.is_none() && self.custom_engine.is_none() {
             self.set(SetupState::Failed {
                 error: SetupError::NoEngine,
@@ -282,33 +286,77 @@ impl Setup {
             notify();
             return;
         }
-        self.cancel.store(false, Ordering::Release);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        // It shows at once: reading back what was kept and connecting take
+        // a while before the first byte arrives.
+        self.set(SetupState::Running {
+            phase: Phase::Checking,
+            done: self.plan.kept(),
+            total: self.plan.total(),
+            rate: 0.0,
+            retry_in: None,
+        });
+        notify();
         let (plan, state, cancel) = (self.plan.clone(), self.state.clone(), self.cancel.clone());
+        let checking = self.state();
         self.worker = std::thread::Builder::new()
             .name("meaning-setup".to_string())
-            .spawn(move || run(&plan, &state, &cancel, &notify))
+            .spawn(move || {
+                if let Some(previous) = previous {
+                    let _ = previous.join();
+                    if let Ok(mut shared) = state.lock() {
+                        *shared = checking;
+                    }
+                }
+                run(&plan, &state, &cancel, &notify)
+            })
             .ok();
     }
 
-    /// Stops the download; what came is kept.
+    /// Stops the download; what came is kept. It reads paused at once,
+    /// though the worker may take a moment to stop.
     pub fn pause(&self) {
         self.cancel.store(true, Ordering::Release);
+        if let SetupState::Running { done, total, .. } = self.state() {
+            self.set(SetupState::Paused { done, total });
+        }
     }
 
-    /// Stops and forgets what came.
+    /// Stops and forgets what came: the files go once the worker stops, on
+    /// a thread of their own.
     pub fn discard(&mut self) {
         self.pause();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let worker = self.worker.take();
+        let (plan, state) = (self.plan.clone(), self.state.clone());
+        let custom_engine = self.custom_engine.clone();
+        self.set(SetupState::Offer {
+            kept: 0,
+            total: plan.total(),
+        });
+        let forget = move || {
+            if let Some(worker) = worker {
+                let _ = worker.join();
+            }
+            if let Some(engine) = &plan.engine {
+                download::discard(&install::engine_archive(&plan.root, engine));
+            }
+            for model in &plan.models {
+                download::discard(&install::model_path(&plan.root, model));
+            }
+            if let Ok(mut shared) = state.lock() {
+                *shared = Self::state_on_disk(&plan, custom_engine.as_deref());
+            }
+        };
+        if std::thread::Builder::new()
+            .name("meaning-discard".to_string())
+            .spawn(forget)
+            .is_err()
+        {
+            self.set(Self::state_on_disk(
+                &self.plan,
+                self.custom_engine.as_deref(),
+            ));
         }
-        if let Some(engine) = &self.plan.engine {
-            download::discard(&install::engine_archive(&self.plan.root, engine));
-        }
-        for model in &self.plan.models {
-            download::discard(&install::model_path(&self.plan.root, model));
-        }
-        let state = Self::state_on_disk(&self.plan, self.custom_engine.as_deref());
-        self.set(state);
     }
 
     fn set(&self, state: SetupState) {
@@ -326,6 +374,11 @@ impl Drop for Setup {
 
 fn run(plan: &Plan, state: &Mutex<SetupState>, cancel: &AtomicBool, notify: &dyn Fn()) {
     let set = |next: SetupState| {
+        // Paused already shows; progress the worker made meanwhile doesn't
+        // undo it.
+        if matches!(next, SetupState::Running { .. }) && cancel.load(Ordering::Acquire) {
+            return;
+        }
         if let Ok(mut shared) = state.lock() {
             *shared = next;
         }
@@ -437,5 +490,77 @@ fn with_retries(
             });
             std::thread::sleep(Duration::from_secs(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::TcpListener, time::Instant};
+
+    use super::*;
+
+    /// A setup of one model from a server that accepts and never answers,
+    /// as a slow connection looks while a download starts; the user's own
+    /// engine stands in for the engine.
+    fn stalled_setup(label: &str) -> (Setup, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.gguf", listener.local_addr().unwrap());
+        let root = std::env::temp_dir().join(format!(
+            "glyphst-setup-{label}-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let engine = root.join("llama-server");
+        std::fs::write(&engine, b"").unwrap();
+        let model = Asset {
+            name: "model.gguf",
+            url: Box::leak(url.into_boxed_str()),
+            sha256: "00",
+            size: 1000,
+        };
+        (Setup::with(root, None, Some(engine), vec![model]), listener)
+    }
+
+    #[test]
+    fn resume_pause_and_resume_again_show_at_once() {
+        let (mut setup, _server) = stalled_setup("resume");
+        assert!(matches!(setup.state(), SetupState::Offer { .. }));
+
+        setup.start(|| {});
+        assert!(matches!(
+            setup.state(),
+            SetupState::Running {
+                phase: Phase::Checking,
+                ..
+            }
+        ));
+
+        // The worker waits on the server, but pausing reads at once…
+        setup.pause();
+        assert!(matches!(setup.state(), SetupState::Paused { .. }));
+
+        // …and so does resuming while it is still stopping.
+        setup.start(|| {});
+        assert!(matches!(
+            setup.state(),
+            SetupState::Running {
+                phase: Phase::Checking,
+                ..
+            }
+        ));
+        setup.pause();
+    }
+
+    #[test]
+    fn discarding_does_not_wait_for_the_worker() {
+        let (mut setup, _server) = stalled_setup("discard");
+        setup.start(|| {});
+        let started = Instant::now();
+
+        setup.discard();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(setup.state(), SetupState::Offer { kept: 0, .. }));
     }
 }

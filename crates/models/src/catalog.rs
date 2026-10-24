@@ -33,22 +33,16 @@ impl Task {
     }
 }
 
-/// A model's license, and whether its terms must be accepted before it
-/// downloads.
+/// A model's license, for the notices (the Models page doesn't show it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct License {
     pub name: &'static str,
     pub url: &'static str,
-    pub must_accept: bool,
-    /// The terms in a line, for a license that must be accepted.
-    pub summary: &'static str,
 }
 
 const APACHE: License = License {
     name: "Apache-2.0",
     url: "https://www.apache.org/licenses/LICENSE-2.0",
-    must_accept: false,
-    summary: "",
 };
 
 /// A model the app can download and run.
@@ -117,8 +111,6 @@ pub const CATALOG: &[ModelEntry] = &[
         license: License {
             name: "modified OpenRAIL-M",
             url: "https://huggingface.co/datalab-to/indra-ocr/blob/bd02167fdf2005a19962cc15188f8496a2c87d3b/LICENSE",
-            must_accept: true,
-            summary: "Free for research, personal use and companies under $20M in funding or revenue; not for competing with Datalab's API.",
         },
         device_choice: true,
         default: false,
@@ -142,8 +134,6 @@ pub const CATALOG: &[ModelEntry] = &[
         license: License {
             name: "Gemma Terms of Use",
             url: "https://ai.google.dev/gemma/terms",
-            must_accept: false,
-            summary: "",
         },
         device_choice: false,
         default: true,
@@ -521,7 +511,6 @@ mod tests {
                 assert!(file.url.ends_with(leaf), "{}", file.url);
                 assert!(!file.url.contains("F16"), "{}", file.url);
             }
-            assert_eq!(entry.license.must_accept, !entry.license.summary.is_empty());
         }
         for task in Task::ALL {
             assert_eq!(for_task(task).filter(|entry| entry.default).count(), 1);
