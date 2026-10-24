@@ -80,6 +80,8 @@ pub enum ShotKind {
 const GENERATING_AT: f32 = 0.6;
 /// Seconds into the first block's sweep at which `Translating` is taken.
 const TRANSLATING_AT: f64 = 0.3;
+/// How long `Translating` waits for a block to start before giving up.
+const TRANSLATING_WAIT: Duration = Duration::from_secs(120);
 /// Seconds into the reveals at which `TranslatingFilm` takes its frames…
 const FILM_AT: [f64; 5] = [0.0, 0.06, 0.15, 0.3, 0.6];
 /// …and at which `RevealCheck` checks characters decoding.
@@ -109,6 +111,8 @@ pub struct Screenshot {
     /// closing one).
     visited: usize,
     film: Film,
+    /// When `Translating` began waiting for a block to start decoding.
+    waiting: Option<Instant>,
 }
 
 /// What a film shows at a step.
@@ -154,6 +158,7 @@ impl Screenshot {
             image: Arc::default(),
             visited: 0,
             film: Film::default(),
+            waiting: None,
         }
     }
 
@@ -667,6 +672,12 @@ impl ReaderApp {
                     .and_then(|active| self.tabs[active].reveals.first_start());
                 if let Some(start) = start {
                     self.reveal_clock = Some(start + TRANSLATING_AT);
+                } else if now.duration_since(*shot.waiting.get_or_insert(now)) > TRANSLATING_WAIT {
+                    eprintln!(
+                        "screenshot: no translated block started decoding in {} seconds",
+                        TRANSLATING_WAIT.as_secs()
+                    );
+                    return true;
                 }
                 return false;
             }

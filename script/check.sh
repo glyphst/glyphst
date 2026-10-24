@@ -395,6 +395,9 @@ if [[ ${tier} == screens ]]; then
         ln -s "${data_home}/fonts" "${seed}/fonts"
     fi
 
+    # A shot still running after this long is stuck (the slowest take
+    # about 80 seconds with every state running).
+    shot_seconds=300
     # Runs one shot (name, image, then the Reader's command) in the
     # background, leaving its exit status and seconds in name.status.
     shoot() {
@@ -403,8 +406,12 @@ if [[ ${tier} == screens ]]; then
         begin=$(date +%s)
         mkdir -p "${data}"
         cp -a "${seed}/." "${data}/"
-        XDG_DATA_HOME="${data}" "$@" > "${run_dir}/${name}.log" 2>&1 || status=$?
+        XDG_DATA_HOME="${data}" timeout --kill-after=10 "${shot_seconds}" "$@" \
+            > "${run_dir}/${name}.log" 2>&1 || status=$?
         rm -rf "${data}"
+        if ((status == 124 || status == 137)); then
+            printf 'stopped after %s seconds\n' "${shot_seconds}" >> "${run_dir}/${name}.log"
+        fi
         # The Reader exits cleanly even when it could not save the image.
         if ((status == 0)) && [[ ! -s ${image} ]]; then
             printf 'no image at %s\n' "${image}" >> "${run_dir}/${name}.log"

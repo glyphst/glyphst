@@ -257,6 +257,10 @@ impl Block {
 #[derive(Default)]
 pub struct Reveals {
     pages: HashMap<usize, Vec<Block>>,
+    /// Blocks wait for their version and their page's base however long
+    /// they take (for screenshots, which mustn't depend on how busy the
+    /// machine is).
+    pub patient: bool,
 }
 
 impl Reveals {
@@ -326,6 +330,11 @@ impl Reveals {
         visible: impl Fn(usize) -> bool,
     ) -> Vec<usize> {
         let mut done = Vec::new();
+        let (hold, wait) = if self.patient {
+            (f64::INFINITY, f64::INFINITY)
+        } else {
+            (HOLD_SECONDS, WAIT_SECONDS)
+        };
         self.pages.retain(|&page, blocks| {
             let state = state(page);
             let shown = visible(page);
@@ -356,14 +365,14 @@ impl Reveals {
                 if based && state.maskable {
                     block.start = Some(next);
                     next += STAGGER_SECONDS;
-                } else if now - held >= HOLD_SECONDS || !state.maskable {
+                } else if now - held >= hold || !state.maskable {
                     block.start = Some(f64::NEG_INFINITY);
                 }
             }
             // A version that never comes (the original shown again) lets
             // its blocks go.
             blocks.retain(|block| match block.start {
-                None => now - block.added < WAIT_SECONDS,
+                None => now - block.added < wait,
                 Some(_) => block.phase(now, reduce_motion) != Phase::Done,
             });
             if blocks.is_empty() {
@@ -684,6 +693,26 @@ mod tests {
             reveals.step(later + 0.1, false, |_| unmaskable, |_| true),
             vec![1]
         );
+    }
+
+    #[test]
+    fn a_patient_block_waits_for_a_late_base_and_still_decodes() {
+        let mut reveals = Reveals {
+            patient: true,
+            ..Reveals::default()
+        };
+        reveals.add(1, 5, vec![block(50.0, 2, 4)], 0.0);
+        reveals.watch();
+        let unbased = PageState {
+            base: None,
+            ..READY
+        };
+        let late = 10.0 * HOLD_SECONDS;
+        reveals.step(0.1, false, |_| unbased, |_| true);
+        assert!(reveals.step(late, false, |_| unbased, |_| true).is_empty());
+        assert_eq!(reveals.first_start(), None);
+        reveals.step(late + 0.1, false, |_| READY, |_| true);
+        assert_eq!(reveals.first_start(), Some(late + 0.1));
     }
 
     #[test]

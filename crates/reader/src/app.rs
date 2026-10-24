@@ -5500,6 +5500,8 @@ impl ReaderApp {
                         .collect()
                 })
                 .unwrap_or_default();
+            self.tabs[active].reveals.patient =
+                matches!(self.harness, Some(crate::harness::Harness::Screenshot(_)));
             let done = self.tabs[active].reveals.step(
                 reveal_seconds,
                 reduce_motion,
