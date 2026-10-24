@@ -187,7 +187,7 @@ impl ProviderPages {
     pub fn start_local_ocr(&mut self, ctx: &egui::Context) {
         let ctx = ctx.clone();
         self.ocr_setup
-            .get_or_insert_with(glyphst_ocr::setup)
+            .get_or_insert_with(glyphst_ocr::default_setup)
             .start(move || ctx.request_repaint());
     }
 
@@ -352,7 +352,9 @@ impl ProviderPages {
             });
             match ocr.provider {
                 OcrProvider::Local => {
-                    let setup = self.ocr_setup.get_or_insert_with(glyphst_ocr::setup);
+                    let setup = self
+                        .ocr_setup
+                        .get_or_insert_with(glyphst_ocr::default_setup);
                     group.row(
                         "Engine",
                         Some("PP-OCRv6 small, on this computer: pages are never uploaded."),

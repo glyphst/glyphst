@@ -22,7 +22,10 @@ pub fn test_ocr_connection(settings: OcrSettings) -> Result<(), OcrProbeError> {
     let cancellation = CancellationToken::new();
     match settings.provider {
         // Loading the models is the test.
-        OcrProvider::Local => match glyphst_ocr::LocalOcr::installed() {
+        OcrProvider::Local => match glyphst_ocr::LocalOcr::installed(
+            &settings.local.model,
+            crate::local_ocr::device(&settings),
+        ) {
             Ok(Some(_)) => Ok(()),
             Ok(None) => Err(OcrProbeError::Provider(Some("not installed".to_string()))),
             Err(error) => Err(OcrProbeError::Provider(Some(format!("{error:#}")))),

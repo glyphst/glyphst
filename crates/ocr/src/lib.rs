@@ -1,22 +1,32 @@
-//! Local text recognition for scanned pages: PP-OCRv6 Small run on this
-//! computer through ONNX Runtime, the way Firecrawl's pdf-inspector runs it
-//! (oar-ocr's staged detection and recognition, a second detection pass for
-//! dense fine print). The runtime and models are downloaded on request,
-//! pinned and checked (see [`manifest`]); pages never leave the computer.
+//! Local text recognition for scanned pages, on this computer through ONNX
+//! Runtime: PP-OCRv6 (tiny, small or medium; oar-ocr's staged detection and
+//! recognition, the way Firecrawl's pdf-inspector runs it, with a second
+//! detection pass for dense fine print) or Indra OCR (oar-ocr's port of
+//! Datalab's pipeline: lines, layout blocks in reading order, tables). The
+//! models are the `glyphst-models` catalog's; the runtime (a CUDA build for
+//! an NVIDIA card) is downloaded on request, pinned and checked (see
+//! [`manifest`]). Pages never leave the computer.
 //!
-//! The recogniser finds lines of text, not layout: no formulas, tables or
-//! reading order beyond top to bottom. Remote OCR providers stay for that.
+//! PP-OCR finds lines, not layout; Indra adds blocks. Neither reads
+//! formulas; remote OCR providers stay for that.
 
 pub mod manifest;
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
-use anyhow::{Context as _, Result, anyhow};
-use glyphst_models::setup::Setup;
+use anyhow::{Context as _, Result, anyhow, bail};
+use glyphst_models::{
+    catalog::{self, ModelEntry, Task},
+    setup::Setup,
+};
 use image::RgbImage;
-use oar_ocr::core::config::onnx::OrtSessionConfig;
+use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
 use oar_ocr::domain::tasks::TextDetectionConfig;
+use oar_ocr::indra::{IndraOcr, IndraOcrBuilder};
 use oar_ocr::oarocr::{EdgeProcessor as _, TextCroppingProcessor};
 use oar_ocr::predictors::{TextDetectionPredictor, TextRecognitionPredictor};
 use oar_ocr::processors::BoundingBox;
@@ -37,23 +47,35 @@ const FINE_MAXIMUM_HEIGHT: f32 = 15.0;
 /// Lines recognised with less confidence are dropped.
 const MINIMUM_CONFIDENCE: f32 = 0.5;
 
-/// The folder local OCR keeps its runtime and models in, or the one named
-/// by `GLYPHST_OCR_DIR`.
-pub fn root() -> PathBuf {
-    std::env::var_os("GLYPHST_OCR_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| glyphst_core::paths::data_dir().join("ocr"))
+/// Where a model runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Device {
+    #[default]
+    Cpu,
+    /// CUDA with an NVIDIA card (its runtime build), CoreML on a Mac.
+    Gpu,
 }
 
-/// Downloading (or resuming) the runtime and models, and their state.
-pub fn setup() -> Setup {
+/// The folder local OCR keeps its runtimes and models in, or the one named
+/// by `GLYPHST_OCR_DIR`.
+pub fn root() -> PathBuf {
+    Task::TextRecognition.root()
+}
+
+/// Downloading (or resuming) `model` and the runtime for `device`, and
+/// their state.
+pub fn setup(model: &ModelEntry, device: Device) -> Setup {
     Setup::with(
         root(),
-        manifest::runtime(),
+        manifest::runtime(device),
         runtime_override(),
-        manifest::MODELS.to_vec(),
+        model.files.to_vec(),
     )
+}
+
+/// The default model on the CPU: what local OCR sets up when asked.
+pub fn default_setup() -> Setup {
+    setup(catalog::default_for(Task::TextRecognition), Device::Cpu)
 }
 
 /// The runtime library named by [`RUNTIME_ENV`], if any.
@@ -72,27 +94,127 @@ pub struct OcrLine {
     pub confidence: f32,
 }
 
-/// PP-OCRv6 Small, loaded.
+/// A layout block Indra found: its class (`Text`, `Section-Header`,
+/// `Page-Header`, `Page-Footer`, `List-Group`, `Table`, `Caption`,
+/// `Footnote`, `Table-Of-Contents`, `Form`), its box in image pixels and
+/// its lines' text, newline-joined.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OcrBlock {
+    pub label: String,
+    pub bbox: [f32; 4],
+    pub text: String,
+}
+
+/// What a page holds: its lines, and its blocks in reading order when the
+/// model finds layout (Indra).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Recognized {
+    pub lines: Vec<OcrLine>,
+    pub blocks: Vec<OcrBlock>,
+}
+
+/// A local OCR model, loaded.
 pub struct LocalOcr {
+    /// Its catalog id.
+    pub model: &'static str,
+    engine: Engine,
+}
+
+enum Engine {
+    PpOcr(Box<PpOcr>),
+    Indra(Box<IndraOcr>),
+}
+
+impl LocalOcr {
+    /// Loads `model` from its `files` on `device`, the runtime library
+    /// first (once a process: another runtime takes a restart).
+    pub fn load(
+        model: &'static ModelEntry,
+        device: Device,
+        runtime: &Path,
+        files: &[PathBuf],
+    ) -> Result<Self> {
+        load_runtime(runtime)?;
+        let session = session_config(device);
+        let engine = if model.id.starts_with("indra") {
+            let folder = files
+                .first()
+                .and_then(|file| file.parent())
+                .ok_or_else(|| anyhow!("Indra OCR has no files"))?;
+            let ocr = IndraOcrBuilder::new(folder)
+                .ort_session(session)
+                .build()
+                .context("could not load Indra OCR")?;
+            Engine::Indra(Box::new(ocr))
+        } else {
+            Engine::PpOcr(Box::new(PpOcr::load(model, session, files)?))
+        };
+        Ok(Self {
+            model: model.id,
+            engine,
+        })
+    }
+
+    /// `model` on `device` once its files are in place: loaded on first
+    /// use and shared, so each translation does not load it again. `None`
+    /// until its [`setup`] is ready.
+    pub fn installed(model: &str, device: Device) -> Result<Option<Arc<Self>>> {
+        type Loaded = HashMap<(&'static str, Device), Arc<LocalOcr>>;
+        static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
+        let entry = catalog::entry(model)
+            .filter(|entry| entry.task == Task::TextRecognition)
+            .ok_or_else(|| anyhow!("{model} is not a local OCR model"))?;
+        let mut loaded = LOADED
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(ocr) = loaded.get(&(entry.id, device)) {
+            return Ok(Some(ocr.clone()));
+        }
+        let Some((runtime, files)) = setup(entry, device).all_paths() else {
+            return Ok(None);
+        };
+        let ocr = Arc::new(Self::load(entry, device, &runtime, &files)?);
+        loaded.insert((entry.id, device), ocr.clone());
+        Ok(Some(ocr))
+    }
+
+    /// The lines (and blocks) of text in `image`, top to bottom.
+    pub fn recognize(&self, image: RgbImage) -> Result<Recognized> {
+        match &self.engine {
+            Engine::PpOcr(ocr) => Ok(Recognized {
+                lines: ocr.recognize(image)?,
+                blocks: Vec::new(),
+            }),
+            Engine::Indra(ocr) => indra_page(ocr, image),
+        }
+    }
+}
+
+/// PP-OCRv6 at one size.
+struct PpOcr {
     detector: TextDetectionPredictor,
     recognizer: TextRecognitionPredictor,
     /// The second pass's detector, made on the first page needing it.
     fine: OnceLock<Option<TextDetectionPredictor>>,
     detection: PathBuf,
+    box_threshold: f32,
+    session: OrtSessionConfig,
 }
 
-impl LocalOcr {
-    /// Loads the runtime library and the models (detection, recognition,
-    /// dictionary, as [`manifest::MODELS`]).
-    pub fn load(runtime: &Path, models: &[PathBuf]) -> Result<Self> {
-        let [detection, recognition, dictionary] = models else {
-            return Err(anyhow!("local OCR needs three model files"));
+impl PpOcr {
+    /// The detection and recognition models and the dictionary, in the
+    /// catalog's order.
+    fn load(model: &ModelEntry, session: OrtSessionConfig, files: &[PathBuf]) -> Result<Self> {
+        let [detection, recognition, dictionary] = files else {
+            bail!("{} needs three model files", model.name);
         };
-        load_runtime(runtime)?;
-        let detector = detector(detection, DETECTION_LIMIT)?;
+        // PaddleOCR's box threshold for each size.
+        let box_threshold = if model.id.contains("tiny") { 0.4 } else { 0.45 };
+        let detector = detector(detection, DETECTION_LIMIT, box_threshold, &session)?;
         let recognizer = TextRecognitionPredictor::builder()
             .dict_path(dictionary)
-            .with_ort_config(session_config())
+            .with_ort_config(session.clone())
             .build(recognition)
             .context("could not load the recognition model")?;
         Ok(Self {
@@ -100,28 +222,12 @@ impl LocalOcr {
             recognizer,
             fine: OnceLock::new(),
             detection: detection.clone(),
+            box_threshold,
+            session,
         })
     }
 
-    /// The recogniser once its files are in place: loaded on first use and
-    /// shared, so each translation does not load it again. `None` until
-    /// [`setup`] is ready.
-    pub fn installed() -> Result<Option<Arc<Self>>> {
-        static LOADED: Mutex<Option<Arc<LocalOcr>>> = Mutex::new(None);
-        let mut loaded = LOADED.lock().unwrap_or_else(|poison| poison.into_inner());
-        if let Some(ocr) = loaded.as_ref() {
-            return Ok(Some(ocr.clone()));
-        }
-        let Some((runtime, models)) = setup().all_paths() else {
-            return Ok(None);
-        };
-        let ocr = Arc::new(Self::load(&runtime, &models)?);
-        *loaded = Some(ocr.clone());
-        Ok(Some(ocr))
-    }
-
-    /// The lines of text in `image`, top to bottom.
-    pub fn recognize(&self, image: RgbImage) -> Result<Vec<OcrLine>> {
+    fn recognize(&self, image: RgbImage) -> Result<Vec<OcrLine>> {
         let image = Arc::new(image);
         let boxes = self.detect(&image)?;
         let boxes = oar_ocr::processors::sort_quad_boxes(&boxes);
@@ -165,9 +271,14 @@ impl LocalOcr {
         let median = heights.get(heights.len() / 2).copied().unwrap_or(f32::MAX) * downscale;
         if downscale < 1.0 && boxes.len() >= FINE_MINIMUM_REGIONS && median < FINE_MAXIMUM_HEIGHT {
             let fine = self.fine.get_or_init(|| {
-                detector(&self.detection, DETECTION_LIMIT_FINE)
-                    .inspect_err(|error| log::warn!("fine OCR detection unavailable: {error:#}"))
-                    .ok()
+                detector(
+                    &self.detection,
+                    DETECTION_LIMIT_FINE,
+                    self.box_threshold,
+                    &self.session,
+                )
+                .inspect_err(|error| log::warn!("fine OCR detection unavailable: {error:#}"))
+                .ok()
             });
             if let Some(fine) = fine {
                 match detect_with(fine, image) {
@@ -180,23 +291,107 @@ impl LocalOcr {
     }
 }
 
+/// A page through Indra: its lines and blocks, mapped back from the upright
+/// page it read to the image given.
+fn indra_page(ocr: &IndraOcr, image: RgbImage) -> Result<Recognized> {
+    let mut pages = ocr.predict(vec![image])?;
+    if pages.is_empty() {
+        return Ok(Recognized::default());
+    }
+    let page = pages.swap_remove(0);
+    let (width, height) = (page.width as f32, page.height as f32);
+    // The page was turned clockwise by `rotation` to read it upright.
+    let back = |[x, y]: [f32; 2]| match page.rotation {
+        90 => [y, width - x],
+        180 => [width - x, height - y],
+        270 => [height - y, x],
+        _ => [x, y],
+    };
+    let unturn = |[x0, y0, x1, y1]: [f32; 4]| {
+        let ([ax, ay], [bx, by]) = (back([x0, y0]), back([x1, y1]));
+        [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]
+    };
+    let lines = page
+        .lines
+        .iter()
+        .filter(|line| !line.text.trim().is_empty() && line.confidence >= MINIMUM_CONFIDENCE)
+        .map(|line| {
+            let [x0, y0, x1, y1] = unturn(line.bbox);
+            OcrLine {
+                text: line.text.clone(),
+                quad: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                confidence: line.confidence.clamp(0.0, 1.0),
+            }
+        })
+        .collect();
+    let blocks = page
+        .blocks
+        .iter()
+        .filter(|block| !block.text.trim().is_empty())
+        .map(|block| OcrBlock {
+            label: block.label.clone(),
+            bbox: unturn(block.bbox),
+            text: block.text.clone(),
+        })
+        .collect();
+    Ok(Recognized { lines, blocks })
+}
+
+/// The runtime library loaded in this process: ONNX Runtime is loaded once,
+/// so another one (switching between CPU and GPU) takes a restart.
 fn load_runtime(path: &Path) -> Result<()> {
+    static LOADED: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut loaded = LOADED.lock().unwrap_or_else(|poison| poison.into_inner());
+    match loaded.as_deref() {
+        Some(current) if current == path => return Ok(()),
+        Some(_) => bail!("switching between the CPU and the GPU takes effect after a restart"),
+        None => {}
+    }
     drop(
         ort::init_from(path)
             .with_context(|| format!("could not load ONNX Runtime from {}", path.display()))?,
     );
+    *loaded = Some(path.to_path_buf());
     Ok(())
 }
 
-fn session_config() -> OrtSessionConfig {
+fn session_config(device: Device) -> OrtSessionConfig {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    OrtSessionConfig::new()
+    let config = OrtSessionConfig::new()
         .with_intra_threads(cores.clamp(1, 4))
         .with_inter_threads(1)
-        .with_parallel_execution(false)
+        .with_parallel_execution(false);
+    match device {
+        Device::Cpu => config,
+        // A GPU that cannot be used is an error, not a quiet CPU run.
+        Device::Gpu => config.with_execution_providers(vec![gpu_provider()]),
+    }
 }
 
-fn detector(path: &Path, limit: u32) -> Result<TextDetectionPredictor> {
+/// The GPU's execution provider on this system.
+fn gpu_provider() -> OrtExecutionProvider {
+    if cfg!(target_os = "macos") {
+        OrtExecutionProvider::CoreML {
+            ane_only: None,
+            subgraphs: None,
+        }
+    } else {
+        OrtExecutionProvider::CUDA {
+            device_id: Some(0),
+            gpu_mem_limit: None,
+            arena_extend_strategy: None,
+            cudnn_conv_algo_search: None,
+            cudnn_conv_use_max_workspace: None,
+        }
+    }
+}
+
+fn detector(
+    path: &Path,
+    limit: u32,
+    box_threshold: f32,
+    session: &OrtSessionConfig,
+) -> Result<TextDetectionPredictor> {
     // Every field the general preset would set, pinned: unclip 2.0 keeps
     // glyph edges inside the boxes.
     let config = TextDetectionConfig {
@@ -204,11 +399,12 @@ fn detector(path: &Path, limit: u32) -> Result<TextDetectionPredictor> {
         limit_type: Some(oar_ocr::processors::LimitType::Max),
         max_side_len: Some(DETECTION_MAXIMUM_SIDE),
         unclip_ratio: 2.0,
+        box_threshold,
         ..Default::default()
     };
     TextDetectionPredictor::builder()
         .with_config(config)
-        .with_ort_config(session_config())
+        .with_ort_config(session.clone())
         .build(path)
         .context("could not load the detection model")
 }
@@ -268,37 +464,36 @@ fn quad(polygon: &BoundingBox, width: f32, height: f32) -> Option<[[f32; 2]; 4]>
 mod tests {
     use super::*;
 
-    /// Recognises the image `GLYPHST_OCR_TEST_IMAGE` with the installed
-    /// engine, or with the runtime library `ORT_DYLIB_PATH` and the models
-    /// in `GLYPHST_OCR_TEST_MODELS`:
+    /// Recognises the image `GLYPHST_OCR_TEST_IMAGE` with the model
+    /// `GLYPHST_OCR_TEST_MODEL` (PP-OCRv6 small unless set), installed
+    /// under `GLYPHST_OCR_DIR` or the data folder, with the runtime library
+    /// `ORT_DYLIB_PATH` if set:
     /// `cargo test -p glyphst-ocr -- --ignored --nocapture`.
     #[test]
-    #[ignore = "needs the runtime and models (Settings · OCR · install)"]
+    #[ignore = "needs the runtime and models (Settings · Models)"]
     fn the_installed_engine_reads_a_page() {
         let image = std::env::var_os("GLYPHST_OCR_TEST_IMAGE").expect("GLYPHST_OCR_TEST_IMAGE");
         let image = image::open(image).unwrap().to_rgb8();
-        let ocr = match (
-            runtime_override(),
-            std::env::var_os("GLYPHST_OCR_TEST_MODELS"),
-        ) {
-            (Some(runtime), Some(models)) => {
-                let models = PathBuf::from(models);
-                let models: Vec<PathBuf> = manifest::MODELS
-                    .iter()
-                    .map(|model| models.join(model.name))
-                    .collect();
-                Arc::new(LocalOcr::load(&runtime, &models).unwrap())
-            }
-            _ => LocalOcr::installed()
-                .unwrap()
-                .expect("local OCR is installed"),
-        };
+        let model =
+            std::env::var("GLYPHST_OCR_TEST_MODEL").unwrap_or_else(|_| "pp-ocrv6-small".to_owned());
+        let ocr = LocalOcr::installed(&model, Device::Cpu)
+            .unwrap()
+            .expect("the model is installed");
         let started = std::time::Instant::now();
-        let lines = ocr.recognize(image).unwrap();
-        println!("{} lines in {:?}", lines.len(), started.elapsed());
-        for line in &lines {
+        let page = ocr.recognize(image).unwrap();
+        println!(
+            "{}: {} lines, {} blocks in {:?}",
+            model,
+            page.lines.len(),
+            page.blocks.len(),
+            started.elapsed()
+        );
+        for line in &page.lines {
             println!("{:.2} {:?} {}", line.confidence, line.quad[0], line.text);
         }
-        assert!(!lines.is_empty());
+        for block in &page.blocks {
+            println!("[{}] {:?} {}", block.label, block.bbox, block.text);
+        }
+        assert!(!page.lines.is_empty());
     }
 }

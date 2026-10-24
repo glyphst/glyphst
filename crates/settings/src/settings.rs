@@ -50,7 +50,10 @@ pub use ai::{
     QuickAskSettings, ResolvedAiConfig,
 };
 pub use model::Settings;
-pub use ocr::{OcrMode, OcrProvider, OcrSettings, PaddleOcrSettings, UnlimitedOcrSettings};
+pub use ocr::{
+    DEFAULT_LOCAL_OCR_MODEL, LocalOcrSettings, OcrDevice, OcrMode, OcrProvider, OcrSettings,
+    PaddleOcrSettings, UnlimitedOcrSettings,
+};
 pub use persistence::{parse_settings, settings_file};
 pub use provider_secrets::{ProviderSecretId, ProviderSecretPersistence, ProviderSecretStatus};
 pub use translation::{

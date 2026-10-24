@@ -62,6 +62,7 @@ mod library_view;
 mod links;
 mod lookups;
 mod meaning;
+mod models;
 mod nav;
 mod overview;
 mod pad;

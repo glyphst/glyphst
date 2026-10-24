@@ -10,6 +10,7 @@ workspace = true
 anyhow.workspace = true
 glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
+glyphst-models = { path = "../models" }
 glyphst-ocr = { path = "../ocr" }
 glyphst-pdf = { path = "../pdf" }
 glyphst-pdf-translation = { path = "../pdf-translation" }

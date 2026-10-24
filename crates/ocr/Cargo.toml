@@ -13,9 +13,17 @@ glyphst-core = { path = "../core" }
 glyphst-models = { path = "../models" }
 image.workspace = true
 log.workspace = true
-# PP-OCRv6 Small on ONNX Runtime, as Firecrawl's pdf-inspector runs it;
-# Apache-2.0. The runtime is loaded at run time from the downloaded
-# release (or ORT_DYLIB_PATH), never linked; no models are downloaded by
-# oar-ocr itself.
-oar-ocr = { version = "0.9.1", default-features = false, features = ["simd"] }
+# PP-OCRv6 and Indra OCR on ONNX Runtime (PP-OCR as Firecrawl's
+# pdf-inspector runs it); Apache-2.0. The runtime is loaded at run time
+# from the downloaded release (or ORT_DYLIB_PATH), never linked; no models
+# are downloaded by oar-ocr itself.
+oar-ocr = { version = "0.10.1", default-features = false, features = ["simd"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+
+# The GPU's execution provider: CUDA with an NVIDIA card (the runtime's
+# CUDA build), CoreML on a Mac.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+oar-ocr = { version = "0.10.1", default-features = false, features = ["simd", "cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+oar-ocr = { version = "0.10.1", default-features = false, features = ["simd", "coreml"] }

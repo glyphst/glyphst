@@ -847,7 +847,8 @@ impl ReaderApp {
                 .translation
                 .as_ref()
                 .is_some_and(|session| session.needs_local_ocr())
-                && glyphst_ocr::setup().all_paths().is_some(),
+                && settings
+                    .is_some_and(|settings| crate::models::local_ocr_installed(&settings.ocr)),
         };
         // The Effects tab edits a copy of this book's choices.
         let showing_effects = self.prefs.sidebar == SidebarTab::Effects;

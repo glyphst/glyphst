@@ -30,6 +30,7 @@ glyphst-ai = { path = "../ai" }
 glyphst-core = { path = "../core" }
 glyphst-effects = { path = "../effects" }
 glyphst-embed = { path = "../embed" }
+glyphst-models = { path = "../models" }
 glyphst-ocr = { path = "../ocr" }
 glyphst-library = { path = "../library" }
 glyphst-markdown = { path = "../markdown" }

@@ -1,9 +1,11 @@
 //! Recognising a page on this computer (glyphst-ocr): the page is drawn by
-//! MuPDF, its lines recognised, and the lines grouped into paragraphs,
-//! given as a PaddleOCR layout payload so they are normalised and fused
-//! with the page's own text the way the services' results are.
+//! MuPDF and read by the chosen model. Indra's layout blocks become a
+//! PaddleOCR layout payload as they are; PP-OCR's lines are grouped into
+//! paragraphs first. Either way they are normalised and fused with the
+//! page's own text the way the services' results are.
 
-use glyphst_ocr::{LocalOcr, OcrLine};
+use glyphst_ocr::{Device, LocalOcr, OcrBlock, OcrLine};
+use glyphst_settings::{OcrDevice, OcrSettings};
 use mupdf::{Colorspace, Document, Matrix};
 use serde_json::{Value, json};
 
@@ -12,10 +14,25 @@ const SCALE: f32 = 200.0 / 72.0;
 /// Lines of one paragraph differ in height by less than this factor (a
 /// title over its authors does not).
 const SAME_SIZE: f32 = 1.25;
-/// The model version recorded with its blocks.
-pub(crate) const MODEL: &str = "pp-ocrv6-small-local";
 
-/// The lines of the one-page PDF `pdf`, as a PaddleOCR payload in its
+/// The device local OCR runs on in `settings`.
+pub(crate) fn device(settings: &OcrSettings) -> Device {
+    match settings.local.device {
+        OcrDevice::Cpu => Device::Cpu,
+        OcrDevice::Gpu => Device::Gpu,
+    }
+}
+
+/// Whether the local model `settings` name is downloaded, with its runtime.
+pub(crate) fn is_installed(settings: &OcrSettings) -> bool {
+    glyphst_models::catalog::entry(&settings.local.model).is_some_and(|model| {
+        glyphst_ocr::setup(model, device(settings))
+            .all_paths()
+            .is_some()
+    })
+}
+
+/// The text of the one-page PDF `pdf`, as a PaddleOCR payload in its
 /// pixels.
 pub(crate) fn recognize_page(ocr: &LocalOcr, pdf: &[u8]) -> Result<Value, String> {
     let document = Document::from_bytes(pdf, "application/pdf").map_err(|e| e.to_string())?;
@@ -40,8 +57,50 @@ pub(crate) fn recognize_page(ocr: &LocalOcr, pdf: &[u8]) -> Result<Value, String
     }
     let image = image::RgbImage::from_raw(width, height, rgb)
         .ok_or_else(|| "the drawn page has the wrong size".to_string())?;
-    let lines = ocr.recognize(image).map_err(|error| format!("{error:#}"))?;
-    Ok(payload(&lines, width as f32, height as f32))
+    let page = ocr.recognize(image).map_err(|error| format!("{error:#}"))?;
+    Ok(if page.blocks.is_empty() {
+        payload(&page.lines, width as f32, height as f32)
+    } else {
+        block_payload(&page.blocks, width as f32, height as f32)
+    })
+}
+
+/// Indra's blocks, in reading order, under PaddleOCR's labels.
+fn block_payload(blocks: &[OcrBlock], width: f32, height: f32) -> Value {
+    let blocks: Vec<Value> = blocks
+        .iter()
+        .map(|block| {
+            let label = match block.label.as_str() {
+                "Section-Header" => "paragraph_title",
+                "Page-Header" => "header",
+                "Page-Footer" => "footer",
+                "List-Group" => "list",
+                "Table" => "table",
+                "Caption" => "figure_title",
+                "Footnote" => "footnote",
+                "Table-Of-Contents" => "content",
+                _ => "text",
+            };
+            json!({
+                "block_label": label,
+                "block_content": block.text,
+                "block_bbox": block.bbox,
+            })
+        })
+        .collect();
+    paddle_payload(blocks, width, height)
+}
+
+fn paddle_payload(blocks: Vec<Value>, width: f32, height: f32) -> Value {
+    json!({
+        "layoutParsingResults": [{
+            "prunedResult": {
+                "width": width,
+                "height": height,
+                "parsing_res_list": blocks,
+            }
+        }]
+    })
 }
 
 /// A line's box: `[x0, y0, x1, y1]`.
@@ -111,15 +170,7 @@ fn payload(lines: &[OcrLine], width: f32, height: f32) -> Value {
             })
         })
         .collect();
-    json!({
-        "layoutParsingResults": [{
-            "prunedResult": {
-                "width": width,
-                "height": height,
-                "parsing_res_list": blocks,
-            }
-        }]
-    })
+    paddle_payload(blocks, width, height)
 }
 
 #[cfg(test)]
@@ -144,7 +195,9 @@ mod tests {
         let path = std::path::PathBuf::from(path);
         let document = Document::open(path.to_str().unwrap()).unwrap();
         let bytes = crate::job::extract_single_pdf_page(&path, 0).unwrap();
-        let ocr = LocalOcr::installed()
+        let model =
+            std::env::var("GLYPHST_OCR_TEST_MODEL").unwrap_or_else(|_| "pp-ocrv6-small".to_owned());
+        let ocr = LocalOcr::installed(&model, Device::Cpu)
             .unwrap()
             .expect("local OCR is installed");
         let payload = recognize_page(&ocr, &bytes).unwrap();
@@ -153,7 +206,7 @@ mod tests {
             &payload,
             "test.pdf",
             "test",
-            MODEL,
+            ocr.model,
             &[glyphst_pdf_translation::PageGeometry::new(
                 bounds.x1 - bounds.x0,
                 bounds.y1 - bounds.y0,

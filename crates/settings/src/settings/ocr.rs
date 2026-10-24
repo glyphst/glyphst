@@ -141,10 +141,56 @@ impl UnlimitedOcrSettings {
     }
 }
 
+/// Where local OCR runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OcrDevice {
+    #[default]
+    Cpu,
+    /// CUDA with an NVIDIA card, CoreML on a Mac.
+    Gpu,
+}
+
+impl OcrDevice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "gpu" => Some(Self::Gpu),
+            _ => None,
+        }
+    }
+}
+
+/// The local OCR model (a `glyphst-models` catalog id) and its device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalOcrSettings {
+    pub model: String,
+    pub device: OcrDevice,
+}
+
+/// PP-OCRv6 small: what local OCR uses until another model is chosen.
+pub const DEFAULT_LOCAL_OCR_MODEL: &str = "pp-ocrv6-small";
+
+impl Default for LocalOcrSettings {
+    fn default() -> Self {
+        Self {
+            model: DEFAULT_LOCAL_OCR_MODEL.to_owned(),
+            device: OcrDevice::Cpu,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct OcrSettings {
     pub mode: OcrMode,
     pub provider: OcrProvider,
+    pub local: LocalOcrSettings,
     pub paddle: PaddleOcrSettings,
     pub unlimited: UnlimitedOcrSettings,
 }
@@ -155,6 +201,7 @@ impl std::fmt::Debug for OcrSettings {
             .debug_struct("OcrSettings")
             .field("mode", &self.mode)
             .field("provider", &self.provider)
+            .field("local", &self.local)
             .field("paddle", &self.paddle)
             .field("unlimited", &self.unlimited)
             .finish()
@@ -166,6 +213,7 @@ impl Default for OcrSettings {
         Self {
             mode: OcrMode::Auto,
             provider: OcrProvider::Local,
+            local: LocalOcrSettings::default(),
             paddle: PaddleOcrSettings::default(),
             unlimited: UnlimitedOcrSettings::default(),
         }
@@ -174,6 +222,10 @@ impl Default for OcrSettings {
 
 impl OcrSettings {
     pub(super) fn sanitize(&mut self) {
+        self.local.model = self.local.model.trim().to_owned();
+        if self.local.model.is_empty() {
+            self.local.model = DEFAULT_LOCAL_OCR_MODEL.to_owned();
+        }
         self.paddle.sanitize();
         self.unlimited.sanitize();
     }

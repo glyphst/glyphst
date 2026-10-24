@@ -299,6 +299,16 @@ impl Settings {
             {
                 settings.ocr.provider = value;
             }
+            if let Some(value) = ocr.get_arg("local-model").and_then(KdlValue::as_string) {
+                settings.ocr.local.model = value.to_string();
+            }
+            if let Some(value) = ocr
+                .get_arg("local-device")
+                .and_then(KdlValue::as_string)
+                .and_then(OcrDevice::from_str)
+            {
+                settings.ocr.local.device = value;
+            }
             // Read the original flat Paddle configuration so existing development
             // settings remain recoverable after the provider model becomes nested.
             if let Some(value) = ocr.get_arg("token").and_then(KdlValue::as_string) {
@@ -527,6 +537,10 @@ impl Settings {
             let ocr_children = ocr.ensure_children();
             push_value_node(ocr_children, "mode", self.ocr.mode.as_str());
             push_value_node(ocr_children, "provider", self.ocr.provider.as_str());
+            if self.ocr.local != LocalOcrSettings::default() {
+                push_value_node(ocr_children, "local-model", self.ocr.local.model.clone());
+                push_value_node(ocr_children, "local-device", self.ocr.local.device.as_str());
+            }
             let mut providers = KdlNode::new("providers");
             let provider_children = providers.ensure_children();
             if self.ocr.paddle != PaddleOcrSettings::default() {

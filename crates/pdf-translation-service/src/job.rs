@@ -899,7 +899,7 @@ impl PdfTranslationService {
         let document_path = prepared_directory.join("document.v1.json");
         let (mut document, reused_prepared_document) = if let Some(mut document) =
             load_normalized_document(&document_path, &source_fingerprint).filter(|document| {
-                let local_ready = || glyphst_ocr::setup().all_paths().is_some();
+                let local_ready = || crate::local_ocr::is_installed(&settings.ocr);
                 !recognize_again(document, settings, local_ready)
             }) {
             document.metadata.source_path = pipeline_request.source_path.clone();
@@ -2008,7 +2008,10 @@ impl PageOcrClient {
             .map_err(|error| {
                 PdfTranslationError::message(PdfTranslationStage::Ocr, error.to_string())
             }),
-            OcrProvider::Local => match glyphst_ocr::LocalOcr::installed() {
+            OcrProvider::Local => match glyphst_ocr::LocalOcr::installed(
+                &settings.ocr.local.model,
+                crate::local_ocr::device(&settings.ocr),
+            ) {
                 Ok(Some(ocr)) => Ok(Self::Local(ocr)),
                 Ok(None) => Err(PdfTranslationError::message(
                     PdfTranslationStage::Ocr,
@@ -2202,13 +2205,9 @@ fn run_ocr_page(
         PageOcrClient::Unlimited(_) => {
             normalize_unlimited_payload(&payload, source_path, document_id, &[geometry])
         }
-        PageOcrClient::Local(_) => normalize_paddle_payload(
-            &payload,
-            source_path,
-            document_id,
-            crate::local_ocr::MODEL,
-            &[geometry],
-        ),
+        PageOcrClient::Local(ocr) => {
+            normalize_paddle_payload(&payload, source_path, document_id, ocr.model, &[geometry])
+        }
     };
     let mut normalized = match normalized {
         Ok(document) => document,
@@ -4042,7 +4041,9 @@ fn source_preparation_fingerprint(settings: &PdfTranslationConfig, source_bytes:
             settings.ocr.paddle.endpoint.hash(&mut hasher);
             settings.ocr.paddle.model.hash(&mut hasher);
         }
-        OcrProvider::Local => crate::local_ocr::MODEL.hash(&mut hasher),
+        // The model's id (its files are pinned with it); not the device,
+        // which reads alike.
+        OcrProvider::Local => settings.ocr.local.model.hash(&mut hasher),
     }
     settings.content_review.mode.as_str().hash(&mut hasher);
     if settings.content_review.mode == PdfContentReviewMode::Ambiguous
