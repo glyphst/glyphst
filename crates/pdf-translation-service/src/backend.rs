@@ -36,6 +36,21 @@ impl GlyphstTranslationBackend {
     }
 }
 
+impl GlyphstTranslationBackend {
+    /// Forgets the cached translations of `units`; returns how many there
+    /// were.
+    pub(crate) fn forget(&self, units: &[TranslationUnit]) -> anyhow::Result<usize> {
+        let units = units.iter().map(semantic_unit).collect::<Vec<_>>();
+        self.service.forget_semantic_translations(
+            &self.config,
+            self.provider,
+            self.source_language.as_ref(),
+            &self.target_language,
+            &units,
+        )
+    }
+}
+
 impl TranslationBackend for GlyphstTranslationBackend {
     fn translate_batch(
         &self,

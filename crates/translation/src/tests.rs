@@ -947,3 +947,40 @@ fn write_json_response(stream: &mut TcpStream, value: Value) {
     stream.write_all(&body).unwrap();
     stream.flush().unwrap();
 }
+
+#[test]
+fn a_forgotten_translation_is_no_longer_cached() {
+    let service = TranslationService::new().unwrap();
+    let config = TranslationExecutionConfig::from_settings(&Settings::default());
+    let target = LanguageCode::new("fr").unwrap();
+    let unit = SemanticTranslationUnit {
+        id: "u".to_string(),
+        role: "body".to_string(),
+        text: "Hello there".to_string(),
+        protected_tokens: Vec::new(),
+        context_before: None,
+        context_after: None,
+    };
+    service.cache_validated_semantic_translation(
+        &config,
+        TranslationProvider::Google,
+        None,
+        &target,
+        &unit,
+        "Bonjour",
+    );
+    let forget = || {
+        service
+            .forget_semantic_translations(
+                &config,
+                TranslationProvider::Google,
+                None,
+                &target,
+                std::slice::from_ref(&unit),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(forget(), 1);
+    assert_eq!(forget(), 0);
+}

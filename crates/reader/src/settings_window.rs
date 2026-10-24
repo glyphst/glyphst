@@ -230,6 +230,8 @@ pub struct SettingsContext<'a> {
 /// What Settings › Library shows about the library.
 #[derive(Clone, Debug, Default)]
 pub struct LibraryFacts {
+    /// The bytes translations keep on disk, for Settings › Translation.
+    pub translation_data: u64,
     pub folder: Option<std::path::PathBuf>,
     pub folder_chosen: bool,
     pub unenriched: usize,
@@ -289,6 +291,26 @@ pub enum LibraryAction {
     CopyLinked,
     /// Open a note's copy in the system's editor.
     OpenFile(std::path::PathBuf),
+    /// Clear every document's translation and the cached text.
+    ClearTranslations,
+}
+
+/// What translations keep on disk, and clearing it all (frame 07).
+fn translation_data(ui: &mut egui::Ui, bytes: u64, actions: &mut Vec<LibraryAction>) {
+    ui_settings::group(ui, "stored", |group| {
+        group.row(
+            "translation data",
+            Some(&format!(
+                "{} · every document's translated pages, recognised scans and cached text.",
+                crate::sidebar::format_size(bytes)
+            )),
+            |ui| {
+                if ui.add(Button::bracket_muted("clear all")).clicked() {
+                    actions.push(LibraryAction::ClearTranslations);
+                }
+            },
+        );
+    });
 }
 
 /// The caption of a downloaded model's row (search by meaning, the
@@ -1183,7 +1205,14 @@ impl SettingsWindow {
                             },
                         );
                     }
-                    Section::Translation => self.providers.translation(ui, app.user),
+                    Section::Translation => {
+                        self.providers.translation(ui, app.user);
+                        translation_data(
+                            ui,
+                            app.library.translation_data,
+                            &mut self.library_actions,
+                        );
+                    }
                     Section::Ocr => {
                         if self.providers.ocr(ui, app.user) {
                             self.section = Some(Section::Models);

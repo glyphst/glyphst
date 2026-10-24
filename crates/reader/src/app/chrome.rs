@@ -852,6 +852,7 @@ impl ReaderApp {
                 .is_some_and(|session| session.needs_local_ocr())
                 && settings
                     .is_some_and(|settings| crate::models::local_ocr_installed(&settings.ocr)),
+            confirm_clear: self.confirm_clear == Some(self.tabs[active].id),
         };
         // The Effects tab edits a copy of this book's choices.
         let showing_effects = self.prefs.sidebar == SidebarTab::Effects;

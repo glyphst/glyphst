@@ -88,6 +88,26 @@ impl TranslationCache {
         Ok(())
     }
 
+    /// Forgets `keys`; returns how many were cached.
+    pub(super) fn remove(&mut self, keys: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for key in keys {
+            removed += usize::from(self.memory.remove(key).is_some());
+        }
+        if let Some(database) = &self.database {
+            removed = 0;
+            let write_txn = database.begin_write()?;
+            {
+                let mut table = write_txn.open_table(CACHE_TABLE)?;
+                for key in keys {
+                    removed += usize::from(table.remove(key.as_str())?.is_some());
+                }
+            }
+            write_txn.commit()?;
+        }
+        Ok(removed)
+    }
+
     pub(super) fn get(&mut self, key: &str) -> Option<CachedTranslation> {
         if let Some(value) = self.memory.get(key) {
             return Some(CachedTranslation {

@@ -34,7 +34,7 @@ use glyphst_pdf_translation::{
 use glyphst_pdf_translation::{
     ScopedRun, TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot,
-    TranslationScope, translate_document_scoped,
+    TranslationScope, document_translation_units, translate_document_scoped,
 };
 
 use crate::PdfTranslationConfig;
@@ -278,6 +278,67 @@ impl PdfTranslationService {
 
     pub fn clear_translation_data(&self) -> anyhow::Result<()> {
         self.clear_translation_data_at(&self.artifact_root, true)
+    }
+
+    /// The bytes translations keep on disk (their pages, previews and
+    /// what OCR read), for Settings.
+    pub fn translation_data_size(&self) -> u64 {
+        folder_size(&self.artifact_root)
+    }
+
+    /// Clears `source_path`'s translations in every language and with
+    /// every provider: their pages, previews and checkpoints, and (for the
+    /// provider `settings` name) their cached text, so the next run asks
+    /// again. What OCR read of its scans stays. The document's sessions
+    /// must have stopped.
+    pub fn clear_document(
+        &self,
+        settings: &PdfTranslationConfig,
+        source_path: &Path,
+    ) -> anyhow::Result<ClearedTranslation> {
+        let source = fs::read(source_path)
+            .with_context(|| format!("failed to read {}", source_path.display()))?;
+        let sha256 = source_sha256(&source);
+        let mut cleared = ClearedTranslation::default();
+        let Ok(entries) = fs::read_dir(&self.artifact_root) else {
+            return Ok(cleared);
+        };
+        for entry in entries.flatten() {
+            let job = entry.path();
+            if !job.is_dir() || entry.file_name() == "prepared" {
+                continue;
+            }
+            let manifest = fs::read(job.join(LIVE_SESSION_MANIFEST_FILE))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<LiveSessionCacheManifest>(&bytes).ok());
+            let ours = match manifest
+                .as_ref()
+                .and_then(|manifest| manifest.source_sha256.as_deref())
+            {
+                Some(job_sha256) => job_sha256 == sha256,
+                None => fs::read(job.join("source-original.pdf")).is_ok_and(|copy| copy == source),
+            };
+            if !ours {
+                continue;
+            }
+            if let Some(manifest) = &manifest
+                && let Some(document) = fs::read(job.join(LIVE_SESSION_DOCUMENT_FILE))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<DocumentV1>(&bytes).ok())
+            {
+                let backend = GlyphstTranslationBackend::new(
+                    self.translation.clone(),
+                    settings.translation.clone(),
+                    manifest.request.source_language.clone(),
+                    manifest.request.target_language.clone(),
+                );
+                cleared.cached += backend.forget(&document_translation_units(&document))?;
+            }
+            cleared.bytes += folder_size(&job);
+            remove_artifact_directory(&job)?;
+            cleared.jobs += 1;
+        }
+        Ok(cleared)
     }
 
     fn clear_translation_data_at(
@@ -3294,6 +3355,16 @@ pub struct PdfTranslationResult {
     pub warnings: Vec<PdfTranslationWarning>,
 }
 
+/// What clearing a document's translation removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClearedTranslation {
+    /// Translation runs (a language and provider each).
+    pub jobs: usize,
+    pub bytes: u64,
+    /// Cached translations of its text.
+    pub cached: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PdfTranslationWarning {
     pub code: String,
@@ -4427,6 +4498,21 @@ fn artifact_root() -> PathBuf {
     glyphst_core::paths::state_dir().join("pdf-translations-v2")
 }
 
+/// The bytes under `path`.
+fn folder_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => folder_size(&entry.path()),
+            Ok(_) => entry.metadata().map_or(0, |metadata| metadata.len()),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 fn remove_artifact_directory(path: &Path) -> anyhow::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -5544,6 +5630,43 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         service
             .clear_translation_data_at(&artifacts, false)
             .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_a_document_removes_its_runs_and_keeps_others_and_ocr() {
+        let directory = temporary_test_directory("clear-document");
+        let artifacts = directory.join("pdf-translations-v2");
+        for (job, source) in [
+            ("job-a-fr", b"a".as_slice()),
+            ("job-a-de", b"a"),
+            ("job-b", b"b"),
+        ] {
+            fs::create_dir_all(artifacts.join(job).join("page-previews")).unwrap();
+            fs::write(artifacts.join(job).join("source-original.pdf"), source).unwrap();
+            fs::write(
+                artifacts.join(job).join("page-previews/page.pdf"),
+                b"preview",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(artifacts.join("prepared/a")).unwrap();
+        fs::write(artifacts.join("prepared/a/document.v1.json"), b"{}").unwrap();
+        let source = directory.join("a.pdf");
+        fs::write(&source, b"a").unwrap();
+        let service = PdfTranslationService::new(TranslationService::new().unwrap())
+            .with_artifact_root(artifacts.clone());
+
+        let cleared = service
+            .clear_document(&PdfTranslationConfig::from(&Settings::default()), &source)
+            .unwrap();
+
+        assert_eq!(cleared.jobs, 2);
+        assert_eq!(cleared.bytes, 2 * (1 + 7));
+        assert!(!artifacts.join("job-a-fr").exists());
+        assert!(!artifacts.join("job-a-de").exists());
+        assert!(artifacts.join("job-b/source-original.pdf").exists());
+        assert!(artifacts.join("prepared/a/document.v1.json").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -379,6 +379,29 @@ impl TranslationService {
         Ok(())
     }
 
+    /// Forgets the cached translations of `units` (as
+    /// [`Self::translate_semantic_batch`] would look them up); returns how
+    /// many there were.
+    pub fn forget_semantic_translations(
+        &self,
+        config: &TranslationExecutionConfig,
+        provider: TranslationProvider,
+        source_language: Option<&LanguageCode>,
+        target_language: &LanguageCode,
+        units: &[SemanticTranslationUnit],
+    ) -> Result<usize> {
+        let keys = units
+            .iter()
+            .map(|unit| {
+                semantic_cache_key(config, provider, source_language, target_language, unit)
+            })
+            .collect::<Vec<_>>();
+        self.cache
+            .lock()
+            .map_err(|_| anyhow!("translation cache is unavailable"))?
+            .remove(&keys)
+    }
+
     pub fn clear_cache(&self) -> Result<()> {
         self.cache
             .lock()

@@ -55,9 +55,9 @@ pub use translate::{
     TranslatedDocument, TranslatedUnit, TranslationBackend, TranslationBackendError,
     TranslationDocumentError, TranslationErrorCategory, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunOutcome, TranslationRunProgress,
-    TranslationRunSnapshot, TranslationUnit, TranslationUnitOutput, protect_text,
-    translate_document, translate_document_partial_resuming, translate_document_resuming,
-    translate_document_scoped,
+    TranslationRunSnapshot, TranslationUnit, TranslationUnitOutput, document_translation_units,
+    protect_text, translate_document, translate_document_partial_resuming,
+    translate_document_resuming, translate_document_scoped,
 };
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,

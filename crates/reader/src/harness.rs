@@ -249,7 +249,15 @@ impl ReaderApp {
             self.prepare_translation(ctx);
             return false;
         };
-        for command in std::mem::take(&mut self.launch_commands) {
+        // A command about the translation waits for the one the run starts.
+        let translating = self.tabs[active].translation.is_some();
+        let (now_commands, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.launch_commands)
+            .into_iter()
+            .partition(|command| {
+                translating || command.needs() != crate::commands::Needs::Translation
+            });
+        self.launch_commands = later;
+        for command in now_commands {
             if let Err(reason) = self.run(command, ctx) {
                 eprintln!("--command {}: {reason}", command.id());
             }

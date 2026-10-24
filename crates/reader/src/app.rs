@@ -441,6 +441,16 @@ pub struct ReaderApp {
     chrome: chrome::StageChrome,
     /// What the toast's `[ undo ]` takes back.
     toast_undo: Option<ToastUndo>,
+    /// The tab whose translation waits for clearing to be confirmed.
+    confirm_clear: Option<u64>,
+    /// The bytes translations keep on disk, and when they were read.
+    translation_data: Option<(u64, Instant)>,
+    /// Translations being cleared, and what each removed.
+    clearing: Vec<
+        std::sync::mpsc::Receiver<
+            Result<glyphst_pdf_translation_service::ClearedTranslation, String>,
+        >,
+    >,
     /// The presentation's tools and clock while presenting.
     pub(crate) presenting: Option<crate::present::Presenting>,
     /// The user's effects folder, what it held when last loaded, and when
@@ -788,6 +798,9 @@ impl ReaderApp {
             pending_actions: Vec::new(),
             chrome: Default::default(),
             toast_undo: None,
+            confirm_clear: None,
+            translation_data: None,
+            clearing: Vec::new(),
             presenting: None,
             effects_dir: user_effects,
             effects_stamp,
@@ -2804,6 +2817,16 @@ impl ReaderApp {
                 }
             }
             SidebarAction::SetFacing(facing) => self.set_facing(facing),
+            SidebarAction::AskClearTranslation => {
+                self.confirm_clear = self.active.map(|active| self.tabs[active].id);
+            }
+            SidebarAction::KeepTranslation => self.confirm_clear = None,
+            SidebarAction::ClearTranslation => {
+                self.confirm_clear = None;
+                if let Some(active) = self.active {
+                    self.clear_translation(active, ctx);
+                }
+            }
             SidebarAction::CancelTranslation => {
                 if let Some(session) = self
                     .active
@@ -3070,6 +3093,64 @@ impl ReaderApp {
             settings: settings.clone(),
             document: self.library.document_ocr(&self.tabs[active].path),
             installed,
+        }
+    }
+
+    /// Clears tab `index`'s document's translation: every tab of it stops
+    /// translating and shows its original, then its translated pages and
+    /// cached text are removed (frame 03e).
+    fn clear_translation(&mut self, index: usize, ctx: &egui::Context) {
+        let path = self.tabs[index].path.clone();
+        let mut sessions = Vec::new();
+        let mut released = Vec::new();
+        for tab in &mut self.tabs {
+            if tab.path != path {
+                continue;
+            }
+            sessions.extend(tab.translation.take());
+            released.extend(
+                tab.reveals
+                    .pages()
+                    .into_iter()
+                    .map(|page| PageKey { tab: tab.id, page }),
+            );
+            tab.reveals = Default::default();
+        }
+        self.with_gpu(|gpu| {
+            for key in released {
+                gpu.release_retired(key);
+            }
+        });
+        match self.translator.clear_document(&path, sessions, ctx) {
+            Ok(done) => self.clearing.push(done),
+            Err(error) => self.notices.push(error),
+        }
+    }
+
+    /// Says what each finished clearing removed.
+    fn poll_clearing(&mut self) {
+        let mut notices = Vec::new();
+        self.clearing.retain(|done| match done.try_recv() {
+            Ok(Ok(cleared)) => {
+                notices.push(if cleared.jobs == 0 {
+                    "this document had no translation to clear".to_string()
+                } else {
+                    format!(
+                        "cleared the translation · {}",
+                        crate::sidebar::format_size(cleared.bytes)
+                    )
+                });
+                false
+            }
+            Ok(Err(error)) => {
+                notices.push(format!("could not clear the translation: {error}"));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for notice in notices {
+            self.notices.push(notice);
         }
     }
 
@@ -4799,6 +4880,15 @@ impl ReaderApp {
                 self.start_document_translation(ctx);
                 None
             }
+            Command::ClearTranslation => {
+                // Asked in the translation panel, where it is confirmed.
+                if let Some(active) = self.active {
+                    self.confirm_clear = Some(self.tabs[active].id);
+                    self.prefs.show_sidebar = true;
+                    self.prefs.sidebar = SidebarTab::Translation;
+                }
+                None
+            }
             Command::ShowTranslated => {
                 if let Some(session) = self
                     .active
@@ -4876,7 +4966,15 @@ impl ReaderApp {
             let effects = self.effect_defs();
             let errors = self.effect_errors();
             let background_seed = self.background_seed();
+            // Read again every few seconds while Settings shows.
+            let fresh = self
+                .translation_data
+                .is_some_and(|(_, read)| read.elapsed() < Duration::from_secs(2));
+            if !fresh {
+                self.translation_data = Some((self.translator.data_size(), Instant::now()));
+            }
             let library_facts = crate::settings_window::LibraryFacts {
+                translation_data: self.translation_data.map_or(0, |(bytes, _)| bytes),
                 folder: self.library.files_root().map(std::path::Path::to_path_buf),
                 folder_chosen: self.library.files_root_chosen(),
                 unenriched: self
@@ -4962,6 +5060,31 @@ impl ReaderApp {
                     continue;
                 }
                 match action {
+                    LibraryAction::ClearTranslations => {
+                        let mut sessions = Vec::new();
+                        let mut released = Vec::new();
+                        for tab in &mut self.tabs {
+                            sessions.extend(tab.translation.take());
+                            released.extend(
+                                tab.reveals
+                                    .pages()
+                                    .into_iter()
+                                    .map(|page| PageKey { tab: tab.id, page }),
+                            );
+                            tab.reveals = Default::default();
+                        }
+                        self.with_gpu(|gpu| {
+                            for key in released {
+                                gpu.release_retired(key);
+                            }
+                        });
+                        match self.translator.clear_all(sessions, ctx) {
+                            Ok(done) => self.clearing.push(done),
+                            Err(error) => self.notices.push(error),
+                        }
+                        self.translation_data = None;
+                        continue;
+                    }
                     LibraryAction::Meaning(action) => {
                         self.meaning_action(action, ctx);
                         continue;
@@ -5031,6 +5154,7 @@ impl ReaderApp {
                     | LibraryAction::RegisterLinks
                     | LibraryAction::SyncNow
                     | LibraryAction::TestSync
+                    | LibraryAction::ClearTranslations
                     | LibraryAction::OpenFile(_) => {}
                     LibraryAction::CopyLinked => match self.library.plan_copy_linked() {
                         Ok(plan) => {
@@ -6691,6 +6815,7 @@ impl eframe::App for ReaderApp {
         self.user_settings.poll(now);
         self.translator.set_settings(self.user_settings.get());
         self.translator.poll();
+        self.poll_clearing();
         self.assistant
             .poll(self.persist.then_some(&mut self.library));
         if let Some(draft) = self.assistant.take_queued() {

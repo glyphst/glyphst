@@ -21,7 +21,7 @@ use std::{
 use crate::reveal::RevealBlock;
 use glyphst_pdf::{DocumentSnapshot, vector::PageRect};
 use glyphst_pdf_translation_service::{
-    CancellationToken, ExportLayout, PageFailureCode, PdfTranslationConfig,
+    CancellationToken, ClearedTranslation, ExportLayout, PageFailureCode, PdfTranslationConfig,
     PdfTranslationExportRequest, PdfTranslationHoverRegion, PdfTranslationPageFailure,
     PdfTranslationPagePreview, PdfTranslationProgress, PdfTranslationService,
     PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
@@ -286,7 +286,8 @@ impl Translator {
                 )));
                 ctx.request_repaint();
             });
-        spawned.map_err(|error| format!("could not start the translation: {error}"))?;
+        let worker =
+            spawned.map_err(|error| format!("could not start the translation: {error}"))?;
         Ok(DocSession {
             target,
             status: SessionStatus::Running,
@@ -306,7 +307,84 @@ impl Translator {
             reveals: Vec::new(),
             scope,
             dwell: None,
+            worker: Some(worker),
         })
+    }
+
+    /// Clears `path`'s translations and their cached text on a thread,
+    /// once its `sessions` (cancelled here) have stopped; the result comes
+    /// on the receiver.
+    pub fn clear_document(
+        &self,
+        path: &Path,
+        sessions: Vec<DocSession>,
+        ctx: &egui::Context,
+    ) -> Result<mpsc::Receiver<Result<ClearedTranslation, String>>, String> {
+        let settings = self.settings.clone().ok_or("settings are not loaded")?;
+        let config = PdfTranslationConfig::from_settings(&settings);
+        let (service, path, ctx) = (self.pdf.clone(), path.to_path_buf(), ctx.clone());
+        let (done_tx, done) = mpsc::channel();
+        for session in &sessions {
+            session.cancel.cancel();
+        }
+        thread::Builder::new()
+            .name("translation-clear".into())
+            .spawn(move || {
+                for mut session in sessions {
+                    if let Some(worker) = session.worker.take() {
+                        let _ = worker.join();
+                    }
+                }
+                let cleared = service
+                    .clear_document(&config, &path)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = done_tx.send(cleared);
+                ctx.request_repaint();
+            })
+            .map_err(|error| format!("could not clear the translation: {error}"))?;
+        Ok(done)
+    }
+
+    /// Clears every document's translations and all cached text, once
+    /// `sessions` (cancelled here) have stopped, as [`Self::clear_document`]
+    /// does.
+    pub fn clear_all(
+        &self,
+        sessions: Vec<DocSession>,
+        ctx: &egui::Context,
+    ) -> Result<mpsc::Receiver<Result<ClearedTranslation, String>>, String> {
+        let (service, ctx) = (self.pdf.clone(), ctx.clone());
+        let (done_tx, done) = mpsc::channel();
+        for session in &sessions {
+            session.cancel.cancel();
+        }
+        thread::Builder::new()
+            .name("translation-clear".into())
+            .spawn(move || {
+                for mut session in sessions {
+                    if let Some(worker) = session.worker.take() {
+                        let _ = worker.join();
+                    }
+                }
+                let bytes = service.translation_data_size();
+                let cleared = service
+                    .clear_translation_data()
+                    .map(|()| ClearedTranslation {
+                        jobs: usize::from(bytes > 0),
+                        bytes,
+                        cached: 0,
+                    })
+                    .map_err(|error| format!("{error:#}"));
+                let _ = done_tx.send(cleared);
+                ctx.request_repaint();
+            })
+            .map_err(|error| format!("could not clear translations: {error}"))?;
+        Ok(done)
+    }
+
+    /// The bytes translations keep on disk.
+    pub fn data_size(&self) -> u64 {
+        self.pdf.translation_data_size()
     }
 
     /// Writes a finished session's PDF to `output`: the translated pages,
@@ -447,6 +525,8 @@ pub struct DocSession {
     scope: Arc<TranslationScope>,
     /// A page the reader moved to and since when, before the scope follows.
     dwell: Option<(usize, Instant)>,
+    /// The session's thread, for clearing to wait on.
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl DocSession {

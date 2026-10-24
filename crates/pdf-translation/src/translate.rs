@@ -565,6 +565,14 @@ impl<'a> ScopedRun<'a> {
 
 /// Translates the units the scope covers, most urgent first; units out of
 /// scope are left out of the outcome unless the scope grows to them.
+/// The units a run of `document` would translate (to forget their cached
+/// translations, say).
+pub fn document_translation_units(document: &DocumentV1) -> Vec<TranslationUnit> {
+    let mut document = document.clone();
+    enforce_unmapped_glyph_policy(&mut document);
+    build_translation_units(&document)
+}
+
 pub fn translate_document_scoped(
     mut document: DocumentV1,
     backend: &dyn TranslationBackend,

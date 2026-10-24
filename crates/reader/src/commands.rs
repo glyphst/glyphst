@@ -121,6 +121,7 @@ pub enum Command {
     TranslateSelection,
     TranslateDocument,
     ShowTranslated,
+    ClearTranslation,
     SideBySide,
     Assistant,
     QuickAsk,
@@ -216,7 +217,7 @@ impl Needs {
 }
 
 impl Command {
-    pub const ALL: [Self; 99] = [
+    pub const ALL: [Self; 100] = [
         Self::Open,
         Self::OpenWithDialog,
         Self::CloseTab,
@@ -301,6 +302,7 @@ impl Command {
         Self::TranslateSelection,
         Self::TranslateDocument,
         Self::ShowTranslated,
+        Self::ClearTranslation,
         Self::SideBySide,
         Self::Assistant,
         Self::QuickAsk,
@@ -405,6 +407,7 @@ impl Command {
             Self::TranslateSelection => "translation.selection",
             Self::TranslateDocument => "translation.document",
             Self::ShowTranslated => "translation.show_translated",
+            Self::ClearTranslation => "translation.clear",
             Self::SideBySide => "translation.side_by_side",
             Self::Assistant => "assistant.toggle",
             Self::QuickAsk => "assistant.quick_ask",
@@ -513,6 +516,7 @@ impl Command {
             Self::TranslateSelection => "Translate the selection",
             Self::TranslateDocument => "Translate the document",
             Self::ShowTranslated => "Show translated or original pages",
+            Self::ClearTranslation => "Clear this document's translation",
             Self::SideBySide => "Translation side by side",
             Self::Assistant => "Show or hide the assistant",
             Self::QuickAsk => "Quick ask about this page",
@@ -612,6 +616,7 @@ impl Command {
             Self::Bookmark => "bookmark-plus",
             Self::TranslateSelection | Self::TranslateDocument => "languages",
             Self::ShowTranslated => "globe",
+            Self::ClearTranslation => "trash-2",
             Self::SideBySide => "columns-2",
             Self::Assistant => "sparkles",
             Self::QuickAsk => "message-square",
@@ -716,6 +721,7 @@ impl Command {
             Self::TranslateSelection
             | Self::TranslateDocument
             | Self::ShowTranslated
+            | Self::ClearTranslation
             | Self::SideBySide => Category::Translation,
             Self::Assistant | Self::QuickAsk | Self::McpConfig => Category::Assistant,
             Self::PresentDraw
@@ -833,6 +839,7 @@ impl Command {
             | Self::SmallerText
             | Self::TranslateDocument
             | Self::ShowTranslated
+            | Self::ClearTranslation
             | Self::SideBySide
             | Self::SplitDown
             | Self::ClosePane
@@ -977,7 +984,7 @@ impl Command {
             | Self::McpConfig => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
-            Self::ShowTranslated => Needs::Translation,
+            Self::ShowTranslated | Self::ClearTranslation => Needs::Translation,
             Self::FocusNextPane | Self::ClosePane => Needs::Panes,
             Self::RotateClockwise
             | Self::RotateCounterclockwise

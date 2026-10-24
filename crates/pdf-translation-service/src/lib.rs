@@ -85,13 +85,14 @@ impl From<&Settings> for PdfTranslationConfig {
 
 pub use glyphst_pdf_translation::*;
 pub use job::{
-    ArtifactGeometry, ExportLayout, PageFailureCode, PdfTranslationArtifactManifest,
-    PdfTranslationError, PdfTranslationExportRequest, PdfTranslationHoverRegion,
-    PdfTranslationHoverRegionKind, PdfTranslationPageFailure, PdfTranslationPageGlyph,
-    PdfTranslationPagePoint, PdfTranslationPagePreview, PdfTranslationPageQuad,
-    PdfTranslationPageTextBlock, PdfTranslationPageTextLayer, PdfTranslationPageTextLine,
-    PdfTranslationRequest, PdfTranslationRestoredSession, PdfTranslationResult,
-    PdfTranslationService, PdfTranslationSessionCacheKey, PdfTranslationSessionRequest,
-    PdfTranslationSessionResult, PdfTranslationSessionUpdate, PdfTranslationWarning,
+    ArtifactGeometry, ClearedTranslation, ExportLayout, PageFailureCode,
+    PdfTranslationArtifactManifest, PdfTranslationError, PdfTranslationExportRequest,
+    PdfTranslationHoverRegion, PdfTranslationHoverRegionKind, PdfTranslationPageFailure,
+    PdfTranslationPageGlyph, PdfTranslationPagePoint, PdfTranslationPagePreview,
+    PdfTranslationPageQuad, PdfTranslationPageTextBlock, PdfTranslationPageTextLayer,
+    PdfTranslationPageTextLine, PdfTranslationRequest, PdfTranslationRestoredSession,
+    PdfTranslationResult, PdfTranslationService, PdfTranslationSessionCacheKey,
+    PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
+    PdfTranslationWarning,
 };
 pub use ocr_probe::{OcrProbeError, test_ocr_connection};

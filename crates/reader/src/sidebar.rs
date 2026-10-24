@@ -118,6 +118,12 @@ pub enum SidebarAction {
     SetFacing(bool),
     CancelTranslation,
     ExportTranslation(ExportLayout),
+    /// Ask before clearing the document's translation (03e).
+    AskClearTranslation,
+    /// Clear the document's translation and its cached text.
+    ClearTranslation,
+    /// Keep it after all.
+    KeepTranslation,
     ShowTranslated(bool),
     Unpin(usize),
     /// Follow the section being read again and show it.
@@ -155,6 +161,8 @@ pub struct SidebarInfo<'a> {
     pub page_columns: PageColumns,
     /// Local OCR is installed (looked up while a page needs it).
     pub local_ocr_ready: bool,
+    /// The document's translation waits for clearing to be confirmed.
+    pub confirm_clear: bool,
     /// The document's OCR choice and what it falls back to, while the
     /// translation tab shows.
     pub ocr: Option<OcrRow>,
@@ -636,6 +644,10 @@ fn translation_panel(
             egui::pos2(ui.max_rect().left(), bottom - footer + 8.0),
             egui::pos2(ui.max_rect().right(), bottom),
         );
+        if info.confirm_clear {
+            clear_confirm(ui, foot, actions);
+            return;
+        }
         let mut foot_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(foot)
@@ -656,32 +668,98 @@ fn translation_panel(
         let can_export = session.status == SessionStatus::Finished
             && !matches!(session.export, Some(Export::Running(_)));
         let width = foot_ui.available_width();
-        let export = foot_ui.add_enabled(
-            can_export,
+        let export = foot_ui.add(
             Button::primary("export")
                 .trailing_icon("chevron-down")
                 .min_width(width),
         );
         egui::Popup::menu(&export).show(|ui| {
             ui_menu::style(ui);
-            if ui_menu::Item::new("side by side")
-                .icon("columns-2")
-                .detail("original | translation on one wide page")
-                .key("pdf")
+            ui.add_enabled_ui(can_export, |ui| {
+                if ui_menu::Item::new("side by side")
+                    .icon("columns-2")
+                    .detail("original | translation on one wide page")
+                    .key("pdf")
+                    .show(ui)
+                    .clicked()
+                {
+                    actions.push(SidebarAction::ExportTranslation(ExportLayout::SideBySide));
+                }
+                if ui_menu::Item::new("translated only")
+                    .icon("file-text")
+                    .key("pdf")
+                    .show(ui)
+                    .clicked()
+                {
+                    actions.push(SidebarAction::ExportTranslation(ExportLayout::Translated));
+                }
+            });
+            ui_menu::separator(ui);
+            if ui_menu::Item::new("clear translation…")
+                .icon("trash-2")
+                .danger(true)
                 .show(ui)
                 .clicked()
             {
-                actions.push(SidebarAction::ExportTranslation(ExportLayout::SideBySide));
-            }
-            if ui_menu::Item::new("translated only")
-                .icon("file-text")
-                .key("pdf")
-                .show(ui)
-                .clicked()
-            {
-                actions.push(SidebarAction::ExportTranslation(ExportLayout::Translated));
+                actions.push(SidebarAction::AskClearTranslation);
             }
         });
+    }
+}
+
+/// Clearing, confirmed in place (frame 03e): the question over the foot of
+/// the pages, and the foot's slot turned to `[ cancel ] [ clear ]`.
+fn clear_confirm(ui: &mut egui::Ui, foot: egui::Rect, actions: &mut Vec<SidebarAction>) {
+    let tokens = Tokens::get(ui.ctx());
+    let width = foot.width();
+    let galley = |text: &str, size: f32, color| {
+        egui::WidgetText::from(
+            egui::RichText::new(text)
+                .font(theme::mono(size))
+                .color(color),
+        )
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
+            width - 16.0,
+            egui::FontSelection::Default,
+        )
+    };
+    let question = galley("Clear this document's translation?", 11.0, tokens.text);
+    let detail = galley(
+        "Its translated pages and cached text go; the next run asks the provider again. Recognised scans stay.",
+        10.0,
+        tokens.muted,
+    );
+    let height = 8.0 + question.size().y + 6.0 + detail.size().y + 8.0;
+    let note = egui::Rect::from_min_size(
+        egui::pos2(foot.left(), foot.top() - 8.0 - height),
+        egui::vec2(width, height),
+    );
+    let painter = ui.painter();
+    // Over the pages' foot, opaque, so nothing under it moves.
+    painter.rect_filled(note, tokens.ctl_radius(), tokens.surface);
+    painter.rect_filled(note, tokens.ctl_radius(), tokens.err_soft);
+    let question_height = question.size().y;
+    painter.galley(note.min + egui::vec2(8.0, 8.0), question, tokens.text);
+    painter.galley(
+        note.min + egui::vec2(8.0, 8.0 + question_height + 6.0),
+        detail,
+        tokens.muted,
+    );
+    // The foot's slot gives the two answers.
+    let mut slot = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(foot)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    slot.spacing_mut().item_spacing.x = 8.0;
+    let half = (width - 8.0) / 2.0;
+    if slot.add(Button::ghost("cancel").min_width(half)).clicked() {
+        actions.push(SidebarAction::KeepTranslation);
+    }
+    if slot.add(Button::ghost("clear").min_width(half)).clicked() {
+        actions.push(SidebarAction::ClearTranslation);
     }
 }
 
