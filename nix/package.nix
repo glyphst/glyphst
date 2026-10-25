@@ -47,8 +47,8 @@
     libglvnd
   ];
   fontsConf = makeFontsConf {
-    fontDirectories = [ ];
-    includes = [ "${fontconfig.out}/etc/fonts/conf.d" ];
+    fontDirectories = [];
+    includes = ["${fontconfig.out}/etc/fonts/conf.d"];
   };
   src = lib.fileset.toSource {
     root = ../.;
@@ -61,21 +61,26 @@
   };
   # crane vendors every Cargo.lock source in its own directory and fetches Git
   # dependencies (craft-libs, merman) with builtins.fetchGit.
+  # mupdf-sys copies its bundled MuPDF with fs::copy, which keeps the store's
+  # read-only mode, and then patches fitz/font.c in place. Make each copy
+  # owner-writable.
+  writableMupdfCopies = buildRs: ''
+    substituteInPlace ${buildRs} --replace-fail \
+      'fs::copy(&src_path, &dst_path)' \
+      'fs::copy(&src_path, &dst_path).and_then(|_| { let mut perms = fs::metadata(&dst_path)?.permissions(); let mode = std::os::unix::fs::PermissionsExt::mode(&perms) | 0o200; std::os::unix::fs::PermissionsExt::set_mode(&mut perms, mode); fs::set_permissions(&dst_path, perms) })'
+  '';
   cargoVendorDir = craneLib.vendorCargoDeps {
     inherit src;
-    # mupdf-sys copies its bundled MuPDF with fs::copy, which keeps the store's
-    # read-only mode, and then patches fitz/font.c in place. Make each copy
-    # owner-writable.
+    # From crates.io: the package is the crate.
     overrideVendorCargoPackage = p: drv:
       if p.name == "mupdf-sys"
-      then
-        drv.overrideAttrs (_: {
-          postPatch = ''
-            substituteInPlace build.rs --replace-fail \
-              'fs::copy(&src_path, &dst_path)' \
-              'fs::copy(&src_path, &dst_path).and_then(|_| { let mut perms = fs::metadata(&dst_path)?.permissions(); let mode = std::os::unix::fs::PermissionsExt::mode(&perms) | 0o200; std::os::unix::fs::PermissionsExt::set_mode(&mut perms, mode); fs::set_permissions(&dst_path, perms) })'
-          '';
-        })
+      then drv.overrideAttrs (_: {postPatch = writableMupdfCopies "build.rs";})
+      else drv;
+    # From Git (mupdf-rs main until a release has #277): the checkout is the
+    # repository.
+    overrideVendorGitCheckout = ps: drv:
+      if lib.any (p: p.name == "mupdf-sys") ps
+      then drv.overrideAttrs (_: {postPatch = writableMupdfCopies "mupdf-sys/build.rs";})
       else drv;
   };
   commonArgs = {
