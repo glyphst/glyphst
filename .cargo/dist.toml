@@ -1,0 +1,3 @@
+# Linker flags for shipped builds (script/bundle, script/check.sh size):
+# cargo --config .cargo/dist.toml build --profile dist. The profile itself is
+# in Cargo.toml, so Nix builds share it.

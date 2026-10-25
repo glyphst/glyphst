@@ -4,6 +4,9 @@
 #   script/check.sh quick   every edit loop: fmt, clippy, tests
 #   script/check.sh gate    before a PR: quick + doctests, audit, and a release
 #                           Reader build
+#   script/check.sh size    the shipped Reader build for this machine
+#                           (script/bundle's profile and linker flags): its
+#                           bytes as built, stripped and gzipped, in size.json
 #   script/check.sh corpus  GPU page rendering against MuPDF on sample PDFs
 #                           (GLYPHST_PDF_CORPUS, default: ../bak pdf.js corpus;
 #                           GLYPHST_PDF_CORPUS_LIMIT files, default 100), and
@@ -73,8 +76,8 @@ while (($# > 0)); do
     shift
 done
 case ${tier} in
-    quick | gate | corpus | screens) ;;
-    *) sed -n '2,28p' "$0" >&2; exit 2 ;;
+    quick | gate | size | corpus | screens) ;;
+    *) sed -n '2,31p' "$0" >&2; exit 2 ;;
 esac
 if [[ ${tier} != screens ]] && ((${#names[@]} > 0)); then
     printf 'only screens takes names: %s\n' "${names[*]}" >&2
@@ -139,6 +142,24 @@ step() {
     record "${name}" "${status}" "$(($(date +%s) - begin))"
 }
 
+# Bytes of `binary` as built, stripped of every symbol (as shipped) and
+# gzipped (as downloaded), with its code and constant sections, into `json`.
+measure_size() {
+    local binary=$1 json=$2 stripped="${run_dir}/stripped"
+    objcopy --strip-all "${binary}" "${stripped}"
+    local built shipped gzipped text rodata
+    built=$(stat -c %s "${binary}")
+    shipped=$(stat -c %s "${stripped}")
+    gzipped=$(gzip -9 -c "${stripped}" | wc -c)
+    text=$(size -A "${stripped}" | awk '$1 == ".text" { print $2 }')
+    rodata=$(size -A "${stripped}" | awk '$1 == ".rodata" { print $2 }')
+    rm -f "${stripped}"
+    printf '{"built":%d,"stripped":%d,"gzipped":%d,"text":%d,"rodata":%d}\n' \
+        "${built}" "${shipped}" "${gzipped}" "${text}" "${rodata}" > "${json}"
+    printf '%-10s %12d bytes\n' built "${built}" stripped "${shipped}" gzipped "${gzipped}" \
+        .text "${text}" .rodata "${rodata}"
+}
+
 # Records a finished step (name, exit status, seconds) after its name was printed.
 record() {
     local name=$1 status=$2 seconds=$3 log="${run_dir}/${1}.log"
@@ -156,6 +177,14 @@ record() {
 }
 
 printf 'check %s at %s\n' "${tier}" "$(git rev-parse --short HEAD)"
+if [[ ${tier} == size ]]; then
+    # The dev shell's RUSTFLAGS (mold) would replace the config's flags.
+    step size-build env -u RUSTFLAGS cargo build --locked --profile dist \
+        --config .cargo/dist.toml -p glyphst-reader
+    step size measure_size "${repo}/target/dist/glyphst-reader" "${run_dir}/size.json"
+    cat "${run_dir}/size.log"
+    finish
+fi
 if [[ ${tier} == corpus ]]; then
     corpus=${GLYPHST_PDF_CORPUS:-${repo}/../bak/glyphst-pdf/references/pdfjs/test/pdfs}
     # Release build: rendering and MuPDF rasterization are too slow unoptimized.
