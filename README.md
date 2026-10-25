@@ -157,6 +157,29 @@ Bug reports and ideas are welcome in
 the checks or cut a release, see [CONTRIBUTING.md](CONTRIBUTING.md); the
 [architecture notes](ARCHITECTURE.md) explain how the pieces fit.
 
+## Acknowledgements
+
+Glyphst Reader is built on [MuPDF](https://mupdf.com) (through
+[mupdf-rs](https://github.com/messense/mupdf-rs)),
+[egui](https://github.com/emilk/egui), [wgpu](https://wgpu.rs) and
+[Typst](https://typst.app), with icons from [Lucide](https://lucide.dev). It
+also owes a great deal to projects we studied closely:
+
+- [Highly-Efficient-PDF-Renderer](https://github.com/soadzoor/Highly-Efficient-PDF-Renderer):
+  the model for drawing pages on the GPU and for smooth, sharp zoom.
+- [retain-pdf](https://github.com/wxyhgk/retain-pdf): the layout-preserving
+  approach behind translation.
+- [Zed](https://github.com/zed-industries/zed): the Reader began on its GPUI;
+  Mermaid diagrams are adapted from its `mermaid_render`, and the release
+  builds and fonts follow its lead.
+- [sioyek](https://github.com/ahrm/sioyek) and
+  [zathura](https://github.com/pwmt/zathura): the reading keys and the Vim
+  keymap.
+- [Zeron](https://github.com/zeronsh/zeron): the assistant's chat, its small
+  motions and Markdown tables.
+- [niri](https://github.com/YaLTeR/niri): following the desktop's theme and
+  blur.
+
 ## License
 
 Glyphst Reader is free software under the
