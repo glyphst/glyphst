@@ -62,7 +62,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates clang curl git libclang-dev \
+            build-essential ca-certificates clang curl git libclang-dev lld \
             pkg-config libfontconfig1-dev libfreetype6-dev libudev-dev \
             libgl1-mesa-dev libvulkan-dev libwayland-dev libx11-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
