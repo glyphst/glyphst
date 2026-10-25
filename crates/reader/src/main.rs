@@ -19,6 +19,10 @@
 //! Alt+Right back and forward, Ctrl+\ split right, F6 next pane, F9
 //! sidebar, F12 statistics. Dragging a tab onto the pages splits them.
 
+// No console window opens with the Reader on Windows; `--mcp-stdio` and the
+// Typst worker still use the pipes their parent hands them.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod activity_view;
 mod ai;
 mod ai_bridge;

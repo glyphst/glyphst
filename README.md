@@ -31,12 +31,25 @@ nix develop
 cargo run -p glyphst-reader --release -- /path/to/document.pdf
 ```
 
-The CJK interface faces (Noto Sans CJK SC) and the PDF translation fonts live
-in [glyphst-fonts](https://github.com/glyphst/glyphst-fonts), read at run time
-from `$GLYPHST_FONTS_DIR` or a `fonts/` checkout beside this one. Without it,
-CJK text falls back to an installed font and translation reports the missing
-directory. `cargo build --release` is the quick local build; shipped builds use
-`--profile dist` (thin LTO, one codegen unit).
+The CJK faces (Noto Sans CJK SC, Source Han Serif SC) are read at run time
+from `$GLYPHST_FONTS_DIR`, the copy Settings · Models downloads, or a
+[glyphst-fonts](https://github.com/glyphst/glyphst-fonts) checkout beside this
+one. Without them, CJK text in the interface falls back to an installed font,
+and translations into Chinese, Japanese or Korean offer the download.
+`cargo build --release` is the quick local build. Shipped builds use
+`script/bundle <target>`: the `dist` profile (thin LTO, one codegen unit,
+stripped, `opt-level = "z"` for Glyphst's cold crates) with the linker flags in
+`.cargo/dist.toml`; `script/check.sh size` measures it.
+
+### Releasing
+
+Bump `[workspace.package] version` in `Cargo.toml`, commit, and push the tag
+`v<version>`. The [release workflow](.github/workflows/release.yml) builds lone
+executables for Linux (glibc 2.31 or newer), macOS (11 or newer) and Windows,
+each on x86_64 and aarch64, and publishes them with `SHA256SUMS` as the GitHub
+Release of that tag (a prerelease when the version has a `-`). Running the
+workflow by hand builds them without publishing. The macOS and Windows
+executables are not signed.
 
 Without Nix, install the platform packages listed in
 [CI](.github/workflows/ci.yml) before running Cargo.

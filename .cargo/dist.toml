@@ -6,3 +6,9 @@
 # no code compares their addresses (LLVM's address-significance tables).
 [target.'cfg(target_os = "linux")']
 rustflags = ["-C", "link-arg=-Wl,--icf=safe", "-C", "llvm-args=-addrsig"]
+
+# The C runtime linked in (MuPDF too, through the mupdf-sys patch), so the
+# executable runs without the VC++ redistributable. MSVC's linker folds
+# identical code in release builds already.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

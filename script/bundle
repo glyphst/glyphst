@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: script/bundle TARGET
+
+Build the Glyphst Reader for TARGET (a Rust target triple) as it ships, and
+copy the lone executable to
+target/bundle/glyphst-reader-<version>-<os>-<arch>[.exe].
+
+  x86_64-unknown-linux-gnu   aarch64-unknown-linux-gnu
+  x86_64-apple-darwin        aarch64-apple-darwin
+  x86_64-pc-windows-msvc     aarch64-pc-windows-msvc
+
+Linux builds run on Ubuntu 20.04, so the executable needs glibc 2.31 or
+newer; they need only the system's libc, libm, libgcc_s, libudev and
+libfontconfig. macOS builds take MACOSX_DEPLOYMENT_TARGET (11.0 in CI).
+The CJK fonts and models download at run time; the Typst packages and
+Lilex are built in.
+EOF
+}
+
+fail() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    "")
+        usage >&2
+        exit 2
+        ;;
+esac
+target=$1
+
+case "$target" in
+    x86_64-* | aarch64-*) arch=${target%%-*} ;;
+    *) fail "unsupported target: $target" ;;
+esac
+extension=
+case "$target" in
+    *-unknown-linux-gnu) os=linux ;;
+    *-apple-darwin) os=macos ;;
+    *-pc-windows-msvc)
+        os=windows
+        extension=.exe
+        ;;
+    *) fail "unsupported target: $target" ;;
+esac
+
+workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$workspace_dir"
+
+version="$(awk '/^\[workspace.package\]/ { found = 1 } found && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
+[[ -n "$version" ]] || fail "no [workspace.package] version in Cargo.toml"
+
+# RUSTFLAGS would replace the flags in .cargo/dist.toml.
+[[ -z "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" ]] ||
+    fail "unset RUSTFLAGS: it replaces .cargo/dist.toml's flags"
+
+if [[ "$os" == linux ]]; then
+    glibc_version="$(getconf GNU_LIBC_VERSION)"
+    [[ "$glibc_version" == "glibc 2.31" ]] ||
+        fail "build on Ubuntu 20.04 (glibc 2.31) so the executable runs on older systems; found $glibc_version"
+fi
+
+cargo build --locked --profile dist --config .cargo/dist.toml \
+    --package glyphst-reader --bin glyphst-reader --target "$target"
+
+target_root="${CARGO_TARGET_DIR:-$workspace_dir/target}"
+built="$target_root/$target/dist/glyphst-reader$extension"
+[[ -f "$built" ]] || fail "built executable not found: $built"
+
+case "$os" in
+    linux)
+        interpreter="$(readelf -lW "$built" | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')"
+        [[ "$interpreter" != /nix/store/* ]] ||
+            fail "the executable uses a Nix Store interpreter; build on Ubuntu 20.04"
+        while read -r library; do
+            case "$library" in
+                libc.so.6 | libm.so.6 | libgcc_s.so.1 | libudev.so.1 | libfontconfig.so.1 | ld-linux*.so.*) ;;
+                *) fail "the executable needs $library, which not every system has" ;;
+            esac
+        done < <(readelf -dW "$built" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+        ;;
+    macos)
+        while read -r library; do
+            case "$library" in
+                /usr/lib/* | /System/Library/*) ;;
+                *) fail "the executable needs $library, which macOS doesn't have" ;;
+            esac
+        done < <(otool -L "$built" | tail -n +2 | awk '{ print $1 }')
+        ;;
+esac
+
+bundle_dir="$target_root/bundle"
+bundled="$bundle_dir/glyphst-reader-$version-$os-$arch$extension"
+mkdir -p "$bundle_dir"
+cp "$built" "$bundled"
+printf 'Created %s (%s bytes)\n' "$bundled" "$(wc -c < "$bundled" | tr -d ' ')"
