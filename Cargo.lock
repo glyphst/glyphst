@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-agent-host"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3447,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-ai"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3466,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-core"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "dirs 7.0.0",
  "httpdate",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-effects"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "bytemuck",
  "pollster 0.4.0",
@@ -3484,7 +3484,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-embed"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3503,7 +3503,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-library"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3517,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-markdown"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "egui",
  "glyphst-core",
@@ -3535,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-mermaid-render"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "merman",
@@ -3546,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-metadata"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-models"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3576,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-ocr"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3590,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-pdf"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-pdf-gpu"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3619,7 +3619,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-pdf-translation"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-pdf-translation-service"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3659,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-reader"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-search"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-settings"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-core",
@@ -3740,7 +3740,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-sync"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "opendal",
@@ -3754,7 +3754,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-translation"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "glyphst-ai",
@@ -3769,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-ui"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "egui",
  "egui_extras",
@@ -3781,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-vault"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "sha2 0.11.0",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "glyphst-zotero-import"
-version = "26.10.25"
+version = "26.10.25+1"
 dependencies = [
  "anyhow",
  "rusqlite",

@@ -29,7 +29,7 @@ resolver = "3"
 [workspace.package]
 # The release date, YY.M.D; a second release that day is YY.M.D+1, tagged
 # vYY.M.D.1 (see CONTRIBUTING.md).
-version = "26.10.25"
+version = "26.10.25+1"
 edition = "2024"
 
 [workspace.lints.rust]
