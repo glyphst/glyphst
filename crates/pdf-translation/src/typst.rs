@@ -42,7 +42,9 @@ pub enum TypstExecutionMode {
 #[derive(Debug, Clone)]
 pub struct TypstCompilerConfig {
     pub assets_dir: PathBuf,
-    /// The glyphst-fonts checkout whose `fonts/` holds the CJK and Lilex faces.
+    /// The CJK fonts' folder, whose `fonts/` holds the faces: a
+    /// glyphst-fonts checkout or the downloaded copy; empty when there is
+    /// none, which only translations into CJK need.
     pub fonts_dir: PathBuf,
     pub execution: TypstExecutionMode,
 }
@@ -173,7 +175,7 @@ impl TypstCompiler {
         cancellation: &CancellationToken,
     ) -> Result<TypstOutput, TypstError> {
         validate_file_stem(file_stem)?;
-        validate_compiler_assets(&self.config.assets_dir, &self.config.fonts_dir)?;
+        validate_compiler_assets(&self.config.assets_dir)?;
         let executable = std::env::current_exe().map_err(|error| {
             TypstError::process(format!(
                 "failed to locate the Glyphst Reader executable for the Typst worker: {error}"
@@ -444,7 +446,7 @@ fn compile_source_in_process(
     file_stem: &str,
 ) -> Result<TypstOutput, TypstError> {
     validate_file_stem(file_stem)?;
-    validate_compiler_assets(assets_dir, fonts_dir)?;
+    validate_compiler_assets(assets_dir)?;
     let source_path = job_directory.join(format!("{file_stem}.typ"));
     validate_file_asset(&source_path, "generated Typst source")?;
 
@@ -485,19 +487,33 @@ impl GlyphstTypstWorld {
         fonts_dir: &Path,
         file_stem: &str,
     ) -> Result<Self, TypstError> {
+        let main_name = format!("{file_stem}.typ");
         let font_path = fonts_dir.join("fonts");
-        let font_entries = fonts::scan(&font_path).collect::<Vec<_>>();
-        if font_entries.is_empty() {
-            return Err(TypstError::missing_asset(format!(
-                "translation font directory contains no readable fonts at {}",
-                font_path.display()
-            )));
+        let font_entries = if font_path.is_dir() {
+            fonts::scan(&font_path).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let covers_cjk = font_entries
+            .iter()
+            .any(|(_, info)| info.coverage.contains(u32::from('中')));
+        if !covers_cjk {
+            let source = fs::read_to_string(job_directory.join(&main_name)).map_err(|error| {
+                TypstError::io(format!(
+                    "failed to read the generated Typst source: {error}"
+                ))
+            })?;
+            if source.chars().any(is_cjk) {
+                return Err(TypstError::missing_asset(
+                    "the CJK fonts for translation are not downloaded (the Models page has                      them; GLYPHST_FONTS_DIR names a glyphst-fonts checkout)",
+                ));
+            }
         }
         let mut font_store = FontStore::new();
         font_store.extend(fonts::embedded());
+        font_store.extend(lilex());
         font_store.extend(font_entries);
 
-        let main_name = format!("{file_stem}.typ");
         let main_path = VirtualPath::new(&main_name).map_err(|error| {
             TypstError::io(format!("failed to create Typst source path: {error}"))
         })?;
@@ -1460,6 +1476,37 @@ fn next_math_span(value: &str, search_from: usize) -> Option<(usize, usize, Stri
     None
 }
 
+/// Lilex, the code face, in the binary: translations into Latin scripts need
+/// no download.
+fn lilex() -> impl Iterator<Item = (Font, typst::text::FontInfo)> {
+    [
+        &include_bytes!("../fonts/Lilex-Regular.ttf")[..],
+        include_bytes!("../fonts/Lilex-Bold.ttf"),
+        include_bytes!("../fonts/Lilex-Italic.ttf"),
+        include_bytes!("../fonts/Lilex-BoldItalic.ttf"),
+    ]
+    .into_iter()
+    .flat_map(|data| {
+        Font::iter(Bytes::new(data)).map(|font| {
+            let info = font.info().clone();
+            (font, info)
+        })
+    })
+}
+
+/// Han, kana and Hangul: text only the CJK fonts can set.
+fn is_cjk(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x3040..=0x30ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x2_0000..=0x3_ffff
+    )
+}
+
 fn typst_font_name(font_class: FontFamilyClass) -> &'static str {
     match font_class {
         FontFamilyClass::SansSerif => "Noto Sans CJK SC",
@@ -1639,11 +1686,7 @@ fn validate_file_stem(file_stem: &str) -> Result<(), TypstError> {
     }
 }
 
-fn validate_compiler_assets(assets_dir: &Path, fonts_dir: &Path) -> Result<(), TypstError> {
-    validate_asset(
-        &fonts_dir.join("fonts"),
-        "glyphst-fonts checkout (set GLYPHST_FONTS_DIR)",
-    )?;
+fn validate_compiler_assets(assets_dir: &Path) -> Result<(), TypstError> {
     validate_asset(
         &assets_dir.join("typst/packages/preview/cmarker/0.1.8"),
         "cmarker Typst package",
@@ -2186,6 +2229,29 @@ mod tests {
 
         assert!(matches!(result, Err(FileError::AccessDenied)));
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn latin_text_needs_no_fonts_folder_but_cjk_text_does() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("glyphst-typst-fonts-{nonce:x}"));
+        fs::create_dir_all(&directory).unwrap();
+        let assets = resolve_translation_assets_dir();
+        let no_fonts = directory.join("no-fonts");
+        let source = directory.join("translated-document.typ");
+
+        fs::write(&source, "#set text(font: \"Lilex\")\nLes pompes à chaleur").unwrap();
+        compile_source_in_process(&directory, &assets, &no_fonts, "translated-document").unwrap();
+
+        fs::write(&source, "热泵从环境空气中获取能量").unwrap();
+        let error =
+            compile_source_in_process(&directory, &assets, &no_fonts, "translated-document")
+                .unwrap_err();
+        assert_eq!(error.kind, TypstErrorKind::MissingAsset, "{error}");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
