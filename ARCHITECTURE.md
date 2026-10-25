@@ -153,9 +153,9 @@ Material You palettes drawn at each design token's tone, so contrast
 stays the design's. `fonts::install` puts the chosen chrome and
 prose families (bundled JetBrains Mono and Inter, or installed ones found
 through fontconfig) ahead of a CJK face of the same weight and egui's
-faces: Noto Sans CJK SC Regular, or Bold in the semibold and bold
-families, from the glyphst-fonts checkout (`glyphst_core::paths::fonts_dir`),
-else an installed CJK family with variable faces set to `wght` 400/700;
+faces: a downloaded Noto Sans CJK pack's Regular (SC first), or Bold in the
+semibold and bold families (`glyphst_core::paths::fonts_dir`), else an
+installed CJK family with variable faces set to `wght` 400/700;
 with ornaments off the motifs draw plain labels. `--gallery` draws every
 component (frame 01) for comparing with the design. The fonts and Lucide
 icons ship in `crates/ui/assets` with their licences. The System theme

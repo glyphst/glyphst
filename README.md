@@ -26,16 +26,18 @@ tools and the windowing and Vulkan libraries are needed. On Linux, the Nix
 development shell provides them.
 
 ```sh
-git clone https://github.com/glyphst/glyphst-fonts ../fonts
 nix develop
 cargo run -p glyphst-reader --release -- /path/to/document.pdf
 ```
 
-The CJK faces (Noto Sans CJK SC, Source Han Serif SC) are read at run time
-from `$GLYPHST_FONTS_DIR`, the copy Settings · Models downloads, or a
-[glyphst-fonts](https://github.com/glyphst/glyphst-fonts) checkout beside this
-one. Without them, CJK text in the interface falls back to an installed font,
-and translations into Chinese, Japanese or Korean offer the download.
+The CJK faces (Noto Sans CJK and Source Han Serif, a pack for each of Chinese
+(Simplified), Chinese (Traditional), Japanese and Korean) are read at run time
+from `$GLYPHST_FONTS_DIR`, the packs Settings · Resources downloads, or a
+`../fonts` folder laid out the same way (`fonts/manifest.txt`,
+`fonts/noto-sans-cjk-sc/…`), which `script/check.sh screens` needs so every
+shot has the same faces. Without them, CJK text in the interface falls back to
+an installed font, and a translation into Chinese, Japanese or Korean uses the
+computer's CJK fonts or offers the download.
 `cargo build --release` is the quick local build. Shipped builds use
 `script/bundle <target>`: the `dist` profile (thin LTO, one codegen unit,
 stripped, `opt-level = "z"` for Glyphst's cold crates) with the linker flags in

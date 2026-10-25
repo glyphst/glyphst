@@ -41,17 +41,9 @@
         let
           pkgs = mkPkgs system;
           craneLib = (crane.mkLib pkgs).overrideToolchain mkRustToolchain;
-          glyphstReader = pkgs.callPackage ./nix/package.nix {
-            inherit craneLib;
-            # The CJK and translation fonts, kept out of this repository.
-            # A private repository: fetched over SSH (like the Cargo Git
-            # dependencies), not as an HTTPS tarball.
-            glyphstFonts = builtins.fetchGit {
-              url = "ssh://git@github.com/glyphst/glyphst-fonts";
-              rev = "fb297ed94f5762e2ef274719da885137483803ca";
-              shallow = true;
-            };
-          };
+          # The CJK fonts are not packaged: like the released executables,
+          # the Reader downloads a language's when a translation needs them.
+          glyphstReader = pkgs.callPackage ./nix/package.nix { inherit craneLib; };
         in
         {
           glyphst-reader = glyphstReader;
