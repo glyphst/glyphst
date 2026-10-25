@@ -391,7 +391,7 @@ mod tests {
 
     fn text(content: &str) -> PageText {
         let bytes = single_page_pdf(content, FONT, "");
-        let document = Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let document = Document::from_copied_bytes(&bytes, "application/pdf").unwrap();
         let list = document
             .load_page(0)
             .unwrap()
@@ -483,7 +483,7 @@ mod tests {
                  /A << /S /URI /URI (https://example.org/) >> >>",
             ],
         );
-        let document = Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let document = Document::from_copied_bytes(&bytes, "application/pdf").unwrap();
         let links = page_links(&document.load_page(0).unwrap());
         assert_eq!(links.len(), 2, "{links:?}");
         assert!(

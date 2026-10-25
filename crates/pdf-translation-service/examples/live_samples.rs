@@ -254,7 +254,7 @@ fn compare_live_previews(
     }
     let exported = Document::open(exported_path.to_string_lossy().as_ref())?;
     for (page_index, preview) in previews {
-        let live = Document::from_bytes(preview.pdf.as_ref(), "application/pdf")?;
+        let live = Document::from_copied_bytes(preview.pdf.as_ref(), "application/pdf")?;
         let live_page = live.load_page(0)?;
         let exported_page = exported.load_page(*page_index as i32)?;
         let colorspace = Colorspace::device_rgb();

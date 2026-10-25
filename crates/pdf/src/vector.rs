@@ -1349,7 +1349,7 @@ mod tests {
     #[test]
     fn regions_render_their_area_at_the_size_asked() {
         let bytes = crate::test_pdf::single_page_pdf("1 0 0 rg 10 10 30 20 re f", "<< >>", "");
-        let document = mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let document = mupdf::Document::from_copied_bytes(&bytes, "application/pdf").unwrap();
         let page = document.load_page(0).unwrap();
         // The red box, in MuPDF's page space (y down on a 100 pt page).
         let image = render_region(&page, [10.0, 70.0, 40.0, 90.0], 120).unwrap();
@@ -1413,7 +1413,7 @@ mod tests {
                        1 0 0 rg 50 50 10 10 re f /Sh0 sh 0 0 1 rg 5 5 5 5 re f";
         let (full, _) = capture(content, SHADING);
         let bytes = crate::test_pdf::single_page_pdf(content, SHADING, "");
-        let document = mupdf::Document::from_bytes(&bytes, "application/pdf").unwrap();
+        let document = mupdf::Document::from_copied_bytes(&bytes, "application/pdf").unwrap();
         let page = document.load_page(0).unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
         // No waiting: a chunk after every vector item.

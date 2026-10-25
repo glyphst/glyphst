@@ -694,7 +694,8 @@ pub fn compose_side_by_side(
         );
         let contents = out
             .add_stream(
-                &Buffer::from_bytes(content.as_bytes()).map_err(PdfCompositionError::mupdf)?,
+                &Buffer::from_copied_bytes(content.as_bytes())
+                    .map_err(PdfCompositionError::mupdf)?,
                 None,
                 true,
             )
@@ -813,7 +814,7 @@ fn page_as_form(
     }
     let form = out
         .add_stream(
-            &Buffer::from_bytes(&content).map_err(PdfCompositionError::mupdf)?,
+            &Buffer::from_copied_bytes(&content).map_err(PdfCompositionError::mupdf)?,
             Some(&form),
             true,
         )

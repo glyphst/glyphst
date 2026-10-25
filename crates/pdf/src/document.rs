@@ -136,7 +136,7 @@ impl DocumentSnapshot {
             bail!("{} is not a PDF document", self.path.display());
         }
 
-        let mut document = MuPdfDocument::from_bytes(self.bytes())
+        let mut document = MuPdfDocument::from_copied_bytes(self.bytes())
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         let password_protected = authenticate_snapshot_document(self, &mut document)?;
         if !password_protected {
@@ -187,7 +187,7 @@ impl GlyphstDocument {
     pub fn from_snapshot(snapshot: &DocumentSnapshot, layout: DocumentLayout) -> Result<Self> {
         configure_context(snapshot.format(), layout)?;
         let mut inner =
-            mupdf::Document::from_bytes(snapshot.bytes(), snapshot.format().mime_type())
+            mupdf::Document::from_copied_bytes(snapshot.bytes(), snapshot.format().mime_type())
                 .with_context(|| format!("failed to open {}", snapshot.path().display()))?;
         let password_protected = authenticate_snapshot_document(snapshot, &mut inner)?;
         let reflowable = inner.is_reflowable().with_context(|| {
@@ -280,7 +280,7 @@ fn authenticate_snapshot_document(
 }
 
 fn validate_unencrypted_pdf_bytes(bytes: &[u8], source_path: &Path) -> Result<()> {
-    let document = MuPdfDocument::from_bytes(bytes).with_context(|| {
+    let document = MuPdfDocument::from_copied_bytes(bytes).with_context(|| {
         format!(
             "failed to validate the unencrypted copy of {}",
             source_path.display()
@@ -467,7 +467,7 @@ mod tests {
             .with_password(DocumentPassword::new("123456"));
 
         let bytes = snapshot.unencrypted_pdf_bytes().unwrap();
-        let document = MuPdfDocument::from_bytes(&bytes).unwrap();
+        let document = MuPdfDocument::from_copied_bytes(&bytes).unwrap();
         assert!(!document.needs_password().unwrap());
         assert!(
             document

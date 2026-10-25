@@ -35,7 +35,8 @@ pub(crate) fn is_installed(settings: &OcrSettings) -> bool {
 /// The text of the one-page PDF `pdf`, as a PaddleOCR payload in its
 /// pixels.
 pub(crate) fn recognize_page(ocr: &LocalOcr, pdf: &[u8]) -> Result<Value, String> {
-    let document = Document::from_bytes(pdf, "application/pdf").map_err(|e| e.to_string())?;
+    let document =
+        Document::from_copied_bytes(pdf, "application/pdf").map_err(|e| e.to_string())?;
     let page = document.load_page(0).map_err(|e| e.to_string())?;
     let pixmap = page
         .to_pixmap(

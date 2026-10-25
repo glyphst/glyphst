@@ -1387,7 +1387,7 @@ mod tests {
             session.status_line()
         );
         let preview = session.shown_preview(0).expect("page 1 is translated");
-        let document = mupdf::Document::from_bytes(&preview.pdf, "application/pdf").unwrap();
+        let document = mupdf::Document::from_copied_bytes(&preview.pdf, "application/pdf").unwrap();
         let text = glyphst_pdf::text::PageText::from_page(&document.load_page(0).unwrap())
             .unwrap()
             .plain_text();
@@ -1406,7 +1406,7 @@ mod tests {
             .base
             .as_ref()
             .expect("reveals carry the page's base");
-        let base = mupdf::Document::from_bytes(base, "application/pdf").unwrap();
+        let base = mupdf::Document::from_copied_bytes(base, "application/pdf").unwrap();
         assert_eq!(base.page_count().unwrap(), 1);
         let base_text = glyphst_pdf::text::PageText::from_page(&base.load_page(0).unwrap())
             .unwrap()

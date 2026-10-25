@@ -4981,7 +4981,7 @@ mod tests {
         source.new_page(mupdf::Size::A5).unwrap();
 
         let bytes = extract_single_pdf_page_from_document(&source, 1).unwrap();
-        let extracted = MuPdfDocument::from_bytes(&bytes).unwrap();
+        let extracted = MuPdfDocument::from_copied_bytes(&bytes).unwrap();
 
         assert_eq!(extracted.page_count().unwrap(), 1);
         let bounds = extracted.load_pdf_page(0).unwrap().bounds().unwrap();

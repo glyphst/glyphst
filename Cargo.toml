@@ -140,10 +140,10 @@ glyphst-reader = { opt-level = 3 }
 glyphst-search = { opt-level = 3 }
 glyphst-ui = { opt-level = 3 }
 
-# mupdf-sys 0.8.0 plus MSVC ARM64 and static-CRT builds (Windows on Arm, and
-# a Windows executable without the VC++ runtime), Visual Studio 2026's
-# toolset and MuPDF's ARM64 fix for bin2coff, from
-# glyphst/mupdf-rs@windows-arm64-0.8. Drop it once a mupdf-sys release has
-# them.
+# mupdf and mupdf-sys from upstream main: its Windows ARM64 and static-CRT
+# builds (Windows on Arm, and a Windows executable without the VC++ runtime;
+# messense/mupdf-rs#277) are not in a release yet, and mupdf 0.8.0 does not
+# build against main's mupdf-sys. Drop both once a release has them.
 [patch.crates-io]
-mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "00cd94ac0fd1357f0e278d4fd5ac717826725e96" }
+mupdf = { git = "https://github.com/messense/mupdf-rs", rev = "d03a17106e0164fe84c6e7fbe415cda20297825f" }
+mupdf-sys = { git = "https://github.com/messense/mupdf-rs", rev = "d03a17106e0164fe84c6e7fbe415cda20297825f" }

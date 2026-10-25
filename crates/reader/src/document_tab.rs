@@ -1970,7 +1970,7 @@ mod tests {
             "semantic first",
             "line",
         ]);
-        let document = mupdf::Document::from_bytes(&pdf, "application/pdf").unwrap();
+        let document = mupdf::Document::from_copied_bytes(&pdf, "application/pdf").unwrap();
         let text = PageText::from_page(&document.load_page(0).unwrap()).unwrap();
         let glyphs: Vec<usize> = (0..text.glyphs.len()).collect();
         assert_eq!(

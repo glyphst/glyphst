@@ -974,7 +974,7 @@ fn load_page(
 /// The drawing of a translated page's base (a one-page PDF), with its
 /// raster layers.
 fn load_base(pdf: &[u8]) -> Result<(PreparedPage, Vec<(usize, LayerImage)>)> {
-    let page = mupdf::Document::from_bytes(pdf, "application/pdf")
+    let page = mupdf::Document::from_copied_bytes(pdf, "application/pdf")
         .and_then(|base| base.load_page(0))
         .context("failed to open a translated page's base")?;
     let list = page.to_display_list(true)?;
@@ -1005,9 +1005,11 @@ fn source_page(
         PageSource::Original => document
             .load_page(i32::try_from(page)?)
             .with_context(|| format!("failed to load page {}", page + 1)),
-        PageSource::Preview { pdf, .. } => mupdf::Document::from_bytes(pdf, "application/pdf")
-            .and_then(|preview| preview.load_page(0))
-            .with_context(|| format!("failed to open the translated page {}", page + 1)),
+        PageSource::Preview { pdf, .. } => {
+            mupdf::Document::from_copied_bytes(pdf, "application/pdf")
+                .and_then(|preview| preview.load_page(0))
+                .with_context(|| format!("failed to open the translated page {}", page + 1))
+        }
     }
 }
 
