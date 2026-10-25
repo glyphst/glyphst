@@ -47,8 +47,9 @@ stripped, `opt-level = "z"` for Glyphst's cold crates) with the linker flags in
 
 Bump `[workspace.package] version` in `Cargo.toml`, commit, and push the tag
 `v<version>`. The [release workflow](.github/workflows/release.yml) builds lone
-executables for Linux (glibc 2.31 or newer), macOS (11 or newer) and Windows,
-each on x86_64 and aarch64, and publishes them with `SHA256SUMS` as the GitHub
+executables for Linux (glibc 2.31 or newer) and Windows, each on x86_64 and
+aarch64, and macOS 11 or newer on Apple silicon (Intel Macs are not
+supported), and publishes them with `SHA256SUMS` as the GitHub
 Release of that tag (a prerelease when the version has a `-`). Running the
 workflow by hand builds them without publishing. The macOS and Windows
 executables are not signed.

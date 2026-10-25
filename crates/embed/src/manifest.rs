@@ -19,8 +19,7 @@ pub const MODEL_KEY: &str = "ggml-org/embeddinggemma-2-GGUF@bfcd2987#embeddingge
 pub const DIMENSIONS: usize = 256;
 
 /// The engine built for this computer, if llama.cpp makes one: Vulkan on
-/// Linux and Windows (any GPU, else the CPU), Metal on Apple silicon, the CPU
-/// on Intel Macs.
+/// Linux and Windows (any GPU, else the CPU), Metal on Apple silicon.
 pub fn engine() -> Option<Engine> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some(Engine {
@@ -69,18 +68,6 @@ pub fn engine() -> Option<Engine> {
                 size: 24_930_718,
             },
             exe: "llama-server.exe",
-        })
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some(Engine {
-            name: "llama.cpp",
-            build: ENGINE_BUILD,
-            archive: Asset {
-                name: "llama-b11724-bin-macos-x64.tar.gz",
-                url: "https://github.com/ggml-org/llama.cpp/releases/download/b11724/llama-b11724-bin-macos-x64.tar.gz",
-                sha256: "a21403b0f4f9eb3804307008680d712332060e3e23b1dc258afdc08c0be85cd0",
-                size: 11_781_370,
-            },
-            exe: "llama-b11724/llama-server",
         })
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some(Engine {
