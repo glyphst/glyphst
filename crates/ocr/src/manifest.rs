@@ -77,7 +77,17 @@ fn cpu_build() -> Option<Build> {
             77_086_915,
             "onnxruntime-win-x64-1.27.0/lib/onnxruntime.dll",
         ))
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        Some((
+            "onnxruntime",
+            "onnxruntime-win-arm64-1.27.0.zip",
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-arm64-1.27.0.zip",
+            "a32f2650575b3c20df462e337519fd1cc4105356130d11dba9771c6f374d952f",
+            78_593_089,
+            "onnxruntime-win-arm64-1.27.0/lib/onnxruntime.dll",
+        ))
     } else {
+        // Intel Macs: ONNX Runtime stopped building for them.
         None
     }
 }
