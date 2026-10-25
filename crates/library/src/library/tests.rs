@@ -2675,7 +2675,7 @@ fn managed_import_copies_content_deduplicates_and_deletes_only_owned_files() {
         panic!("expected a new managed item");
     };
     let managed_path = store.primary_attachment(item_id).unwrap().path.clone();
-    assert!(managed_path.starts_with(managed_root.join("files")));
+    assert!(managed_path.starts_with(normalize_path(&managed_root).join("files")));
     assert_ne!(managed_path, normalize_path(&first_source));
     assert_eq!(fs::read(&managed_path).unwrap(), content);
 
@@ -3641,7 +3641,7 @@ fn moving_the_files_keeps_items_highlights_and_history_with_them() {
             panic!("expected item");
         };
         let old_path = store.primary_attachment(item_id).unwrap().path.clone();
-        assert!(old_path.starts_with(&old_root));
+        assert!(old_path.starts_with(normalize_path(&old_root)));
         store
             .add_highlight(
                 &old_path,
@@ -3673,7 +3673,11 @@ fn moving_the_files_keeps_items_highlights_and_history_with_them() {
         assert_eq!(moved.files, 1);
         assert_eq!(steps.last(), Some(&(1, 1)));
         let new_path = store.primary_attachment(item_id).unwrap().path.clone();
-        assert!(new_path.starts_with(&new_root), "{}", new_path.display());
+        assert!(
+            new_path.starts_with(normalize_path(&new_root)),
+            "{}",
+            new_path.display()
+        );
         assert!(new_path.is_file());
         assert!(!old_path.exists(), "the old copy is removed");
         assert_eq!(store.highlights_for(&new_path).len(), 1);
@@ -3681,7 +3685,10 @@ fn moving_the_files_keeps_items_highlights_and_history_with_them() {
     };
 
     let store = LibraryStore::open_for_test(database_path.clone()).unwrap();
-    assert_eq!(store.files_root(), Some(new_root.as_path()));
+    assert_eq!(
+        store.files_root(),
+        Some(normalize_path(&new_root).as_path())
+    );
     assert_eq!(store.primary_attachment(item_id).unwrap().path, new_path);
     assert_eq!(store.highlights_for(&new_path).len(), 1);
     assert_eq!(store.history_entries()[0].path, new_path);
@@ -3712,7 +3719,10 @@ fn a_moved_linked_file_is_found_again() {
     assert!(store.find_moved_linked_files().is_empty());
     let moved = read.join("renamed.pdf");
     fs::rename(&original, &moved).unwrap();
-    assert_eq!(store.find_moved_linked_files(), vec![(id, moved.clone())]);
+    assert_eq!(
+        store.find_moved_linked_files(),
+        vec![(id, normalize_path(&moved))]
+    );
     store.relink_library_attachment(id, &moved).unwrap();
     assert!(store.find_moved_linked_files().is_empty());
     let _ = fs::remove_dir_all(folder);
@@ -3839,7 +3849,7 @@ fn an_import_batch_brings_items_files_tags_collections_and_trash_in_one_write() 
     assert_eq!(store.library_items().len(), 3);
     let attachment = store.primary_attachment(paper).unwrap();
     assert!(!attachment.is_linked());
-    assert!(attachment.path.starts_with(&managed_root));
+    assert!(attachment.path.starts_with(normalize_path(&managed_root)));
     assert!(attachment.path.is_file());
     assert!(store.primary_attachment(book).unwrap().is_linked());
     assert!(store.primary_attachment(note_only).is_none());

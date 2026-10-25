@@ -34,6 +34,11 @@ pub(super) fn restrict_library_file(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to restrict {}", path.display()))?;
     }
 
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
     Ok(())
 }
 

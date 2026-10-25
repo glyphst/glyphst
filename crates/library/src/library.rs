@@ -2197,16 +2197,28 @@ pub use syncing::{
 pub use tags::{AiTagEdit, TagOwner};
 pub use vault_notes::VaultNoteRecord;
 
+/// `path` absolute with its links resolved. A path that doesn't exist yet
+/// resolves through its deepest existing folder, so it names the same place
+/// once created (macOS's temporary folder, for one, is a link).
 pub fn normalize_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    })
+    if let Ok(path) = fs::canonicalize(path) {
+        return path;
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    absolute
+        .ancestors()
+        .skip(1)
+        .find_map(|ancestor| {
+            let rest = absolute.strip_prefix(ancestor).ok()?;
+            Some(fs::canonicalize(ancestor).ok()?.join(rest))
+        })
+        .unwrap_or(absolute)
 }
 
 fn finite_fraction(value: f32) -> f32 {

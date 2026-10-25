@@ -98,6 +98,9 @@ impl LibraryStore {
         let files_root_chosen = chosen_root.is_some();
         let managed_library_root = chosen_root.unwrap_or(managed_library_root);
         ensure_managed_library_directories(&managed_library_root)?;
+        // Resolved as document paths are (macOS's temporary folder, for one,
+        // is a link), so the files' paths start with it.
+        let managed_library_root = super::normalize_path(&managed_library_root);
         let library = load_current_library(&database, &managed_library_root)?;
         let ai_catalog = super::ai_catalog::load_ai_catalog(&database)?;
         let jobs = super::jobs::load_library_jobs(&database)?;
