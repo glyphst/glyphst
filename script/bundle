@@ -84,7 +84,9 @@ case "$os" in
             fail "the executable uses a Nix Store interpreter; build on Ubuntu 20.04"
         while read -r library; do
             case "$library" in
-                libc.so.6 | libm.so.6 | libgcc_s.so.1 | libudev.so.1 | libfontconfig.so.1 | ld-linux*.so.*) ;;
+                # glibc (libdl, libpthread and librt are its parts before 2.34),
+                # libgcc_s, and the udev and fontconfig every desktop has.
+                libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 | libgcc_s.so.1 | libudev.so.1 | libfontconfig.so.1 | ld-linux*.so.*) ;;
                 *) fail "the executable needs $library, which not every system has" ;;
             esac
         done < <(readelf -dW "$built" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
