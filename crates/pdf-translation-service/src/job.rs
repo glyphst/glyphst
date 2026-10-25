@@ -4604,19 +4604,40 @@ fn create_prepared_directory(
     Ok(directory)
 }
 
+/// Writes `bytes` to `path`, readable by this user only. On Unix the bytes go
+/// to a temporary file renamed over `path`, so a session still reading the
+/// old copy (one being replaced by a newer session of the same job) never
+/// sees it half written.
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        use std::sync::atomic::{AtomicU64, Ordering};
 
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        static WRITES: AtomicU64 = AtomicU64::new(0);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let temporary = path.with_file_name(format!(
+            ".{name}.{}.{}.tmp",
+            std::process::id(),
+            WRITES.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            std::io::Write::write_all(&mut file, bytes)?;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+            fs::rename(&temporary, path)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        written
     }
     #[cfg(not(unix))]
     {
@@ -5306,6 +5327,30 @@ mod tests {
         assert_ne!(encrypted.as_slice(), decrypted.as_ref());
         assert!(cached_source_matches(Some(&digest), &encrypted, &decrypted));
         assert!(!cached_source_matches(None, &encrypted, &decrypted));
+    }
+
+    #[test]
+    fn a_private_file_is_replaced_whole_and_leaves_nothing_behind() {
+        let directory = temporary_test_directory("private-replace");
+        create_private_directory(&directory).unwrap();
+        let path = directory.join("source-original.pdf");
+        write_private_file(&path, b"first, a longer copy").unwrap();
+        // A reader holding the first copy keeps reading it whole.
+        let mut held = fs::File::open(&path).unwrap();
+
+        write_private_file(&path, b"second").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        let mut first = Vec::new();
+        std::io::Read::read_to_end(&mut held, &mut first).unwrap();
+        #[cfg(unix)]
+        assert_eq!(first, b"first, a longer copy");
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["source-original.pdf"]);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
