@@ -1,6 +1,7 @@
 /result
 /target/
 /.direnv/
+/.envrc
 /.cargo/config.local.toml
 /.env
 /.env.*
