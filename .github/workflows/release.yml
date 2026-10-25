@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a tag vX.Y.Z (the [workspace.package] version in Cargo.toml)
-# builds the Reader for six targets and publishes a GitHub Release with the
+# builds the Reader for five targets and publishes a GitHub Release with the
 # executables and SHA256SUMS. Run it by hand to build them without
 # publishing.
 on:
@@ -75,13 +75,17 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
             sh -s -- -y --profile minimal --default-toolchain none
+          # The toolchain rust-toolchain.toml names.
+          "$HOME/.cargo/bin/rustup" toolchain install
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-${{ matrix.arch }}
+          cache-on-failure: true
+
       - name: Build
-        run: |
-          # The toolchain rust-toolchain.toml names.
-          rustup toolchain install
-          script/bundle ${{ matrix.arch }}-unknown-linux-gnu
+        run: script/bundle ${{ matrix.arch }}-unknown-linux-gnu
 
       - uses: actions/upload-artifact@v4
         with:
@@ -89,19 +93,12 @@ jobs:
           path: target/bundle/*
           if-no-files-found: error
 
+  # Apple silicon only: Intel Macs are not supported.
   macos:
-    name: macOS (${{ matrix.arch }})
+    name: macOS (aarch64)
     needs: version
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            runner: macos-15
-          - arch: x86_64
-            runner: macos-15-intel
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -113,12 +110,17 @@ jobs:
           cache: false
           rustflags: ""
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-aarch64
+          cache-on-failure: true
+
       - name: Build
-        run: script/bundle ${{ matrix.arch }}-apple-darwin
+        run: script/bundle aarch64-apple-darwin
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
+          name: macos-aarch64
           path: target/bundle/*
           if-no-files-found: error
 
@@ -144,6 +146,11 @@ jobs:
           target: ${{ matrix.arch }}-pc-windows-msvc
           cache: false
           rustflags: ""
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-${{ matrix.arch }}
+          cache-on-failure: true
 
       - name: Build
         run: script/bundle ${{ matrix.arch }}-pc-windows-msvc

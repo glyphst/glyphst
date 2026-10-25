@@ -15,6 +15,8 @@ on:
       - "prek.toml"
       - "rust-toolchain.toml"
   pull_request:
+    # `labeled`: adding full-ci runs the Windows and macOS jobs.
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - ".gitmodules"
       - ".cargo/audit.toml"
@@ -75,7 +77,12 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-workspaces: "."
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main saves: branches restore its cache and do not evict it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --check
@@ -88,9 +95,14 @@ jobs:
 
   platform-check:
     name: Platform (${{ matrix.os }})
+    # Pushes to main, the weekly run, runs by hand and PRs labelled full-ci:
+    # other branches and PRs wait only on Linux.
+    if: >-
+      github.ref == 'refs/heads/main'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ${{ matrix.os }}
-    # Windows compiles MuPDF with MSBuild and the workspace twice (check,
-    # then the headless tests): about 35 minutes on a cold cache.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -102,13 +114,24 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-workspaces: "."
+          cache: false
 
-      - name: Compile workspace
-        run: cargo check --workspace --all-targets --all-features --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Test headless crates
-        run: cargo test --locked -p glyphst-core -p glyphst-library -p glyphst-pdf -p glyphst-settings -p glyphst-ai -p glyphst-search -p glyphst-embed
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # One build of the whole workspace (MuPDF once), then only the
+      # headless crates' tests: the others need a display.
+      - name: Build workspace and test headless crates
+        run: >-
+          cargo nextest run --workspace --all-targets --all-features --locked
+          -E 'package(glyphst-core) | package(glyphst-library) | package(glyphst-pdf)
+          | package(glyphst-settings) | package(glyphst-ai) | package(glyphst-search)
+          | package(glyphst-embed)'
 
   audit:
     runs-on: ubuntu-latest
@@ -123,7 +146,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-workspaces: "."
+          cache: false
 
       - name: Audit
         uses: rustsec/audit-check@v2.0.0

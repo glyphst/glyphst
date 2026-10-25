@@ -144,4 +144,4 @@ glyphst-ui = { opt-level = 3 }
 # glyphst/mupdf-rs@windows-arm64-0.8. Drop it once a mupdf-sys release has
 # them.
 [patch.crates-io]
-mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "1be2cd4279e63864710061d79f8cb2c1d5b62c8b" }
+mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "00cd94ac0fd1357f0e278d4fd5ac717826725e96" }
