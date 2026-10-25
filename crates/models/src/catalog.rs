@@ -181,14 +181,44 @@ pub const CATALOG: &[ModelEntry] = &[
         default: false,
     },
     ModelEntry {
-        id: "cjk-fonts",
+        id: "cjk-fonts-sc",
         task: Task::Fonts,
-        name: "cjk fonts",
-        note: "Noto Sans CJK and Source Han Serif, for translations into Chinese, Japanese and Korean.",
-        files: CJK_FONTS,
+        name: "chinese (simplified)",
+        note: "Noto Sans CJK and Source Han Serif in Chinese (Simplified) forms, for translations into Chinese (Simplified).",
+        files: CJK_FONTS_SC,
         license: OFL,
         device_choice: false,
         default: true,
+    },
+    ModelEntry {
+        id: "cjk-fonts-tc",
+        task: Task::Fonts,
+        name: "chinese (traditional)",
+        note: "Noto Sans CJK and Source Han Serif in Chinese (Traditional) forms, for translations into Chinese (Traditional).",
+        files: CJK_FONTS_TC,
+        license: OFL,
+        device_choice: false,
+        default: false,
+    },
+    ModelEntry {
+        id: "cjk-fonts-jp",
+        task: Task::Fonts,
+        name: "japanese",
+        note: "Noto Sans CJK and Source Han Serif in Japanese forms, for translations into Japanese.",
+        files: CJK_FONTS_JP,
+        license: OFL,
+        device_choice: false,
+        default: false,
+    },
+    ModelEntry {
+        id: "cjk-fonts-kr",
+        task: Task::Fonts,
+        name: "korean",
+        note: "Noto Sans CJK and Source Han Serif in Korean forms, for translations into Korean.",
+        files: CJK_FONTS_KR,
+        license: OFL,
+        device_choice: false,
+        default: false,
     },
     ModelEntry {
         id: "bge-reranker-v2-m3",
@@ -212,45 +242,222 @@ pub const CATALOG: &[ModelEntry] = &[
     },
 ];
 
-/// The glyphst-fonts faces translation needs for CJK text, from the
-/// upstream commits glyphst-fonts pins, laid out as its `fonts/` folder.
-const CJK_FONTS: &[Asset] = &[
-    Asset {
-        name: "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf",
-        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
-        sha256: "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
-        size: 16_437_364,
-    },
-    Asset {
-        name: "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf",
-        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
-        sha256: "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
-        size: 17_002_248,
-    },
-    Asset {
-        name: "fonts/noto-sans-cjk-sc/LICENSE",
-        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
-        sha256: "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
-        size: 4_301,
-    },
-    Asset {
-        name: "fonts/source-han-serif-sc/SourceHanSerifSC-Regular.otf",
-        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/OTF/SimplifiedChinese/SourceHanSerifSC-Regular.otf",
-        sha256: "78aa7a328fd974df2d688c8a9fd74a33d8334dfa84ab24d9d11efb2ffc464117",
-        size: 24_543_332,
-    },
-    Asset {
-        name: "fonts/source-han-serif-sc/SourceHanSerifSC-Bold.otf",
-        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/OTF/SimplifiedChinese/SourceHanSerifSC-Bold.otf",
-        sha256: "706b8c0de2deff6cbc0c87e2cdedfd33a78b7ffd76cebb4549012f197ba611fe",
-        size: 25_521_732,
-    },
-    Asset {
-        name: "fonts/source-han-serif-sc/LICENSE.txt",
-        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/LICENSE.txt",
-        sha256: "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
-        size: 4_463,
-    },
+/// A Noto Sans CJK face (or the family's licence), from the commit of
+/// notofonts/noto-cjk glyphst-fonts pins, in the pack's `fonts/<dir>/`.
+macro_rules! noto_sans {
+    ($dir:literal, $folder:literal, $file:literal, $sha256:literal, $size:literal) => {
+        Asset {
+            name: concat!("fonts/", $dir, "/", $file),
+            url: concat!(
+                "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/",
+                $folder,
+                $file
+            ),
+            sha256: $sha256,
+            size: $size,
+        }
+    };
+}
+
+/// A Source Han Serif face (or its licence), from the commit of
+/// adobe-fonts/source-han-serif glyphst-fonts pins.
+macro_rules! source_han_serif {
+    ($dir:literal, $folder:literal, $file:literal, $sha256:literal, $size:literal) => {
+        Asset {
+            name: concat!("fonts/", $dir, "/", $file),
+            url: concat!(
+                "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/",
+                $folder,
+                $file
+            ),
+            sha256: $sha256,
+            size: $size,
+        }
+    };
+}
+
+/// The faces translation into Chinese (Simplified) sets text in, and their licences.
+const CJK_FONTS_SC: &[Asset] = &[
+    noto_sans!(
+        "noto-sans-cjk-sc",
+        "OTF/SimplifiedChinese/",
+        "NotoSansCJKsc-Regular.otf",
+        "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+        16_437_364
+    ),
+    noto_sans!(
+        "noto-sans-cjk-sc",
+        "OTF/SimplifiedChinese/",
+        "NotoSansCJKsc-Bold.otf",
+        "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
+        17_002_248
+    ),
+    noto_sans!(
+        "noto-sans-cjk-sc",
+        "",
+        "LICENSE",
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+        4_301
+    ),
+    source_han_serif!(
+        "source-han-serif-sc",
+        "OTF/SimplifiedChinese/",
+        "SourceHanSerifSC-Regular.otf",
+        "78aa7a328fd974df2d688c8a9fd74a33d8334dfa84ab24d9d11efb2ffc464117",
+        24_543_332
+    ),
+    source_han_serif!(
+        "source-han-serif-sc",
+        "OTF/SimplifiedChinese/",
+        "SourceHanSerifSC-Bold.otf",
+        "706b8c0de2deff6cbc0c87e2cdedfd33a78b7ffd76cebb4549012f197ba611fe",
+        25_521_732
+    ),
+    source_han_serif!(
+        "source-han-serif-sc",
+        "",
+        "LICENSE.txt",
+        "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
+        4_463
+    ),
+];
+
+/// The faces translation into Chinese (Traditional) sets text in, and their licences.
+const CJK_FONTS_TC: &[Asset] = &[
+    noto_sans!(
+        "noto-sans-cjk-tc",
+        "OTF/TraditionalChinese/",
+        "NotoSansCJKtc-Regular.otf",
+        "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
+        16_435_884
+    ),
+    noto_sans!(
+        "noto-sans-cjk-tc",
+        "OTF/TraditionalChinese/",
+        "NotoSansCJKtc-Bold.otf",
+        "3ee160e5015106e3ec1a394301df54fa9bbbf8a251519984aec5c0abc50840c0",
+        17_000_768
+    ),
+    noto_sans!(
+        "noto-sans-cjk-tc",
+        "",
+        "LICENSE",
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+        4_301
+    ),
+    source_han_serif!(
+        "source-han-serif-tc",
+        "OTF/TraditionalChinese/",
+        "SourceHanSerifTC-Regular.otf",
+        "659c9606d8fda03372247b99ec5e5bbc5a034e06a70d80fb00546772c582d3e5",
+        24_542_148
+    ),
+    source_han_serif!(
+        "source-han-serif-tc",
+        "OTF/TraditionalChinese/",
+        "SourceHanSerifTC-Bold.otf",
+        "5dfc336214dc81d9bfed14c668cdce99b55078bfee60833d50f5445b8fa944b3",
+        25_520_548
+    ),
+    source_han_serif!(
+        "source-han-serif-tc",
+        "",
+        "LICENSE.txt",
+        "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
+        4_463
+    ),
+];
+
+/// The faces translation into Japanese sets text in, and their licences.
+const CJK_FONTS_JP: &[Asset] = &[
+    noto_sans!(
+        "noto-sans-cjk-jp",
+        "OTF/Japanese/",
+        "NotoSansCJKjp-Regular.otf",
+        "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+        16_467_736
+    ),
+    noto_sans!(
+        "noto-sans-cjk-jp",
+        "OTF/Japanese/",
+        "NotoSansCJKjp-Bold.otf",
+        "e53dcb0dcb2922e45d01aae1ebd2f382bb81d4229b18b6b883bd170678af1f76",
+        17_032_620
+    ),
+    noto_sans!(
+        "noto-sans-cjk-jp",
+        "",
+        "LICENSE",
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+        4_301
+    ),
+    source_han_serif!(
+        "source-han-serif-jp",
+        "OTF/Japanese/",
+        "SourceHanSerif-Regular.otf",
+        "066dfd35dbcb96f953ebd72eb182169c3cec6b7c0f18be22f1b6e3936ac6ac20",
+        24_574_024
+    ),
+    source_han_serif!(
+        "source-han-serif-jp",
+        "OTF/Japanese/",
+        "SourceHanSerif-Bold.otf",
+        "ae6cdb0ede937fb1fec5371d352569b7f0c39e3532b0337e1cd0ee0397571467",
+        25_552_420
+    ),
+    source_han_serif!(
+        "source-han-serif-jp",
+        "",
+        "LICENSE.txt",
+        "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
+        4_463
+    ),
+];
+
+/// The faces translation into Korean sets text in, and their licences.
+const CJK_FONTS_KR: &[Asset] = &[
+    noto_sans!(
+        "noto-sans-cjk-kr",
+        "OTF/Korean/",
+        "NotoSansCJKkr-Regular.otf",
+        "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+        16_433_112
+    ),
+    noto_sans!(
+        "noto-sans-cjk-kr",
+        "OTF/Korean/",
+        "NotoSansCJKkr-Bold.otf",
+        "26d0c6748500a0444844280b308f5b62c7ae92ac6c6ac88148e502dd211eb52a",
+        16_997_996
+    ),
+    noto_sans!(
+        "noto-sans-cjk-kr",
+        "",
+        "LICENSE",
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+        4_301
+    ),
+    source_han_serif!(
+        "source-han-serif-kr",
+        "OTF/Korean/",
+        "SourceHanSerifK-Regular.otf",
+        "04060f03c5e998bfce5bc46896bf996974a3b4186aa30c434f8d84ac98afb6db",
+        24_539_840
+    ),
+    source_han_serif!(
+        "source-han-serif-kr",
+        "OTF/Korean/",
+        "SourceHanSerifK-Bold.otf",
+        "50f79d398c0f895bcd3c84c4aad294c792659036f1ac9fcef5f2aac8784cb494",
+        25_518_236
+    ),
+    source_han_serif!(
+        "source-han-serif-kr",
+        "",
+        "LICENSE.txt",
+        "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
+        4_463
+    ),
 ];
 
 /// The model `id`.
@@ -622,7 +829,7 @@ mod tests {
             })
             .filter(|(file, _)| !file.starts_with("fonts/lilex/"))
             .collect();
-        let fonts: Vec<(&str, &str)> = CJK_FONTS
+        let fonts: Vec<(&str, &str)> = CJK_FONTS_SC
             .iter()
             .filter(|file| file.name.ends_with(".otf"))
             .map(|file| (file.name, file.sha256))

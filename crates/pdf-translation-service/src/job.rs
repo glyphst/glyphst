@@ -820,6 +820,7 @@ impl PdfTranslationService {
         let _run_guard = self.begin_run()?;
         self.compile_page_preview(
             &session.translated,
+            session.request.target_language.as_str(),
             &session.source_snapshot_path,
             &session.inspection,
             &session.job_directory,
@@ -1168,6 +1169,7 @@ impl PdfTranslationService {
                 stream_page_previews(
                     self,
                     &document,
+                    request.target_language.as_str(),
                     &pipeline_request.source_path,
                     &inspection,
                     &job_directory,
@@ -1408,6 +1410,7 @@ impl PdfTranslationService {
             source_snapshot_path,
             source_snapshot_path,
             &layout,
+            session.request.target_language.as_str(),
             &session.inspection,
             false,
             job_directory,
@@ -1503,6 +1506,7 @@ impl PdfTranslationService {
         original_source_path: &Path,
         render_source_path: &Path,
         layout: &LayoutDocument,
+        language: &str,
         inspection: &PdfInspection,
         with_base: bool,
         work_directory: &Path,
@@ -1535,6 +1539,7 @@ impl PdfTranslationService {
                 original_source_path,
                 &sanitized_source_path,
                 layout,
+                language,
                 with_base,
                 work_directory,
                 cancellation,
@@ -1596,6 +1601,7 @@ impl PdfTranslationService {
     fn compile_page_preview(
         &self,
         translated: &TranslatedDocument,
+        language: &str,
         source_path: &Path,
         inspection: &PdfInspection,
         job_directory: &Path,
@@ -1612,6 +1618,7 @@ impl PdfTranslationService {
             |kept| {
                 self.compile_page_preview_once(
                     translated,
+                    language,
                     source_path,
                     inspection,
                     job_directory,
@@ -1630,6 +1637,7 @@ impl PdfTranslationService {
     fn compile_page_preview_once(
         &self,
         translated: &TranslatedDocument,
+        language: &str,
         source_path: &Path,
         inspection: &PdfInspection,
         job_directory: &Path,
@@ -1706,6 +1714,7 @@ impl PdfTranslationService {
             &page_source_path,
             &page_source_path,
             &preview_layout,
+            language,
             &page_inspection,
             true,
             &work_directory,
@@ -2012,6 +2021,7 @@ impl PdfTranslationService {
                 translated_at = Some(scope.generation());
                 translate_ready_pages(
                     self,
+                    request.target_language.as_str(),
                     &ready_pages,
                     &native,
                     &stream_metadata,
@@ -2434,6 +2444,7 @@ fn globalize_ocr_page(mut page: Page, page_index: usize) -> Page {
 #[allow(clippy::too_many_arguments)]
 fn translate_ready_pages(
     service: &PdfTranslationService,
+    language: &str,
     ready_pages: &[Option<Page>],
     native: &DocumentV1,
     metadata: &DocumentMetadata,
@@ -2472,6 +2483,7 @@ fn translate_ready_pages(
             stream_page_previews(
                 service,
                 &document,
+                language,
                 source_path,
                 inspection,
                 job_directory,
@@ -2652,6 +2664,7 @@ type PreviewUnits = HashMap<String, (u64, Vec<usize>)>;
 fn stream_page_previews<U>(
     service: &PdfTranslationService,
     document: &DocumentV1,
+    language: &str,
     source_path: &Path,
     inspection: &PdfInspection,
     job_directory: &Path,
@@ -2708,6 +2721,7 @@ where
                 compile_dirty_page_previews(
                     service,
                     document,
+                    language,
                     source_path,
                     inspection,
                     job_directory,
@@ -2725,6 +2739,7 @@ where
                 compile_dirty_page_previews(
                     service,
                     document,
+                    language,
                     source_path,
                     inspection,
                     job_directory,
@@ -2746,6 +2761,7 @@ where
 fn compile_dirty_page_previews<U>(
     service: &PdfTranslationService,
     document: &DocumentV1,
+    language: &str,
     source_path: &Path,
     inspection: &PdfInspection,
     job_directory: &Path,
@@ -2776,6 +2792,7 @@ fn compile_dirty_page_previews<U>(
         *revision = revision.wrapping_add(1).max(1);
         let update = match service.compile_page_preview(
             &translated,
+            language,
             source_path,
             inspection,
             job_directory,

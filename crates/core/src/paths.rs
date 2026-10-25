@@ -48,9 +48,9 @@ pub fn fonts_dir() -> Option<PathBuf> {
     packaged
         .filter(is_checkout)
         .or_else(|| {
-            downloaded
-                .join(DOWNLOADED_FACE)
-                .is_file()
+            DOWNLOADED_FACES
+                .iter()
+                .any(|face| downloaded.join(face).is_file())
                 .then_some(downloaded)
         })
         .or_else(|| Some(checkout).filter(is_checkout))
@@ -68,8 +68,13 @@ fn fonts_dir_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The face whose presence marks the downloaded CJK fonts.
-const DOWNLOADED_FACE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf";
+/// Faces whose presence marks downloaded CJK fonts: each pack's first.
+const DOWNLOADED_FACES: [&str; 4] = [
+    "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf",
+    "fonts/noto-sans-cjk-tc/NotoSansCJKtc-Regular.otf",
+    "fonts/noto-sans-cjk-jp/NotoSansCJKjp-Regular.otf",
+    "fonts/noto-sans-cjk-kr/NotoSansCJKkr-Regular.otf",
+];
 
 pub fn migrate_legacy_app_dirs() -> io::Result<()> {
     migrate_legacy_dir(&config_base_dir())?;

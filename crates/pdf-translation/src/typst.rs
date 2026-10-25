@@ -27,7 +27,7 @@ use crate::{
 };
 
 const TYPST_WORKER_FLAG: &str = "--glyphst-typst-worker";
-const TYPST_WORKER_PROTOCOL_VERSION: u32 = 1;
+const TYPST_WORKER_PROTOCOL_VERSION: u32 = 2;
 const TYPST_WORKER_OUTPUT_LIMIT: usize = 64 * 1024;
 const CMARKER_PACKAGE: &str = "@preview/cmarker:0.1.8";
 const MITEX_PACKAGE: &str = "@preview/mitex:0.2.6";
@@ -78,25 +78,31 @@ impl TypstCompiler {
         Self { config }
     }
 
+    /// Typesets `layout`, translated into `language` (a code such as
+    /// `zh-hans`, which picks the CJK faces and the text's language).
     pub fn compile(
         &self,
         layout: &LayoutDocument,
+        language: &str,
         job_directory: &Path,
         cancellation: &CancellationToken,
     ) -> Result<TypstOutput, TypstError> {
         self.compile_source(
-            generate_typst_source(layout),
+            generate_typst_source(layout, language),
+            cjk_faces(language),
             "translation-overlay",
             job_directory,
             cancellation,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_translated_pdf(
         &self,
         original_pdf: &Path,
         source_pdf: &Path,
         layout: &LayoutDocument,
+        language: &str,
         bases: bool,
         job_directory: &Path,
         cancellation: &CancellationToken,
@@ -117,7 +123,8 @@ impl TypstCompiler {
         })?;
         let colors = sample_layout_background_colors(source_pdf, layout)?;
         self.compile_source(
-            generate_translated_pdf_source(layout, "source.pdf", &colors, bases),
+            generate_translated_pdf_source(layout, language, "source.pdf", &colors, bases),
+            cjk_faces(language),
             "translated-document",
             job_directory,
             cancellation,
@@ -127,6 +134,7 @@ impl TypstCompiler {
     fn compile_source(
         &self,
         source: String,
+        faces: &'static CjkFaces,
         file_stem: &str,
         job_directory: &Path,
         cancellation: &CancellationToken,
@@ -153,10 +161,12 @@ impl TypstCompiler {
                 &self.config.assets_dir,
                 &self.config.fonts_dir,
                 file_stem,
+                faces,
             ),
             TypstExecutionMode::CurrentExecutableWorker => self.compile_source_in_worker(
                 job_directory,
                 file_stem,
+                faces,
                 &source_path,
                 &output_path,
                 cancellation,
@@ -170,6 +180,7 @@ impl TypstCompiler {
         &self,
         job_directory: &Path,
         file_stem: &str,
+        faces: &'static CjkFaces,
         source_path: &Path,
         output_path: &Path,
         cancellation: &CancellationToken,
@@ -187,6 +198,7 @@ impl TypstCompiler {
             .arg(&self.config.assets_dir)
             .arg(&self.config.fonts_dir)
             .arg(file_stem)
+            .arg(faces.pack)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -408,6 +420,13 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
         let file_stem = arguments
             .next()
             .ok_or_else(|| TypstError::process("Typst worker is missing its source file stem"))?;
+        let pack = arguments
+            .next()
+            .ok_or_else(|| TypstError::process("Typst worker is missing its CJK fonts"))?;
+        let faces = [&CJK_SC, &CJK_TC, &CJK_JP, &CJK_KR]
+            .into_iter()
+            .find(|faces| pack.to_str() == Some(faces.pack))
+            .ok_or_else(|| TypstError::process("Typst worker was given unknown CJK fonts"))?;
         if arguments.next().is_some() {
             return Err(TypstError::process(
                 "Typst worker received unexpected arguments",
@@ -421,6 +440,7 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
             Path::new(&assets_dir),
             Path::new(&fonts_dir),
             file_stem,
+            faces,
         )
     })();
 
@@ -439,28 +459,33 @@ pub fn run_typst_worker_if_requested() -> Option<i32> {
     Some(exit_code)
 }
 
+/// Typesets the source in `job_directory`, whose CJK text is set in
+/// `faces`.
 fn compile_source_in_process(
     job_directory: &Path,
     assets_dir: &Path,
     fonts_dir: &Path,
     file_stem: &str,
+    faces: &CjkFaces,
 ) -> Result<TypstOutput, TypstError> {
     compile_with_system_cjk(
         job_directory,
         assets_dir,
         fonts_dir,
         file_stem,
+        faces,
         system_cjk_faces,
     )
 }
 
 /// [`compile_source_in_process`] with `system_cjk` giving the system's CJK
-/// faces, asked only when the fonts folder has none.
+/// faces, asked only when the fonts folder lacks `faces`' families.
 fn compile_with_system_cjk(
     job_directory: &Path,
     assets_dir: &Path,
     fonts_dir: &Path,
     file_stem: &str,
+    faces: &CjkFaces,
     system_cjk: fn() -> &'static [SystemFace],
 ) -> Result<TypstOutput, TypstError> {
     validate_file_stem(file_stem)?;
@@ -468,8 +493,14 @@ fn compile_with_system_cjk(
     let source_path = job_directory.join(format!("{file_stem}.typ"));
     validate_file_asset(&source_path, "generated Typst source")?;
 
-    let world =
-        GlyphstTypstWorld::new(job_directory, assets_dir, fonts_dir, file_stem, system_cjk)?;
+    let world = GlyphstTypstWorld::new(
+        job_directory,
+        assets_dir,
+        fonts_dir,
+        file_stem,
+        faces,
+        system_cjk,
+    )?;
     let compilation = typst::compile::<PagedDocument>(&world);
     if !compilation.warnings.is_empty() {
         tracing::warn!(
@@ -505,6 +536,7 @@ impl GlyphstTypstWorld {
         assets_dir: &Path,
         fonts_dir: &Path,
         file_stem: &str,
+        faces: &CjkFaces,
         system_cjk: fn() -> &'static [SystemFace],
     ) -> Result<Self, TypstError> {
         let main_name = format!("{file_stem}.typ");
@@ -514,10 +546,23 @@ impl GlyphstTypstWorld {
         } else {
             Vec::new()
         };
-        let covers_cjk = font_entries.iter().any(|(_, info)| covers_cjk(info));
-        // Without the CJK fonts, the system's CJK faces set CJK text.
-        let system = if covers_cjk { &[][..] } else { system_cjk() };
-        if !covers_cjk && system.is_empty() {
+        let has = |names: &[&str]| {
+            font_entries.iter().any(|(_, info)| {
+                names
+                    .iter()
+                    .any(|name| info.family.eq_ignore_ascii_case(name))
+            })
+        };
+        // The system's CJK faces stand in for the families the CJK fonts
+        // folder lacks (another language's, or none).
+        let system = if has(faces.sans) && has(faces.serif) {
+            &[][..]
+        } else {
+            system_cjk()
+        };
+        let covers_cjk =
+            font_entries.iter().any(|(_, info)| covers_cjk(info)) || !system.is_empty();
+        if !covers_cjk {
             let source = fs::read_to_string(job_directory.join(&main_name)).map_err(|error| {
                 TypstError::io(format!(
                     "failed to read the generated Typst source: {error}"
@@ -812,12 +857,28 @@ fn unpack_embedded_assets() -> Option<PathBuf> {
     Some(dir)
 }
 
-pub fn generate_typst_source(layout: &LayoutDocument) -> String {
-    let mut source = String::from(
-        r#"#import "@preview/cmarker:0.1.8"
-#import "@preview/mitex:0.2.6": mitex
-#set text(font: "Source Han Serif SC", lang: "zh")
-#let glyphst_fit_size(lo, hi, eps, fits) = {
+/// The Typst source of `layout`, translated into `language`.
+pub fn generate_typst_source(layout: &LayoutDocument, language: &str) -> String {
+    let faces = cjk_faces(language);
+    let names = |names: &[&str]| {
+        let quoted = names
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>();
+        format!("({},)", quoted.join(", "))
+    };
+    let mut source = format!(
+        "#import \"@preview/cmarker:0.1.8\"\n\
+         #import \"@preview/mitex:0.2.6\": mitex\n\
+         #let glyphst-sans = {}\n\
+         #let glyphst-serif = {}\n\
+         #set text(font: glyphst-serif{})\n",
+        names(faces.sans),
+        names(faces.serif),
+        text_language(language),
+    );
+    source.push_str(
+        r#"#let glyphst_fit_size(lo, hi, eps, fits) = {
   if hi - lo <= eps {
     lo
   } else {
@@ -905,11 +966,12 @@ pub fn generate_typst_source(layout: &LayoutDocument) -> String {
 /// arrived yet.
 pub fn generate_translated_pdf_source(
     layout: &LayoutDocument,
+    language: &str,
     source_pdf_name: &str,
     background_colors: &[Vec<[u8; 3]>],
     bases: bool,
 ) -> String {
-    let overlay = generate_typst_source(layout);
+    let overlay = generate_typst_source(layout, language);
     let preamble_end = overlay.find("#set page(").unwrap_or(overlay.len());
     let mut source = overlay[..preamble_end].to_string();
     for (page_position, page) in layout.pages.iter().enumerate() {
@@ -1415,7 +1477,7 @@ fn append_typst_styled_text(
         content = format!("#sub[{content}]");
     }
     source.push_str(&format!(
-        "#text(font: \"{}\", size: text-size * {:.4}, weight: \"{}\", style: \"{}\", fill: rgb({}, {}, {}))[{}]",
+        "#text(font: {}, size: text-size * {:.4}, weight: \"{}\", style: \"{}\", fill: rgb({}, {}, {}))[{}]",
         font,
         size_ratio,
         if style.bold { "bold" } else { "regular" },
@@ -1603,6 +1665,91 @@ pub fn system_has_cjk_fonts() -> bool {
     !system_cjk_faces().is_empty()
 }
 
+/// The CJK families a translation into a language is set in: the CJK
+/// fonts' names first (Source Han Serif and Noto Sans CJK, as downloaded),
+/// then the same designs' other names, so copies installed on the system
+/// match too.
+pub struct CjkFaces {
+    /// The CJK fonts pack, as glyphst-models names it (`cjk-fonts-sc`).
+    pub pack: &'static str,
+    pub sans: &'static [&'static str],
+    pub serif: &'static [&'static str],
+}
+
+const CJK_SC: CjkFaces = CjkFaces {
+    pack: "cjk-fonts-sc",
+    sans: &["Noto Sans CJK SC", "Source Han Sans SC"],
+    serif: &["Source Han Serif SC", "Noto Serif CJK SC"],
+};
+const CJK_TC: CjkFaces = CjkFaces {
+    pack: "cjk-fonts-tc",
+    sans: &["Noto Sans CJK TC", "Source Han Sans TC"],
+    serif: &["Source Han Serif TC", "Noto Serif CJK TC"],
+};
+const CJK_JP: CjkFaces = CjkFaces {
+    pack: "cjk-fonts-jp",
+    sans: &["Noto Sans CJK JP", "Source Han Sans"],
+    serif: &["Source Han Serif", "Noto Serif CJK JP"],
+};
+const CJK_KR: CjkFaces = CjkFaces {
+    pack: "cjk-fonts-kr",
+    sans: &["Noto Sans CJK KR", "Source Han Sans K"],
+    serif: &["Source Han Serif K", "Noto Serif CJK KR"],
+};
+
+/// The CJK families for a translation into `language` (a code such as
+/// `zh-hans`, `ja`): its region's forms, Simplified Chinese's otherwise.
+pub fn cjk_faces(language: &str) -> &'static CjkFaces {
+    let language = language.to_ascii_lowercase();
+    if ["zh-hant", "zh-tw", "zh-hk", "zh-mo"].contains(&language.as_str()) {
+        &CJK_TC
+    } else if language == "ja" || language.starts_with("ja-") {
+        &CJK_JP
+    } else if language == "ko" || language.starts_with("ko-") {
+        &CJK_KR
+    } else {
+        &CJK_SC
+    }
+}
+
+/// The `lang` (and `region`) Typst sets text in for `language`, as the
+/// arguments after `font:`; nothing for a code Typst can't take.
+fn text_language(language: &str) -> String {
+    let language = language.to_ascii_lowercase();
+    let (lang, region) = match language.as_str() {
+        "zh-hans" | "zh" => ("zh", Some("cn")),
+        "zh-hant" => ("zh", Some("tw")),
+        _ => {
+            let mut parts = language.split('-');
+            let lang = parts.next().unwrap_or_default();
+            let region = parts.next().filter(|part| part.len() == 2);
+            (lang, region)
+        }
+    };
+    let letters = |text: &str| text.bytes().all(|byte| byte.is_ascii_lowercase());
+    if !(2..=3).contains(&lang.len()) || !letters(lang) {
+        return String::new();
+    }
+    match region.filter(|region| letters(region)) {
+        Some(region) => format!(", lang: \"{lang}\", region: \"{region}\""),
+        None => format!(", lang: \"{lang}\""),
+    }
+}
+
+/// Whether this computer has `language`'s CJK families of its own, sans and
+/// serif, under either name.
+pub fn system_has_cjk_families(language: &str) -> bool {
+    let faces = cjk_faces(language);
+    let has = |names: &[&str]| {
+        system_cjk_faces().iter().any(|face| {
+            names
+                .iter()
+                .any(|name| face.info.family.eq_ignore_ascii_case(name))
+        })
+    };
+    has(faces.sans) && has(faces.serif)
+}
+
 /// Han, kana and Hangul: text only the CJK fonts can set.
 fn is_cjk(character: char) -> bool {
     matches!(
@@ -1616,12 +1763,14 @@ fn is_cjk(character: char) -> bool {
     )
 }
 
+/// The Typst font expression for `font_class`: the preamble's CJK family
+/// lists, or Lilex.
 fn typst_font_name(font_class: FontFamilyClass) -> &'static str {
     match font_class {
-        FontFamilyClass::SansSerif => "Noto Sans CJK SC",
-        FontFamilyClass::Monospace => "Lilex",
+        FontFamilyClass::SansSerif => "glyphst-sans",
+        FontFamilyClass::Monospace => "\"Lilex\"",
         FontFamilyClass::Serif | FontFamilyClass::Math | FontFamilyClass::Unknown => {
-            "Source Han Serif SC"
+            "glyphst-serif"
         }
     }
 }
@@ -2077,14 +2226,18 @@ mod tests {
             overflow_policy: OverflowPolicy::Strict,
         };
 
-        let source = generate_typst_source(&layout);
+        let source = generate_typst_source(&layout, "zh-hans");
 
         assert!(source.contains("@preview/cmarker:0.1.8"));
         assert!(source.contains("@preview/mitex:0.2.6"));
         assert!(source.contains("glyphst_fit"));
         assert!(source.contains("fill: none"));
         assert!(source.contains("clip: false"));
-        assert!(source.contains("font: \"Noto Sans CJK SC\""));
+        assert!(source.contains("font: glyphst-sans"));
+        assert!(
+            source.contains("#let glyphst-sans = (\"Noto Sans CJK SC\", \"Source Han Sans SC\",)")
+        );
+        assert!(source.contains("lang: \"zh\", region: \"cn\""));
         assert!(source.contains("weight: \"bold\""));
         assert!(source.contains("style: \"italic\""));
         assert!(source.contains("fill: rgb(68, 85, 102)"));
@@ -2145,7 +2298,7 @@ mod tests {
             overflow_policy: OverflowPolicy::Adaptive,
         };
 
-        let source = generate_typst_source(&layout);
+        let source = generate_typst_source(&layout, "zh-hans");
 
         assert!(source.contains("第一句。"));
         assert!(source.contains("#linebreak()"));
@@ -2156,7 +2309,7 @@ mod tests {
     fn ordinary_prose_metacharacters_are_literal_while_formula_spans_use_cmarker() {
         let mut item = test_layout_item("* 表示项目负责人；†表示技术总监。公式 $x + y$。");
         item.block_id = "literal-marker".to_string();
-        let source = generate_typst_source(&test_layout(item));
+        let source = generate_typst_source(&test_layout(item), "zh-hans");
 
         assert!(source.contains("#text(\"* 表示项目负责人；†表示技术总监。公式 \")"));
         assert!(source.contains("#cmarker.render(\"$x + y$\", math: mitex)"));
@@ -2175,7 +2328,7 @@ mod tests {
                 gap_em: 0.32,
             }),
         });
-        let source = generate_typst_source(&test_layout(item));
+        let source = generate_typst_source(&test_layout(item), "zh-hans");
 
         assert!(source.contains("#text(\"2.1\")"));
         assert!(source.contains("#text(\"流水线框架\")"));
@@ -2198,16 +2351,16 @@ mod tests {
             }],
         });
 
-        let source = generate_typst_source(&test_layout(item.clone()));
+        let source = generate_typst_source(&test_layout(item.clone()), "zh-hans");
         assert!(source.contains("baseline: (at: bottom, shift: text-size * 0.00000)"));
         assert!(!source.contains("baseline: 100"));
 
         item.inline_objects[0].baseline_y = 18.0;
-        let raised = generate_typst_source(&test_layout(item.clone()));
+        let raised = generate_typst_source(&test_layout(item.clone()), "zh-hans");
         assert!(raised.contains("baseline: (at: bottom, shift: text-size * 0.20000)"));
 
         item.inline_objects[0].baseline_y = 22.0;
-        let lowered = generate_typst_source(&test_layout(item));
+        let lowered = generate_typst_source(&test_layout(item), "zh-hans");
         assert!(lowered.contains("baseline: (at: bottom, shift: text-size * -0.20000)"));
     }
 
@@ -2341,6 +2494,25 @@ mod tests {
     }
 
     #[test]
+    fn each_cjk_language_gets_its_own_faces_and_text_language() {
+        let empty = LayoutDocument {
+            pages: Vec::new(),
+            warnings: Vec::new(),
+            preserved_on_overflow: Vec::new(),
+            overflow_policy: OverflowPolicy::Strict,
+        };
+        let korean = generate_typst_source(&empty, "ko");
+        assert!(korean.contains("\"Source Han Serif K\", \"Noto Serif CJK KR\""));
+        assert!(korean.contains("lang: \"ko\")"));
+        let japanese = generate_typst_source(&empty, "ja");
+        assert!(japanese.contains("\"Noto Sans CJK JP\""));
+        assert_eq!(cjk_faces("zh-hant").pack, "cjk-fonts-tc");
+        assert!(generate_typst_source(&empty, "pt-br").contains("lang: \"pt\", region: \"br\""));
+        // A code Typst can't take sets no language.
+        assert!(!generate_typst_source(&empty, "x").contains("lang:"));
+    }
+
+    #[test]
     fn the_typst_packages_are_built_in() {
         for package in [
             "typst/packages/preview/cmarker/0.1.8/typst.toml",
@@ -2371,6 +2543,7 @@ mod tests {
             &assets,
             &no_fonts,
             "translated-document",
+            &CJK_SC,
             || &[],
         )
         .unwrap();
@@ -2381,6 +2554,7 @@ mod tests {
             &assets,
             &no_fonts,
             "translated-document",
+            &CJK_SC,
             || &[],
         )
         .unwrap_err();
@@ -2440,7 +2614,7 @@ mod tests {
             .as_nanos();
         let directory = std::env::temp_dir().join(format!("glyphst-typst-crowded-{nonce:x}"));
         let output = TypstCompiler::new(TypstCompilerConfig::default())
-            .compile(&layout, &directory, &CancellationToken::new())
+            .compile(&layout, "zh-hans", &directory, &CancellationToken::new())
             .unwrap();
         let document = mupdf::Document::open(output.pdf_path.to_str().unwrap()).unwrap();
         let page = document.load_page(0).unwrap();
@@ -2514,7 +2688,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("glyphst-typst-test-{nonce:x}"));
 
         let output = TypstCompiler::new(TypstCompilerConfig::default())
-            .compile(&layout, &directory, &CancellationToken::new())
+            .compile(&layout, "zh-hans", &directory, &CancellationToken::new())
             .unwrap();
 
         assert!(output.pdf_path.is_file());

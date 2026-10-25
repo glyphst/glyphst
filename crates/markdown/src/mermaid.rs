@@ -185,13 +185,12 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
             let mut fonts = usvg::fontdb::Database::new();
             fonts.load_font_data(glyphst_ui::fonts::INTER_REGULAR.to_vec());
             fonts.load_font_data(glyphst_ui::fonts::INTER_SEMIBOLD.to_vec());
-            if let Some(dir) = glyphst_core::paths::fonts_dir() {
-                for file in [
-                    glyphst_ui::fonts::CJK_REGULAR_FILE,
-                    glyphst_ui::fonts::CJK_BOLD_FILE,
-                ] {
-                    // Missing files leave the installed CJK fonts to fall back on.
-                    let _ = fonts.load_font_file(dir.join(file));
+            // Without them, the installed CJK fonts are fallen back on.
+            if let Some((regular, bold)) =
+                glyphst_core::paths::fonts_dir().and_then(|dir| glyphst_ui::fonts::cjk_files(&dir))
+            {
+                for file in [regular, bold] {
+                    let _ = fonts.load_font_file(file);
                 }
             }
             fonts.load_system_fonts();
@@ -216,7 +215,7 @@ fn theme(style: &MarkdownStyle) -> MermaidTheme {
     let git_branch_colors: [Hsla; 8] = std::array::from_fn(branch);
     MermaidTheme {
         dark_mode: style.dark,
-        font_family: "Inter, \"Noto Sans CJK SC\", sans-serif".into(),
+        font_family: "Inter, \"Noto Sans CJK SC\", \"Noto Sans CJK TC\", \"Noto Sans CJK JP\", \"Noto Sans CJK KR\", sans-serif".into(),
         background: color(style.block_bg),
         primary_color: color(style.code_bg),
         primary_text_color: color(style.strong_text),

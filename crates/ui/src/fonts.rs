@@ -38,9 +38,35 @@ pub const BUNDLED_MONO: &str = "JetBrains Mono";
 /// The bundled prose family.
 pub const BUNDLED_SANS: &str = "Inter";
 
-/// The CJK faces in a glyphst-fonts checkout.
-pub const CJK_REGULAR_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf";
-pub const CJK_BOLD_FILE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf";
+/// The CJK fonts' Noto Sans faces, regular and bold, by pack (Simplified
+/// Chinese first, as a glyphst-fonts checkout has it): the interface uses
+/// the first pack in the fonts folder.
+pub const CJK_FACE_FILES: [(&str, &str); 4] = [
+    (
+        "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf",
+        "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf",
+    ),
+    (
+        "fonts/noto-sans-cjk-tc/NotoSansCJKtc-Regular.otf",
+        "fonts/noto-sans-cjk-tc/NotoSansCJKtc-Bold.otf",
+    ),
+    (
+        "fonts/noto-sans-cjk-jp/NotoSansCJKjp-Regular.otf",
+        "fonts/noto-sans-cjk-jp/NotoSansCJKjp-Bold.otf",
+    ),
+    (
+        "fonts/noto-sans-cjk-kr/NotoSansCJKkr-Regular.otf",
+        "fonts/noto-sans-cjk-kr/NotoSansCJKkr-Bold.otf",
+    ),
+];
+
+/// The regular and bold Noto Sans CJK files of the first pack in `dir`.
+pub fn cjk_files(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    CJK_FACE_FILES
+        .iter()
+        .map(|(regular, bold)| (dir.join(regular), dir.join(bold)))
+        .find(|(regular, _)| regular.is_file())
+}
 
 /// Installed CJK sans families tried in order without a checkout; past
 /// them, any face covering 中 (U+4E2D), Simplified Chinese ones first.
@@ -284,23 +310,23 @@ fn match_pattern(pattern: &str, family: &str) -> Option<(String, u32)> {
         .then_some((file, index))
 }
 
-/// The CJK face of `weight` and where it came from: the glyphst-fonts
-/// checkout, else an installed family.
+/// The CJK face of `weight` and where it came from: the CJK fonts (a
+/// glyphst-fonts checkout or a download), else an installed family.
 fn cjk_face(weight: Weight) -> Result<(String, FontData), String> {
-    let file = match weight {
-        Weight::Regular => CJK_REGULAR_FILE,
-        Weight::Bold => CJK_BOLD_FILE,
-    };
-    let checkout_error = match glyphst_core::paths::fonts_dir() {
-        Some(dir) => match shared_bytes(&dir.join(file)) {
-            Ok(blob) => {
-                return Ok((
-                    dir.join(file).display().to_string(),
-                    FontData::from_blob(blob, 0),
-                ));
+    let files = glyphst_core::paths::fonts_dir().and_then(|dir| cjk_files(&dir));
+    let checkout_error = match files {
+        Some((regular, bold)) => {
+            let file = match weight {
+                Weight::Regular => regular,
+                Weight::Bold => bold,
+            };
+            match shared_bytes(&file) {
+                Ok(blob) => {
+                    return Ok((file.display().to_string(), FontData::from_blob(blob, 0)));
+                }
+                Err(error) => format!("{error}; "),
             }
-            Err(error) => format!("{error}; "),
-        },
+        }
         None => String::new(),
     };
     let (file, index) = installed_cjk_face(weight)
@@ -452,7 +478,7 @@ mod tests {
         let Some(dir) = glyphst_core::paths::fonts_dir() else {
             return;
         };
-        if !dir.join(CJK_BOLD_FILE).is_file() {
+        if !dir.join(CJK_FACE_FILES[0].1).is_file() {
             return;
         }
         let (regular, _) = cjk_face(Weight::Regular).unwrap();

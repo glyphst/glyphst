@@ -232,6 +232,109 @@ impl Toasts {
     }
 }
 
+/// A task's progress at the bottom right while it runs (component
+/// `progress-toast`, frame 03h): an icon and title, a 2 px bar, a muted line
+/// and `[ actions ]`, with `×` to dismiss. The caller keeps its state and
+/// stops drawing it when done.
+pub struct ProgressCard<'a> {
+    pub id: &'a str,
+    pub icon: &'a str,
+    pub tone: Tone,
+    pub title: &'a str,
+    /// 0 to 1; the bar is empty without a fraction.
+    pub fraction: Option<f32>,
+    pub line: &'a str,
+    pub actions: &'a [&'a str],
+}
+
+/// What a click on a [`ProgressCard`] asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressAnswer {
+    Action(usize),
+    Dismiss,
+}
+
+impl ProgressCard<'_> {
+    /// Draws the card `lift` points above the bottom right.
+    pub fn show(self, ctx: &egui::Context, lift: f32) -> Option<ProgressAnswer> {
+        let t = Tokens::get(ctx);
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 32.0).clamp(1.0, 440.0);
+        let (icon_color, bar_color, line_color) = match self.tone {
+            Tone::Info => (t.accent_text, t.accent, t.muted),
+            Tone::Ok => (t.ok, t.ok, t.muted),
+            Tone::Err => (t.err, t.err, t.err),
+        };
+        let mut answer = None;
+        egui::Area::new(egui::Id::unique("progress-card").with(self.id))
+            .order(egui::Order::Tooltip)
+            .pivot(Align2::RIGHT_BOTTOM)
+            .fixed_pos(screen.right_bottom() - vec2(16.0, lift))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(t.raised)
+                    .stroke(t.edge())
+                    .corner_radius(t.pop_radius())
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 24.0);
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.add(icons::image(self.icon, 14.0, icon_color));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(self.title)
+                                        .font(theme::mono(12.0))
+                                        .color(t.text),
+                                )
+                                .truncate(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if icons::button(ui, "x", 14.0, false, "dismiss").clicked() {
+                                        answer = Some(ProgressAnswer::Dismiss);
+                                    }
+                                },
+                            );
+                        });
+                        let (rail, _) =
+                            ui.allocate_exact_size(vec2(ui.available_width(), 2.0), Sense::hover());
+                        ui.painter().rect_filled(rail, 0.0, t.rule_strong);
+                        if let Some(fraction) = self.fraction {
+                            let mut bar = rail;
+                            bar.set_width(rail.width() * fraction.clamp(0.0, 1.0));
+                            ui.painter().rect_filled(bar, 0.0, bar_color);
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(self.line)
+                                        .font(theme::mono(11.0))
+                                        .color(line_color),
+                                )
+                                .truncate(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    for (index, action) in self.actions.iter().enumerate().rev() {
+                                        if ui.add(crate::button::Button::bracket(action)).clicked()
+                                        {
+                                            answer = Some(ProgressAnswer::Action(index));
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
+        answer
+    }
+}
+
 /// The keys of a sequence typed so far (`g`), with a block cursor, on an
 /// accent-edged chip whose bottom left is at `at`; `hints` (what can
 /// follow: `gg top · gt tab`) follow it in faint mono.

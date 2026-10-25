@@ -227,6 +227,8 @@ pub struct SettingsContext<'a> {
     pub library: LibraryFacts,
     /// This computer, for the models that suit it.
     pub machine: &'a glyphst_models::machine::Machine,
+    /// The CJK fonts' downloads, which the progress card follows too.
+    pub cjk_fonts: &'a mut crate::cjk_fonts::CjkFonts,
 }
 
 /// What Settings › Library shows about the library.
@@ -925,18 +927,6 @@ impl SettingsWindow {
         self.models.start_local_ocr(settings, ctx);
     }
 
-    /// Downloads the CJK fonts, showing them coming in on Settings · Resources.
-    pub fn download_cjk_fonts(&mut self, ctx: &egui::Context) {
-        self.show_section(Section::Resources);
-        self.models.start_cjk_fonts(ctx);
-    }
-
-    /// Downloads the CJK fonts without opening the settings: a prompt
-    /// asked for them.
-    pub fn start_cjk_fonts(&mut self, ctx: &egui::Context) {
-        self.models.start_cjk_fonts(ctx);
-    }
-
     /// Lists a provider's models, as its Fetch models button does.
     pub fn fetch_models(
         &mut self,
@@ -1241,6 +1231,7 @@ impl SettingsWindow {
                             facts: &app.library,
                             machine: app.machine,
                             actions: &mut self.library_actions,
+                            cjk_fonts: app.cjk_fonts,
                         },
                     ),
                 }
@@ -1847,6 +1838,7 @@ mod tests {
                         background_seed: None,
                         library: LibraryFacts::default(),
                         machine: &glyphst_models::machine::Machine::default(),
+                        cjk_fonts: &mut crate::cjk_fonts::CjkFonts::default(),
                     },
                 );
             });

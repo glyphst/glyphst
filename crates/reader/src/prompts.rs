@@ -22,11 +22,17 @@ pub enum Question {
     /// B on gamepad mode's home: leave it?
     Leave,
     /// A translation into `language` starts, and this computer has CJK
-    /// faces of its own: download the CJK fonts? Asked once ever.
-    CjkFontsOffer,
+    /// faces of its own: download its CJK fonts `pack`? Asked once a pack.
+    CjkFontsOffer {
+        language: String,
+        pack: &'static str,
+    },
     /// A translation into `language` can't start: this computer has no CJK
     /// faces. Asked each time.
-    CjkFontsNeeded { language: String },
+    CjkFontsNeeded {
+        language: String,
+        pack: &'static str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,9 +42,11 @@ pub enum Answer {
     NeverAsk,
     LeaveGamepadMode,
     Stay,
-    DownloadCjkFonts,
-    UseSystemFonts,
-    DownloadAndTranslate,
+    /// Download the CJK fonts pack.
+    DownloadCjkFonts(&'static str),
+    /// The pack was offered; the computer's fonts do.
+    UseSystemFonts(&'static str),
+    DownloadAndTranslate(&'static str),
     CancelTranslation,
 }
 
@@ -166,13 +174,14 @@ impl Prompts {
                 .show(ctx)
                 .map(|index| [Answer::Stay, Answer::LeaveGamepadMode][index])
             }
-            Question::CjkFontsOffer => {
+            Question::CjkFontsOffer { language, pack } => {
+                let pack = *pack;
                 let body = format!(
-                    "Chinese, Japanese and Korean translations use this computer's fonts for \
-                     now. The CJK fonts (Noto Sans CJK and Source Han Serif, {}) set them as \
-                     the Reader's pages are designed, and may go into exported PDFs. Asked \
-                     once; Settings · Resources has them.",
-                    cjk_fonts_size()
+                    "Translations into {language} use this computer's fonts for now. Its CJK \
+                     fonts (Noto Sans CJK and Source Han Serif, {}) set them as the Reader's \
+                     pages are designed, and may go into exported PDFs; pages already \
+                     translated switch to them. Asked once.",
+                    pack_size(pack)
                 );
                 let choices = [
                     Choice::new("use this computer's", Face::East),
@@ -188,14 +197,15 @@ impl Prompts {
                     scale: Scale::Chrome,
                 }
                 .show(ctx)
-                .map(|index| [Answer::UseSystemFonts, Answer::DownloadCjkFonts][index])
+                .map(|index| [Answer::UseSystemFonts(pack), Answer::DownloadCjkFonts(pack)][index])
             }
-            Question::CjkFontsNeeded { language } => {
+            Question::CjkFontsNeeded { language, pack } => {
+                let pack = *pack;
                 let body = format!(
                     "This computer has no Chinese, Japanese or Korean fonts, so a translation \
-                     into {language} can't be set. Download the CJK fonts ({})? The \
+                     into {language} can't be set. Download its CJK fonts ({})? The \
                      translation starts as they arrive.",
-                    cjk_fonts_size()
+                    pack_size(pack)
                 );
                 let choices = [
                     Choice::new("cancel", Face::East),
@@ -211,7 +221,12 @@ impl Prompts {
                     scale: Scale::Chrome,
                 }
                 .show(ctx)
-                .map(|index| [Answer::CancelTranslation, Answer::DownloadAndTranslate][index])
+                .map(|index| {
+                    [
+                        Answer::CancelTranslation,
+                        Answer::DownloadAndTranslate(pack),
+                    ][index]
+                })
             }
         };
         if let Some(answer) = answer {
@@ -224,10 +239,11 @@ impl Prompts {
     }
 }
 
-/// The CJK fonts' download, as the Resources page sizes it.
-fn cjk_fonts_size() -> String {
-    let fonts = glyphst_models::catalog::default_for(glyphst_models::catalog::Task::Fonts);
-    crate::sidebar::format_size(fonts.size())
+/// A CJK fonts pack's download, as the Resources page sizes it.
+fn pack_size(pack: &str) -> String {
+    glyphst_models::catalog::entry(pack)
+        .map(|pack| crate::sidebar::format_size(pack.size()))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

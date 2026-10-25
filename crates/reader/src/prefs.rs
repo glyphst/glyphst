@@ -321,9 +321,9 @@ pub struct Prefs {
     pub gamepad_mode: bool,
     /// A pad connecting asks whether to switch to gamepad mode.
     pub ask_gamepad_mode: bool,
-    /// The CJK fonts were offered (03f): a computer with CJK faces of its
-    /// own is asked once.
-    pub cjk_fonts_offered: bool,
+    /// The CJK fonts packs offered (03f): a computer with CJK faces of its
+    /// own is asked once a pack.
+    pub offered_cjk_fonts: std::collections::BTreeSet<String>,
     /// Gamepad mode's text size, as zoom over the design's.
     pub couch_text: f32,
     pub last_session: LastSession,
@@ -381,7 +381,7 @@ impl Default for Prefs {
             reading_ring: present::default_reading_ring(),
             gamepad_mode: false,
             ask_gamepad_mode: true,
-            cjk_fonts_offered: false,
+            offered_cjk_fonts: Default::default(),
             couch_text: 1.0,
             last_session: LastSession::default(),
         }

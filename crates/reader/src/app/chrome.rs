@@ -855,8 +855,10 @@ impl ReaderApp {
             cjk_fonts_ready: self.tabs[active]
                 .translation
                 .as_ref()
-                .is_some_and(|session| session.needs_cjk_fonts())
-                && self.cjk_fonts_downloaded(),
+                .is_some_and(|session| {
+                    session.needs_cjk_fonts()
+                        && self.cjk_pack_here(crate::cjk_fonts::pack_for(&session.target))
+                }),
             confirm_clear: self.confirm_clear == Some(self.tabs[active].id),
         };
         // The Effects tab edits a copy of this book's choices.

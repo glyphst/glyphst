@@ -62,9 +62,10 @@ pub use translate::{
     translate_document_resuming, translate_document_scoped,
 };
 pub use typst::{
-    TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,
-    TypstOutput, cjk_fonts_available, generate_translated_pdf_source, generate_typst_source,
-    resolve_translation_assets_dir, run_typst_worker_if_requested, system_has_cjk_fonts,
+    CjkFaces, TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,
+    TypstOutput, cjk_faces, cjk_fonts_available, generate_translated_pdf_source,
+    generate_typst_source, resolve_translation_assets_dir, run_typst_worker_if_requested,
+    system_has_cjk_families, system_has_cjk_fonts,
 };
 pub use unlimited::{
     UnlimitedClient, UnlimitedClientConfig, UnlimitedError, UnlimitedErrorCategory,

@@ -44,8 +44,6 @@ pub struct ModelsPage {
     /// Search models other than the ones in use (those are the app's), by
     /// id and the `llama-server` they were made with.
     search: HashMap<(&'static str, String), Setup>,
-    /// The CJK fonts' download.
-    fonts: Option<Setup>,
     /// What went wrong removing a model.
     notice: Option<String>,
     /// The folders' sizes, and when they were read.
@@ -59,6 +57,7 @@ pub struct ModelsContext<'a> {
     pub facts: &'a LibraryFacts,
     pub machine: &'a Machine,
     pub actions: &'a mut Vec<LibraryAction>,
+    pub cjk_fonts: &'a mut crate::cjk_fonts::CjkFonts,
 }
 
 impl ModelsPage {
@@ -70,20 +69,6 @@ impl ModelsPage {
         let ctx = ctx.clone();
         self.ocr_setup(entry, settings.ocr.local.device)
             .start(move || ctx.request_repaint());
-    }
-
-    /// Starts downloading the CJK fonts, as the translation panel's
-    /// download button asks.
-    pub fn start_cjk_fonts(&mut self, ctx: &egui::Context) {
-        let ctx = ctx.clone();
-        self.fonts_setup().start(move || ctx.request_repaint());
-    }
-
-    fn fonts_setup(&mut self) -> &mut Setup {
-        self.fonts.get_or_insert_with(|| {
-            let entry = catalog::default_for(Task::Fonts);
-            Setup::files(entry.task.files_dir(), entry.files.to_vec())
-        })
     }
 
     /// Downloads in each state, for screenshots: medium coming in, Indra
@@ -141,6 +126,7 @@ impl ModelsPage {
             facts,
             machine,
             actions,
+            cjk_fonts,
         } = app;
         ui_settings::group(ui, "", |group| {
             group.note(&format!(
@@ -154,7 +140,7 @@ impl ModelsPage {
         self.text_recognition(ui, user, machine);
         self.search(ui, library, facts, machine, actions, Task::Embedding);
         self.search(ui, library, facts, machine, actions, Task::Rerank);
-        self.fonts(ui);
+        self.fonts(ui, cjk_fonts);
         let fresh = self
             .usage
             .as_ref()
@@ -346,33 +332,59 @@ impl ModelsPage {
         });
     }
 
-    /// The CJK fonts translation into Chinese, Japanese and Korean needs:
-    /// in use once downloaded, with nothing to choose.
-    fn fonts(&mut self, ui: &mut Ui) {
-        let entry = catalog::default_for(Task::Fonts);
-        let setup = self.fonts_setup();
-        let state = setup.state();
-        let row = Row {
-            in_use: state == SetupState::Ready,
-            ready: state == SetupState::Ready,
-            entry,
-            suggested: false,
-            description: entry.note.to_owned(),
-            progress: progress(&state),
-        };
-        let mut action = None;
+    /// The CJK fonts, a pack a language: in use once here; a pack whose
+    /// families this computer has already needs no download.
+    fn fonts(&mut self, ui: &mut Ui, cjk_fonts: &mut crate::cjk_fonts::CjkFonts) {
+        let mut removed = None;
         ui_settings::group(ui, "fonts", |group| {
-            group.full(|ui| {
-                action = model_row(
-                    ui,
-                    &row,
-                    |ui| action_buttons(ui, setup, &state),
-                    |ui| muted(ui, "ofl"),
-                );
-            });
+            for pack in catalog::for_task(Task::Fonts) {
+                let state = cjk_fonts.setup(pack).state();
+                let on_system = state != SetupState::Ready && crate::cjk_fonts::on_system(pack);
+                let here = state == SetupState::Ready || crate::cjk_fonts::is_here(pack);
+                let row = Row {
+                    in_use: here || on_system,
+                    ready: here,
+                    entry: pack,
+                    suggested: false,
+                    description: pack.note.to_owned(),
+                    progress: if on_system {
+                        Some(Progress::Note {
+                            text: "✓ installed on this computer".to_owned(),
+                            error: false,
+                        })
+                    } else {
+                        progress(&state)
+                    },
+                };
+                let mut action = None;
+                group.full(|ui| {
+                    action = model_row(
+                        ui,
+                        &row,
+                        |ui| {
+                            // A download can go; a checkout's fonts stay.
+                            if catalog::is_installed(pack) {
+                                return ui
+                                    .add(Button::ghost("remove").min_width(ACTION_WIDTH))
+                                    .clicked()
+                                    .then_some(RowAction::Remove);
+                            }
+                            if !on_system && !here {
+                                fonts_buttons(ui, cjk_fonts, pack, &state);
+                            }
+                            None
+                        },
+                        |ui| muted(ui, "ofl"),
+                    );
+                });
+                if let Some(RowAction::Remove) = action {
+                    removed = Some(pack);
+                }
+            }
         });
-        if let Some(RowAction::Remove) = action {
-            self.remove(entry);
+        if let Some(pack) = removed {
+            cjk_fonts.forget(pack);
+            self.remove(pack);
         }
     }
 
@@ -384,9 +396,6 @@ impl ModelsPage {
             .map(|error| format!("could not remove {}: {error}", entry.name));
         self.ocr.retain(|(id, _), _| *id != entry.id);
         self.search.retain(|(id, _), _| *id != entry.id);
-        if entry.task == Task::Fonts {
-            self.fonts = None;
-        }
         self.usage = None;
     }
 }
@@ -625,6 +634,49 @@ fn action_buttons(ui: &mut Ui, setup: &mut Setup, state: &SetupState) -> Option<
     }
 }
 
+/// A fonts pack's action for its download `state`, as [`action_buttons`]
+/// but through the app's downloads, which the progress card follows.
+fn fonts_buttons(
+    ui: &mut Ui,
+    cjk_fonts: &mut crate::cjk_fonts::CjkFonts,
+    pack: &'static ModelEntry,
+    state: &SetupState,
+) {
+    let wide = |label| Button::ghost(label).min_width(ACTION_WIDTH);
+    match state {
+        SetupState::Offer { kept, .. } => {
+            if ui
+                .add(wide(if *kept > 0 { "resume" } else { "download" }))
+                .clicked()
+            {
+                cjk_fonts.start(pack, ui.ctx());
+            }
+        }
+        SetupState::Running { .. } => {
+            if ui.add(wide("pause")).clicked() {
+                cjk_fonts.setup(pack).pause();
+            }
+        }
+        SetupState::Paused { .. } => {
+            if glyphst_ui::button::icon(ui, "x", 14.0, false, "discard what came").clicked() {
+                cjk_fonts.setup(pack).discard();
+            }
+            if ui
+                .add(Button::ghost("resume").min_width(ACTION_WIDTH - 34.0))
+                .clicked()
+            {
+                cjk_fonts.start(pack, ui.ctx());
+            }
+        }
+        SetupState::Failed { .. } => {
+            if ui.add(wide("retry")).clicked() {
+                cjk_fonts.start(pack, ui.ctx());
+            }
+        }
+        SetupState::Ready => {}
+    }
+}
+
 /// How a model's download stands, for its progress slot.
 fn progress(state: &SetupState) -> Option<Progress> {
     let fraction = |done: u64, total: u64| done as f32 / total.max(1) as f32;
@@ -790,7 +842,7 @@ fn card_buttons(ui: &mut Ui, card: &MeaningCard, mut act: impl FnMut(MeaningActi
 }
 
 /// `2.1 MB/s · 40 s`, short enough for the progress slot.
-fn rate_line(rate: f64, seconds_left: Option<u64>) -> String {
+pub(crate) fn rate_line(rate: f64, seconds_left: Option<u64>) -> String {
     if rate <= 0.0 {
         return "starting".to_owned();
     }

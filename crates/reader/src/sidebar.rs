@@ -112,8 +112,8 @@ pub enum SidebarAction {
     RetryFailed,
     /// Install local OCR (Settings · OCR), which failed pages need.
     InstallLocalOcr,
-    /// Download the CJK fonts, which failed pages need.
-    DownloadCjkFonts,
+    /// Download the CJK fonts pack failed pages need.
+    DownloadCjkFonts(&'static str),
     /// This document's own OCR engine and mode (`None`: the settings').
     SetDocumentOcr(Option<(String, Option<String>)>),
     /// Open Settings · Resources.
@@ -1021,11 +1021,10 @@ fn failures_box(
             }
             let width = ui.available_width();
             if fonts_missing {
-                let fonts =
-                    glyphst_models::catalog::default_for(glyphst_models::catalog::Task::Fonts);
+                let fonts = crate::cjk_fonts::pack_for(&session.target);
                 let download = format!("download {} · {}", fonts.name, format_size(fonts.size()));
                 if ui.add(Button::ghost(&download).min_width(width)).clicked() {
-                    actions.push(SidebarAction::DownloadCjkFonts);
+                    actions.push(SidebarAction::DownloadCjkFonts(fonts.id));
                 }
                 ui.add(
                     egui::Label::new(

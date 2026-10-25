@@ -157,6 +157,8 @@ pub struct Launch {
     /// Screens: no CJK fonts downloaded, and whether the computer has CJK
     /// faces of its own (`--cjk-fonts system|none`).
     pub cjk_fonts: Option<bool>,
+    /// Screens: the Simplified Chinese fonts coming in, under their card.
+    pub cjk_fonts_download: bool,
     /// Scripted runs: translate the first document, or the selection.
     pub translate_document: bool,
     /// Scripted runs: translate the first document as it is read.
@@ -359,11 +361,10 @@ pub struct ReaderApp {
     /// it goes.
     pad_focused: bool,
     prompts: crate::prompts::Prompts,
+    /// The CJK fonts' downloads (Settings · Resources, frame 03h).
+    pub(crate) cjk_fonts: crate::cjk_fonts::CjkFonts,
     /// A translation waiting on the CJK fonts prompt (03g).
     cjk_fonts_pending: Option<std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>>,
-    /// Tabs whose pages that waited for the CJK fonts were tried again once
-    /// the fonts came.
-    cjk_fonts_retried: std::collections::HashSet<u64>,
     pub(crate) couch: crate::couch::Couch,
     fixed_clock: bool,
     /// Where the pointer was when the pad was last used: moving it away
@@ -757,8 +758,8 @@ impl ReaderApp {
             pad_events: Vec::new(),
             pad_focused: false,
             prompts: Default::default(),
+            cjk_fonts: Default::default(),
             cjk_fonts_pending: None,
-            cjk_fonts_retried: std::collections::HashSet::new(),
             couch: Default::default(),
             fixed_clock: launch.fixed_clock,
             pad_pointer: None,
@@ -1152,12 +1153,25 @@ impl ReaderApp {
                 page.gamepad = true;
             }
         }
+        // The system's CJK faces are read once, here rather than when a
+        // translation into CJK or Settings · Resources first asks.
+        let _ = std::thread::Builder::new()
+            .name("system-cjk-fonts".into())
+            .spawn(|| {
+                glyphst_pdf_translation_service::system_has_cjk_fonts();
+            });
+        if launch.cjk_fonts_download {
+            app.cjk_fonts
+                .show_download(crate::cjk_fonts::pack_for("zh-hans"));
+        }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
             if section == Section::Resources
                 && launch.settings_group.as_deref() == Some("downloads")
             {
                 app.settings_window.show_model_downloads();
+                app.cjk_fonts
+                    .show_download(crate::cjk_fonts::pack_for("ja"));
             }
             app.settings_window.scroll_to = launch.settings_group;
             // Scripted runs show the fake model's list.
@@ -2848,7 +2862,11 @@ impl ReaderApp {
                     self.settings_window.install_local_ocr(ctx, &settings);
                 }
             }
-            SidebarAction::DownloadCjkFonts => self.settings_window.download_cjk_fonts(ctx),
+            SidebarAction::DownloadCjkFonts(pack) => {
+                if let Some(pack) = glyphst_models::catalog::entry(pack) {
+                    self.cjk_fonts.start(pack, ctx);
+                }
+            }
             SidebarAction::SetFacing(facing) => self.set_facing(facing),
             SidebarAction::AskClearTranslation => {
                 self.confirm_clear = self.active.map(|active| self.tabs[active].id);
@@ -3275,44 +3293,83 @@ impl ReaderApp {
         let Some(language) = language else {
             return true;
         };
-        if !crate::models::is_cjk_language(&language) || self.cjk_fonts_downloaded() {
+        let pack = crate::cjk_fonts::pack_for(&language);
+        if !crate::models::is_cjk_language(&language) || self.cjk_pack_here(pack) {
+            return true;
+        }
+        // This computer has the pack's own families: nothing to download.
+        if self.demo_system_cjk_fonts.is_none() && crate::cjk_fonts::on_system(pack) {
             return true;
         }
         let system = self
             .demo_system_cjk_fonts
             .unwrap_or_else(glyphst_pdf_translation_service::system_has_cjk_fonts);
+        let label = crate::sidebar::language_label(&language).to_owned();
         if system {
-            if !self.prefs.cjk_fonts_offered {
-                self.prompts.ask(crate::prompts::Question::CjkFontsOffer);
+            if !self.prefs.offered_cjk_fonts.contains(pack.id) {
+                self.prompts.ask(crate::prompts::Question::CjkFontsOffer {
+                    language: label,
+                    pack: pack.id,
+                });
             }
             return true;
         }
         self.cjk_fonts_pending = Some(scope.clone());
         self.prompts.ask(crate::prompts::Question::CjkFontsNeeded {
-            language: crate::sidebar::language_label(&language).to_owned(),
+            language: label,
+            pack: pack.id,
         });
         false
     }
 
-    /// [`crate::models::cjk_fonts_downloaded`], unless a screen goes without.
-    pub(crate) fn cjk_fonts_downloaded(&self) -> bool {
-        self.demo_system_cjk_fonts.is_none() && crate::models::cjk_fonts_downloaded()
+    /// Whether `pack`'s faces are here ([`crate::cjk_fonts::is_here`]),
+    /// unless a screen goes without them.
+    pub(crate) fn cjk_pack_here(&self, pack: &glyphst_models::catalog::ModelEntry) -> bool {
+        self.demo_system_cjk_fonts.is_none() && crate::cjk_fonts::is_here(pack)
     }
 
-    /// Pages that waited for the CJK fonts are tried again once the fonts
-    /// are here, once a tab.
-    fn retry_when_cjk_fonts_come(&mut self, ctx: &egui::Context) {
-        let Some(active) = self.active else {
-            return;
-        };
-        let id = self.tabs[active].id;
-        let waiting = self.tabs[active]
-            .translation
-            .as_ref()
-            .is_some_and(|session| session.needs_cjk_fonts());
-        if waiting && !self.cjk_fonts_retried.contains(&id) && self.cjk_fonts_downloaded() {
-            self.cjk_fonts_retried.insert(id);
-            self.retry_failed_translation(ctx);
+    /// Once a CJK fonts pack has come, the translations into its language
+    /// start again with their scope, showing their pages meanwhile: the
+    /// translated text comes back from the cache, so no engine is asked, and
+    /// the pages are set again in the new fonts (pages that waited for them
+    /// too).
+    fn set_pages_in_new_cjk_fonts(&mut self, ctx: &egui::Context) {
+        for pack in self.cjk_fonts.newly_ready() {
+            for index in 0..self.tabs.len() {
+                let Some(old) = self.tabs[index].translation.as_ref() else {
+                    continue;
+                };
+                if crate::cjk_fonts::pack_for(&old.target).id != pack {
+                    continue;
+                }
+                let scope = if old.is_following() {
+                    let page = self.tabs[index].current_page();
+                    glyphst_pdf_translation_service::TranslationScope::following(page, FOLLOW_AHEAD)
+                } else {
+                    glyphst_pdf_translation_service::TranslationScope::whole()
+                };
+                let target = old.target.clone();
+                let Some(old) = self.tabs[index].translation.take() else {
+                    continue;
+                };
+                let previews = old.previews.clone();
+                drop(old);
+                let path = self.tabs[index].path.clone();
+                let options = crate::translation::SessionOptions {
+                    retry: true,
+                    ocr: self.library.document_ocr(&path),
+                };
+                match self
+                    .translator
+                    .start_session(&path, Some(&target), scope, options, ctx)
+                {
+                    Ok(mut session) => {
+                        session.keep_previews(previews);
+                        self.tabs[index].translation = Some(session);
+                    }
+                    Err(error) => self.notices.push(format!("Could not translate: {error}")),
+                }
+            }
         }
     }
 
@@ -5136,6 +5193,7 @@ impl ReaderApp {
                     background_seed,
                     library: library_facts,
                     machine: &self.machine,
+                    cjk_fonts: &mut self.cjk_fonts,
                 },
             );
             if std::mem::take(&mut self.settings_window.open_shortcuts) {
@@ -7146,7 +7204,7 @@ impl eframe::App for ReaderApp {
         }
         self.couch_overlay(&ctx);
         self.pad_ring_overlay(&ctx);
-        self.retry_when_cjk_fonts_come(&ctx);
+        self.set_pages_in_new_cjk_fonts(&ctx);
         if let Some(answer) = self.prompts.show(&ctx, self.prefs.gamepad_mode) {
             use crate::prompts::Answer;
             match answer {
@@ -7154,13 +7212,19 @@ impl eframe::App for ReaderApp {
                 Answer::LeaveGamepadMode => self.set_gamepad_mode(false, &ctx),
                 Answer::NeverAsk => self.prefs.ask_gamepad_mode = false,
                 Answer::NotNow | Answer::Stay => {}
-                Answer::DownloadCjkFonts => {
-                    self.prefs.cjk_fonts_offered = true;
-                    self.settings_window.start_cjk_fonts(&ctx);
+                Answer::DownloadCjkFonts(pack) => {
+                    self.prefs.offered_cjk_fonts.insert(pack.to_owned());
+                    if let Some(pack) = glyphst_models::catalog::entry(pack) {
+                        self.cjk_fonts.start(pack, &ctx);
+                    }
                 }
-                Answer::UseSystemFonts => self.prefs.cjk_fonts_offered = true,
-                Answer::DownloadAndTranslate => {
-                    self.settings_window.start_cjk_fonts(&ctx);
+                Answer::UseSystemFonts(pack) => {
+                    self.prefs.offered_cjk_fonts.insert(pack.to_owned());
+                }
+                Answer::DownloadAndTranslate(pack) => {
+                    if let Some(pack) = glyphst_models::catalog::entry(pack) {
+                        self.cjk_fonts.start(pack, &ctx);
+                    }
                     if let Some(scope) = self.cjk_fonts_pending.take() {
                         // Its pages wait for the fonts, then go again.
                         self.start_translation(&ctx, scope, true);
@@ -7175,6 +7239,12 @@ impl eframe::App for ReaderApp {
         } else {
             glyphst_ui::status::HEIGHT + 16.0
         };
+        if let Some(crate::cjk_fonts::CardAction::OpenResources) =
+            self.cjk_fonts.show_card(&ctx, lift)
+        {
+            self.settings_window
+                .show_section(crate::settings_window::Section::Resources);
+        }
         if self.notices.show(&ctx, lift).as_deref() == Some("undo") {
             match self.toast_undo.take() {
                 Some(ToastUndo::Highlight(id)) => self.remove_annotation(id),
