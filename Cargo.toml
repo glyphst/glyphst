@@ -139,8 +139,8 @@ glyphst-search = { opt-level = 3 }
 glyphst-ui = { opt-level = 3 }
 
 # mupdf-sys 0.8.0 plus MSVC ARM64 and static-CRT builds (Windows on Arm, and
-# a Windows executable without the VC++ runtime), from
-# glyphst/mupdf-rs@windows-arm64-0.8. Drop it once a mupdf-sys release has
-# both.
+# a Windows executable without the VC++ runtime) and Visual Studio 2026's
+# toolset, from glyphst/mupdf-rs@windows-arm64-0.8. Drop it once a mupdf-sys
+# release has them.
 [patch.crates-io]
-mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "9975c15f572e9338cad5914a4b1ed398cf9135a5" }
+mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "34a67c85af1485511de9b9fc7354ed3ea77ccafd" }
