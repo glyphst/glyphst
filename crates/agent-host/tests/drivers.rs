@@ -33,18 +33,16 @@ impl Tool for Info {
     }
 }
 
-fn turn(kind: AgentKind) -> (ExternalTurn, PathBuf) {
+/// A turn in a folder of its own: `test` names it, as tests run at once and
+/// two may drive the same agent.
+fn turn(kind: AgentKind, test: &str) -> (ExternalTurn, PathBuf) {
     let sessions = McpSessions::default();
     let server = McpServer::start(sessions.clone()).unwrap();
     let token = sessions.open(McpSession {
         tools: Arc::new(ToolRegistry::new().with(Info)),
         context: ToolContext::default(),
     });
-    let root = std::env::temp_dir().join(format!(
-        "glyphst-drivers-{}-{}",
-        kind.id(),
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("glyphst-drivers-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let scratch = Scratch::open(&root, "doc", "Doc").unwrap();
     let mut agent = AgentSpec::known(
@@ -93,7 +91,7 @@ fn text(events: &[ExternalEvent]) -> String {
 
 #[test]
 fn claude_code_turns_use_the_mcp_server_and_stay_in_their_folder() {
-    let (mut turn, root) = turn(AgentKind::ClaudeCode);
+    let (mut turn, root) = turn(AgentKind::ClaudeCode, "claude-code");
     let events = run(&turn);
     assert!(events.contains(&ExternalEvent::Session("fake-session".into())));
     assert_eq!(
@@ -120,7 +118,7 @@ fn claude_code_turns_use_the_mcp_server_and_stay_in_their_folder() {
 
 #[test]
 fn codex_turns_use_the_mcp_server_and_resume_or_start_threads() {
-    let (mut turn, root) = turn(AgentKind::Codex);
+    let (mut turn, root) = turn(AgentKind::Codex, "codex");
     // A thread that cannot be resumed starts afresh.
     turn.resume = Some("gone".into());
     let events = run(&turn);
@@ -136,7 +134,7 @@ fn codex_turns_use_the_mcp_server_and_resume_or_start_threads() {
 
 #[test]
 fn pi_turns_load_the_extension_and_report_their_session() {
-    let (mut turn, root) = turn(AgentKind::Pi);
+    let (mut turn, root) = turn(AgentKind::Pi, "pi");
     let events = run(&turn);
     assert!(events.contains(&ExternalEvent::Session("pi-session".into())));
     assert_eq!(
@@ -155,7 +153,7 @@ fn pi_turns_load_the_extension_and_report_their_session() {
 
 #[test]
 fn acp_agents_get_the_mcp_server_and_permissions_once() {
-    let (mut turn, root) = turn(AgentKind::Acp);
+    let (mut turn, root) = turn(AgentKind::Acp, "acp");
     let events = run(&turn);
     assert!(events.contains(&ExternalEvent::Session("acp-session".into())));
     assert_eq!(text(&events), "tools=1 permission=yes last=</reader_state>");
@@ -172,7 +170,7 @@ fn acp_agents_get_the_mcp_server_and_permissions_once() {
 
 #[test]
 fn a_canceled_turn_stops_the_agent() {
-    let (turn, root) = turn(AgentKind::ClaudeCode);
+    let (turn, root) = turn(AgentKind::ClaudeCode, "canceled");
     let cancel = AgentCancellationToken::default();
     cancel.cancel();
     let started = std::time::Instant::now();
