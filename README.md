@@ -1,151 +1,170 @@
-# Glyphst
+<p align="center">
+  <img src="docs/images/logo.svg" width="80" height="80" alt="The Glyphst logo: a g beside an amber bar">
+</p>
 
-Glyphst Reader is a PDF and EPUB reader built with Rust,
-[egui](https://github.com/emilk/egui) and [wgpu](https://wgpu.rs): pages are
-drawn from their vectors on the GPU, so zooming stays sharp and smooth.
+<h1 align="center">Glyphst Reader</h1>
 
-## Glyphst Reader
+<p align="center">
+  A PDF and EPUB reader that draws every page from its vectors on the GPU.<br>
+  Zoom glides and text stays sharp; translation, an assistant and a library
+  that files itself are one keystroke away.
+</p>
 
-Tabs and split panes, a library home, search, links and history,
-bookmarks, highlights and notes, two-page spreads and rotation, document and
-selection translation, an AI assistant, shader effects for page turns and
-backgrounds, a command palette and configurable shortcuts with a Vim
-keymap (the Keyboard shortcuts tab, or "Keys: Vim" in the palette), and an
-optionally transparent window (Settings › Appearance).
+<p align="center">
+  <a href="https://github.com/glyphst/glyphst/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/glyphst/glyphst?label=release"></a>
+  <a href="https://github.com/glyphst/glyphst/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/glyphst/glyphst/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/github/license/glyphst/glyphst"></a>
+</p>
 
-## Documentation
+<p align="center">
+  <a href="https://glyphst.com/reader/"><b>Website</b></a> ·
+  <a href="https://github.com/glyphst/glyphst/releases/latest"><b>Download</b></a> ·
+  <a href="#getting-started"><b>Getting started</b></a> ·
+  <a href="CONTRIBUTING.md"><b>Contributing</b></a>
+</p>
 
-- [Architecture](ARCHITECTURE.md): ownership, persistence, GPU lifetimes, and dependencies.
-- [Next work](ROADMAP.md): prioritized follow-ups and completion criteria.
-- [Agent guidance](AGENTS.md): repository constraints and task-specific verification.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dark-hero.webp">
+  <img src="docs/images/light-hero.webp" alt="Glyphst Reader with a book open: the outline on the left, the page in the middle, and the assistant on the right explaining the page with a code block and a before-and-after table.">
+</picture>
 
-## Development
+## Features
 
-The Rust version in [rust-toolchain.toml](rust-toolchain.toml), MuPDF's build
-tools and the windowing and Vulkan libraries are needed. On Linux, the Nix
-development shell provides them.
+- **Sharp at any zoom.** Pages are drawn from their vectors on the GPU, so
+  text and line art stay crisp however far you zoom, and zooming glides.
+- **Translation that keeps the layout.** Translate a whole document, the pages
+  as you read them, or a selection. The translation is set into the page in
+  place, or shown side by side with the original; hover a block to see its
+  partner. Uses DeepL, Google or Microsoft Translator.
+- **An assistant that reads along.** Ask about the page, a selection or a
+  figure, and get answers that cite their pages. Bring your own model
+  (OpenAI, Anthropic, DeepSeek or any compatible API) or agent (Claude Code,
+  Codex, Pi or any ACP agent).
+- **A library that files itself.** Folders, collections and tags, search by
+  words or by meaning across every document, and suggested collections and
+  related papers. The library lives on your computer.
+- **Made for long reads.** Tabs and split panes, a ctrl+tab book switcher,
+  outline, bookmarks, highlights and notes, two-page spreads, rotation, a page
+  overview and back and forward through links.
+- **Present from it.** Full screen with a pen, highlighter, laser and timer.
+- **Read from the couch.** A gamepad mode with its own home and a reading ring
+  on the right stick.
+- **Make it yours.** Themes from your wallpaper, page tints, shader effects
+  for page turns and backgrounds, a transparent window, and every shortcut
+  configurable, with a Vim keymap.
+
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/dark-side-by-side.webp">
+        <img src="docs/images/light-side-by-side.webp" alt="The Mamba paper side by side: the English original on the left and its Chinese translation on the right, in the same layout.">
+      </picture>
+      <p align="center"><sub>Translation, side by side</sub></p>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/dark-library.webp">
+        <img src="docs/images/light-library.webp" alt="The library: collections and tags on the left, a list of papers in the middle, and the selected paper's summary, tags, suggested collection and related papers on the right.">
+      </picture>
+      <p align="center"><sub>The library</sub></p>
+    </td>
+  </tr>
+</table>
+
+## Download
+
+Get the executable for your computer from the
+[latest release](https://github.com/glyphst/glyphst/releases/latest). Each is a
+single file; there is nothing to install.
+
+| System | File |
+| --- | --- |
+| Linux, x86_64 | `glyphst-reader-<version>-linux-x86_64` |
+| Linux, ARM64 | `glyphst-reader-<version>-linux-aarch64` |
+| macOS 11 or newer, Apple silicon | `glyphst-reader-<version>-macos-aarch64` |
+| Windows 10 or newer, x64 | `glyphst-reader-<version>-windows-x86_64.exe` |
+| Windows 10 or newer, ARM64 | `glyphst-reader-<version>-windows-aarch64.exe` |
+
+`SHA256SUMS` in each release lists the files' checksums.
+
+<details>
+<summary><b>Linux</b></summary>
+
+The executable runs on distributions with glibc 2.31 or newer (Ubuntu 20.04,
+Debian 11, Fedora 32 and later) and needs a Vulkan or OpenGL driver. Make it
+executable, then run it:
 
 ```sh
-nix develop
-cargo run -p glyphst-reader --release -- /path/to/document.pdf
+chmod +x glyphst-reader-*-linux-x86_64
+./glyphst-reader-*-linux-x86_64 paper.pdf
 ```
 
-The CJK faces (Noto Sans CJK and Source Han Serif, a pack for each of Chinese
-(Simplified), Chinese (Traditional), Japanese and Korean) are read at run time
-from `$GLYPHST_FONTS_DIR`, the packs Settings · Resources downloads, or a
-`../fonts` folder laid out the same way (`fonts/manifest.txt`,
-`fonts/noto-sans-cjk-sc/…`), which `script/check.sh screens` needs so every
-shot has the same faces. Without them, CJK text in the interface falls back to
-an installed font, and a translation into Chinese, Japanese or Korean uses the
-computer's CJK fonts or offers the download.
-`cargo build --release` is the quick local build. Shipped builds use
-`script/bundle <target>`: the `dist` profile (thin LTO, one codegen unit,
-stripped, `opt-level = "z"` for Glyphst's cold crates) with the linker flags in
-`.cargo/dist.toml`; `script/check.sh size` measures it.
+With Nix: `nix run github:glyphst/glyphst -- paper.pdf`.
+</details>
 
-### Releasing
+<details>
+<summary><b>macOS</b></summary>
 
-Bump `[workspace.package] version` in `Cargo.toml`, commit, and push the tag
-`v<version>`. The [release workflow](.github/workflows/release.yml) builds lone
-executables for Linux (glibc 2.31 or newer) and Windows, each on x86_64 and
-aarch64, and macOS 11 or newer on Apple silicon (Intel Macs are not
-supported), and publishes them with `SHA256SUMS` as the GitHub
-Release of that tag (a prerelease when the version has a `-`). Running the
-workflow by hand builds them without publishing. The macOS and Windows
-executables are not signed.
-
-Without Nix, install the platform packages listed in
-[CI](.github/workflows/ci.yml) before running Cargo.
-
-Normal builds use the published Git revisions in `Cargo.toml` and `Cargo.lock`;
-no dependency submodule or sibling checkout is required to build. Nix uses the same Rust
-toolchain file and Cargo lockfile. The read-only clones in the workspace's
-`../references/` are optional research material, not build inputs.
-
-See [architecture and dependency boundaries](ARCHITECTURE.md) for ownership,
-persistence, cache limits, and the remaining dependency-audit exception.
-
-### Verification
-
-`script/check.sh` runs the tiered checks inside the Nix shell and records step
-logs and timings under `target/check-reports/`:
+The executable is not signed yet, so macOS stops it the first time. Remove the
+quarantine mark once, then run it:
 
 ```sh
-script/check.sh quick          # fmt, clippy, tests
-script/check.sh gate           # + doctests, cargo audit, release Reader build
-script/check.sh corpus         # GPU page rendering against MuPDF on sample PDFs
-script/check.sh screens        # every design frame in both themes, as PNGs
-script/check.sh screens 02d --theme dark   # only the named frames
+xattr -d com.apple.quarantine glyphst-reader-*-macos-aarch64
+chmod +x glyphst-reader-*-macos-aarch64
+./glyphst-reader-*-macos-aarch64 paper.pdf
 ```
+</details>
 
-Screens run in a private headless sway (`script/headless-session.sh`), four
-Readers at a time, so no window reaches the desktop and they keep going while
-the screen is locked.
+<details>
+<summary><b>Windows</b></summary>
 
-The `corpus` tier renders page 1 of up to `GLYPHST_PDF_CORPUS_LIMIT` (100) PDFs
-from `GLYPHST_PDF_CORPUS` (default: the pdf.js test corpus under `../bak`),
-and 20 of them turned 90 degrees, and fails only on crashes or timeouts after
-parsing. For zoom timing on one page:
+The executable is not signed yet, so SmartScreen may warn about it: choose
+**More info**, then **Run anyway**. You can also open a document by dropping it
+on the executable.
+</details>
 
-```sh
-cargo run --release -p glyphst-pdf-gpu --example zoom_bench -- page.pdf --out target/check-reports/zoom-bench
-cargo run --release -p glyphst-pdf-gpu --example zoom_view -- page.pdf   # interactive
-```
+## Getting started
 
-The Reader runs the same checks unattended in its own window, saving
-nothing: `--bench` prints zoom, scroll, sidebar-slide and whole-document
-search frame times as JSON, and `--screenshot PATH`, `--screenshot-turn
-PATH` and `--screenshot-switch PATH` (two documents) capture the window, the
-latter two halfway through a transition; `--screenshot-generating PATH` and
-`--screenshot-revealing PATH` replay the loading animation over the drawn
-pages and capture it while the page's parts are traced, and halfway
-through the reveal; `--screenshot-present-tools PATH` (with `--command
-view.present`) sets out presenting's ink, toolbox and tool ring first;
-`--screenshot-slide PATH` captures the sidebar partway through sliding
-in or out, the pages resizing with it. `--zoom Z`, `--page N`, `--background ID` and
-`--transition ID|none` set up the run, `--theme system|light|dark` its
-colours, `--gallery` shows every component of the design instead of home,
-`--split right|down` shows the second document beside the
-first, `--rotate 90|180|270` and `--spread` turn and spread the pages
-(without remembering it), and `--overlay ID|none` and `--wallpaper PATH`
-set both themes' page tint and the wallpaper; `--colours preset|background|custom`
-picks where the theme's colours come from, and `--opacity O` makes the
-window transparent at that opacity; `--find TEXT`, `--select-page N`
-(or `--select-pages A-B`), `--sidebar TAB` and `--font-size PT` (EPUB)
-show a search, a selection, a
-sidebar tab or a reflowed size in the screenshot. `--translate-fake`
-translates through a local fake provider (no keys, no network), and
-`--translate-document` / `--translate-selection` start a translation that a
-screenshot waits for and a bench runs alongside. `--ai-fake` answers the
-assistant from a local fake model, and `--ask TEXT` asks it at startup.
-`--command ID` (repeatable) runs a command by its id, such as `view.zen`,
-once the documents are open, and `--select-region PAGE:X0,Y0,X1,Y1` draws a
-region (in page points) as the region tool would.
-`--palette QUERY` opens the command palette and `--settings SECTION` the
-settings window (`appearance`, `reading`, `effects`, `translation`, `ocr`,
-`ai`; `appearance:background` and `appearance:colours` scroll to that
-group), or with `shortcuts` the Keyboard shortcuts tab. Scripted runs keep
-settings and keys in memory.
+Open a document with **Ctrl+O**, by passing its path to the executable, or from
+the library on the home screen. A few keys to start with (**Ctrl** is **⌘** on
+macOS):
 
-### Writing an effect
+| Key | Does |
+| --- | --- |
+| **Ctrl+K** | Command palette: every command, searchable |
+| **Ctrl+F** | Find in the document |
+| **Ctrl+T** | Translate the selection |
+| **Ctrl+L** | Open the assistant |
+| **Ctrl+Tab** | Switch between open books |
+| **+ / − / 0** | Zoom in, zoom out, fit width |
+| **Z** | Zen mode: only the page |
+| **P** | Present |
+| **Ctrl+,** | Settings |
 
-Settings › Effects › New effect writes a commented starter
-(`crates/effects/src/template.wgsl`) into `<config>/glyphst/effects` and
-opens the folder; the Reader reloads effects when a file there changes, and
-lists the ones that fail to compile on that page. An effect is a WGSL
-`fn effect(uv, pixel) -> vec4<f32>` returning premultiplied colour after
-the shared [prelude](crates/effects/src/prelude.wgsl), with `// @effect`
-lines naming it, its kind (`background`, `transition` or `overlay`) and up
-to four parameters for the sliders.
+Settings › Keyboard shortcuts lists and changes every key, and "Keys: Vim" in
+the palette switches to the Vim keymap.
 
-Report baseline failures separately. The statistics overlay (F12) shows
-frame times and GPU memory while reading. Review
-[audit exceptions](ARCHITECTURE.md#dependency-audit) when dependencies
-change. Documentation-only changes need content/link checks and
-`git diff --check`.
+Translation and the assistant need a provider: add your key in Settings ›
+Translation or Settings › AI. Fonts for translating into Chinese, Japanese or
+Korean, and the models for local search and OCR, download when first needed;
+Settings › Resources shows and manages them.
 
-Install the configured pre-commit hooks with `prek install`.
+## Contributing
+
+Bug reports and ideas are welcome in
+[issues](https://github.com/glyphst/glyphst/issues). To build from source, run
+the checks or cut a release, see [CONTRIBUTING.md](CONTRIBUTING.md); the
+[architecture notes](ARCHITECTURE.md) explain how the pieces fit.
 
 ## License
 
-Glyphst is licensed under [AGPL-3.0-only](LICENSE).
+Glyphst Reader is free software under the
+[GNU Affero General Public License v3.0](LICENSE). The bundled fonts and icons
+keep their own licences, kept beside them in `crates/ui/assets` and
+`crates/pdf-translation/fonts`.
+
+The screenshots show *Mamba: Linear-Time Sequence Modeling with Selective
+State Spaces* (Albert Gu and Tri Dao,
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and *Zero To
+Production in Rust* (Luca Palmieri).
