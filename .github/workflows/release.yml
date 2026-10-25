@@ -7,6 +7,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    # TEMPORARY: a dry run from the branch; removed before merging.
+    branches: [release-ci]
   workflow_dispatch:
 
 concurrency:
