@@ -5598,7 +5598,7 @@ dependencies = [
 [[package]]
 name = "mupdf-sys"
 version = "0.8.0"
-source = "git+https://github.com/glyphst/mupdf-rs?rev=34a67c85af1485511de9b9fc7354ed3ea77ccafd#34a67c85af1485511de9b9fc7354ed3ea77ccafd"
+source = "git+https://github.com/glyphst/mupdf-rs?rev=1be2cd4279e63864710061d79f8cb2c1d5b62c8b#1be2cd4279e63864710061d79f8cb2c1d5b62c8b"
 dependencies = [
  "bindgen",
  "cc",
