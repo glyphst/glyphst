@@ -1169,26 +1169,38 @@ fn progress_summary(ui: &mut egui::Ui, states: &[PageProgress], kept: usize) {
         parts.push(format!("{waiting} waiting"));
     }
     if kept > 0 {
-        parts.push(format!(
-            "{kept} block{} kept original",
-            if kept == 1 { "" } else { "s" }
-        ));
+        parts.push(format!("{kept} kept original"));
     }
     let fraction = done as f32 / states.len().max(1) as f32;
     let percent = format!("{:.0}%", fraction * 100.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (bar, _) = ui.allocate_exact_size(egui::vec2(104.0, 14.0), egui::Sense::hover());
-        Meter::new(fraction)
-            .width(bar.width())
-            .label(&percent)
-            .paint(ui, bar);
-        ui.label(
-            egui::RichText::new(parts.join(" · "))
-                .font(theme::mono(10.0))
-                .color(tokens.muted),
-        );
-    });
+    // One line as wide as the pane: the meter, then the counts cut to the
+    // rest, whole on hover.
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), egui::Sense::hover());
+    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(104.0, rect.height()));
+    Meter::new(fraction)
+        .width(bar.width())
+        .label(&percent)
+        .paint(ui, bar);
+    let counts = parts.join(" · ");
+    let font = theme::mono(10.0);
+    let room = rect.right() - bar.right() - 8.0;
+    let whole = ui
+        .painter()
+        .layout_no_wrap(counts.clone(), font.clone(), tokens.muted)
+        .size()
+        .x;
+    glyphst_ui::text::row(
+        ui,
+        egui::pos2(bar.right() + 8.0, rect.center().y),
+        &counts,
+        font,
+        tokens.muted,
+        room,
+    );
+    if whole > room {
+        response.on_hover_text(counts);
+    }
 }
 
 /// A page's colour in the map.
@@ -1286,9 +1298,7 @@ fn progress_label(
     tokens: &Tokens,
 ) -> (&'static str, String, egui::Color32) {
     match state {
-        PageProgress::Done if kept > 0 => {
-            ("✓", format!("translated · {kept} kept original"), tokens.ok)
-        }
+        PageProgress::Done if kept > 0 => ("✓", format!("translated · {kept} kept"), tokens.ok),
         PageProgress::Done => ("✓", "translated".to_string(), tokens.ok),
         PageProgress::Partial { done, total } => (
             "◌",
@@ -1350,8 +1360,9 @@ fn page_status_row(
             tokens.text_2
         },
     );
+    // The state from x 76, after a page column (frame 03e), cut to the row.
     let (glyph, label, color) = progress_label(state, kept, &tokens);
-    let x = rect.left() + rect.width() * 0.45;
+    let x = rect.left() + 76.0;
     ui.painter().text(
         egui::pos2(x, y),
         egui::Align2::LEFT_CENTER,
@@ -1359,10 +1370,10 @@ fn page_status_row(
         font.clone(),
         color,
     );
-    ui.painter().text(
+    glyphst_ui::text::row(
+        ui,
         egui::pos2(x + 14.0, y),
-        egui::Align2::LEFT_CENTER,
-        &label,
+        label,
         font,
         match state {
             PageProgress::Done if current => tokens.ok,
@@ -1371,6 +1382,7 @@ fn page_status_row(
             PageProgress::Waiting => tokens.muted,
             _ => tokens.faint,
         },
+        rect.right() - 4.0 - (x + 14.0),
     );
 }
 
@@ -2687,6 +2699,47 @@ mod tests {
         assert!(cell >= 6.0, "{cell}");
         let (cell, _, per_row) = map_cells(5_000, 276.0);
         assert!(cell >= 3.0 && per_row > 0);
+    }
+
+    #[test]
+    fn the_pages_section_stays_within_the_pane() {
+        // A book mid-run, with every count in the summary and the longest
+        // rows the list shows.
+        let mut states = vec![PageProgress::Done; 530];
+        for state in &mut states[100..112] {
+            *state = PageProgress::Partial {
+                done: 13,
+                total: 24,
+            };
+        }
+        for state in &mut states[200..230] {
+            *state = PageProgress::Waiting;
+        }
+        states[311] = PageProgress::Failed(PageFailureCode::LocalOcrMissing);
+        let width = 276.0;
+        let ctx = egui::Context::default();
+        let mut used = 0.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(
+                egui::Rect::from_min_size(egui::pos2(12.0, 0.0), egui::vec2(width, 800.0)),
+            ));
+            progress_summary(&mut pane, &states, 120);
+            page_map(&mut pane, &states, 140, |page| page.to_string());
+            map_legend(&mut pane);
+            page_status_row(&mut pane, 528, 528, PageProgress::Done, true, None, 12);
+            page_status_row(&mut pane, 101, 101, states[101], false, None, 0);
+            page_status_row(&mut pane, 311, 311, states[311], false, None, 0);
+            used = pane.min_rect().width();
+        });
+        output.textures_delta.clear();
+        assert!(used <= width, "the pages section is {used} wide");
     }
 
     #[test]

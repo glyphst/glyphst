@@ -159,6 +159,8 @@ pub struct Launch {
     /// Screens: failures (codes, comma-separated) given to the pages from
     /// the current one on, every other page, once a translation runs.
     pub translate_failures: Option<String>,
+    /// Screens: blocks the current page keeps original, once translated.
+    pub translate_kept: Option<usize>,
     pub translate_selection: bool,
     /// Ask through a local fake model; scripted runs ask this at startup.
     pub ai_fake: bool,
@@ -390,6 +392,7 @@ pub struct ReaderApp {
     pub(crate) launch_translate_document: bool,
     pub(crate) launch_translate_follow: bool,
     pub(crate) launch_translate_failures: Option<String>,
+    pub(crate) launch_translate_kept: Option<usize>,
     /// Scripted runs: the time translated blocks' reveals are held at,
     /// how they show, and where the pages were last drawn.
     pub(crate) reveal_clock: Option<f64>,
@@ -763,6 +766,7 @@ impl ReaderApp {
             launch_translate_document: launch.translate_document,
             launch_translate_follow: launch.translate_follow,
             launch_translate_failures: launch.translate_failures.clone(),
+            launch_translate_kept: launch.translate_kept,
             reveal_clock: None,
             reveal_view: RevealView::Normal,
             reveal_maps: Vec::new(),

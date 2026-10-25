@@ -305,6 +305,7 @@ if [[ ${tier} == screens ]]; then
         "03-translation-done @ --sidebar translation --translate-fake --translate-document"
         "03-translation-clear-confirm @ --sidebar translation --translate-fake --translate-document --command translation.clear"
         "03-translation-book + --sidebar translation --translate-fake --translate-follow"
+        "03-translation-kept @ --sidebar translation --translate-fake --translate-follow --translate-kept 2"
         "03-translation-failed @ --sidebar translation --translate-fake --translate-document --translate-failures network,network"
         "03-translation-failed-install @ --sidebar translation --translate-fake --translate-follow --translate-failures local-ocr-missing"
         "03-translation-ocr-menu @ --sidebar translation --pointer-demo click:189,211;wait*3"

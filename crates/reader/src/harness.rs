@@ -351,6 +351,21 @@ impl ReaderApp {
             }
             self.launch_translate_failures = None;
         }
+        if let Some(count) = self.launch_translate_kept
+            && let Some(preview) = self.tabs[active]
+                .translation
+                .as_mut()
+                // Once its last preview is in, so no later one replaces it.
+                .filter(|session| {
+                    session.page_progress(current) == crate::translation::PageProgress::Done
+                })
+                .and_then(|session| session.previews.get_mut(&current))
+        {
+            preview.kept_original = (1..=count)
+                .map(|block| format!("block {block} kept its original, for the screens."))
+                .collect();
+            self.launch_translate_kept = None;
+        }
         if self.launch_translate_selection && self.launch_select.is_none() {
             if self.tabs[active].selection.is_none() {
                 return true;
@@ -384,6 +399,7 @@ impl ReaderApp {
         document
             || selection
             || self.launch_translate_selection
+            || self.launch_translate_kept.is_some()
             || (self.assistant.is_running() && !self.assistant.is_demo())
     }
 
