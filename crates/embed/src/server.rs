@@ -588,17 +588,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_server_that_exits_says_why() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("glyphst-embed-server-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("llama-server");
-        std::fs::write(
+        install_script(
             &exe,
             "#!/bin/sh\nif [ \"$1\" = --list-devices ]; then echo 'Available devices:'; echo '  Vulkan0: Test GPU'; exit 0; fi\necho \"error: failed to load model '$2'\" >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let config = ServerConfig {
             exe,
             model: dir.join("model.gguf"),
@@ -615,5 +612,22 @@ mod tests {
             Ok(_) => panic!("the fake server cannot serve"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Puts an executable script at `path` through `install`, so this
+    /// process never holds it open for writing: a child another test forks
+    /// meanwhile would inherit that handle and make running the script fail
+    /// with "Text file busy".
+    #[cfg(unix)]
+    fn install_script(path: &std::path::Path, body: &str) {
+        let source = path.with_extension("txt");
+        std::fs::write(&source, body).unwrap();
+        let status = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

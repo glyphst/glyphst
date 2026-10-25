@@ -2059,16 +2059,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn external_agents_answer_in_the_panel_and_their_files_can_be_undone() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let directory =
             std::env::temp_dir().join(format!("glyphst-reader-external-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         // A stand-in for `claude` speaking its stream-json protocol.
         let program = directory.join("claude");
+        // Put in place by `install`, so this process never holds it open
+        // for writing: a child another test forks meanwhile would inherit
+        // that handle and make running it fail with "Text file busy".
+        let source = directory.join("claude.txt");
         std::fs::write(
-            &program,
+            &source,
             r#"#!/bin/sh
 read line
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
@@ -2081,7 +2083,13 @@ cat > /dev/null
 "#,
         )
         .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let installed = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(&program)
+            .status()
+            .unwrap();
+        assert!(installed.success());
         let scratch = Scratch::open(&directory, "doc", "Doc").unwrap();
         let mut library = LibraryStore::open_for_test(directory.join("library.redb")).unwrap();
         let ctx = egui::Context::default();
