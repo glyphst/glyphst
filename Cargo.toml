@@ -118,3 +118,10 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 debug = false
+
+# mupdf-sys 0.8.0 plus MSVC ARM64 and static-CRT builds (Windows on Arm, and
+# a Windows executable without the VC++ runtime), from
+# glyphst/mupdf-rs@windows-arm64-0.8. Drop it once a mupdf-sys release has
+# both.
+[patch.crates-io]
+mupdf-sys = { git = "https://github.com/glyphst/mupdf-rs", rev = "9975c15f572e9338cad5914a4b1ed398cf9135a5" }

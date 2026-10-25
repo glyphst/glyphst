@@ -559,7 +559,10 @@ When redb reports a file from an older file format
 ## Dependency maintenance
 
 [Cargo.toml](Cargo.toml) and [Cargo.lock](Cargo.lock) pin crates.io
-versions and Git revisions (merman for Mermaid).
+versions and Git revisions (merman for Mermaid). `mupdf-sys` is patched to
+[glyphst/mupdf-rs](https://github.com/glyphst/mupdf-rs) `windows-arm64-0.8`:
+the published 0.8.0 plus MSVC ARM64 and static-CRT builds, which the Windows
+releases need; it goes once a mupdf-sys release has both.
 Cargo and Nix use [rust-toolchain.toml](rust-toolchain.toml). egui, eframe
 and egui_extras move together (and resvg in `markdown` stays egui_extras'
 version), and `pdf-gpu` uses egui's

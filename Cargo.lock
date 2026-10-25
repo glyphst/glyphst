@@ -5598,8 +5598,7 @@ dependencies = [
 [[package]]
 name = "mupdf-sys"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c20755e9694e43da4ce8ee2e0211d63883cccd68d314ea4d518c031efee7d8e"
+source = "git+https://github.com/glyphst/mupdf-rs?rev=9975c15f572e9338cad5914a4b1ed398cf9135a5#9975c15f572e9338cad5914a4b1ed398cf9135a5"
 dependencies = [
  "bindgen",
  "cc",
