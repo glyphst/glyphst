@@ -154,6 +154,8 @@ pub struct Launch {
     pub translate_fake: bool,
     /// The fake provider's target language (French unless named).
     pub translate_to: Option<String>,
+    /// Screens: once translated, the document shows as if reopened.
+    pub translate_reopened: bool,
     /// Screens: no CJK fonts downloaded, and whether the computer has CJK
     /// faces of its own (`--cjk-fonts system|none`).
     pub cjk_fonts: Option<bool>,
@@ -363,6 +365,9 @@ pub struct ReaderApp {
     prompts: crate::prompts::Prompts,
     /// The CJK fonts' downloads (Settings · Resources, frame 03h).
     pub(crate) cjk_fonts: crate::cjk_fonts::CjkFonts,
+    /// A tab whose kept translation shows once the lookup for the language
+    /// and engine just set finds it (03i).
+    pub(crate) show_kept_when_found: Option<u64>,
     /// A translation waiting on the CJK fonts prompt (03g).
     cjk_fonts_pending: Option<std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>>,
     pub(crate) couch: crate::couch::Couch,
@@ -404,6 +409,8 @@ pub struct ReaderApp {
     pub(crate) launch_translate_follow: bool,
     pub(crate) launch_translate_failures: Option<String>,
     pub(crate) launch_translate_kept: Option<usize>,
+    /// Screens: the document's translation ends as if it were reopened.
+    pub(crate) launch_translate_reopened: bool,
     /// Screens without the CJK fonts, though the run has the glyphst-fonts
     /// checkout: whether the computer has CJK faces of its own then.
     pub(crate) demo_system_cjk_fonts: Option<bool>,
@@ -760,6 +767,7 @@ impl ReaderApp {
             prompts: Default::default(),
             cjk_fonts: Default::default(),
             cjk_fonts_pending: None,
+            show_kept_when_found: None,
             couch: Default::default(),
             fixed_clock: launch.fixed_clock,
             pad_pointer: None,
@@ -787,6 +795,7 @@ impl ReaderApp {
             launch_translate_follow: launch.translate_follow,
             launch_translate_failures: launch.translate_failures.clone(),
             launch_translate_kept: launch.translate_kept,
+            launch_translate_reopened: launch.translate_reopened,
             demo_system_cjk_fonts: launch.cjk_fonts.or_else(|| {
                 launch
                     .translate_failures
@@ -2862,6 +2871,7 @@ impl ReaderApp {
                     self.settings_window.install_local_ocr(ctx, &settings);
                 }
             }
+            SidebarAction::ShowKeptTranslation => self.show_kept_translation(ctx),
             SidebarAction::DownloadCjkFonts(pack) => {
                 if let Some(pack) = glyphst_models::catalog::entry(pack) {
                     self.cjk_fonts.start(pack, ctx);
@@ -3172,6 +3182,15 @@ impl ReaderApp {
                 gpu.release_retired(key);
             }
         });
+        // Nothing kept is offered while it goes.
+        for tab in self.tabs.iter_mut().filter(|tab| tab.path == path) {
+            if let Some(kept) = &tab.kept_translations {
+                tab.kept_translations = Some(crate::translation::KeptTranslations::Known {
+                    key: kept.key().to_owned(),
+                    runs: Vec::new(),
+                });
+            }
+        }
         match self.translator.clear_document(&path, sessions, ctx) {
             Ok(done) => self.clearing.push(done),
             Err(error) => self.notices.push(error),
@@ -3320,6 +3339,42 @@ impl ReaderApp {
             pack: pack.id,
         });
         false
+    }
+
+    /// Shows the translation kept from an earlier run (frame 03i): only its
+    /// pages, so no engine is asked. One in another language or engine
+    /// makes those the settings' first, and shows once the lookup for them
+    /// finds it.
+    fn show_kept_translation(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(kept) = self.tabs[active]
+            .kept_translations
+            .as_ref()
+            .and_then(|kept| kept.first())
+            .cloned()
+        else {
+            return;
+        };
+        if !kept.matches {
+            self.prefs.target_language = Some(kept.target_language.as_str().to_owned());
+            if let Some(provider) = glyphst_settings::TranslationProvider::ALL
+                .into_iter()
+                .find(|provider| kept.provider.as_deref() == Some(provider.as_str()))
+            {
+                self.user_settings
+                    .edit(|settings| settings.translation.active_provider = provider);
+            }
+            self.show_kept_when_found = Some(self.tabs[active].id);
+            return;
+        }
+        let scope = if kept.pages.len() >= kept.page_count {
+            glyphst_pdf_translation_service::TranslationScope::whole()
+        } else {
+            glyphst_pdf_translation_service::TranslationScope::pages(kept.pages.iter().copied())
+        };
+        self.start_translation(ctx, scope, false);
     }
 
     /// Whether `pack`'s faces are here ([`crate::cjk_fonts::is_here`]),
@@ -4506,6 +4561,13 @@ impl ReaderApp {
             Needs::Selection => tab.selection.is_some(),
             Needs::Reflow => matches!(tab.document_layout, DocumentLayout::Reflow(_)),
             Needs::Translation => tab.translation.is_some(),
+            Needs::TranslationOrKept => {
+                tab.translation.is_some()
+                    || tab
+                        .kept_translations
+                        .as_ref()
+                        .is_some_and(|kept| kept.first().is_some())
+            }
             Needs::Panes => self.panes.count() > 1,
             Needs::FixedLayout => !tab.is_reflowed(),
         };
@@ -7205,6 +7267,11 @@ impl eframe::App for ReaderApp {
         self.couch_overlay(&ctx);
         self.pad_ring_overlay(&ctx);
         self.set_pages_in_new_cjk_fonts(&ctx);
+        for tab in &mut self.tabs {
+            if let Some(kept) = &mut tab.kept_translations {
+                kept.poll();
+            }
+        }
         if let Some(answer) = self.prompts.show(&ctx, self.prefs.gamepad_mode) {
             use crate::prompts::Answer;
             match answer {

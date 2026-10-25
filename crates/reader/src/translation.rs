@@ -21,11 +21,11 @@ use std::{
 use crate::reveal::RevealBlock;
 use glyphst_pdf::{DocumentSnapshot, vector::PageRect};
 use glyphst_pdf_translation_service::{
-    CancellationToken, ClearedTranslation, ExportLayout, PageFailureCode, PdfTranslationConfig,
-    PdfTranslationExportRequest, PdfTranslationHoverRegion, PdfTranslationPageFailure,
-    PdfTranslationPagePreview, PdfTranslationProgress, PdfTranslationService,
-    PdfTranslationSessionRequest, PdfTranslationSessionResult, PdfTranslationSessionUpdate,
-    TranslationScope,
+    CachedTranslation, CancellationToken, ClearedTranslation, ExportLayout, PageFailureCode,
+    PdfTranslationConfig, PdfTranslationExportRequest, PdfTranslationHoverRegion,
+    PdfTranslationPageFailure, PdfTranslationPagePreview, PdfTranslationProgress,
+    PdfTranslationRequest, PdfTranslationService, PdfTranslationSessionRequest,
+    PdfTranslationSessionResult, PdfTranslationSessionUpdate, TranslationScope,
 };
 use glyphst_settings::Settings;
 use glyphst_translation::{
@@ -143,6 +143,55 @@ impl Translator {
                     .resolved_target_language(),
             )
         })
+    }
+
+    /// The language and engine a translation of a document resumes:
+    /// a kept run is looked up again when they change.
+    pub fn resume_key(&self, target: Option<&str>) -> Option<String> {
+        let settings = self.settings.as_ref()?;
+        Some(format!(
+            "{}|{}|{}",
+            self.target_language(target)?,
+            settings.translation.active_provider.as_str(),
+            settings
+                .translation
+                .source_language
+                .as_deref()
+                .unwrap_or("auto")
+        ))
+    }
+
+    /// Looks up, on a thread, the translations of `path` kept from earlier
+    /// runs (frame 03i); none when the settings are not read yet.
+    pub fn look_up_kept(
+        &self,
+        path: &Path,
+        target: Option<&str>,
+        ctx: &egui::Context,
+    ) -> Option<mpsc::Receiver<Vec<CachedTranslation>>> {
+        let settings = self.settings.clone()?;
+        let target = LanguageCode::new(self.target_language(target)?).ok()?;
+        let request = PdfTranslationRequest {
+            source_path: path.to_path_buf(),
+            output_path: path.with_extension("translated.pdf"),
+            source_language: settings
+                .translation
+                .source_language
+                .as_deref()
+                .and_then(|language| LanguageCode::new(language).ok()),
+            target_language: target,
+        };
+        let config = PdfTranslationConfig::from_settings(&settings);
+        let (service, ctx) = (self.pdf.clone(), ctx.clone());
+        let (found_tx, found) = mpsc::channel();
+        thread::Builder::new()
+            .name("translation-kept".into())
+            .spawn(move || {
+                let _ = found_tx.send(service.cached_translations(&config, &request));
+                ctx.request_repaint();
+            })
+            .ok()?;
+        Some(found)
     }
 
     /// Translates `text` into a card at `at`.
@@ -493,6 +542,47 @@ pub enum PageProgress {
 pub enum Export {
     Running(Receiver<Result<PathBuf, String>>),
     Done(Result<PathBuf, String>),
+}
+
+/// A document's translations kept from earlier runs (frame 03i), for the
+/// language and engine `key` names.
+pub enum KeptTranslations {
+    Asking {
+        key: String,
+        found: mpsc::Receiver<Vec<CachedTranslation>>,
+    },
+    Known {
+        key: String,
+        runs: Vec<CachedTranslation>,
+    },
+}
+
+impl KeptTranslations {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Asking { key, .. } | Self::Known { key, .. } => key,
+        }
+    }
+
+    /// Takes the answer once it has come.
+    pub fn poll(&mut self) {
+        if let Self::Asking { key, found } = self
+            && let Ok(runs) = found.try_recv()
+        {
+            *self = Self::Known {
+                key: std::mem::take(key),
+                runs,
+            };
+        }
+    }
+
+    /// The run to offer: the one the settings resume, else the newest.
+    pub fn first(&self) -> Option<&CachedTranslation> {
+        match self {
+            Self::Known { runs, .. } => runs.first(),
+            Self::Asking { .. } => None,
+        }
+    }
 }
 
 /// The translation of one document.

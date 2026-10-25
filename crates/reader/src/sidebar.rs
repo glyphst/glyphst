@@ -112,6 +112,8 @@ pub enum SidebarAction {
     RetryFailed,
     /// Install local OCR (Settings · OCR), which failed pages need.
     InstallLocalOcr,
+    /// Show the translation kept from an earlier run (03i).
+    ShowKeptTranslation,
     /// Download the CJK fonts pack failed pages need.
     DownloadCjkFonts(&'static str),
     /// This document's own OCR engine and mode (`None`: the settings').
@@ -699,6 +701,15 @@ fn translation_panel(
     }
     // The foot of the pane: what is shown, and the export. Its controls keep
     // their size whatever the session does.
+    if tab.translation.is_none() && info.confirm_clear {
+        let bottom = ui.max_rect().bottom();
+        let foot = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left(), bottom - footer + 8.0),
+            egui::pos2(ui.max_rect().right(), bottom),
+        );
+        clear_confirm(ui, foot, actions);
+        return;
+    }
     if let Some(session) = &tab.translation {
         let bottom = ui.max_rect().bottom();
         let foot = egui::Rect::from_min_max(
@@ -835,12 +846,12 @@ fn scope_slot(
 ) {
     let tokens = Tokens::get(ui.ctx());
     let width = ui.available_width();
-    let target = info
-        .target
-        .as_deref()
-        .map(language_label)
-        .unwrap_or("the settings' language");
+    let kept = tab.kept_translations.as_ref().and_then(|kept| kept.first());
     let (button, note) = match &tab.translation {
+        None if let Some(kept) = kept => {
+            kept_translation(ui, kept, width, actions);
+            (None, String::new())
+        }
         None => {
             let start = ui.add_enabled(
                 info.ready,
@@ -850,9 +861,7 @@ fn scope_slot(
                 actions.push(SidebarAction::StartTranslation);
             }
             let note = if info.ready {
-                format!(
-                    "or switch on translate as I read: it translates the page you are on and the next two, into {target}."
-                )
+                String::new()
             } else {
                 "reading the translation settings…".to_owned()
             };
@@ -914,7 +923,7 @@ fn scope_slot(
                         (
                             format!("✓ all {total} pages translated"),
                             tokens.ok,
-                            "kept in the cache: reopening shows them at once.".to_owned(),
+                            String::new(),
                         )
                     } else {
                         (
@@ -932,6 +941,19 @@ fn scope_slot(
                 theme::mono(12.0),
                 color,
             );
+            // Clearing, within reach of what it clears (03c).
+            let clear = egui::Rect::from_min_max(
+                egui::pos2(rect.right() - 80.0, rect.top()),
+                rect.max - egui::vec2(6.0, 0.0),
+            );
+            let mut slot = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(clear)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            if slot.add(Button::bracket_muted("clear")).clicked() {
+                actions.push(SidebarAction::AskClearTranslation);
+            }
             (None, note)
         }
     };
@@ -940,11 +962,87 @@ fn scope_slot(
     {
         actions.push(action);
     }
-    ui.add_space(6.0);
-    muted(ui, &note);
+    if !note.is_empty() {
+        ui.add_space(6.0);
+        muted(ui, &note);
+    }
     if let Some(session) = &tab.translation {
         failures_box(ui, session, info, actions);
     }
+}
+
+/// A translation kept from an earlier run (frame 03i): what it is, and
+/// showing it (no engine is asked) or clearing it. One in another language
+/// or engine is offered beside translating anew.
+fn kept_translation(
+    ui: &mut egui::Ui,
+    kept: &glyphst_pdf_translation_service::CachedTranslation,
+    width: f32,
+    actions: &mut Vec<SidebarAction>,
+) {
+    let tokens = Tokens::get(ui.ctx());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, tokens.row(28.0)), egui::Sense::hover());
+    ui.painter().rect_stroke(
+        rect,
+        tokens.ctl_radius(),
+        tokens.edge(),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!(
+            "✓ translated before · {} of {} pages",
+            kept.pages.len(),
+            kept.page_count
+        ),
+        theme::mono(12.0),
+        tokens.ok,
+    );
+    let mut parts = vec![language_label(kept.target_language.as_str()).to_owned()];
+    parts.extend(kept.provider.clone());
+    parts.extend(kept.modified.map(crate::library_sync::ago));
+    let note = if kept.matches {
+        format!(
+            "→ {}. Showing it asks the engine nothing.",
+            parts.join(" · ")
+        )
+    } else {
+        format!(
+            "→ {}, not the language and engine set above.",
+            parts.join(" · ")
+        )
+    };
+    ui.add_space(6.0);
+    muted(ui, &note);
+    ui.add_space(4.0);
+    if !kept.matches
+        && ui
+            .add(Button::primary("translate document").min_width(width))
+            .clicked()
+    {
+        actions.push(SidebarAction::StartTranslation);
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let clear_width = 72.0;
+        let show_width = width - clear_width - 8.0;
+        let show = if kept.matches {
+            Button::primary("show translation").min_width(show_width)
+        } else {
+            Button::ghost("show it").min_width(show_width)
+        };
+        if ui.add(show).clicked() {
+            actions.push(SidebarAction::ShowKeptTranslation);
+        }
+        if ui
+            .add(Button::ghost("clear").min_width(clear_width))
+            .clicked()
+        {
+            actions.push(SidebarAction::AskClearTranslation);
+        }
+    });
 }
 
 /// What went wrong with the pages that failed, and what fixes it (frame

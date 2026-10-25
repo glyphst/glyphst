@@ -27,6 +27,8 @@ struct ScopeState {
     ahead: usize,
     whole: bool,
     touched: BTreeSet<usize>,
+    /// Only the pages given stay in scope: the reader moving doesn't add any.
+    fixed: bool,
     generation: u64,
 }
 
@@ -55,6 +57,18 @@ impl TranslationScope {
         })
     }
 
+    /// Exactly `pages` (a kept translation shown again), until it is
+    /// expanded to the whole document.
+    pub fn pages(pages: impl IntoIterator<Item = usize>) -> Arc<Self> {
+        let touched: BTreeSet<usize> = pages.into_iter().collect();
+        Self::new(ScopeState {
+            focus: touched.first().copied().unwrap_or_default(),
+            touched,
+            fixed: true,
+            ..ScopeState::default()
+        })
+    }
+
     fn new(state: ScopeState) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(state),
@@ -77,7 +91,7 @@ impl TranslationScope {
     /// Moves the focus to `page`; its window joins the pages kept in scope.
     pub fn set_focus(&self, page: usize) {
         let mut state = self.lock();
-        if state.focus == page {
+        if state.focus == page || state.fixed {
             return;
         }
         state.focus = page;
@@ -207,6 +221,18 @@ mod tests {
         assert_eq!(view.rank(3), None);
         assert_eq!(view.ocr_rank(3), Some(1));
         assert_eq!(view.ocr_rank(7), Some(3));
+    }
+
+    #[test]
+    fn a_scope_of_pages_keeps_to_them_until_it_takes_the_whole() {
+        let scope = TranslationScope::pages([2, 5]);
+        scope.set_focus(9);
+        let view = scope.view();
+        assert!(view.rank(2).is_some() && view.rank(5).is_some());
+        assert_eq!(view.rank(9), None);
+        assert_eq!(view.rank(3), None);
+        scope.expand_to_whole();
+        assert!(scope.view().rank(9).is_some());
     }
 
     #[test]

@@ -366,6 +366,20 @@ impl ReaderApp {
                 .collect();
             self.launch_translate_kept = None;
         }
+        // As if reopened: the finished translation goes, and what was kept
+        // is looked up (03i).
+        if self.launch_translate_reopened
+            && self.tabs[active]
+                .translation
+                .as_ref()
+                .is_some_and(|session| {
+                    session.status == crate::translation::SessionStatus::Finished
+                })
+        {
+            self.tabs[active].translation = None;
+            self.tabs[active].reveals = Default::default();
+            self.launch_translate_reopened = false;
+        }
         if self.launch_translate_selection && self.launch_select.is_none() {
             if self.tabs[active].selection.is_none() {
                 return true;
@@ -396,8 +410,14 @@ impl ReaderApp {
             .card
             .as_ref()
             .is_some_and(|card| card.state == crate::translation::CardState::Loading);
+        let looking_up = matches!(
+            self.tabs[active].kept_translations,
+            Some(crate::translation::KeptTranslations::Asking { .. })
+        );
         document
             || selection
+            || looking_up
+            || self.launch_translate_reopened
             || self.launch_translate_selection
             || self.launch_translate_kept.is_some()
             || (self.assistant.is_running() && !self.assistant.is_demo())

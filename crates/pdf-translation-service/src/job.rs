@@ -79,9 +79,28 @@ struct LiveSessionCacheManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_sha256: Option<String>,
     request: PdfTranslationSessionRequest,
+    /// The engine's name (`google`); runs before it was kept have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     inspection: PdfInspection,
     warnings: Vec<PdfTranslationWarning>,
     completed: bool,
+}
+
+/// A translation of a document kept from an earlier run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedTranslation {
+    pub target_language: LanguageCode,
+    pub source_language: Option<LanguageCode>,
+    /// The engine's name (`google`), when the run kept it.
+    pub provider: Option<String>,
+    /// The pages with translated text, first to last.
+    pub pages: Vec<usize>,
+    pub page_count: usize,
+    pub completed: bool,
+    pub modified: Option<std::time::SystemTime>,
+    /// The run the settings' languages and engine resume.
+    pub matches: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -292,6 +311,63 @@ impl PdfTranslationService {
     /// provider `settings` name) their cached text, so the next run asks
     /// again. What OCR read of its scans stays. The document's sessions
     /// must have stopped.
+    /// The document's translations kept from earlier runs, the one the
+    /// settings resume first, then the newest: what a reopened document
+    /// can show again without asking an engine. Nothing is typeset.
+    pub fn cached_translations(
+        &self,
+        settings: &PdfTranslationConfig,
+        request: &PdfTranslationRequest,
+    ) -> Vec<CachedTranslation> {
+        let Ok(source) = fs::read(&request.source_path) else {
+            return Vec::new();
+        };
+        let sha256 = source_sha256(&source);
+        let (fingerprint, _) = request_fingerprints_for_source(settings, request, &source);
+        let Ok(entries) = fs::read_dir(&self.artifact_root) else {
+            return Vec::new();
+        };
+        let mut cached = Vec::new();
+        for entry in entries.flatten() {
+            let job = entry.path();
+            let manifest_path = job.join(LIVE_SESSION_MANIFEST_FILE);
+            let Some(manifest) = fs::read(&manifest_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<LiveSessionCacheManifest>(&bytes).ok())
+            else {
+                continue;
+            };
+            if manifest.source_sha256.as_deref() != Some(sha256.as_str())
+                || manifest.pipeline_version != PIPELINE_VERSION
+            {
+                continue;
+            }
+            let page_count = manifest.inspection.pages.len();
+            let pages = if manifest.completed {
+                (0..page_count).collect()
+            } else {
+                translated_pages(&job)
+            };
+            if pages.is_empty() {
+                continue;
+            }
+            cached.push(CachedTranslation {
+                target_language: manifest.request.target_language.clone(),
+                source_language: manifest.request.source_language.clone(),
+                provider: manifest.provider.clone(),
+                pages,
+                page_count,
+                completed: manifest.completed,
+                modified: fs::metadata(&manifest_path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok(),
+                matches: manifest.fingerprint == fingerprint,
+            });
+        }
+        cached.sort_by(|a, b| b.matches.cmp(&a.matches).then(b.modified.cmp(&a.modified)));
+        cached
+    }
+
     pub fn clear_document(
         &self,
         settings: &PdfTranslationConfig,
@@ -932,6 +1008,7 @@ impl PdfTranslationService {
             source_fingerprint: source_fingerprint.clone(),
             source_sha256: Some(source_sha256(source_snapshot.bytes())),
             request: session_request.clone(),
+            provider: Some(settings.translation.provider().as_str().to_string()),
             inspection: inspection.clone(),
             warnings: Vec::new(),
             completed: false,
@@ -4334,6 +4411,28 @@ fn request_fingerprint_with_source(
     Ok((fingerprint, source_fingerprint, source_bytes))
 }
 
+/// Pages of the run in `job` with a translated unit, from its kept state.
+fn translated_pages(job: &Path) -> Vec<usize> {
+    let document = fs::read(job.join(LIVE_SESSION_DOCUMENT_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DocumentV1>(&bytes).ok());
+    let state = fs::read(job.join(LIVE_SESSION_STATE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LiveSessionPipelineState>(&bytes).ok());
+    let (Some(document), Some(units)) = (document, state.and_then(|state| state.units)) else {
+        return Vec::new();
+    };
+    let pages = translation_block_locations(&document);
+    units
+        .resolved_units
+        .iter()
+        .flat_map(|unit| &unit.member_block_ids)
+        .filter_map(|block| pages.get(block).map(|location| location.page_index))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn request_fingerprints_for_source(
     settings: &PdfTranslationConfig,
     request: &PdfTranslationRequest,
@@ -5715,6 +5814,90 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         assert!(!artifacts.join("job-a-de").exists());
         assert!(artifacts.join("job-b/source-original.pdf").exists());
         assert!(artifacts.join("prepared/a/document.v1.json").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn kept_translations_of_a_document_are_listed_resumable_first() {
+        let directory = temporary_test_directory("cached-translations");
+        let artifacts = directory.join("pdf-translations-v2");
+        fs::create_dir_all(&artifacts).unwrap();
+        let source = directory.join("a.pdf");
+        fs::write(&source, b"a").unwrap();
+        let settings = PdfTranslationConfig::from(&Settings::default());
+        let request = |target: &str| PdfTranslationRequest {
+            source_path: source.clone(),
+            output_path: directory.join("out.pdf"),
+            source_language: None,
+            target_language: LanguageCode::new(target).unwrap(),
+        };
+        let page = glyphst_pdf_translation::PdfPageProfile {
+            page_index: 0,
+            width: 100.0,
+            height: 100.0,
+            character_count: 1,
+            replacement_character_count: 0,
+            text_area_ratio: 0.5,
+            image_area_ratio: 0.0,
+            needs_ocr: false,
+        };
+        let write = |job: &str, target: &str, sha256: &str, pipeline: &str| {
+            let (fingerprint, source_fingerprint) =
+                request_fingerprints_for_source(&settings, &request(target), b"a");
+            let manifest = LiveSessionCacheManifest {
+                version: LIVE_SESSION_CACHE_VERSION,
+                pipeline_version: pipeline.to_string(),
+                fingerprint,
+                source_fingerprint,
+                source_sha256: Some(sha256.to_string()),
+                request: PdfTranslationSessionRequest {
+                    source_path: source.clone(),
+                    source_language: None,
+                    target_language: LanguageCode::new(target).unwrap(),
+                },
+                provider: Some("google".to_string()),
+                inspection: PdfInspection {
+                    pages: vec![page.clone(); 3],
+                    recommends_ocr: false,
+                },
+                warnings: Vec::new(),
+                completed: true,
+            };
+            fs::create_dir_all(artifacts.join(job)).unwrap();
+            write_json(
+                artifacts.join(job).join(LIVE_SESSION_MANIFEST_FILE),
+                &manifest,
+            )
+            .unwrap();
+        };
+        let sha256 = source_sha256(b"a");
+        write("job-ja", "ja", &sha256, PIPELINE_VERSION);
+        write("job-zh", "zh-hans", &sha256, PIPELINE_VERSION);
+        write(
+            "job-other-pdf",
+            "zh-hans",
+            &source_sha256(b"b"),
+            PIPELINE_VERSION,
+        );
+        write("job-old", "zh-hans", &sha256, "an older pipeline");
+        let service = PdfTranslationService::new(TranslationService::new().unwrap())
+            .with_artifact_root(artifacts.clone());
+
+        let cached = service.cached_translations(&settings, &request("zh-hans"));
+
+        let targets: Vec<_> = cached
+            .iter()
+            .map(|run| (run.target_language.as_str().to_owned(), run.matches))
+            .collect();
+        assert_eq!(
+            targets,
+            [("zh-hans".to_owned(), true), ("ja".to_owned(), false)]
+        );
+        assert_eq!(
+            (cached[0].pages.as_slice(), cached[0].page_count),
+            (&[0, 1, 2][..], 3)
+        );
+        assert_eq!(cached[0].provider.as_deref(), Some("google"));
         fs::remove_dir_all(directory).unwrap();
     }
 

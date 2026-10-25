@@ -193,6 +193,9 @@ pub enum Needs {
     Reflow,
     /// The active document has a translation.
     Translation,
+    /// The active document has a translation, running or kept from an
+    /// earlier run.
+    TranslationOrKept,
     /// The stage is split into panes.
     Panes,
     /// The active document has fixed pages (not a reflowed book).
@@ -208,7 +211,7 @@ impl Needs {
             Self::Nothing | Self::Document => "Open a document first",
             Self::Selection => "Select text first",
             Self::Reflow => "Only for reflowed books",
-            Self::Translation => "Translate the document first",
+            Self::Translation | Self::TranslationOrKept => "Translate the document first",
             Self::Panes => "Split the view first",
             Self::FixedLayout => "Reflowed books don't turn or spread",
             Self::Presenting => "Only while presenting",
@@ -984,7 +987,8 @@ impl Command {
             | Self::McpConfig => Needs::Nothing,
             Self::LargerText | Self::SmallerText => Needs::Reflow,
             Self::TranslateSelection => Needs::Selection,
-            Self::ShowTranslated | Self::ClearTranslation => Needs::Translation,
+            Self::ShowTranslated => Needs::Translation,
+            Self::ClearTranslation => Needs::TranslationOrKept,
             Self::FocusNextPane | Self::ClosePane => Needs::Panes,
             Self::RotateClockwise
             | Self::RotateCounterclockwise

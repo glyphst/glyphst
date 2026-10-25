@@ -285,6 +285,8 @@ pub struct DocumentTab {
     pub reflow_mismatch: Option<Instant>,
     /// The document's translation, when one was started.
     pub translation: Option<DocSession>,
+    /// Its translations kept from earlier runs, once looked up (frame 03i).
+    pub kept_translations: Option<crate::translation::KeptTranslations>,
     /// Its blocks revealing themselves as they arrive.
     pub reveals: crate::reveal::Reveals,
     /// The source version of each page's loaded drawing and of its text.
@@ -373,6 +375,7 @@ impl DocumentTab {
             pending_anchor: None,
             reflow_mismatch: None,
             translation: None,
+            kept_translations: None,
             reveals: Default::default(),
             loaded_version: HashMap::new(),
             text_version: vec![0; pages],
@@ -1903,6 +1906,7 @@ pub(crate) fn test_tab(pages: usize) -> DocumentTab {
         pending_anchor: None,
         reflow_mismatch: None,
         translation: None,
+        kept_translations: None,
         reveals: Default::default(),
         loaded_version: HashMap::new(),
         text_version: vec![0; pages],

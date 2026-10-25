@@ -85,7 +85,7 @@ impl From<&Settings> for PdfTranslationConfig {
 
 pub use glyphst_pdf_translation::*;
 pub use job::{
-    ArtifactGeometry, ClearedTranslation, ExportLayout, PageFailureCode,
+    ArtifactGeometry, CachedTranslation, ClearedTranslation, ExportLayout, PageFailureCode,
     PdfTranslationArtifactManifest, PdfTranslationError, PdfTranslationExportRequest,
     PdfTranslationHoverRegion, PdfTranslationHoverRegionKind, PdfTranslationPageFailure,
     PdfTranslationPageGlyph, PdfTranslationPagePoint, PdfTranslationPagePreview,

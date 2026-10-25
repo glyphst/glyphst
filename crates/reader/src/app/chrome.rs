@@ -810,6 +810,46 @@ impl ReaderApp {
 
     /// The sidebar: outline, pages, bookmarks, notes, search, translation
     /// or effects.
+    /// Without a translation running, the translation tab asks what was
+    /// kept from earlier runs (frame 03i), again when the language or the
+    /// engine changes.
+    fn look_up_kept_translations(&mut self, active: usize, ctx: &egui::Context) {
+        // A translation running now changes what will have been kept.
+        if self.tabs[active].translation.is_some() {
+            self.tabs[active].kept_translations = None;
+            return;
+        }
+        if self.prefs.sidebar != SidebarTab::Translation {
+            return;
+        }
+        let target = self.prefs.target_language.clone();
+        let Some(key) = self.translator.resume_key(target.as_deref()) else {
+            return;
+        };
+        let tab = &mut self.tabs[active];
+        if let Some(kept) = &tab.kept_translations
+            && kept.key() == key
+        {
+            let found = kept.first().is_some_and(|kept| kept.matches);
+            if found
+                && self
+                    .show_kept_when_found
+                    .take_if(|id| *id == tab.id)
+                    .is_some()
+            {
+                self.show_kept_translation(ctx);
+            }
+            return;
+        }
+        if let Some(found) = self
+            .translator
+            .look_up_kept(&tab.path, target.as_deref(), ctx)
+        {
+            tab.kept_translations =
+                Some(crate::translation::KeptTranslations::Asking { key, found });
+        }
+    }
+
     fn sidebar_pane(&mut self, ui: &mut egui::Ui, rect: Rect, active: usize, now: Instant) {
         let ctx = ui.ctx().clone();
         let warnings: Vec<String> = self
@@ -824,6 +864,7 @@ impl ReaderApp {
         } else {
             Vec::new()
         };
+        self.look_up_kept_translations(active, &ctx);
         let settings = self.user_settings.get();
         let info = SidebarInfo {
             target: self
