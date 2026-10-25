@@ -26,10 +26,11 @@ use glyphst_pdf_translation::{
     LayoutOptions, LayoutPage, OcrFusionReport, PaddleClient, PaddleClientConfig, Page,
     PdfComposer, PdfInspection, PdfTranslationStage, ProgressTracker, ProtectedRegionKind,
     TranslatedDocument, TranslationProgressSink, TypstCompiler, TypstCompilerConfig,
-    UnlimitedClient, UnlimitedClientConfig, annotate_reference_sections, build_layout_with_options,
-    compose_side_by_side, extract_native_document, fuse_native_with_ocr_report, inspect_pdf,
-    normalize_paddle_payload, normalize_unlimited_payload, reconcile_provider_continuations,
-    review_translation_policies, sanitize_source_pdf, source_text_regions,
+    TypstErrorKind, UnlimitedClient, UnlimitedClientConfig, annotate_reference_sections,
+    build_layout_with_options, compose_side_by_side, extract_native_document,
+    fuse_native_with_ocr_report, inspect_pdf, normalize_paddle_payload,
+    normalize_unlimited_payload, reconcile_provider_continuations, review_translation_policies,
+    sanitize_source_pdf, source_text_regions,
 };
 use glyphst_pdf_translation::{
     ScopedRun, TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
@@ -760,9 +761,13 @@ impl PdfTranslationService {
                         } else {
                             TranslationFailurePhase::Preview
                         },
+                        code: if error.fonts_missing {
+                            PageFailureCode::FontsMissing
+                        } else {
+                            PageFailureCode::Layout
+                        },
                         message: error.message,
                         retryable: error.retryable,
-                        code: PageFailureCode::Layout,
                     };
                     restored_page_failures.retain(|current| {
                         current.page_index != failure.page_index || current.phase != failure.phase
@@ -1281,6 +1286,7 @@ impl PdfTranslationService {
                     message: error.message,
                     retryable: error.retryable,
                     detailed_message: Some(detailed_message),
+                    fonts_missing: false,
                 });
             }
         };
@@ -1521,6 +1527,7 @@ impl PdfTranslationService {
             message: format!("Could not remove source text from translated regions: {error}"),
             retryable: false,
             detailed_message: None,
+            fonts_missing: false,
         })?;
         let typst_output = self
             .typst
@@ -1537,6 +1544,7 @@ impl PdfTranslationService {
                 message: error.message,
                 retryable: false,
                 detailed_message: None,
+                fonts_missing: error.kind == TypstErrorKind::MissingCjkFonts,
             })?;
         // The preview's Typst output is the page then its base.
         let (translated_path, base) = if with_base {
@@ -1569,6 +1577,7 @@ impl PdfTranslationService {
                 message: error.message,
                 retryable: false,
                 detailed_message: None,
+                fonts_missing: false,
             })?;
         let unsearchable = validate_rendered_output(original_source_path, &composed_path, layout)?;
         cancellation
@@ -2783,9 +2792,13 @@ fn compile_dirty_page_previews<U>(
                 } else {
                     TranslationFailurePhase::Preview
                 },
+                code: if error.fonts_missing {
+                    PageFailureCode::FontsMissing
+                } else {
+                    PageFailureCode::Layout
+                },
                 message: error.message,
                 retryable: error.retryable,
-                code: PageFailureCode::Layout,
             }),
         };
         let Ok(mut sink) = update_sink.lock() else {
@@ -3264,6 +3277,9 @@ pub enum PageFailureCode {
     Provider,
     /// The translation could not be laid out on the page.
     Layout,
+    /// The translation is in Chinese, Japanese or Korean, and the CJK fonts
+    /// are not downloaded.
+    FontsMissing,
     #[default]
     Other,
 }
@@ -3276,6 +3292,7 @@ impl PageFailureCode {
             Self::Network => "network",
             Self::Provider => "provider",
             Self::Layout => "layout",
+            Self::FontsMissing => "fonts-missing",
             Self::Other => "other",
         }
     }
@@ -3287,6 +3304,7 @@ impl PageFailureCode {
             Self::Network,
             Self::Provider,
             Self::Layout,
+            Self::FontsMissing,
         ]
         .into_iter()
         .find(|code| code.as_str() == text)
@@ -3381,6 +3399,8 @@ pub struct PdfTranslationError {
     pub message: String,
     pub retryable: bool,
     pub detailed_message: Option<String>,
+    /// Text in Han, kana or Hangul, and no CJK fonts to set it.
+    pub fonts_missing: bool,
 }
 
 impl PdfTranslationError {
@@ -3390,6 +3410,7 @@ impl PdfTranslationError {
             message: "PDF translation was cancelled".to_string(),
             retryable: false,
             detailed_message: None,
+            fonts_missing: false,
         }
     }
 
@@ -3399,6 +3420,7 @@ impl PdfTranslationError {
             message: message.into(),
             retryable: false,
             detailed_message: None,
+            fonts_missing: false,
         }
     }
 
@@ -3408,6 +3430,7 @@ impl PdfTranslationError {
             message: format!("{context}: {error}"),
             retryable: false,
             detailed_message: None,
+            fonts_missing: false,
         }
     }
 }

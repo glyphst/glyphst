@@ -15,10 +15,17 @@ pub enum Task {
     Embedding,
     /// Rereading the best matches against the query.
     Rerank,
+    /// Chinese, Japanese and Korean faces for translations into them.
+    Fonts,
 }
 
 impl Task {
-    pub const ALL: [Self; 3] = [Self::TextRecognition, Self::Embedding, Self::Rerank];
+    pub const ALL: [Self; 4] = [
+        Self::TextRecognition,
+        Self::Embedding,
+        Self::Rerank,
+        Self::Fonts,
+    ];
 
     /// The folder its models (and their engine) live in.
     pub fn root(self) -> PathBuf {
@@ -29,6 +36,8 @@ impl Task {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| data.join("ocr")),
             Self::Embedding | Self::Rerank => data.join("meaning-search"),
+            // Its `models/` is a fonts folder (`glyphst_core::paths::fonts_dir`).
+            Self::Fonts => data.join("fonts"),
         }
     }
 }
@@ -39,6 +48,11 @@ pub struct License {
     pub name: &'static str,
     pub url: &'static str,
 }
+
+const OFL: License = License {
+    name: "OFL-1.1",
+    url: "https://openfontlicense.org/open-font-license-official-text/",
+};
 
 const APACHE: License = License {
     name: "Apache-2.0",
@@ -159,6 +173,16 @@ pub const CATALOG: &[ModelEntry] = &[
         default: false,
     },
     ModelEntry {
+        id: "cjk-fonts",
+        task: Task::Fonts,
+        name: "cjk fonts",
+        note: "Noto Sans CJK and Source Han Serif, for translations into Chinese, Japanese and Korean.",
+        files: CJK_FONTS,
+        license: OFL,
+        device_choice: false,
+        default: true,
+    },
+    ModelEntry {
         id: "bge-reranker-v2-m3",
         task: Task::Rerank,
         name: "bge-reranker v2 m3",
@@ -177,6 +201,47 @@ pub const CATALOG: &[ModelEntry] = &[
         license: APACHE,
         device_choice: false,
         default: false,
+    },
+];
+
+/// The glyphst-fonts faces translation needs for CJK text, from the
+/// upstream commits glyphst-fonts pins, laid out as its `fonts/` folder.
+const CJK_FONTS: &[Asset] = &[
+    Asset {
+        name: "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf",
+        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+        sha256: "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+        size: 16_437_364,
+    },
+    Asset {
+        name: "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Bold.otf",
+        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
+        sha256: "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
+        size: 17_002_248,
+    },
+    Asset {
+        name: "fonts/noto-sans-cjk-sc/LICENSE",
+        url: "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+        sha256: "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+        size: 4_301,
+    },
+    Asset {
+        name: "fonts/source-han-serif-sc/SourceHanSerifSC-Regular.otf",
+        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/OTF/SimplifiedChinese/SourceHanSerifSC-Regular.otf",
+        sha256: "78aa7a328fd974df2d688c8a9fd74a33d8334dfa84ab24d9d11efb2ffc464117",
+        size: 24_543_332,
+    },
+    Asset {
+        name: "fonts/source-han-serif-sc/SourceHanSerifSC-Bold.otf",
+        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/OTF/SimplifiedChinese/SourceHanSerifSC-Bold.otf",
+        sha256: "706b8c0de2deff6cbc0c87e2cdedfd33a78b7ffd76cebb4549012f197ba611fe",
+        size: 25_521_732,
+    },
+    Asset {
+        name: "fonts/source-han-serif-sc/LICENSE.txt",
+        url: "https://raw.githubusercontent.com/adobe-fonts/source-han-serif/7889f11bf31170b5d092a083b357c8c8130f89e0/LICENSE.txt",
+        sha256: "9ff5bb567e1b92c801fc1069e5fbf992ff8efccacb9db94e5959a5b3ba9bb903",
+        size: 4_463,
     },
 ];
 
@@ -522,5 +587,31 @@ mod tests {
                 .iter()
                 .all(|file| file.name.starts_with("indra-v1.1.0/"))
         );
+    }
+
+    /// The CJK pack is glyphst-fonts' CJK faces, byte for byte, when its
+    /// checkout is beside this repository.
+    #[test]
+    fn the_cjk_fonts_are_the_checkouts() {
+        let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fonts");
+        let Ok(manifest) = std::fs::read_to_string(checkout.join("fonts/manifest.txt")) else {
+            eprintln!("no glyphst-fonts checkout; skipping");
+            return;
+        };
+        let faces: Vec<(&str, &str)> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split(" | ").collect();
+                Some((fields.get(2)?.trim(), fields.get(6)?.trim()))
+            })
+            .filter(|(file, _)| !file.starts_with("fonts/lilex/"))
+            .collect();
+        let fonts: Vec<(&str, &str)> = CJK_FONTS
+            .iter()
+            .filter(|file| file.name.ends_with(".otf"))
+            .map(|file| (file.name, file.sha256))
+            .collect();
+        assert_eq!(fonts, faces);
     }
 }

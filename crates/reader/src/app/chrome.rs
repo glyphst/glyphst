@@ -852,6 +852,12 @@ impl ReaderApp {
                 .is_some_and(|session| session.needs_local_ocr())
                 && settings
                     .is_some_and(|settings| crate::models::local_ocr_installed(&settings.ocr)),
+            cjk_fonts_ready: self.tabs[active]
+                .translation
+                .as_ref()
+                .is_some_and(|session| session.needs_cjk_fonts())
+                && !self.demo_without_cjk_fonts
+                && glyphst_core::paths::fonts_dir().is_some(),
             confirm_clear: self.confirm_clear == Some(self.tabs[active].id),
         };
         // The Effects tab edits a copy of this book's choices.

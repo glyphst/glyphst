@@ -393,6 +393,9 @@ pub struct ReaderApp {
     pub(crate) launch_translate_follow: bool,
     pub(crate) launch_translate_failures: Option<String>,
     pub(crate) launch_translate_kept: Option<usize>,
+    /// Screens of pages that wait for the CJK fonts show them missing,
+    /// though the run has the glyphst-fonts checkout.
+    pub(crate) demo_without_cjk_fonts: bool,
     /// Scripted runs: the time translated blocks' reveals are held at,
     /// how they show, and where the pages were last drawn.
     pub(crate) reveal_clock: Option<f64>,
@@ -767,6 +770,10 @@ impl ReaderApp {
             launch_translate_follow: launch.translate_follow,
             launch_translate_failures: launch.translate_failures.clone(),
             launch_translate_kept: launch.translate_kept,
+            demo_without_cjk_fonts: launch
+                .translate_failures
+                .as_deref()
+                .is_some_and(|codes| codes.contains("fonts-missing")),
             reveal_clock: None,
             reveal_view: RevealView::Normal,
             reveal_maps: Vec::new(),
@@ -2820,6 +2827,7 @@ impl ReaderApp {
                     self.settings_window.install_local_ocr(ctx, &settings);
                 }
             }
+            SidebarAction::DownloadCjkFonts => self.settings_window.download_cjk_fonts(ctx),
             SidebarAction::SetFacing(facing) => self.set_facing(facing),
             SidebarAction::AskClearTranslation => {
                 self.confirm_clear = self.active.map(|active| self.tabs[active].id);

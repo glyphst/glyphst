@@ -44,6 +44,8 @@ pub struct ModelsPage {
     /// Search models other than the ones in use (those are the app's), by
     /// id and the `llama-server` they were made with.
     search: HashMap<(&'static str, String), Setup>,
+    /// The CJK fonts' download.
+    fonts: Option<Setup>,
     /// What went wrong removing a model.
     notice: Option<String>,
     /// The folders' sizes, and when they were read.
@@ -68,6 +70,20 @@ impl ModelsPage {
         let ctx = ctx.clone();
         self.ocr_setup(entry, settings.ocr.local.device)
             .start(move || ctx.request_repaint());
+    }
+
+    /// Starts downloading the CJK fonts, as the translation panel's
+    /// download button asks.
+    pub fn start_cjk_fonts(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        self.fonts_setup().start(move || ctx.request_repaint());
+    }
+
+    fn fonts_setup(&mut self) -> &mut Setup {
+        self.fonts.get_or_insert_with(|| {
+            let entry = catalog::default_for(Task::Fonts);
+            Setup::files(entry.task.root(), entry.files.to_vec())
+        })
     }
 
     /// Downloads in each state, for screenshots: medium coming in, Indra
@@ -138,6 +154,7 @@ impl ModelsPage {
         self.text_recognition(ui, user, machine);
         self.search(ui, library, facts, machine, actions, Task::Embedding);
         self.search(ui, library, facts, machine, actions, Task::Rerank);
+        self.fonts(ui);
         let fresh = self
             .usage
             .as_ref()
@@ -329,6 +346,36 @@ impl ModelsPage {
         });
     }
 
+    /// The CJK fonts translation into Chinese, Japanese and Korean needs:
+    /// in use once downloaded, with nothing to choose.
+    fn fonts(&mut self, ui: &mut Ui) {
+        let entry = catalog::default_for(Task::Fonts);
+        let setup = self.fonts_setup();
+        let state = setup.state();
+        let row = Row {
+            in_use: state == SetupState::Ready,
+            ready: state == SetupState::Ready,
+            entry,
+            suggested: false,
+            description: entry.note.to_owned(),
+            progress: progress(&state),
+        };
+        let mut action = None;
+        ui_settings::group(ui, "fonts", |group| {
+            group.full(|ui| {
+                action = model_row(
+                    ui,
+                    &row,
+                    |ui| action_buttons(ui, setup, &state),
+                    |ui| muted(ui, "ofl"),
+                );
+            });
+        });
+        if let Some(RowAction::Remove) = action {
+            self.remove(entry);
+        }
+    }
+
     /// Deletes `entry`'s files and forgets its setups, so its rows read
     /// the disk again.
     fn remove(&mut self, entry: &'static ModelEntry) {
@@ -337,6 +384,9 @@ impl ModelsPage {
             .map(|error| format!("could not remove {}: {error}", entry.name));
         self.ocr.retain(|(id, _), _| *id != entry.id);
         self.search.retain(|(id, _), _| *id != entry.id);
+        if entry.task == Task::Fonts {
+            self.fonts = None;
+        }
         self.usage = None;
     }
 }

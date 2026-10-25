@@ -923,6 +923,12 @@ impl SettingsWindow {
         self.models.start_local_ocr(settings, ctx);
     }
 
+    /// Downloads the CJK fonts, showing them coming in on Settings · Models.
+    pub fn download_cjk_fonts(&mut self, ctx: &egui::Context) {
+        self.show_section(Section::Models);
+        self.models.start_cjk_fonts(ctx);
+    }
+
     /// Lists a provider's models, as its Fetch models button does.
     pub fn fetch_models(
         &mut self,

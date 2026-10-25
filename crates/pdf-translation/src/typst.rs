@@ -504,9 +504,14 @@ impl GlyphstTypstWorld {
                 ))
             })?;
             if source.chars().any(is_cjk) {
-                return Err(TypstError::missing_asset(
-                    "the CJK fonts for translation are not downloaded (the Models page has                      them; GLYPHST_FONTS_DIR names a glyphst-fonts checkout)",
-                ));
+                return Err(TypstError {
+                    kind: TypstErrorKind::MissingCjkFonts,
+                    message: concat!(
+                        "the CJK fonts for translation are not downloaded (the Models page ",
+                        "has them; GLYPHST_FONTS_DIR names a glyphst-fonts checkout)"
+                    )
+                    .to_owned(),
+                });
             }
         }
         let mut font_store = FontStore::new();
@@ -671,6 +676,8 @@ pub struct TypstOutput {
 pub enum TypstErrorKind {
     Cancelled,
     MissingAsset,
+    /// Text in Han, kana or Hangul, and no CJK fonts to set it.
+    MissingCjkFonts,
     Io,
     Process,
     Compile,
@@ -739,7 +746,43 @@ pub fn resolve_translation_assets_dir() -> PathBuf {
             return packaged;
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+    if checkout.is_dir() {
+        return checkout;
+    }
+    unpack_embedded_assets().unwrap_or(checkout)
+}
+
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+}
+
+/// The assets built into the executable, unpacked once into the cache
+/// folder: a lone executable has no other copy.
+fn unpack_embedded_assets() -> Option<PathBuf> {
+    let dir = glyphst_core::paths::cache_dir()
+        .join("pdf-translation")
+        .join(embedded::ASSETS_HASH);
+    let complete = |dir: &Path| dir.join(".complete").is_file();
+    if complete(&dir) {
+        return Some(dir);
+    }
+    let staging = dir.with_extension(format!("unpacking-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    for (name, bytes) in embedded::ASSETS {
+        let path = staging.join(name);
+        fs::create_dir_all(path.parent()?).ok()?;
+        fs::write(&path, bytes).ok()?;
+    }
+    fs::write(staging.join(".complete"), b"").ok()?;
+    if fs::rename(&staging, &dir).is_err() {
+        // Another Reader unpacked them first, or a broken copy is in the way.
+        let _ = fs::remove_dir_all(&staging);
+        if !complete(&dir) {
+            return None;
+        }
+    }
+    Some(dir)
 }
 
 pub fn generate_typst_source(layout: &LayoutDocument) -> String {
@@ -2232,6 +2275,19 @@ mod tests {
     }
 
     #[test]
+    fn the_typst_packages_are_built_in() {
+        for package in [
+            "typst/packages/preview/cmarker/0.1.8/typst.toml",
+            "typst/packages/preview/mitex/0.2.6/typst.toml",
+        ] {
+            assert!(
+                embedded::ASSETS.iter().any(|(name, _)| *name == package),
+                "{package}"
+            );
+        }
+    }
+
+    #[test]
     fn latin_text_needs_no_fonts_folder_but_cjk_text_does() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2250,7 +2306,7 @@ mod tests {
         let error =
             compile_source_in_process(&directory, &assets, &no_fonts, "translated-document")
                 .unwrap_err();
-        assert_eq!(error.kind, TypstErrorKind::MissingAsset, "{error}");
+        assert_eq!(error.kind, TypstErrorKind::MissingCjkFonts, "{error}");
         fs::remove_dir_all(directory).unwrap();
     }
 

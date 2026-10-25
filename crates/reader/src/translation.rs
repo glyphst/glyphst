@@ -777,6 +777,13 @@ impl DocSession {
             .any(|failure| failure.code == PageFailureCode::LocalOcrMissing)
     }
 
+    /// Whether a page failed for want of the CJK fonts.
+    pub fn needs_cjk_fonts(&self) -> bool {
+        self.failures
+            .iter()
+            .any(|failure| failure.code == PageFailureCode::FontsMissing)
+    }
+
     /// How far `page` has come.
     pub fn page_progress(&self, page: usize) -> PageProgress {
         if let Some(failure) = self.failure(page) {

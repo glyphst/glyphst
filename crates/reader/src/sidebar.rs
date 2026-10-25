@@ -112,6 +112,8 @@ pub enum SidebarAction {
     RetryFailed,
     /// Install local OCR (Settings · OCR), which failed pages need.
     InstallLocalOcr,
+    /// Download the CJK fonts, which failed pages need.
+    DownloadCjkFonts,
     /// This document's own OCR engine and mode (`None`: the settings').
     SetDocumentOcr(Option<(String, Option<String>)>),
     /// Open Settings · Models.
@@ -163,6 +165,8 @@ pub struct SidebarInfo<'a> {
     pub page_columns: PageColumns,
     /// Local OCR is installed (looked up while a page needs it).
     pub local_ocr_ready: bool,
+    /// The CJK fonts are there (looked up while a page needs them).
+    pub cjk_fonts_ready: bool,
     /// The document's translation waits for clearing to be confirmed.
     pub confirm_clear: bool,
     /// The document's OCR choice and what it falls back to, while the
@@ -967,7 +971,14 @@ fn failures_box(
         .map(|failure| failure.code)
         .unwrap_or_default();
     let missing = session.needs_local_ocr() && !info.local_ocr_ready;
-    let message = if missing {
+    let fonts_missing = session.needs_cjk_fonts() && !info.cjk_fonts_ready;
+    let message = if fonts_missing {
+        format!(
+            "✕ {pages}: the translation is in Chinese, Japanese or Korean, and the CJK fonts are not downloaded."
+        )
+    } else if session.needs_cjk_fonts() {
+        format!("✕ {pages} waited for the CJK fonts, now downloaded: try again to translate them.")
+    } else if missing {
         if one {
             format!(
                 "✕ {pages} is a scan: it needs text recognition, and no local model is installed."
@@ -1009,7 +1020,22 @@ fn failures_box(
                 label.on_hover_text(&failure.message);
             }
             let width = ui.available_width();
-            if missing {
+            if fonts_missing {
+                let fonts =
+                    glyphst_models::catalog::default_for(glyphst_models::catalog::Task::Fonts);
+                let download = format!("download {} · {}", fonts.name, format_size(fonts.size()));
+                if ui.add(Button::ghost(&download).min_width(width)).clicked() {
+                    actions.push(SidebarAction::DownloadCjkFonts);
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("or download them in Settings · Models.")
+                            .font(theme::mono(10.0))
+                            .color(tokens.muted),
+                    )
+                    .wrap(),
+                );
+            } else if missing {
                 // The model Settings · OCR names, as Models would download it.
                 let model = info
                     .ocr
@@ -1313,6 +1339,7 @@ fn progress_label(
                 PageFailureCode::Network => "network",
                 PageFailureCode::Provider => "ocr service",
                 PageFailureCode::Layout => "page error",
+                PageFailureCode::FontsMissing => "needs cjk fonts",
                 PageFailureCode::Other => "failed",
             }
             .to_string(),

@@ -23,10 +23,12 @@ pub fn cache_dir() -> PathBuf {
     cache_base_dir().join(APP_DIR_NAME)
 }
 
-/// The glyphst-fonts checkout (CJK and translation fonts, read at run
-/// time): `$GLYPHST_FONTS_DIR` when set, else the packaged copy at
-/// `<exe>/../share/glyphst-reader/fonts`, else `fonts/` beside this
-/// repository's checkout. A checkout holds `fonts/manifest.txt`.
+/// The CJK fonts' folder (read at run time), whose `fonts/` holds the
+/// faces: `$GLYPHST_FONTS_DIR` when set, else the packaged copy at
+/// `<exe>/../share/glyphst-reader/fonts`, else the copy the Models page
+/// downloads, else `fonts/` beside this repository's checkout. A
+/// glyphst-fonts checkout holds `fonts/manifest.txt`; a download is there
+/// once its first face is (each file arrives whole).
 pub fn fonts_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("GLYPHST_FONTS_DIR") {
         return Some(PathBuf::from(dir));
@@ -41,11 +43,22 @@ pub fn fonts_dir() -> Option<PathBuf> {
         )
     });
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fonts");
+    // glyphst-models keeps a download's files under its root's `models/`.
+    let downloaded = data_dir().join("fonts").join("models");
+    let is_checkout = |dir: &PathBuf| dir.join("fonts/manifest.txt").is_file();
     packaged
-        .into_iter()
-        .chain([checkout])
-        .find(|dir| dir.join("fonts/manifest.txt").is_file())
+        .filter(is_checkout)
+        .or_else(|| {
+            downloaded
+                .join(DOWNLOADED_FACE)
+                .is_file()
+                .then_some(downloaded)
+        })
+        .or_else(|| Some(checkout).filter(is_checkout))
 }
+
+/// The face whose presence marks the downloaded CJK fonts.
+const DOWNLOADED_FACE: &str = "fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf";
 
 pub fn migrate_legacy_app_dirs() -> io::Result<()> {
     migrate_legacy_dir(&config_base_dir())?;

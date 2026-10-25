@@ -107,6 +107,8 @@ struct Plan {
     root: PathBuf,
     /// None when the user names their own server, or none is built here.
     engine: Option<Engine>,
+    /// Files that run on nothing (fonts) want no engine.
+    needs_engine: bool,
     models: Vec<Asset>,
 }
 
@@ -179,12 +181,31 @@ impl Setup {
         let plan = Plan {
             root,
             engine,
+            needs_engine: true,
             models,
         };
         let state = Self::state_on_disk(&plan, custom_engine.as_deref());
         Self {
             plan,
             custom_engine,
+            state: Arc::new(Mutex::new(state)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        }
+    }
+
+    /// Files that need no engine (fonts), kept in `root`.
+    pub fn files(root: PathBuf, files: Vec<Asset>) -> Self {
+        let plan = Plan {
+            root,
+            engine: None,
+            needs_engine: false,
+            models: files,
+        };
+        let state = Self::state_on_disk(&plan, None);
+        Self {
+            plan,
+            custom_engine: None,
             state: Arc::new(Mutex::new(state)),
             cancel: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -198,6 +219,7 @@ impl Setup {
             plan: Plan {
                 root: std::env::temp_dir().join("glyphst-model-demo"),
                 engine: None,
+                needs_engine: true,
                 models: Vec::new(),
             },
             custom_engine: None,
@@ -215,7 +237,8 @@ impl Setup {
     }
 
     fn state_on_disk(plan: &Plan, custom_engine: Option<&Path>) -> SetupState {
-        let engine_ok = custom_engine.is_some_and(Path::is_file)
+        let engine_ok = !plan.needs_engine
+            || custom_engine.is_some_and(Path::is_file)
             || plan
                 .engine
                 .as_ref()
@@ -277,7 +300,7 @@ impl Setup {
         }
         // A worker still stopping from a pause is waited for by the next.
         let previous = self.worker.take().filter(|_| running);
-        if self.plan.engine.is_none() && self.custom_engine.is_none() {
+        if self.plan.needs_engine && self.plan.engine.is_none() && self.custom_engine.is_none() {
             self.set(SetupState::Failed {
                 error: SetupError::NoEngine,
                 done: 0,
