@@ -109,6 +109,8 @@ struct Plan {
     engine: Option<Engine>,
     /// Files that run on nothing (fonts) want no engine.
     needs_engine: bool,
+    /// The folder the models go in: `root`'s `models/`, or the fonts'.
+    files: PathBuf,
     models: Vec<Asset>,
 }
 
@@ -131,7 +133,7 @@ impl Plan {
     fn models_ready(&self) -> bool {
         self.models
             .iter()
-            .all(|model| install::model_ready(&self.root, model))
+            .all(|model| install::file_ready(&self.files, model))
     }
 
     /// Bytes on disk already: installed parts whole, partial ones as far as
@@ -149,10 +151,10 @@ impl Plan {
             .models
             .iter()
             .map(|model| {
-                if install::model_ready(&self.root, model) {
+                if install::file_ready(&self.files, model) {
                     model.size
                 } else {
-                    download::resumable(&install::model_path(&self.root, model), model).unwrap_or(0)
+                    download::resumable(&install::file_path(&self.files, model), model).unwrap_or(0)
                 }
             })
             .sum();
@@ -179,6 +181,7 @@ impl Setup {
         models: Vec<Asset>,
     ) -> Self {
         let plan = Plan {
+            files: root.join("models"),
             root,
             engine,
             needs_engine: true,
@@ -194,12 +197,13 @@ impl Setup {
         }
     }
 
-    /// Files that need no engine (fonts), kept in `root`.
-    pub fn files(root: PathBuf, files: Vec<Asset>) -> Self {
+    /// Files that need no engine (fonts), kept in `dir` under their names.
+    pub fn files(dir: PathBuf, files: Vec<Asset>) -> Self {
         let plan = Plan {
-            root,
+            root: dir.clone(),
             engine: None,
             needs_engine: false,
+            files: dir,
             models: files,
         };
         let state = Self::state_on_disk(&plan, None);
@@ -220,6 +224,7 @@ impl Setup {
                 root: std::env::temp_dir().join("glyphst-model-demo"),
                 engine: None,
                 needs_engine: true,
+                files: std::env::temp_dir().join("glyphst-model-demo/models"),
                 models: Vec::new(),
             },
             custom_engine: None,
@@ -273,7 +278,7 @@ impl Setup {
             Some(exe) => exe.clone(),
             None => install::engine_exe(&self.plan.root, self.plan.engine.as_ref()?)?,
         };
-        let model = install::model_path(&self.plan.root, self.plan.models.first()?);
+        let model = install::file_path(&self.plan.files, self.plan.models.first()?);
         Some((exe, model))
     }
 
@@ -284,7 +289,7 @@ impl Setup {
             .plan
             .models
             .iter()
-            .map(|model| install::model_path(&self.plan.root, model))
+            .map(|model| install::file_path(&self.plan.files, model))
             .collect();
         Some((exe, models))
     }
@@ -364,7 +369,7 @@ impl Setup {
                 download::discard(&install::engine_archive(&plan.root, engine));
             }
             for model in &plan.models {
-                download::discard(&install::model_path(&plan.root, model));
+                download::discard(&install::file_path(&plan.files, model));
             }
             if let Ok(mut shared) = state.lock() {
                 *shared = Self::state_on_disk(&plan, custom_engine.as_deref());
@@ -444,11 +449,11 @@ fn run(plan: &Plan, state: &Mutex<SetupState>, cancel: &AtomicBool, notify: &dyn
     }
     // The models, one after another under the same bar.
     for model in &plan.models {
-        if install::model_ready(&plan.root, model) {
+        if install::file_ready(&plan.files, model) {
             base += model.size;
             continue;
         }
-        let target = install::model_path(&plan.root, model);
+        let target = install::file_path(&plan.files, model);
         if let Err(stop) = with_retries(model, &target, Phase::Model, base, total, cancel, &set) {
             set(stop);
             return;

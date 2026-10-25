@@ -1,4 +1,4 @@
-//! Settings · Models (frame 07c): every model that runs on this computer,
+//! Settings · Resources (frame 07c): every model that runs on this computer,
 //! by task. A model is a row of two lines: whether it's in use, its name,
 //! size and whether it suits this machine, then its download's progress and
 //! what fits its state (download, pause, resume, remove); under them what
@@ -82,7 +82,7 @@ impl ModelsPage {
     fn fonts_setup(&mut self) -> &mut Setup {
         self.fonts.get_or_insert_with(|| {
             let entry = catalog::default_for(Task::Fonts);
-            Setup::files(entry.task.root(), entry.files.to_vec())
+            Setup::files(entry.task.files_dir(), entry.files.to_vec())
         })
     }
 

@@ -261,7 +261,7 @@ impl ProviderPages {
         apply(user, &current, draft);
     }
 
-    /// The OCR page; returns whether its link to Settings · Models was
+    /// The OCR page; returns whether its link to Settings · Resources was
     /// clicked.
     pub fn ocr(&mut self, ui: &mut egui::Ui, user: &mut UserSettings) -> bool {
         let Some(current) = user.draft().cloned() else {
@@ -302,7 +302,7 @@ impl ProviderPages {
             });
             match ocr.provider {
                 OcrProvider::Local => {
-                    // The model and its device are chosen in Settings · Models.
+                    // The model and its device are chosen in Settings · Resources.
                     let name = glyphst_models::catalog::entry(&ocr.local.model)
                         .map_or(ocr.local.model.as_str(), |entry| entry.name);
                     let state = if crate::models::local_ocr_installed(ocr) {
@@ -316,7 +316,7 @@ impl ProviderPages {
                     );
                     group.row("Model", Some(&caption), |ui| {
                         if ui
-                            .add(glyphst_ui::button::Button::bracket("manage in models"))
+                            .add(glyphst_ui::button::Button::bracket("manage in resources"))
                             .clicked()
                         {
                             manage = true;

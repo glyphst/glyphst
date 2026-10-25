@@ -116,8 +116,8 @@ pub enum SidebarAction {
     DownloadCjkFonts,
     /// This document's own OCR engine and mode (`None`: the settings').
     SetDocumentOcr(Option<(String, Option<String>)>),
-    /// Open Settings · Models.
-    OpenModels,
+    /// Open Settings · Resources.
+    OpenResources,
     /// Show pages beside their translation, or in place.
     SetFacing(bool),
     CancelTranslation,
@@ -1029,7 +1029,7 @@ fn failures_box(
                 }
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new("or download them in Settings · Models.")
+                        egui::RichText::new("or download them in Settings · Resources.")
                             .font(theme::mono(10.0))
                             .color(tokens.muted),
                     )
@@ -1110,7 +1110,7 @@ fn ocr_row(ui: &mut egui::Ui, ocr: &OcrRow, actions: &mut Vec<SidebarAction>) {
                 .show(ui)
                 .clicked()
             {
-                actions.push(SidebarAction::OpenModels);
+                actions.push(SidebarAction::OpenResources);
             }
         }
         ui_menu::group(ui, "online");

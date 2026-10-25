@@ -36,8 +36,16 @@ impl Task {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| data.join("ocr")),
             Self::Embedding | Self::Rerank => data.join("meaning-search"),
-            // Its `models/` is a fonts folder (`glyphst_core::paths::fonts_dir`).
-            Self::Fonts => data.join("fonts"),
+            Self::Fonts => glyphst_core::paths::fonts_download_dir(),
+        }
+    }
+
+    /// The folder its files go in: the root's `models/`, or for fonts the
+    /// fonts folder itself (`fonts/` in it holds the faces).
+    pub fn files_dir(self) -> PathBuf {
+        match self {
+            Self::Fonts => self.root(),
+            _ => self.root().join("models"),
         }
     }
 }
@@ -264,20 +272,22 @@ pub fn default_for(task: Task) -> &'static ModelEntry {
 
 /// Whether every file of `entry` is downloaded whole.
 pub fn is_installed(entry: &ModelEntry) -> bool {
-    let root = entry.task.root();
+    let dir = entry.task.files_dir();
     entry
         .files
         .iter()
-        .all(|file| crate::install::model_ready(&root, file))
+        .all(|file| crate::install::file_ready(&dir, file))
 }
 
 /// Deletes `entry`'s files, but not those another installed model shares
 /// (PP-OCRv6 small and medium share a dictionary).
 pub fn remove(entry: &ModelEntry) -> std::io::Result<()> {
-    let root = entry.task.root();
+    let dir = entry.task.files_dir();
     let shared: Vec<&str> = CATALOG
         .iter()
-        .filter(|other| other.id != entry.id && other.task.root() == root && is_installed(other))
+        .filter(|other| {
+            other.id != entry.id && other.task.files_dir() == dir && is_installed(other)
+        })
         .flat_map(|other| other.files.iter().map(|file| file.name))
         .collect();
     let own: Vec<Asset> = entry
@@ -286,7 +296,7 @@ pub fn remove(entry: &ModelEntry) -> std::io::Result<()> {
         .filter(|file| !shared.contains(&file.name))
         .copied()
         .collect();
-    crate::install::remove_models(&root, &own)
+    crate::install::remove_files(&dir, &own)
 }
 
 /// Bytes on disk under every task's folder: models, engines and partial
@@ -299,9 +309,14 @@ pub struct DiskUsage {
 }
 
 pub fn disk_usage() -> DiskUsage {
-    let mut roots: Vec<PathBuf> = Task::ALL.iter().map(|task| task.root()).collect();
+    let mut roots: Vec<PathBuf> = Task::ALL
+        .iter()
+        .filter(|task| **task != Task::Fonts)
+        .map(|task| task.root())
+        .collect();
     roots.dedup();
     let mut usage = DiskUsage::default();
+    usage.models += crate::install::folder_size(&Task::Fonts.files_dir().join("fonts"));
     for root in roots {
         usage.models += crate::install::folder_size(&root.join("models"));
         usage.engines += crate::install::folder_size(&root.join("engines"));

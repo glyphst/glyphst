@@ -17,9 +17,14 @@ use glyphst_settings::{
 };
 use serde_json::{Value, json};
 
-/// The fake translation of `text`.
-pub fn fake_translation(text: &str) -> String {
-    format!("«{text}»")
+/// The fake translation of `text` into `target`: Chinese ones carry Han
+/// text, so they need CJK faces.
+pub fn fake_translation(text: &str, target: &str) -> String {
+    if target.starts_with("zh") {
+        format!("「{text}」译文")
+    } else {
+        format!("«{text}»")
+    }
 }
 
 /// Starts the fake translation server; returns its port. It runs until the
@@ -45,7 +50,10 @@ pub fn start_translation_server() -> Result<u16> {
                 };
                 let translations: Vec<Value> = texts
                     .into_iter()
-                    .map(|text| json!({ "translatedText": fake_translation(text) }))
+                    .map(|text| {
+                        let target = query["target"].as_str().unwrap_or_default();
+                        json!({ "translatedText": fake_translation(text, target) })
+                    })
                     .collect();
                 let response = tiny_http::Response::from_string(
                     json!({ "data": { "translations": translations } }).to_string(),
@@ -66,15 +74,17 @@ pub fn start_translation_server() -> Result<u16> {
 #[cfg(test)]
 pub fn translation_settings(port: u16) -> Settings {
     let mut settings = Settings::default();
-    use_fake_translation(&mut settings, port);
+    use_fake_translation(&mut settings, port, None);
     settings
 }
 
-/// Points translation at the fake server on `port`.
-pub fn use_fake_translation(settings: &mut Settings, port: u16) {
+/// Points translation at the fake server on `port`, into `target` (French
+/// unless named).
+pub fn use_fake_translation(settings: &mut Settings, port: u16, target: Option<&str>) {
     settings.ocr.mode = OcrMode::Off;
     settings.translation.active_provider = TranslationProvider::Google;
-    settings.translation.target_language = TranslationTargetLanguage::Explicit("fr".into());
+    settings.translation.target_language =
+        TranslationTargetLanguage::Explicit(target.unwrap_or("fr").into());
     let google = settings
         .translation
         .provider_config_mut(TranslationProvider::Google);

@@ -38,7 +38,7 @@ pub enum Section {
     Translation,
     Ocr,
     Ai,
-    Models,
+    Resources,
 }
 
 /// The section list's groups, top to bottom.
@@ -57,7 +57,7 @@ const GROUPS: [(&str, &[Section]); 4] = [
         "services",
         &[Section::Translation, Section::Ocr, Section::Ai],
     ),
-    ("this computer", &[Section::Models]),
+    ("this computer", &[Section::Resources]),
 ];
 
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -73,7 +73,7 @@ impl Section {
         Self::Translation,
         Self::Ocr,
         Self::Ai,
-        Self::Models,
+        Self::Resources,
     ];
 
     /// The section a scripted run names: `appearance`, `ai`…
@@ -96,7 +96,7 @@ impl Section {
             Self::Translation => "languages",
             Self::Ocr => "scan-text",
             Self::Ai => "sparkles",
-            Self::Models => "cpu",
+            Self::Resources => "package",
         }
     }
 
@@ -110,7 +110,7 @@ impl Section {
             Self::Translation => "Translation",
             Self::Ocr => "OCR",
             Self::Ai => "AI & agents",
-            Self::Models => "Models",
+            Self::Resources => "Resources",
         }
     }
 
@@ -136,9 +136,10 @@ impl Section {
             Self::Translation => "translate deepl google microsoft language engine glossary",
             Self::Ocr => "ocr scan recognize text",
             Self::Ai => "ai model provider key agent claude codex mcp assistant",
-            Self::Models => {
-                "models download local gpu cuda coreml ocr pp-ocr indra embedding \
-                 embeddinggemma qwen rerank reranker disk"
+            Self::Resources => {
+                "resources models download local gpu cuda coreml ocr pp-ocr indra embedding \
+                 embeddinggemma qwen rerank reranker fonts cjk chinese japanese korean noto \
+                 source han disk"
             }
         }
     }
@@ -160,10 +161,11 @@ impl Section {
             Self::Translation => "The service that translates selections and documents.",
             Self::Ocr => "Recognizing the text of scanned pages.",
             Self::Ai => "Models and providers for the assistant and AI translation.",
-            Self::Models => {
-                "Models that run on this computer, for reading scans and searching by \
-                 meaning. Downloads are pinned and checked; pages and passages never leave \
-                 the computer."
+            Self::Resources => {
+                "What runs on this computer: models for reading scans and searching by \
+                 meaning, and the fonts translations into Chinese, Japanese and Korean use. \
+                 Downloads are pinned and checked; pages and passages never leave the \
+                 computer."
             }
         }
     }
@@ -183,7 +185,7 @@ pub struct SettingsWindow {
     pub open: bool,
     section: Option<Section>,
     providers: ProviderPages,
-    /// Settings · Models' downloads.
+    /// Settings · Resources' downloads.
     models: crate::models_page::ModelsPage,
     /// What the Effects page asked for, for the app to do.
     pub effects_actions: Vec<crate::effects_page::Action>,
@@ -907,7 +909,7 @@ impl SettingsWindow {
         self.section = Some(section);
     }
 
-    /// Opens Settings · Models and starts downloading the local OCR model
+    /// Opens Settings · Resources and starts downloading the local OCR model
     /// `settings` use.
     /// Shows Models' downloads in each state, for screenshots.
     pub fn show_model_downloads(&mut self) {
@@ -919,13 +921,19 @@ impl SettingsWindow {
         ctx: &egui::Context,
         settings: &glyphst_settings::Settings,
     ) {
-        self.show_section(Section::Models);
+        self.show_section(Section::Resources);
         self.models.start_local_ocr(settings, ctx);
     }
 
-    /// Downloads the CJK fonts, showing them coming in on Settings · Models.
+    /// Downloads the CJK fonts, showing them coming in on Settings · Resources.
     pub fn download_cjk_fonts(&mut self, ctx: &egui::Context) {
-        self.show_section(Section::Models);
+        self.show_section(Section::Resources);
+        self.models.start_cjk_fonts(ctx);
+    }
+
+    /// Downloads the CJK fonts without opening the settings: a prompt
+    /// asked for them.
+    pub fn start_cjk_fonts(&mut self, ctx: &egui::Context) {
         self.models.start_cjk_fonts(ctx);
     }
 
@@ -1221,11 +1229,11 @@ impl SettingsWindow {
                     }
                     Section::Ocr => {
                         if self.providers.ocr(ui, app.user) {
-                            self.section = Some(Section::Models);
+                            self.section = Some(Section::Resources);
                         }
                     }
                     Section::Ai => self.providers.ai(ui, app.user, app.chatgpt),
-                    Section::Models => self.models.show(
+                    Section::Resources => self.models.show(
                         ui,
                         crate::models_page::ModelsContext {
                             user: app.user,

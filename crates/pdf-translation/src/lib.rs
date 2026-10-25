@@ -63,8 +63,8 @@ pub use translate::{
 };
 pub use typst::{
     TypstCompiler, TypstCompilerConfig, TypstError, TypstErrorKind, TypstExecutionMode,
-    TypstOutput, generate_translated_pdf_source, generate_typst_source,
-    resolve_translation_assets_dir, run_typst_worker_if_requested,
+    TypstOutput, cjk_fonts_available, generate_translated_pdf_source, generate_typst_source,
+    resolve_translation_assets_dir, run_typst_worker_if_requested, system_has_cjk_fonts,
 };
 pub use unlimited::{
     UnlimitedClient, UnlimitedClientConfig, UnlimitedError, UnlimitedErrorCategory,

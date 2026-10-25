@@ -1,6 +1,8 @@
-//! The questions the Reader asks in a prompt (frames 09a, 09j): whether a
-//! pad that connects should switch to gamepad mode, and whether to leave
-//! gamepad mode when the pad goes away. One shows at a time.
+//! The questions the Reader asks in a prompt (frames 09a, 09j, 03f, 03g):
+//! whether a pad that connects should switch to gamepad mode, whether to
+//! leave gamepad mode when the pad goes away, and whether to download the
+//! CJK fonts for a translation into Chinese, Japanese or Korean. One shows
+//! at a time.
 
 use std::collections::VecDeque;
 
@@ -19,6 +21,12 @@ pub enum Question {
     Disconnected,
     /// B on gamepad mode's home: leave it?
     Leave,
+    /// A translation into `language` starts, and this computer has CJK
+    /// faces of its own: download the CJK fonts? Asked once ever.
+    CjkFontsOffer,
+    /// A translation into `language` can't start: this computer has no CJK
+    /// faces. Asked each time.
+    CjkFontsNeeded { language: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +36,10 @@ pub enum Answer {
     NeverAsk,
     LeaveGamepadMode,
     Stay,
+    DownloadCjkFonts,
+    UseSystemFonts,
+    DownloadAndTranslate,
+    CancelTranslation,
 }
 
 #[derive(Debug, Default)]
@@ -154,6 +166,53 @@ impl Prompts {
                 .show(ctx)
                 .map(|index| [Answer::Stay, Answer::LeaveGamepadMode][index])
             }
+            Question::CjkFontsOffer => {
+                let body = format!(
+                    "Chinese, Japanese and Korean translations use this computer's fonts for \
+                     now. The CJK fonts (Noto Sans CJK and Source Han Serif, {}) set them as \
+                     the Reader's pages are designed, and may go into exported PDFs. Asked \
+                     once; Settings · Resources has them.",
+                    cjk_fonts_size()
+                );
+                let choices = [
+                    Choice::new("use this computer's", Face::East),
+                    Choice::new("download", Face::South),
+                ];
+                Prompt {
+                    id: egui::Id::unique("prompt-cjk-fonts-offer"),
+                    icon: Some("languages"),
+                    title: "Download the CJK fonts?",
+                    body: &body,
+                    choices: &choices,
+                    apart: 0,
+                    scale: Scale::Chrome,
+                }
+                .show(ctx)
+                .map(|index| [Answer::UseSystemFonts, Answer::DownloadCjkFonts][index])
+            }
+            Question::CjkFontsNeeded { language } => {
+                let body = format!(
+                    "This computer has no Chinese, Japanese or Korean fonts, so a translation \
+                     into {language} can't be set. Download the CJK fonts ({})? The \
+                     translation starts as they arrive.",
+                    cjk_fonts_size()
+                );
+                let choices = [
+                    Choice::new("cancel", Face::East),
+                    Choice::new("download and translate", Face::South),
+                ];
+                Prompt {
+                    id: egui::Id::unique("prompt-cjk-fonts-needed"),
+                    icon: Some("languages"),
+                    title: "CJK fonts needed",
+                    body: &body,
+                    choices: &choices,
+                    apart: 0,
+                    scale: Scale::Chrome,
+                }
+                .show(ctx)
+                .map(|index| [Answer::CancelTranslation, Answer::DownloadAndTranslate][index])
+            }
         };
         if let Some(answer) = answer {
             self.queue.pop_front();
@@ -163,6 +222,12 @@ impl Prompts {
         }
         answer
     }
+}
+
+/// The CJK fonts' download, as the Resources page sizes it.
+fn cjk_fonts_size() -> String {
+    let fonts = glyphst_models::catalog::default_for(glyphst_models::catalog::Task::Fonts);
+    crate::sidebar::format_size(fonts.size())
 }
 
 #[cfg(test)]

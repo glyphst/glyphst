@@ -856,8 +856,7 @@ impl ReaderApp {
                 .translation
                 .as_ref()
                 .is_some_and(|session| session.needs_cjk_fonts())
-                && !self.demo_without_cjk_fonts
-                && glyphst_core::paths::fonts_dir().is_some(),
+                && self.cjk_fonts_downloaded(),
             confirm_clear: self.confirm_clear == Some(self.tabs[active].id),
         };
         // The Effects tab edits a copy of this book's choices.

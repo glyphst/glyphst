@@ -25,13 +25,13 @@ pub fn cache_dir() -> PathBuf {
 
 /// The CJK fonts' folder (read at run time), whose `fonts/` holds the
 /// faces: `$GLYPHST_FONTS_DIR` when set, else the packaged copy at
-/// `<exe>/../share/glyphst-reader/fonts`, else the copy the Models page
-/// downloads, else `fonts/` beside this repository's checkout. A
-/// glyphst-fonts checkout holds `fonts/manifest.txt`; a download is there
-/// once its first face is (each file arrives whole).
+/// `<exe>/../share/glyphst-reader/fonts`, else the downloaded copy, else
+/// `fonts/` beside this repository's checkout. A glyphst-fonts checkout
+/// holds `fonts/manifest.txt`; a download is there once its first face is
+/// (each file arrives whole).
 pub fn fonts_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("GLYPHST_FONTS_DIR") {
-        return Some(PathBuf::from(dir));
+    if let Some(dir) = fonts_dir_override() {
+        return Some(dir);
     }
     let packaged = std::env::current_exe().ok().and_then(|exe| {
         Some(
@@ -43,8 +43,7 @@ pub fn fonts_dir() -> Option<PathBuf> {
         )
     });
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fonts");
-    // glyphst-models keeps a download's files under its root's `models/`.
-    let downloaded = data_dir().join("fonts").join("models");
+    let downloaded = fonts_download_dir();
     let is_checkout = |dir: &PathBuf| dir.join("fonts/manifest.txt").is_file();
     packaged
         .filter(is_checkout)
@@ -55,6 +54,18 @@ pub fn fonts_dir() -> Option<PathBuf> {
                 .then_some(downloaded)
         })
         .or_else(|| Some(checkout).filter(is_checkout))
+}
+
+/// Where the CJK fonts download to: `$GLYPHST_FONTS_DIR` when set (so the
+/// download is what the Reader reads), else `fonts/` in the data folder.
+pub fn fonts_download_dir() -> PathBuf {
+    fonts_dir_override().unwrap_or_else(|| data_dir().join("fonts"))
+}
+
+fn fonts_dir_override() -> Option<PathBuf> {
+    std::env::var_os("GLYPHST_FONTS_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The face whose presence marks the downloaded CJK fonts.

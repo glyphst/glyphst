@@ -445,12 +445,31 @@ fn compile_source_in_process(
     fonts_dir: &Path,
     file_stem: &str,
 ) -> Result<TypstOutput, TypstError> {
+    compile_with_system_cjk(
+        job_directory,
+        assets_dir,
+        fonts_dir,
+        file_stem,
+        system_cjk_faces,
+    )
+}
+
+/// [`compile_source_in_process`] with `system_cjk` giving the system's CJK
+/// faces, asked only when the fonts folder has none.
+fn compile_with_system_cjk(
+    job_directory: &Path,
+    assets_dir: &Path,
+    fonts_dir: &Path,
+    file_stem: &str,
+    system_cjk: fn() -> &'static [SystemFace],
+) -> Result<TypstOutput, TypstError> {
     validate_file_stem(file_stem)?;
     validate_compiler_assets(assets_dir)?;
     let source_path = job_directory.join(format!("{file_stem}.typ"));
     validate_file_asset(&source_path, "generated Typst source")?;
 
-    let world = GlyphstTypstWorld::new(job_directory, assets_dir, fonts_dir, file_stem)?;
+    let world =
+        GlyphstTypstWorld::new(job_directory, assets_dir, fonts_dir, file_stem, system_cjk)?;
     let compilation = typst::compile::<PagedDocument>(&world);
     if !compilation.warnings.is_empty() {
         tracing::warn!(
@@ -486,6 +505,7 @@ impl GlyphstTypstWorld {
         assets_dir: &Path,
         fonts_dir: &Path,
         file_stem: &str,
+        system_cjk: fn() -> &'static [SystemFace],
     ) -> Result<Self, TypstError> {
         let main_name = format!("{file_stem}.typ");
         let font_path = fonts_dir.join("fonts");
@@ -494,10 +514,10 @@ impl GlyphstTypstWorld {
         } else {
             Vec::new()
         };
-        let covers_cjk = font_entries
-            .iter()
-            .any(|(_, info)| info.coverage.contains(u32::from('中')));
-        if !covers_cjk {
+        let covers_cjk = font_entries.iter().any(|(_, info)| covers_cjk(info));
+        // Without the CJK fonts, the system's CJK faces set CJK text.
+        let system = if covers_cjk { &[][..] } else { system_cjk() };
+        if !covers_cjk && system.is_empty() {
             let source = fs::read_to_string(job_directory.join(&main_name)).map_err(|error| {
                 TypstError::io(format!(
                     "failed to read the generated Typst source: {error}"
@@ -507,8 +527,8 @@ impl GlyphstTypstWorld {
                 return Err(TypstError {
                     kind: TypstErrorKind::MissingCjkFonts,
                     message: concat!(
-                        "the CJK fonts for translation are not downloaded (the Models page ",
-                        "has them; GLYPHST_FONTS_DIR names a glyphst-fonts checkout)"
+                        "this computer has no CJK fonts and the CJK fonts for translation ",
+                        "are not downloaded (Settings · Resources has them)"
                     )
                     .to_owned(),
                 });
@@ -518,6 +538,13 @@ impl GlyphstTypstWorld {
         font_store.extend(fonts::embedded());
         font_store.extend(lilex());
         font_store.extend(font_entries);
+        font_store.extend(system.iter().map(|face| {
+            let path = fonts::FontPath {
+                path: face.path.clone(),
+                index: face.index,
+            };
+            (path, face.info.clone())
+        }));
 
         let main_path = VirtualPath::new(&main_name).map_err(|error| {
             TypstError::io(format!("failed to create Typst source path: {error}"))
@@ -1537,6 +1564,45 @@ fn lilex() -> impl Iterator<Item = (Font, typst::text::FontInfo)> {
     })
 }
 
+/// A system face that covers CJK text.
+struct SystemFace {
+    path: PathBuf,
+    index: u32,
+    info: typst::text::FontInfo,
+}
+
+/// The system's CJK faces, found once a process.
+fn system_cjk_faces() -> &'static [SystemFace] {
+    static FACES: std::sync::OnceLock<Vec<SystemFace>> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        fonts::system()
+            .filter(|(_, info)| covers_cjk(info))
+            .map(|(path, info)| SystemFace {
+                path: path.path,
+                index: path.index,
+                info,
+            })
+            .collect()
+    })
+}
+
+fn covers_cjk(info: &typst::text::FontInfo) -> bool {
+    info.coverage.contains(u32::from('中'))
+}
+
+/// Whether CJK translations can be typeset: the CJK fonts in `fonts_dir`
+/// (`fonts/` in it), or the system's.
+pub fn cjk_fonts_available(fonts_dir: &Path) -> bool {
+    let font_path = fonts_dir.join("fonts");
+    (font_path.is_dir() && fonts::scan(&font_path).any(|(_, info)| covers_cjk(&info)))
+        || !system_cjk_faces().is_empty()
+}
+
+/// Whether this computer has CJK faces of its own.
+pub fn system_has_cjk_fonts() -> bool {
+    !system_cjk_faces().is_empty()
+}
+
 /// Han, kana and Hangul: text only the CJK fonts can set.
 fn is_cjk(character: char) -> bool {
     matches!(
@@ -2300,12 +2366,24 @@ mod tests {
         let source = directory.join("translated-document.typ");
 
         fs::write(&source, "#set text(font: \"Lilex\")\nLes pompes à chaleur").unwrap();
-        compile_source_in_process(&directory, &assets, &no_fonts, "translated-document").unwrap();
+        compile_with_system_cjk(
+            &directory,
+            &assets,
+            &no_fonts,
+            "translated-document",
+            || &[],
+        )
+        .unwrap();
 
         fs::write(&source, "热泵从环境空气中获取能量").unwrap();
-        let error =
-            compile_source_in_process(&directory, &assets, &no_fonts, "translated-document")
-                .unwrap_err();
+        let error = compile_with_system_cjk(
+            &directory,
+            &assets,
+            &no_fonts,
+            "translated-document",
+            || &[],
+        )
+        .unwrap_err();
         assert_eq!(error.kind, TypstErrorKind::MissingCjkFonts, "{error}");
         fs::remove_dir_all(directory).unwrap();
     }

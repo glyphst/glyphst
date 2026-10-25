@@ -22,7 +22,8 @@
 #                           its own copy of the library as it was when the
 #                           run started, so shots agree and never touch it;
 #                           the CJK faces come from GLYPHST_FONTS_DIR
-#                           (default: ../fonts, the glyphst-fonts checkout)
+#                           (default: ../fonts, the glyphst-fonts checkout;
+#                           an empty folder: none)
 #
 # Options:
 #   --keep-going      run every step and report all failures
@@ -200,11 +201,17 @@ if [[ ${tier} == screens ]]; then
     document=${GLYPHST_SCREENS_DOC:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 1p)}
     second=${GLYPHST_SCREENS_DOC2:-$(find "${repo}/../pdf-samples" -name '*.pdf' | sort | sed -n 2p)}
     # The glyphst-fonts checkout gives every shot the same CJK faces
-    # instead of whatever fontconfig has installed.
-    export GLYPHST_FONTS_DIR=${GLYPHST_FONTS_DIR:-${repo}/../fonts}
-    if [[ ! -f ${GLYPHST_FONTS_DIR}/fonts/manifest.txt ]]; then
-        printf 'error: no glyphst-fonts checkout at %s (set GLYPHST_FONTS_DIR)\n' "${GLYPHST_FONTS_DIR}" >&2
-        exit 1
+    # instead of whatever fontconfig has installed. A GLYPHST_FONTS_DIR set
+    # to an empty folder shows the Reader without the CJK fonts.
+    if [[ -n ${GLYPHST_FONTS_DIR:-} ]]; then
+        [[ -e ${GLYPHST_FONTS_DIR}/fonts ]] ||
+            printf 'no fonts in GLYPHST_FONTS_DIR: the shots show the Reader without the CJK fonts\n'
+    else
+        export GLYPHST_FONTS_DIR=${repo}/../fonts
+        if [[ ! -f ${GLYPHST_FONTS_DIR}/fonts/manifest.txt ]]; then
+            printf 'error: no glyphst-fonts checkout at %s (set GLYPHST_FONTS_DIR)\n' "${GLYPHST_FONTS_DIR}" >&2
+            exit 1
+        fi
     fi
     shots="${run_dir}/screens"
     mkdir -p "${shots}"
@@ -337,6 +344,9 @@ if [[ ${tier} == screens ]]; then
         "03-translation-kept @ --sidebar translation --translate-fake --translate-follow --translate-kept 2"
         "03-translation-failed @ --sidebar translation --translate-fake --translate-document --translate-failures network,network"
         "03-translation-failed-install @ --sidebar translation --translate-fake --translate-follow --translate-failures local-ocr-missing"
+        "03-translation-cjk @ --sidebar translation --translate-fake --translate-to zh-hans --translate-document"
+        "03f-cjk-fonts-offer @ --sidebar translation --translate-fake --translate-to zh-hans --cjk-fonts system --translate-document"
+        "03g-cjk-fonts-needed @ --sidebar translation --translate-fake --translate-to zh-hans --cjk-fonts none --translate-document"
         "03-translation-failed-fonts @ --sidebar translation --translate-fake --translate-follow --translate-failures fonts-missing"
         "03-translation-ocr-menu @ --sidebar translation --pointer-demo click:189,211;wait*3"
         "03-effects @ --sidebar effects"
@@ -403,8 +413,8 @@ if [[ ${tier} == screens ]]; then
         "07-effects @ --settings effects"
         "07-translation @ --settings translation"
         "07-ocr @ --settings ocr"
-        "07c-models @ --settings models"
-        "07c-models-downloading @ --settings models:downloads"
+        "07c-resources @ --settings resources"
+        "07c-resources-downloading @ --settings resources:downloads"
         "07-ai @ --settings ai"
         "07-shortcuts --settings shortcuts"
         "07-shortcuts-glass --settings shortcuts --opacity 0.5"
@@ -432,7 +442,7 @@ if [[ ${tier} == screens ]]; then
             for state in "${states[@]}"; do
                 if [[ ${state%% *} == "${wanted}"* ]]; then
                     found=1
-                    # Named twice (07c and 07c-models), a state runs once:
+                    # Named twice (07c and 07c-resources), a state runs once:
                     # two runs would share its data folder.
                     for taken in "${chosen[@]}"; do
                         [[ ${taken} == "${state}" ]] && continue 2

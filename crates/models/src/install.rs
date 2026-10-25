@@ -30,12 +30,22 @@ pub fn engine_exe(root: &Path, engine: &Engine) -> Option<PathBuf> {
 }
 
 pub fn model_path(root: &Path, model: &Asset) -> PathBuf {
-    root.join("models").join(model.name)
+    file_path(&root.join("models"), model)
 }
 
 /// A model, once downloaded whole.
 pub fn model_ready(root: &Path, model: &Asset) -> bool {
-    fs::metadata(model_path(root, model)).is_ok_and(|metadata| metadata.len() == model.size)
+    file_ready(&root.join("models"), model)
+}
+
+/// Where `file` goes in the folder `dir`.
+pub fn file_path(dir: &Path, file: &Asset) -> PathBuf {
+    dir.join(file.name)
+}
+
+/// A file in `dir`, once downloaded whole.
+pub fn file_ready(dir: &Path, file: &Asset) -> bool {
+    fs::metadata(file_path(dir, file)).is_ok_and(|metadata| metadata.len() == file.size)
 }
 
 /// Unpacks the downloaded `archive` into the engine's folder, then deletes
@@ -92,17 +102,23 @@ pub fn remove_old_engines(root: &Path, engine: &Engine) {
 
 /// Deletes `models` from `root` (and a folder they leave empty).
 pub fn remove_models(root: &Path, models: &[Asset]) -> std::io::Result<()> {
-    for model in models {
-        let path = model_path(root, model);
+    remove_files(&root.join("models"), models)
+}
+
+/// Deletes `files` from `dir` (and folders they leave empty).
+pub fn remove_files(dir: &Path, files: &[Asset]) -> std::io::Result<()> {
+    for file in files {
+        let path = file_path(dir, file);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        if let Some(parent) = path.parent()
-            && parent != root.join("models")
-        {
-            let _ = fs::remove_dir(parent);
+        // Up to `dir`, the folders the file was in, once empty.
+        for parent in path.ancestors().skip(1) {
+            if parent == dir || !parent.starts_with(dir) || fs::remove_dir(parent).is_err() {
+                break;
+            }
         }
     }
     Ok(())

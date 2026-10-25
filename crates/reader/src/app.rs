@@ -152,6 +152,11 @@ pub struct Launch {
     pub font_size: Option<f32>,
     /// Translate through a local fake provider instead of the settings'.
     pub translate_fake: bool,
+    /// The fake provider's target language (French unless named).
+    pub translate_to: Option<String>,
+    /// Screens: no CJK fonts downloaded, and whether the computer has CJK
+    /// faces of its own (`--cjk-fonts system|none`).
+    pub cjk_fonts: Option<bool>,
     /// Scripted runs: translate the first document, or the selection.
     pub translate_document: bool,
     /// Scripted runs: translate the first document as it is read.
@@ -354,6 +359,11 @@ pub struct ReaderApp {
     /// it goes.
     pad_focused: bool,
     prompts: crate::prompts::Prompts,
+    /// A translation waiting on the CJK fonts prompt (03g).
+    cjk_fonts_pending: Option<std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>>,
+    /// Tabs whose pages that waited for the CJK fonts were tried again once
+    /// the fonts came.
+    cjk_fonts_retried: std::collections::HashSet<u64>,
     pub(crate) couch: crate::couch::Couch,
     fixed_clock: bool,
     /// Where the pointer was when the pad was last used: moving it away
@@ -393,9 +403,9 @@ pub struct ReaderApp {
     pub(crate) launch_translate_follow: bool,
     pub(crate) launch_translate_failures: Option<String>,
     pub(crate) launch_translate_kept: Option<usize>,
-    /// Screens of pages that wait for the CJK fonts show them missing,
-    /// though the run has the glyphst-fonts checkout.
-    pub(crate) demo_without_cjk_fonts: bool,
+    /// Screens without the CJK fonts, though the run has the glyphst-fonts
+    /// checkout: whether the computer has CJK faces of its own then.
+    pub(crate) demo_system_cjk_fonts: Option<bool>,
     /// Scripted runs: the time translated blocks' reveals are held at,
     /// how they show, and where the pages were last drawn.
     pub(crate) reveal_clock: Option<f64>,
@@ -626,7 +636,11 @@ impl ReaderApp {
                 }
                 if launch.translate_fake {
                     let port = crate::fake_providers::start_translation_server()?;
-                    crate::fake_providers::use_fake_translation(&mut settings, port);
+                    crate::fake_providers::use_fake_translation(
+                        &mut settings,
+                        port,
+                        launch.translate_to.as_deref(),
+                    );
                 }
                 if launch.ai_fake {
                     let port = crate::fake_providers::start_ai_server()?;
@@ -743,6 +757,8 @@ impl ReaderApp {
             pad_events: Vec::new(),
             pad_focused: false,
             prompts: Default::default(),
+            cjk_fonts_pending: None,
+            cjk_fonts_retried: std::collections::HashSet::new(),
             couch: Default::default(),
             fixed_clock: launch.fixed_clock,
             pad_pointer: None,
@@ -770,10 +786,13 @@ impl ReaderApp {
             launch_translate_follow: launch.translate_follow,
             launch_translate_failures: launch.translate_failures.clone(),
             launch_translate_kept: launch.translate_kept,
-            demo_without_cjk_fonts: launch
-                .translate_failures
-                .as_deref()
-                .is_some_and(|codes| codes.contains("fonts-missing")),
+            demo_system_cjk_fonts: launch.cjk_fonts.or_else(|| {
+                launch
+                    .translate_failures
+                    .as_deref()
+                    .is_some_and(|codes| codes.contains("fonts-missing"))
+                    .then_some(false)
+            }),
             reveal_clock: None,
             reveal_view: RevealView::Normal,
             reveal_maps: Vec::new(),
@@ -1135,7 +1154,9 @@ impl ReaderApp {
         }
         if let Some(section) = launch.settings {
             app.settings_window.show_section(section);
-            if section == Section::Models && launch.settings_group.as_deref() == Some("downloads") {
+            if section == Section::Resources
+                && launch.settings_group.as_deref() == Some("downloads")
+            {
                 app.settings_window.show_model_downloads();
             }
             app.settings_window.scroll_to = launch.settings_group;
@@ -2819,9 +2840,9 @@ impl ReaderApp {
             SidebarAction::TranslateRest => self.start_document_translation(ctx),
             SidebarAction::RetryFailed => self.retry_failed_translation(ctx),
             SidebarAction::SetDocumentOcr(choice) => self.set_document_ocr(choice, ctx),
-            SidebarAction::OpenModels => self
+            SidebarAction::OpenResources => self
                 .settings_window
-                .show_section(crate::settings_window::Section::Models),
+                .show_section(crate::settings_window::Section::Resources),
             SidebarAction::InstallLocalOcr => {
                 if let Some(settings) = self.user_settings.get().cloned() {
                     self.settings_window.install_local_ocr(ctx, &settings);
@@ -3210,6 +3231,9 @@ impl ReaderApp {
             return;
         };
         let target = self.prefs.target_language.clone();
+        if !retry && !self.cjk_fonts_allow(target.as_deref(), &scope) {
+            return;
+        }
         let options = crate::translation::SessionOptions {
             retry,
             ocr: self.library.document_ocr(&self.tabs[active].path),
@@ -3231,6 +3255,64 @@ impl ReaderApp {
                 self.prefs.sidebar = SidebarTab::Translation;
             }
             Err(error) => self.notices.push(format!("Could not translate: {error}")),
+        }
+    }
+
+    /// Whether a translation into `target` (else the settings' language)
+    /// may start: into Chinese, Japanese or Korean without the CJK fonts it
+    /// offers them, once on a computer with CJK faces of its own (03f), and
+    /// on one without asks each time, holding the translation (03g).
+    fn cjk_fonts_allow(
+        &mut self,
+        target: Option<&str>,
+        scope: &std::sync::Arc<glyphst_pdf_translation_service::TranslationScope>,
+    ) -> bool {
+        let language = target.map(str::to_owned).or_else(|| {
+            self.user_settings
+                .get()
+                .map(|settings| settings.translation.resolved_target_language())
+        });
+        let Some(language) = language else {
+            return true;
+        };
+        if !crate::models::is_cjk_language(&language) || self.cjk_fonts_downloaded() {
+            return true;
+        }
+        let system = self
+            .demo_system_cjk_fonts
+            .unwrap_or_else(glyphst_pdf_translation_service::system_has_cjk_fonts);
+        if system {
+            if !self.prefs.cjk_fonts_offered {
+                self.prompts.ask(crate::prompts::Question::CjkFontsOffer);
+            }
+            return true;
+        }
+        self.cjk_fonts_pending = Some(scope.clone());
+        self.prompts.ask(crate::prompts::Question::CjkFontsNeeded {
+            language: crate::sidebar::language_label(&language).to_owned(),
+        });
+        false
+    }
+
+    /// [`crate::models::cjk_fonts_downloaded`], unless a screen goes without.
+    pub(crate) fn cjk_fonts_downloaded(&self) -> bool {
+        self.demo_system_cjk_fonts.is_none() && crate::models::cjk_fonts_downloaded()
+    }
+
+    /// Pages that waited for the CJK fonts are tried again once the fonts
+    /// are here, once a tab.
+    fn retry_when_cjk_fonts_come(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let id = self.tabs[active].id;
+        let waiting = self.tabs[active]
+            .translation
+            .as_ref()
+            .is_some_and(|session| session.needs_cjk_fonts());
+        if waiting && !self.cjk_fonts_retried.contains(&id) && self.cjk_fonts_downloaded() {
+            self.cjk_fonts_retried.insert(id);
+            self.retry_failed_translation(ctx);
         }
     }
 
@@ -7064,6 +7146,7 @@ impl eframe::App for ReaderApp {
         }
         self.couch_overlay(&ctx);
         self.pad_ring_overlay(&ctx);
+        self.retry_when_cjk_fonts_come(&ctx);
         if let Some(answer) = self.prompts.show(&ctx, self.prefs.gamepad_mode) {
             use crate::prompts::Answer;
             match answer {
@@ -7071,6 +7154,19 @@ impl eframe::App for ReaderApp {
                 Answer::LeaveGamepadMode => self.set_gamepad_mode(false, &ctx),
                 Answer::NeverAsk => self.prefs.ask_gamepad_mode = false,
                 Answer::NotNow | Answer::Stay => {}
+                Answer::DownloadCjkFonts => {
+                    self.prefs.cjk_fonts_offered = true;
+                    self.settings_window.start_cjk_fonts(&ctx);
+                }
+                Answer::UseSystemFonts => self.prefs.cjk_fonts_offered = true,
+                Answer::DownloadAndTranslate => {
+                    self.settings_window.start_cjk_fonts(&ctx);
+                    if let Some(scope) = self.cjk_fonts_pending.take() {
+                        // Its pages wait for the fonts, then go again.
+                        self.start_translation(&ctx, scope, true);
+                    }
+                }
+                Answer::CancelTranslation => self.cjk_fonts_pending = None,
             }
         }
         // Above the status bar while it shows.

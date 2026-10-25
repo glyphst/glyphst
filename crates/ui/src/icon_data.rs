@@ -240,6 +240,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
         "mouse-pointer-2",
         include_bytes!("../assets/icons/mouse-pointer-2.svg"),
     ),
+    ("package", include_bytes!("../assets/icons/package.svg")),
     ("palette", include_bytes!("../assets/icons/palette.svg")),
     (
         "panel-left",

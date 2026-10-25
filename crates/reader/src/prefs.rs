@@ -121,7 +121,7 @@ pub struct LibraryPrefs {
     /// The reranker rereads each search's best passages (once downloaded).
     pub rerank: bool,
     /// The embedder and reranker (`glyphst-models` catalog ids) search
-    /// uses; others are downloaded from Settings · Models.
+    /// uses; others are downloaded from Settings · Resources.
     pub meaning_model: String,
     pub rerank_model: String,
     /// Searches and the passages opened from them are kept on this
@@ -321,6 +321,9 @@ pub struct Prefs {
     pub gamepad_mode: bool,
     /// A pad connecting asks whether to switch to gamepad mode.
     pub ask_gamepad_mode: bool,
+    /// The CJK fonts were offered (03f): a computer with CJK faces of its
+    /// own is asked once.
+    pub cjk_fonts_offered: bool,
     /// Gamepad mode's text size, as zoom over the design's.
     pub couch_text: f32,
     pub last_session: LastSession,
@@ -378,6 +381,7 @@ impl Default for Prefs {
             reading_ring: present::default_reading_ring(),
             gamepad_mode: false,
             ask_gamepad_mode: true,
+            cjk_fonts_offered: false,
             couch_text: 1.0,
             last_session: LastSession::default(),
         }

@@ -4000,6 +4000,8 @@ fn keep_breaking_units_original<T>(
     loop {
         let error = match attempt(&kept) {
             Ok(done) => return Ok((done, fallbacks)),
+            // No block breaks the page: without CJK fonts none can show.
+            Err(error) if error.fonts_missing => return Err(error),
             Err(error) => error,
         };
         cancellation

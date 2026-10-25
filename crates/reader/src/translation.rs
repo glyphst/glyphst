@@ -1131,10 +1131,13 @@ mod tests {
         });
         assert_eq!(
             translator.card.as_ref().unwrap().state,
-            CardState::Done(fake_translation("Hello world"))
+            CardState::Done(fake_translation("Hello world", "fr"))
         );
         translator.pin_card();
-        assert_eq!(translator.pinned[0].1, fake_translation("Hello world"));
+        assert_eq!(
+            translator.pinned[0].1,
+            fake_translation("Hello world", "fr")
+        );
 
         translator.translate_selection("x".into(), Some("not a language!"), egui::Pos2::ZERO, &ctx);
         assert!(matches!(
