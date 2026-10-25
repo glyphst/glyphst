@@ -27,7 +27,9 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+# The release date, YY.M.D; a second release that day is YY.M.D+1, tagged
+# vYY.M.D.1 (see CONTRIBUTING.md).
+version = "26.10.25"
 edition = "2024"
 
 [workspace.lints.rust]

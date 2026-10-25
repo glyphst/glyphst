@@ -59,6 +59,8 @@ cd "$workspace_dir"
 
 version="$(awk '/^\[workspace.package\]/ { found = 1 } found && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
 [[ -n "$version" ]] || fail "no [workspace.package] version in Cargo.toml"
+# A same-day release's number: 26.10.25+1 is released as 26.10.25.1.
+version="${version/+/.}"
 
 # RUSTFLAGS would replace the flags in .cargo/dist.toml.
 [[ -z "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" ]] ||

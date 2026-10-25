@@ -1,6 +1,7 @@
 name: Release
 
-# Pushing a tag vX.Y.Z (the [workspace.package] version in Cargo.toml)
+# Pushing a tag vYY.M.D (the [workspace.package] version in Cargo.toml;
+# vYY.M.D.N for its YY.M.D+N)
 # builds the Reader for five targets and publishes a GitHub Release with the
 # executables and SHA256SUMS. Run it by hand to build them without
 # publishing.
@@ -32,6 +33,8 @@ jobs:
         id: version
         run: |
           version="$(awk '/^\[workspace.package\]/ { found = 1 } found && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
+          # A same-day release's number: 26.10.25+1 is released as 26.10.25.1.
+          version="${version/+/.}"
           if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "::error::tag $GITHUB_REF_NAME does not match the Cargo.toml version $version"
             exit 1
