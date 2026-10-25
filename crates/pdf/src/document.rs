@@ -334,6 +334,12 @@ fn document_format(path: &Path) -> Result<DocumentFormat> {
 // and avoid rewriting an unchanged flag while other PDF threads consume it.
 static STYLE_CONFIGURATION_LOCK: Mutex<()> = Mutex::new(());
 
+/// Held by tests that change the shared stylesheet, or that open a document
+/// other than a PDF (which sets it): PDF tests run alongside them and must
+/// preserve its allocation.
+#[cfg(test)]
+pub(crate) static EPUB_STYLE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn configure_context(format: DocumentFormat, layout: DocumentLayout) -> Result<()> {
     let _configuration = STYLE_CONFIGURATION_LOCK
         .lock()
@@ -374,10 +380,6 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::*;
-
-    // These two tests intentionally change the shared EPUB stylesheet. PDF
-    // tests run alongside them and must preserve its allocation.
-    static EPUB_STYLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn encrypted_pdf_bytes() -> Vec<u8> {
         let encoded = include_str!("../tests/fixtures/dummy-encrypted.pdf.b64")

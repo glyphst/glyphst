@@ -209,6 +209,8 @@ mod tests {
 
     #[test]
     fn an_epub_gives_its_package_title_and_author() {
+        // Opening an EPUB resets the shared stylesheet.
+        let _styles = crate::document::EPUB_STYLE_TEST_LOCK.lock().unwrap();
         let path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.epub");
         let probe = probe_document(&path, 2).unwrap();
