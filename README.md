@@ -165,6 +165,8 @@ Glyphst Reader is built on [MuPDF](https://mupdf.com) (through
 [Typst](https://typst.app), with icons from [Lucide](https://lucide.dev). It
 also owes a great deal to projects we studied closely:
 
+- [MuPDF](https://mupdf.com): besides opening and laying out every document,
+  its rendering is the reference the GPU renderer is checked against.
 - [Highly-Efficient-PDF-Renderer](https://github.com/soadzoor/Highly-Efficient-PDF-Renderer):
   the model for drawing pages on the GPU and for smooth, sharp zoom.
 - [retain-pdf](https://github.com/wxyhgk/retain-pdf): the layout-preserving
