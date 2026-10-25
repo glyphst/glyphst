@@ -462,7 +462,9 @@ mod tests {
             std::process::id(),
             current_timestamp()
         ));
-        let document = Path::new("/tmp/agent-edits.pdf");
+        // As the store keeps it (macOS's /tmp is a link).
+        let document = normalize_path(Path::new("/tmp/agent-edits.pdf"));
+        let document = document.as_path();
         let mut store = LibraryStore::open_for_test(database.clone()).unwrap();
 
         let (highlight, edits) = store.record_edits(|store| {

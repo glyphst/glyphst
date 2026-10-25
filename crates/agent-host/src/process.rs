@@ -215,11 +215,11 @@ pub fn command(program: &Path, cwd: &Path) -> Command {
     command
 }
 
-#[cfg(test)]
+// The stand-in agent is a shell script.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn processes_stream_lines_and_stop_with_their_children() {
         let mut command = Command::new("sh");

@@ -897,7 +897,8 @@ fn edit_history_is_bounded_and_not_persisted() {
 #[test]
 fn round_trips_v3_ai_session_mention_references_without_image_bytes() {
     let database_path = temp_library_path("ai-session-v3-references");
-    let document_path = PathBuf::from("/tmp/v3-session.pdf");
+    // As the store keeps it (macOS's /tmp is a link).
+    let document_path = normalize_path(Path::new("/tmp/v3-session.pdf"));
     let references = vec![
         AiMentionReference::Selection,
         AiMentionReference::DocumentText,
@@ -1518,7 +1519,8 @@ fn legacy_new_tab_destinations_migrate_to_quick_open_sources() {
 #[test]
 fn persists_reader_session_with_duplicate_document_tabs() {
     let database_path = temp_library_path("reader-session");
-    let document_path = PathBuf::from("/tmp/reader-session.pdf");
+    // As the store keeps it (macOS's /tmp is a link).
+    let document_path = normalize_path(Path::new("/tmp/reader-session.pdf"));
     let session = ReaderSessionSnapshot {
         windows: vec![ReaderWindowSession {
             bounds: ReaderWindowBounds {
