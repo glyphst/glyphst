@@ -1,4 +1,4 @@
-//! Design tokens and egui style of the glyph design (`design/main.pen`,
+//! Design tokens and egui style of the glyph design (`design/reader/main.pen`,
 //! frame 00 Direction): mono chrome, sans prose, hairline panes, one accent,
 //! dark first with a paper light theme, radius 0 / 2 / 4 and no shadows.
 //! Field names follow the pen variables (`text-2` is `text_2`). Every

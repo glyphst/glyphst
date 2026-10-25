@@ -12,7 +12,7 @@
 #                           GLYPHST_PDF_CORPUS_LIMIT files, default 100), and
 #                           20 of them turned 90 degrees
 #   script/check.sh screens [NAME...]
-#                           screenshots of the frames of design/main.pen from
+#                           screenshots of the frames of design/reader/main.pen from
 #                           Reader runs in a private headless sway, so no
 #                           window reaches the desktop; NAMEs pick states by
 #                           name or prefix (02d, 03-search, 07a), all by

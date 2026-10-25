@@ -1,4 +1,4 @@
-//! Frame 01 Components of `design/main.pen`, drawn from the components:
+//! Frame 01 Components of `design/reader/main.pen`, drawn from the components:
 //! the place to compare the code with the design (`glyphst-reader
 //! --gallery --screenshot PATH`).
 

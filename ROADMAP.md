@@ -25,7 +25,7 @@ and the abandoned Files app in M5). It has:
   assistant (streaming answers, document tools, sessions in the library), a
   command registry and palette, configurable shortcuts and a settings
   window; [effects](crates/effects) for transitions and backgrounds.
-- **Styling:** the glyph design (`design/main.pen`) on the `ui` crate's
+- **Styling:** the glyph design (`design/reader/main.pen`) on the `ui` crate's
   components: mono chrome, hairline panes docked beside the pages, a
   status bar in place of the dock and progress line, rule titles and tree
   branches, first-page covers, a reading heatmap and activity log on home,

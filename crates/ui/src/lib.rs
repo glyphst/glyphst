@@ -1,5 +1,5 @@
 //! Glyphst's design system on egui: the tokens, type and icons of the glyph
-//! design (`design/main.pen`) and one reusable component per pen component.
+//! design (`design/reader/main.pen`) and one reusable component per pen component.
 //! Components read [`theme::Tokens::get`] only, so callers never pick
 //! colours, radii or fonts.
 //!

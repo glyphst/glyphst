@@ -5,7 +5,7 @@
 | Owner | Responsibility |
 | --- | --- |
 | `reader` | The Reader (egui): tabs and split panes, home, GPU document view, page overview, text and region selection, find, links, annotations, EPUB reflow, translation, assistant and quick ask, commands and settings |
-| `ui` | The glyph design system on egui: tokens, type, icons and one component per component of `design/main.pen` |
+| `ui` | The glyph design system on egui: tokens, type, icons and one component per component of `design/reader/main.pen` |
 | `settings` | Settings data, its KDL file and the keychain |
 | `library` | Managed documents, annotations, reader sessions, persistence |
 | `metadata` | Recognising library items: identifiers in a document's first pages, lookups in arXiv, Crossref, OpenAlex and Open Library, duplicate detection, merging into an item |
@@ -135,9 +135,9 @@ the Reader's preferences by document path, not in the library, whose
 formats are compatibility contracts. Preview cards are paint callbacks
 drawing each effect over two sample pages (or the wallpaper).
 
-The look is the glyph design in `design/main.pen` (monospace chrome, prose
+The look is the glyph design in `design/reader/main.pen` (monospace chrome, prose
 in Inter, hairline panes, one accent, radius 0/2/4 and no shadows; see
-[design/README.md](../design/README.md)). Its tokens, type, icons and
+[design/reader/README.md](../design/reader/README.md)). Its tokens, type, icons and
 components live in [`ui`](crates/ui) (`glyphst-ui`), one module per pen
 component (buttons, keys, chips, toggles, sliders, meters, fields,
 segmented choices, tooltips and toasts, tabs, the rail, pane headers, the

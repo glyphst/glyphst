@@ -1,4 +1,4 @@
-//! The centred column of views without a document (design/README.md,
+//! The centred column of views without a document (design/reader/README.md,
 //! "Layout"): home, the new tab, the reading activity and the library keep
 //! their content in one column, `clamp(available − 2 × gutter, 560,
 //! 1040)` wide (the new tab's at most 720), and every section spans

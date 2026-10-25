@@ -19,7 +19,7 @@ pages through `pdf-gpu`), with artcraft's craft-ui components copied into
 - `reader` is the entry point; service and domain owners are described in
   [ARCHITECTURE.md](ARCHITECTURE.md). The egui apps in `../../artcraft` are
   the reference for UI patterns.
-- UI follows the pen.dev design in `../design` (see the workspace
+- UI follows the pen.dev design in `../design/reader` (see the workspace
   `../AGENTS.md` for how to read it).
 - MuPDF renders every document page; keep its integration in `crates/pdf`.
 - Preserve task ownership, cancellation, paint order, and render-cache limits
