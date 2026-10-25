@@ -17,11 +17,16 @@ use glyphst_settings::{
 };
 use serde_json::{Value, json};
 
-/// The fake translation of `text` into `target`: Chinese ones carry Han
-/// text, so they need CJK faces.
+/// The fake translation of `text` into `target`: Chinese, Japanese and
+/// Korean ones carry Han, kana or Hangul, so they need CJK faces.
 pub fn fake_translation(text: &str, target: &str) -> String {
+    let target = target.to_ascii_lowercase();
     if target.starts_with("zh") {
         format!("「{text}」译文")
+    } else if target.starts_with("ja") {
+        format!("「{text}」の翻訳")
+    } else if target.starts_with("ko") {
+        format!("「{text}」 번역문")
     } else {
         format!("«{text}»")
     }

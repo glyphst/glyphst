@@ -345,6 +345,8 @@ if [[ ${tier} == screens ]]; then
         "03-translation-failed @ --sidebar translation --translate-fake --translate-document --translate-failures network,network"
         "03-translation-failed-install @ --sidebar translation --translate-fake --translate-follow --translate-failures local-ocr-missing"
         "03-translation-cjk @ --sidebar translation --translate-fake --translate-to zh-hans --translate-document"
+        "03-translation-ja @ --sidebar translation --translate-fake --translate-to ja --translate-document"
+        "03-translation-ko @ --sidebar translation --translate-fake --translate-to ko --translate-document"
         "03f-cjk-fonts-offer @ --sidebar translation --translate-fake --translate-to zh-hans --cjk-fonts system --translate-document"
         "03i-translated-before @ --sidebar translation --translate-fake --translate-document --translate-reopened"
         "03h-cjk-fonts-downloading @ --sidebar translation --cjk-fonts-download"
