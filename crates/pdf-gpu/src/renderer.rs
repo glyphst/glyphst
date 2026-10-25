@@ -1313,6 +1313,7 @@ impl Renderer {
                     pass.set_stencil_reference(options.stencil);
                     self.draw_layer(&overview.layer, pass);
                     stats.draw_calls += 1;
+                    reset_scissor(pass, camera);
                 }
             }
             _ => {
@@ -1515,6 +1516,7 @@ impl Renderer {
                 }
             }
         }
+        reset_scissor(pass, camera);
     }
 
     fn draw_clip(
@@ -1533,6 +1535,17 @@ impl Renderer {
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(range.clone(), 0, 0..1);
+    }
+}
+
+/// Leaves the scissor covering `camera`'s whole view after a drawing:
+/// wgpu's GL backend resolves a multisampled target with a framebuffer blit
+/// that honours the scissor (wgpu-hal 30 `gles/queue.rs`), so a pass ending
+/// on a clipped draw would resolve only that clip.
+fn reset_scissor(pass: &mut wgpu::RenderPass<'_>, camera: &Camera) {
+    let [width, height] = camera.viewport;
+    if width > 0 && height > 0 {
+        pass.set_scissor_rect(0, 0, width, height);
     }
 }
 
@@ -2070,9 +2083,16 @@ pub fn stencil_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassDepthSten
 mod tests {
     use super::*;
 
+    /// The default adapter, or the one `WGPU_BACKEND` and
+    /// `WGPU_ADAPTER_NAME` pick (CI runs on Mesa's software drivers).
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+            &instance, None,
+        ))
+        .ok()?;
+        eprintln!("adapter: {:?}", adapter.get_info());
         pollster::block_on(adapter.request_device(&Default::default())).ok()
     }
 

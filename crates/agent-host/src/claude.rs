@@ -281,8 +281,6 @@ struct McpConfigFile {
 
 impl McpConfigFile {
     fn write(turn: &ExternalTurn) -> Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
         let path = std::env::temp_dir().join(format!(
             "glyphst-mcp-{}.json",
             uuid::Uuid::new_v4().simple()
@@ -296,10 +294,11 @@ impl McpConfigFile {
                 }
             }
         });
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
             .open(&path)
             .context("could not write the MCP config")?;
         file.write_all(config.to_string().as_bytes())?;

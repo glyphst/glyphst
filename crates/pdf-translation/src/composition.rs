@@ -12,7 +12,7 @@ use mupdf::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{BoundingBox, CancellationToken, LayoutDocument, PdfInspection};
+use crate::{BoundingBox, CancellationToken, LayoutDocument, PdfInspection, mupdf_path};
 
 #[derive(Debug, Clone, Default)]
 pub struct PdfComposer;
@@ -26,8 +26,9 @@ pub fn sanitize_source_pdf(
     cancellation
         .check()
         .map_err(|_| PdfCompositionError::cancelled())?;
-    let source_path = source_path.to_string_lossy().to_string();
-    let document = PdfDocument::open(source_path.as_str()).map_err(PdfCompositionError::mupdf)?;
+    let document = mupdf_path(source_path)
+        .and_then(PdfDocument::open)
+        .map_err(PdfCompositionError::mupdf)?;
 
     for page_layout in &layout.pages {
         cancellation
@@ -75,8 +76,12 @@ impl PdfComposer {
         cancellation
             .check()
             .map_err(|_| PdfCompositionError::cancelled())?;
-        let source = Document::open(source_path).map_err(PdfCompositionError::mupdf)?;
-        let translated = Document::open(translated_pdf_path).map_err(PdfCompositionError::mupdf)?;
+        let source = mupdf_path(source_path)
+            .and_then(Document::open)
+            .map_err(PdfCompositionError::mupdf)?;
+        let translated = mupdf_path(translated_pdf_path)
+            .and_then(Document::open)
+            .map_err(PdfCompositionError::mupdf)?;
         let source_pages =
             usize::try_from(source.page_count().map_err(PdfCompositionError::mupdf)?)
                 .unwrap_or_default();
@@ -589,8 +594,12 @@ fn restore_pdf_structure(
     output_path: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(), PdfCompositionError> {
-    let source = PdfDocument::open(source_path).map_err(PdfCompositionError::mupdf)?;
-    let mut output = PdfDocument::open(temporary_path).map_err(PdfCompositionError::mupdf)?;
+    let source = mupdf_path(source_path)
+        .and_then(PdfDocument::open)
+        .map_err(PdfCompositionError::mupdf)?;
+    let mut output = mupdf_path(temporary_path)
+        .and_then(PdfDocument::open)
+        .map_err(PdfCompositionError::mupdf)?;
     let page_count = source.page_count().map_err(PdfCompositionError::mupdf)?;
     for page_index in 0..page_count {
         cancellation
@@ -652,9 +661,11 @@ pub fn compose_side_by_side(
     output: &Path,
     cancellation: &CancellationToken,
 ) -> Result<usize, PdfCompositionError> {
-    let left = PdfDocument::open(original.to_string_lossy().as_ref())
+    let left = mupdf_path(original)
+        .and_then(PdfDocument::open)
         .map_err(PdfCompositionError::mupdf)?;
-    let right = PdfDocument::open(translated.to_string_lossy().as_ref())
+    let right = mupdf_path(translated)
+        .and_then(PdfDocument::open)
         .map_err(PdfCompositionError::mupdf)?;
     let pages = left.page_count().map_err(PdfCompositionError::mupdf)?;
     let translated_pages = right.page_count().map_err(PdfCompositionError::mupdf)?;

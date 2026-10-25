@@ -34,7 +34,7 @@ use glyphst_pdf_translation::{
 use glyphst_pdf_translation::{
     ScopedRun, TranslatedUnit, TranslationDocumentError, TranslationFailureDiagnostic,
     TranslationFailurePhase, TranslationQueueStats, TranslationRunProgress, TranslationRunSnapshot,
-    TranslationScope, document_translation_units, translate_document_scoped,
+    TranslationScope, document_translation_units, mupdf_path, translate_document_scoped,
 };
 
 use crate::PdfTranslationConfig;
@@ -2961,13 +2961,15 @@ const TRANSLATION_HOVER_TEXT_TOLERANCE_PT: f32 = 0.75;
 fn extract_preview_text_layer(
     output_path: &Path,
 ) -> Result<PdfTranslationPageTextLayer, PdfTranslationError> {
-    let document = Document::open(output_path).map_err(|error| {
-        PdfTranslationError::stage(
-            PdfTranslationStage::Compiling,
-            "Could not reopen the translated page preview",
-            error,
-        )
-    })?;
+    let document = mupdf_path(output_path)
+        .and_then(Document::open)
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Compiling,
+                "Could not reopen the translated page preview",
+                error,
+            )
+        })?;
     let page_count = document.page_count().map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Compiling,
@@ -3759,21 +3761,24 @@ fn validate_rendered_output(
     output_path: &Path,
     layout: &LayoutDocument,
 ) -> Result<Vec<String>, PdfTranslationError> {
-    let source = Document::open(source_path).map_err(|error| {
-        PdfTranslationError::stage(
-            PdfTranslationStage::Validating,
-            "Could not reopen the source PDF",
-            error,
-        )
-    })?;
-    let output_path_text = output_path.to_string_lossy();
-    let output = MuPdfDocument::open(output_path_text.as_ref()).map_err(|error| {
-        PdfTranslationError::stage(
-            PdfTranslationStage::Validating,
-            "Could not open the translated PDF",
-            error,
-        )
-    })?;
+    let source = mupdf_path(source_path)
+        .and_then(Document::open)
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Validating,
+                "Could not reopen the source PDF",
+                error,
+            )
+        })?;
+    let output = mupdf_path(output_path)
+        .and_then(MuPdfDocument::open)
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Validating,
+                "Could not open the translated PDF",
+                error,
+            )
+        })?;
     if output.needs_password().map_err(|error| {
         PdfTranslationError::stage(
             PdfTranslationStage::Validating,
@@ -4177,14 +4182,15 @@ pub(crate) fn extract_single_pdf_page(
     source_path: &Path,
     page_index: usize,
 ) -> Result<Vec<u8>, PdfTranslationError> {
-    let source_path_text = source_path.to_string_lossy();
-    let source = MuPdfDocument::open(source_path_text.as_ref()).map_err(|error| {
-        PdfTranslationError::stage(
-            PdfTranslationStage::Preparing,
-            "Could not open the source PDF for page streaming",
-            error,
-        )
-    })?;
+    let source = mupdf_path(source_path)
+        .and_then(MuPdfDocument::open)
+        .map_err(|error| {
+            PdfTranslationError::stage(
+                PdfTranslationStage::Preparing,
+                "Could not open the source PDF for page streaming",
+                error,
+            )
+        })?;
     extract_single_pdf_page_from_document(&source, page_index)
 }
 

@@ -7,9 +7,9 @@
 //! `x-scheme-handler/glyphst` (Linux; macOS and Windows later).
 
 use std::{
-    io::{self, BufRead as _, BufReader, Write as _},
+    io,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::Receiver,
 };
 
 /// The running Reader's socket: in the user's runtime folder (private to
@@ -26,6 +26,7 @@ pub fn socket_path() -> PathBuf {
 /// false when none runs.
 #[cfg(unix)]
 pub fn forward(path: &Path, urls: &[String]) -> io::Result<bool> {
+    use std::io::{BufRead as _, BufReader, Write as _};
     use std::os::unix::net::UnixStream;
     let mut stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
@@ -65,7 +66,9 @@ impl Instance {
     /// when another Reader listens there already.
     #[cfg(unix)]
     pub fn listen(path: &Path, ctx: &egui::Context) -> io::Result<Self> {
+        use std::io::{BufRead as _, BufReader, Write as _};
         use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
         if path.exists() {
             if UnixStream::connect(path).is_ok() {
                 return Err(io::Error::new(

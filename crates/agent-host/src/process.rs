@@ -5,7 +5,6 @@
 use std::{
     collections::VecDeque,
     io::{BufRead as _, BufReader, Read},
-    os::unix::process::CommandExt as _,
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -49,8 +48,12 @@ impl AgentProcess {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        // No console window flashing up.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
         let mut child = command
             .spawn()
             .with_context(|| format!("could not start {name}"))?;
@@ -154,11 +157,30 @@ impl Drop for AgentProcess {
 
 /// Sends a signal to a process group with `kill` (the workspace allows no
 /// unsafe code for libc).
+#[cfg(unix)]
 fn signal_group(group: u32, signal: &str) {
     let _ = Command::new("kill")
         .arg(format!("-{signal}"))
         .arg("--")
         .arg(format!("-{group}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Windows has no groups or signals: `taskkill /T` ends the process and
+/// the ones it started, asking first and forcing on `KILL`.
+#[cfg(windows)]
+fn signal_group(group: u32, signal: &str) {
+    use std::os::windows::process::CommandExt as _;
+    let mut command = Command::new("taskkill");
+    command.args(["/T", "/PID", &group.to_string()]);
+    if signal == "KILL" {
+        command.arg("/F");
+    }
+    let _ = command
+        .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -197,6 +219,7 @@ pub fn command(program: &Path, cwd: &Path) -> Command {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn processes_stream_lines_and_stop_with_their_children() {
         let mut command = Command::new("sh");

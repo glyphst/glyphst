@@ -4,11 +4,13 @@ use super::fusion::{
 };
 use super::text_quality::text_looks_broken;
 use super::*;
+use crate::mupdf_path;
 use crate::toc::annotate_table_of_contents_page;
 
 pub fn inspect_pdf(path: &Path, cancellation: &CancellationToken) -> Result<PdfInspection> {
-    let document =
-        Document::open(path).with_context(|| format!("failed to open PDF {}", path.display()))?;
+    let document = mupdf_path(path)
+        .and_then(Document::open)
+        .with_context(|| format!("failed to open PDF {}", path.display()))?;
     let page_count = usize::try_from(document.page_count()?).unwrap_or_default();
     let mut pages = Vec::with_capacity(page_count);
 
@@ -97,8 +99,9 @@ pub fn extract_native_document(
     document_id: impl Into<String>,
     cancellation: &CancellationToken,
 ) -> Result<DocumentV1> {
-    let source =
-        Document::open(path).with_context(|| format!("failed to open PDF {}", path.display()))?;
+    let source = mupdf_path(path)
+        .and_then(Document::open)
+        .with_context(|| format!("failed to open PDF {}", path.display()))?;
     let page_count = usize::try_from(source.page_count()?).unwrap_or_default();
     let mut pages = Vec::with_capacity(page_count);
 

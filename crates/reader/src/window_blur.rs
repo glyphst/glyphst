@@ -93,6 +93,7 @@ fn region_size(size: egui::Vec2) -> [i32; 2] {
 }
 
 /// Whether the manager's `capabilities` flags offer blur.
+#[cfg(any(target_os = "linux", test))]
 fn offers_blur(flags: u32) -> bool {
     flags & 1 != 0
 }

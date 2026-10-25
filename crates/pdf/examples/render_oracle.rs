@@ -37,8 +37,11 @@ fn main() -> Result<()> {
 
     let input = path_text(&input, "input")?;
     let output = path_text(&output, "output")?;
-    let document =
-        Document::open(input).with_context(|| format!("failed to open PDF {}", input.display()))?;
+    let input_text = input
+        .to_str()
+        .with_context(|| format!("input path is not UTF-8: {}", input.display()))?;
+    let document = Document::open(input_text)
+        .with_context(|| format!("failed to open PDF {}", input.display()))?;
     let page = document
         .load_page(page_index)
         .with_context(|| format!("failed to load PDF page {}", page_index + 1))?;

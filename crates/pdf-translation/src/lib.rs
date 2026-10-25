@@ -2,6 +2,7 @@ mod cancellation;
 mod composition;
 mod document;
 mod layout;
+mod mupdf_path;
 mod native;
 mod paddle;
 mod policy;
@@ -31,6 +32,7 @@ pub use layout::{
     OverflowPolicy, TableOfContentsLayout, build_layout, build_layout_with_options,
     source_text_regions, split_text_for_layout_boxes,
 };
+pub use mupdf_path::mupdf_path;
 pub use native::{
     OcrFusionDecision, OcrFusionPageReport, OcrFusionRelation, OcrFusionReport, OcrFusionResult,
     PdfInspection, PdfPageProfile, extract_native_document, fuse_native_with_ocr,

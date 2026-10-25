@@ -2055,6 +2055,8 @@ mod tests {
         assert_eq!(assistant.editor.text(), "ask");
     }
 
+    // Its stand-in agent is a shell script.
+    #[cfg(unix)]
     #[test]
     fn external_agents_answer_in_the_panel_and_their_files_can_be_undone() {
         use std::os::unix::fs::PermissionsExt as _;

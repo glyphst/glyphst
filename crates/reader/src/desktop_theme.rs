@@ -144,6 +144,7 @@ fn parse(value: &zbus::zvariant::Value<'_>) -> Option<Option<bool>> {
 
 /// `org.freedesktop.appearance color-scheme`: 1 prefers dark, 2 light, 0
 /// (or anything newer) states no preference.
+#[cfg(any(target_os = "linux", test))]
 fn scheme_number(scheme: u32) -> Option<bool> {
     match scheme {
         1 => Some(true),
@@ -153,6 +154,7 @@ fn scheme_number(scheme: u32) -> Option<bool> {
 }
 
 /// The GNOME schema's `color-scheme`; `default` states no preference.
+#[cfg(any(target_os = "linux", test))]
 fn scheme_name(scheme: &str) -> Option<bool> {
     match scheme {
         "prefer-dark" => Some(true),

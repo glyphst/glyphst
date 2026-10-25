@@ -23,7 +23,7 @@ use typst_pdf::PdfOptions;
 
 use crate::{
     BaselinePosition, BoundingBox, CancellationToken, FontFamilyClass, LayoutDocument, LayoutItem,
-    OverflowPolicy, StyledRun, TextStyle,
+    OverflowPolicy, StyledRun, TextStyle, mupdf_path,
 };
 
 const TYPST_WORKER_FLAG: &str = "--glyphst-typst-worker";
@@ -287,12 +287,14 @@ fn materialize_inline_assets(
         return Ok(());
     }
 
-    let document = Document::open(original_pdf).map_err(|error| {
-        TypstError::io(format!(
-            "failed to open original PDF {} for inline images: {error}",
-            original_pdf.display()
-        ))
-    })?;
+    let document = mupdf_path(original_pdf)
+        .and_then(Document::open)
+        .map_err(|error| {
+            TypstError::io(format!(
+                "failed to open original PDF {} for inline images: {error}",
+                original_pdf.display()
+            ))
+        })?;
     for (page_index, page_requests) in requests {
         let page = document.load_page(page_index as i32).map_err(|error| {
             TypstError::io(format!(
@@ -1480,12 +1482,14 @@ fn sample_layout_background_colors(
     source_pdf: &Path,
     layout: &LayoutDocument,
 ) -> Result<Vec<Vec<[u8; 3]>>, TypstError> {
-    let source = Document::open(source_pdf).map_err(|error| {
-        TypstError::io(format!(
-            "failed to open source PDF {} for background sampling: {error}",
-            source_pdf.display()
-        ))
-    })?;
+    let source = mupdf_path(source_pdf)
+        .and_then(Document::open)
+        .map_err(|error| {
+            TypstError::io(format!(
+                "failed to open source PDF {} for background sampling: {error}",
+                source_pdf.display()
+            ))
+        })?;
     let mut pages = Vec::with_capacity(layout.pages.len());
     for page in &layout.pages {
         let source_page = source.load_page(page.page_index as i32).map_err(|error| {
