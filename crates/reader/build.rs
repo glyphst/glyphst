@@ -14,8 +14,19 @@ fn main() {
     }
     // A same-day release's number: 26.10.25+1 is released as 26.10.25.1.
     let version = env!("CARGO_PKG_VERSION").replace('+', ".");
+    // The numeric version keeps the fourth part too (winresource would take
+    // only major.minor.patch), 16 bits a part.
+    let numeric = version
+        .split(['.', '-'])
+        .take(4)
+        .map(|part| part.parse::<u64>().unwrap_or(0) & 0xffff)
+        .chain(std::iter::repeat(0))
+        .take(4)
+        .fold(0, |number, part| number << 16 | part);
     let mut resource = winresource::WindowsResource::new();
     resource
+        .set_version_info(winresource::VersionInfo::FILEVERSION, numeric)
+        .set_version_info(winresource::VersionInfo::PRODUCTVERSION, numeric)
         .set_icon("resources/app-icon/glyphst-reader.ico")
         .set("ProductName", "Glyphst Reader")
         .set("FileDescription", "Glyphst Reader")
