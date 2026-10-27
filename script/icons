@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: script/icons
+
+Render the app icon (frame 11 · App icon in design/reader/main.pen) from
+the two Typst sources in crates/reader/resources/app-icon/ into the files
+the packages ship, all committed there:
+
+  glyphst-reader.svg             the Windows and Linux master
+  glyphst-reader-macos.svg       the macOS master
+  hicolor/<n>x<n>/apps/glyphst-reader.png
+                                 16 to 512, and scalable/ (Linux, and the
+                                 window icon)
+  glyphst-reader.ico             16 to 256 (Windows)
+  glyphst-reader-macos-1024.png  script/bundle makes the .icns from it
+
+Needs typst, resvg and python3; the font is the Reader's JetBrains Mono.
+EOF
+}
+
+fail() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    "") ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+
+for tool in typst resvg python3; do
+    command -v "$tool" >/dev/null || fail "$tool not found"
+done
+
+workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+icons="$workspace_dir/crates/reader/resources/app-icon"
+fonts="$workspace_dir/crates/ui/assets/fonts"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+typst=(typst compile --ignore-system-fonts --font-path "$fonts")
+"${typst[@]}" "$icons/glyphst-reader.typ" "$icons/glyphst-reader.svg"
+"${typst[@]}" "$icons/glyphst-reader-macos.typ" "$icons/glyphst-reader-macos.svg"
+
+rm -rf "$icons/hicolor"
+for size in 16 24 32 48 64 128 256 512; do
+    out="$icons/hicolor/${size}x${size}/apps/glyphst-reader.png"
+    mkdir -p "$(dirname "$out")"
+    resvg -w "$size" -h "$size" "$icons/glyphst-reader.svg" "$out"
+done
+mkdir -p "$icons/hicolor/scalable/apps"
+cp "$icons/glyphst-reader.svg" "$icons/hicolor/scalable/apps/glyphst-reader.svg"
+
+ico_parts=()
+for size in 16 20 24 32 40 48 64 128 256; do
+    resvg -w "$size" -h "$size" "$icons/glyphst-reader.svg" "$tmp/$size.png"
+    ico_parts+=("$tmp/$size.png")
+done
+# An ICO of PNG images (Windows Vista and later read them), smaller than
+# the bitmaps ImageMagick writes.
+python3 -I - "$icons/glyphst-reader.ico" "${ico_parts[@]}" <<'PY'
+import struct, sys
+
+out, *pngs = sys.argv[1:]
+images = [open(path, "rb").read() for path in pngs]
+offset = 6 + 16 * len(images)
+entries = b""
+for image in images:
+    width, height = struct.unpack(">II", image[16:24])
+    entries += struct.pack(
+        "<BBBBHHII", width % 256, height % 256, 0, 0, 1, 32, len(image), offset
+    )
+    offset += len(image)
+with open(out, "wb") as ico:
+    ico.write(struct.pack("<HHH", 0, 1, len(images)) + entries + b"".join(images))
+PY
+
+resvg -w 1024 -h 1024 "$icons/glyphst-reader-macos.svg" "$icons/glyphst-reader-macos-1024.png"
+
+printf 'Rendered the app icon into %s\n' "$icons"

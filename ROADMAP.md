@@ -233,9 +233,10 @@ Known gaps:
 - Knowledge layer: pages have been written only by the fake model in
   tests; a real model's citations, the page prompt and the cost estimate
   are untried. Topic groups come from mean vectors (long books blur) with
-  thresholds untuned on a real library. The glyphst:// handler is Linux
-  only, untried by hand, and a forwarded link may not raise the window
-  under Wayland. A page has no in-app editor (by choice).
+  thresholds untuned on a real library. Registering the glyphst://
+  handler from the Reader is Linux only (the macOS app and the Windows
+  installer declare it themselves); it is untried by hand, and a
+  forwarded link may not raise the window under Wayland. A page has no in-app editor (by choice).
 - Library sync: checked by tests on fakes (two stores through a journal
   folder, an in-process S3); a real Syncthing folder, R2 or B2 bucket and
   WebDAV server are untried by hand (an ignored test runs against a
@@ -248,6 +249,16 @@ Known gaps:
 - The wallpaper is written to the GPU in one go when chosen (a 4K image
   can cost a frame then), and Solid colour's preview card shows its
   manifest colour rather than the theme's.
+- Packages (`script/bundle`): the macOS app is signed ad hoc, not with a
+  Developer ID or notarized (that needs an Apple Developer account, and an
+  entitlement that lets the hardened runtime load the downloaded ONNX
+  Runtime and llama.cpp); the Windows installer and executable are
+  unsigned. On Windows every document or link opened from Explorer starts
+  a Reader of its own (no single instance there). The DMG has no
+  background or icon layout. Opening documents from Finder (the
+  application delegate in `macos_open.rs`) and the installer's Open With
+  and uninstall are checked by building them, not yet by hand on a Mac or
+  a Windows machine.
 
 **Next step:** the user picks the next milestone. Candidates: scanned
 pages (EmbeddingGemma 2's vision part, or OCR); a Glyphst account for

@@ -6,19 +6,22 @@ usage() {
     cat <<'EOF'
 Usage: script/bundle TARGET
 
-Build the Glyphst Reader for TARGET (a Rust target triple) as it ships, and
-copy the lone executable to
-target/bundle/glyphst-reader-<version>-<os>-<arch>[.exe].
+Build the Glyphst Reader for TARGET (a Rust target triple) as it ships and
+package it in target/bundle/ as glyphst-reader-<version>-<os>-<arch>:
 
-  x86_64-unknown-linux-gnu   aarch64-unknown-linux-gnu
-  aarch64-apple-darwin
-  x86_64-pc-windows-msvc     aarch64-pc-windows-msvc
+  x86_64-unknown-linux-gnu   .tar.gz: bin/, share/applications,
+  aarch64-unknown-linux-gnu  share/icons (extract into ~/.local with
+                             --strip-components=1)
+  aarch64-apple-darwin       .dmg holding Glyphst Reader.app (signed ad hoc)
+  x86_64-pc-windows-msvc     -setup.exe (Inno Setup, for the current user)
+  aarch64-pc-windows-msvc    and .zip (the executable alone)
 
 Linux builds run on Ubuntu 20.04, so the executable needs glibc 2.31 or
 newer; they need only the system's libc, libm, libgcc_s, libudev and
-libfontconfig. macOS builds take MACOSX_DEPLOYMENT_TARGET (11.0 in CI).
-The CJK fonts and models download at run time; the Typst packages and
-Lilex are built in.
+libfontconfig. macOS builds take MACOSX_DEPLOYMENT_TARGET (11.0 in CI) and
+need Xcode's command-line tools. Windows builds need Inno Setup 6.3 or newer
+(ISCC, or set ISCC to its path) and 7-Zip or PowerShell. The CJK fonts and
+models download at run time; the Typst packages and Lilex are built in.
 EOF
 }
 
@@ -72,6 +75,8 @@ if [[ "$os" == linux ]]; then
         fail "build on Ubuntu 20.04 (glibc 2.31) so the executable runs on older systems; found $glibc_version"
 fi
 
+# The icon and version resources must make it into the Windows executable.
+export GLYPHST_REQUIRE_WINRES=1
 cargo build --locked --profile dist --config .cargo/dist.toml \
     --package glyphst-reader --bin glyphst-reader --target "$target"
 
@@ -104,7 +109,121 @@ case "$os" in
 esac
 
 bundle_dir="$target_root/bundle"
-bundled="$bundle_dir/glyphst-reader-$version-$os-$arch$extension"
+name="glyphst-reader-$version-$os-$arch"
+resources="$workspace_dir/crates/reader/resources"
+# The version without a prerelease part, for the fields that take numbers.
+numeric_version="${version%%-*}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
 mkdir -p "$bundle_dir"
-cp "$built" "$bundled"
-printf 'Created %s (%s bytes)\n' "$bundled" "$(wc -c < "$bundled" | tr -d ' ')"
+
+created() {
+    printf 'Created %s (%s bytes)\n' "$1" "$(wc -c < "$1" | tr -d ' ')"
+}
+
+package_linux() {
+    local root="$work/$name"
+    install -Dm755 "$built" "$root/bin/glyphst-reader"
+    install -Dm644 -t "$root/share/applications" \
+        crates/reader/glyphst-reader.desktop crates/reader/glyphst-reader-url.desktop
+    mkdir -p "$root/share/icons"
+    cp -R "$resources/app-icon/hicolor" "$root/share/icons/"
+    install -Dm644 -t "$root/share/doc/glyphst-reader" README.md LICENSE
+    if command -v desktop-file-validate >/dev/null; then
+        desktop-file-validate "$root"/share/applications/*.desktop
+    fi
+    local archive="$bundle_dir/$name.tar.gz"
+    tar -C "$work" --owner=0 --group=0 --numeric-owner -czf "$archive" "$name"
+    created "$archive"
+}
+
+package_macos() {
+    local app="$work/Glyphst Reader.app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp "$built" "$app/Contents/MacOS/glyphst-reader"
+    sed -e "s/@SHORT_VERSION@/$(cut -d. -f1-3 <<<"$numeric_version")/" \
+        -e "s/@BUNDLE_VERSION@/$numeric_version/" \
+        "$resources/macos/Info.plist.in" > "$app/Contents/Info.plist"
+    plutil -lint "$app/Contents/Info.plist"
+    printf 'APPL????' > "$app/Contents/PkgInfo"
+
+    local master="$resources/app-icon/glyphst-reader-macos-1024.png"
+    local iconset="$work/glyphst-reader.iconset"
+    mkdir -p "$iconset"
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" "$master" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+        sips -z $((size * 2)) $((size * 2)) "$master" \
+            --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns -o "$app/Contents/Resources/glyphst-reader.icns" "$iconset"
+
+    # Ad hoc until there is a Developer ID: it seals the bundle, and
+    # Gatekeeper still asks the first time. No hardened runtime, whose
+    # library validation would refuse the ONNX Runtime and llama.cpp
+    # libraries the Reader downloads.
+    codesign --force --sign - "$app"
+    codesign --verify --strict --verbose=2 "$app"
+
+    local stage="$work/dmg" dmg="$bundle_dir/$name.dmg"
+    mkdir -p "$stage"
+    ditto "$app" "$stage/Glyphst Reader.app"
+    ln -s /Applications "$stage/Applications"
+    rm -f "$dmg"
+    # hdiutil fails now and then on CI runners ("Resource busy").
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if hdiutil create -volname "Glyphst Reader" -srcfolder "$stage" -fs HFS+ \
+            -format UDZO -imagekey zlib-level=9 -ov "$dmg"; then
+            break
+        fi
+        ((attempt < 5)) || fail "hdiutil could not create $dmg"
+        sleep $((attempt * 10))
+    done
+
+    local mount="$work/mount" verified=true
+    mkdir -p "$mount"
+    hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
+    codesign --verify --strict "$mount/Glyphst Reader.app" || verified=false
+    [[ -L "$mount/Applications" ]] || verified=false
+    hdiutil detach "$mount" >/dev/null
+    "$verified" || fail "$dmg does not hold the signed app and the Applications link"
+    created "$dmg"
+}
+
+package_windows() {
+    local stage="$work/$name"
+    mkdir -p "$stage"
+    cp "$built" "$stage/glyphst-reader.exe"
+    cp README.md LICENSE "$stage/"
+
+    local zip="$bundle_dir/$name.zip"
+    rm -f "$zip"
+    if command -v 7z >/dev/null; then
+        (cd "$work" && 7z a -tzip -mx=9 "$(cygpath -w "$zip")" "$name" >/dev/null)
+    else
+        powershell -NoProfile -Command \
+            "Compress-Archive -Path '$(cygpath -w "$stage")' -DestinationPath '$(cygpath -w "$zip")'"
+    fi
+    created "$zip"
+
+    local iscc="${ISCC:-}"
+    if [[ -z "$iscc" ]]; then
+        iscc="$(command -v iscc || command -v ISCC.exe || true)"
+    fi
+    if [[ -z "$iscc" && -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]]; then
+        iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+    fi
+    [[ -n "$iscc" ]] || fail "Inno Setup's ISCC not found; install Inno Setup 6 or set ISCC"
+    cp "$resources/app-icon/glyphst-reader.ico" "$stage/"
+    "$iscc" -Q \
+        "/DVersion=$version" \
+        "/DFileVersion=$numeric_version" \
+        "/DArch=$arch" \
+        "/DSourceDir=$(cygpath -w "$stage")" \
+        "/DOutputDir=$(cygpath -w "$bundle_dir")" \
+        "/DOutputBaseFilename=$name-setup" \
+        "$(cygpath -w "$resources/windows/glyphst-reader.iss")"
+    created "$bundle_dir/$name-setup.exe"
+}
+
+"package_$os"

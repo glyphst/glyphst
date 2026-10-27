@@ -74,54 +74,64 @@
 
 ## Download
 
-Get the executable for your computer from the
-[latest release](https://github.com/glyphst/glyphst/releases/latest). Each is a
-single file; there is nothing to install.
+Get the package for your computer from the
+[latest release](https://github.com/glyphst/glyphst/releases/latest).
 
 | System | File |
 | --- | --- |
-| Linux, x86_64 | `glyphst-reader-<version>-linux-x86_64` |
-| Linux, ARM64 | `glyphst-reader-<version>-linux-aarch64` |
-| macOS 11 or newer, Apple silicon | `glyphst-reader-<version>-macos-aarch64` |
-| Windows 10 or newer, x64 | `glyphst-reader-<version>-windows-x86_64.exe` |
-| Windows 10 or newer, ARM64 | `glyphst-reader-<version>-windows-aarch64.exe` |
+| Linux, x86_64 | `glyphst-reader-<version>-linux-x86_64.tar.gz` |
+| Linux, ARM64 | `glyphst-reader-<version>-linux-aarch64.tar.gz` |
+| macOS 11 or newer, Apple silicon | `glyphst-reader-<version>-macos-aarch64.dmg` |
+| Windows 10 or newer, x64 | `glyphst-reader-<version>-windows-x86_64-setup.exe` |
+| Windows 10 or newer, ARM64 | `glyphst-reader-<version>-windows-aarch64-setup.exe` |
 
-`SHA256SUMS` in each release lists the files' checksums.
+Windows also has `glyphst-reader-<version>-windows-<arch>.zip`, the
+executable alone, which runs without installing. `SHA256SUMS` in each
+release lists the files' checksums.
 
 <details>
 <summary><b>Linux</b></summary>
 
-The executable runs on distributions with glibc 2.31 or newer (Ubuntu 20.04,
-Debian 11, Fedora 32 and later) and needs a Vulkan or OpenGL driver. Make it
-executable, then run it:
+The Reader runs on distributions with glibc 2.31 or newer (Ubuntu 20.04,
+Debian 11, Fedora 32 and later) and needs a Vulkan or OpenGL driver. The
+archive holds `bin/`, the desktop entries and the icons, so extracting it
+into `~/.local` installs it for you, with Glyphst Reader in your
+applications and in Open With for PDF and EPUB:
 
 ```sh
-chmod +x glyphst-reader-*-linux-x86_64
-./glyphst-reader-*-linux-x86_64 paper.pdf
+tar -xzf glyphst-reader-*-linux-x86_64.tar.gz -C ~/.local --strip-components=1
+update-desktop-database ~/.local/share/applications
+glyphst-reader paper.pdf
 ```
 
+(`glyphst-reader` runs from the shell when `~/.local/bin` is on your `PATH`.)
 With Nix: `nix run github:glyphst/glyphst -- paper.pdf`.
 </details>
 
 <details>
 <summary><b>macOS</b></summary>
 
-The executable is not signed yet, so macOS stops it the first time. Remove the
-quarantine mark once, then run it:
+Open the disk image and drag Glyphst Reader to Applications. The app is
+not notarized yet, so macOS stops it the first time: Control-click it in
+Applications, choose **Open**, then **Open** again. Or remove the
+quarantine mark once:
 
 ```sh
-xattr -d com.apple.quarantine glyphst-reader-*-macos-aarch64
-chmod +x glyphst-reader-*-macos-aarch64
-./glyphst-reader-*-macos-aarch64 paper.pdf
+xattr -dr com.apple.quarantine "/Applications/Glyphst Reader.app"
 ```
+
+Glyphst Reader then appears in Open With for PDF and EPUB documents.
 </details>
 
 <details>
 <summary><b>Windows</b></summary>
 
-The executable is not signed yet, so SmartScreen may warn about it: choose
-**More info**, then **Run anyway**. You can also open a document by dropping it
-on the executable.
+Run the setup; it installs for you alone, without asking for an
+administrator, and adds Glyphst Reader to the Start menu and to Open With
+for PDF and EPUB (Settings › Default apps can make it the default).
+Neither the setup nor the executable is signed yet, so SmartScreen may warn
+about them: choose **More info**, then **Run anyway**. Uninstall it from
+Settings › Apps.
 </details>
 
 ## Getting started

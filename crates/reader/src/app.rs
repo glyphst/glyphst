@@ -7360,6 +7360,18 @@ impl eframe::App for ReaderApp {
             .as_ref()
             .map(|instance| instance.take())
             .unwrap_or_default();
+        // Documents and links macOS handed over (Finder, other apps).
+        #[cfg(target_os = "macos")]
+        let forwarded = {
+            let (files, urls) = crate::macos_open::take();
+            if !files.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            for path in files {
+                self.open(&path, &ctx, None);
+            }
+            [forwarded, urls].concat()
+        };
         if !forwarded.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }

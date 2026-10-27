@@ -4,7 +4,9 @@
 //! exits. The Reader takes links as they come, between frames.
 //!
 //! Registering the handler writes a desktop entry for
-//! `x-scheme-handler/glyphst` (Linux; macOS and Windows later).
+//! `x-scheme-handler/glyphst` (Linux). On macOS the app bundle declares the
+//! scheme and links arrive through `macos_open`; on Windows the installer
+//! registers it, and each link starts a Reader of its own.
 
 use std::{
     io,

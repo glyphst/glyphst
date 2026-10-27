@@ -35,7 +35,14 @@ computer's CJK fonts or offers the download.
 `cargo build --release` is the quick local build. Shipped builds use
 `script/bundle <target>`: the `dist` profile (thin LTO, one codegen unit,
 stripped, `opt-level = "z"` for Glyphst's cold crates) with the linker flags in
-`.cargo/dist.toml`; `script/check.sh size` measures it.
+`.cargo/dist.toml`, packaged for the target's system; `script/check.sh size`
+measures the executable.
+
+The app icon is frame 11 of `design/reader/main.pen`. Its two masters are
+Typst files in [crates/reader/resources/app-icon](crates/reader/resources/app-icon);
+after changing them, `script/icons` renders the PNGs, SVGs and `.ico` there
+(commit them). The macOS `Info.plist` and the Windows installer script are
+beside them in `crates/reader/resources/`.
 
 Without Nix, install the platform packages listed in
 [CI](.github/workflows/ci.yml) before running Cargo.
@@ -56,12 +63,21 @@ released as `26.10.25.1`.
 
 Set `[workspace.package] version` in `Cargo.toml`, commit, and push the tag
 `v<version>` (`v26.10.25`, or `v26.10.25.1`). The
-[release workflow](.github/workflows/release.yml) builds lone executables for
+[release workflow](.github/workflows/release.yml) builds the Reader for
 Linux (glibc 2.31 or newer) and Windows, each on x86_64 and aarch64, and macOS
-11 or newer on Apple silicon (Intel Macs are not supported), and publishes
-them with `SHA256SUMS` as the GitHub Release of that tag (a prerelease when
-the version has a `-`). Running the workflow by hand builds them without
-publishing. The macOS and Windows executables are not signed.
+11 or newer on Apple silicon (Intel Macs are not supported), packages it with
+`script/bundle`, and publishes the packages with `SHA256SUMS` as the GitHub
+Release of that tag (a prerelease when the version has a `-`):
+
+| System | Package |
+| --- | --- |
+| Linux | `glyphst-reader-<version>-linux-<arch>.tar.gz`: `bin/`, the desktop entries and the icons, laid out to extract into a prefix such as `~/.local` |
+| macOS | `glyphst-reader-<version>-macos-aarch64.dmg`: `Glyphst Reader.app` and a link to Applications |
+| Windows | `glyphst-reader-<version>-windows-<arch>-setup.exe`: an Inno Setup installer for the current user; and `….zip`, the executable alone |
+
+Running the workflow by hand builds them without publishing. The macOS app
+is signed ad hoc only (no Developer ID, not notarized), and the Windows
+installer and executable are not signed.
 
 ## Verification
 

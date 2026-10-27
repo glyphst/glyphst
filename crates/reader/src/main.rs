@@ -66,6 +66,8 @@ mod library_tab;
 mod library_view;
 mod links;
 mod lookups;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod meaning;
 mod models;
 mod models_page;
@@ -540,6 +542,7 @@ fn main() -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Glyphst Reader")
         .with_app_id("glyphst-reader")
+        .with_icon(app_icon())
         .with_inner_size(launch.window.unwrap_or([1440.0, 920.0]))
         .with_min_inner_size([720.0, 480.0]);
     // A fixed size, which tiling compositors keep.
@@ -557,14 +560,48 @@ fn main() -> Result<()> {
         persistence_path,
         ..Default::default()
     };
-    let result = eframe::run_native(
-        "glyphst-reader",
-        native,
-        Box::new(move |cc| Ok(Box::new(ReaderApp::new(cc, launch)?))),
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"));
+    let result = run(native, launch);
     if let Some(path) = scratch_path {
         let _ = std::fs::remove_file(path);
     }
     result
+}
+
+/// The window's icon on X11 and Windows (Wayland takes it from the desktop
+/// entry). On macOS none: eframe would put this square, or its own icon,
+/// over the app bundle's rounded one in the Dock.
+fn app_icon() -> egui::IconData {
+    if cfg!(target_os = "macos") {
+        return egui::IconData::default();
+    }
+    eframe::icon_data::from_png_bytes(include_bytes!(
+        "../resources/app-icon/hicolor/256x256/apps/glyphst-reader.png"
+    ))
+    .unwrap_or_default()
+}
+
+/// Runs the Reader until its window closes.
+fn run(native: eframe::NativeOptions, launch: Launch) -> Result<()> {
+    let app_creator: eframe::AppCreator<'_> = Box::new(move |cc| {
+        #[cfg(target_os = "macos")]
+        macos_open::set_context(&cc.egui_ctx);
+        Ok(Box::new(ReaderApp::new(cc, launch)?))
+    });
+    // On macOS on an event loop made here, so the delegate that takes
+    // documents from Finder is in place before it starts.
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
+        let mut event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event()
+            .build()
+            .context("could not start the event loop")?;
+        macos_open::install();
+        let mut app = eframe::create_native("glyphst-reader", native, app_creator, &event_loop);
+        event_loop
+            .run_app_on_demand(&mut app)
+            .context("the event loop failed")
+    }
+    #[cfg(not(target_os = "macos"))]
+    eframe::run_native("glyphst-reader", native, app_creator)
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }

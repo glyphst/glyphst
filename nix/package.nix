@@ -147,6 +147,8 @@ in
           --set GLYPHST_PDF_TRANSLATION_ASSETS $out/share/glyphst-reader/pdf-translation
         install -Dm644 crates/reader/glyphst-reader.desktop $out/share/applications/glyphst-reader.desktop
         install -Dm644 crates/reader/glyphst-reader-url.desktop $out/share/applications/glyphst-reader-url.desktop
+        mkdir -p $out/share/icons
+        cp -R crates/reader/resources/app-icon/hicolor $out/share/icons/
       '';
 
       meta = {

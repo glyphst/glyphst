@@ -2,9 +2,10 @@ name: Release
 
 # Pushing a tag vYY.M.D (the [workspace.package] version in Cargo.toml;
 # vYY.M.D.N for its YY.M.D+N)
-# builds the Reader for five targets and publishes a GitHub Release with the
-# executables and SHA256SUMS. Run it by hand to build them without
-# publishing.
+# builds the Reader for five targets and publishes a GitHub Release with
+# their packages (script/bundle: a .tar.gz for Linux, a .dmg for macOS, a
+# setup .exe and a .zip for Windows) and SHA256SUMS. Run it by hand to build
+# them without publishing.
 on:
   push:
     tags: ["v*"]
@@ -63,7 +64,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates clang curl git libclang-dev lld \
+            build-essential ca-certificates clang curl desktop-file-utils git \
+            libclang-dev lld \
             pkg-config libfontconfig1-dev libfreetype6-dev libudev-dev \
             libgl1-mesa-dev libvulkan-dev libwayland-dev libx11-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
@@ -152,6 +154,12 @@ jobs:
         with:
           shared-key: release-windows-${{ matrix.arch }}
           cache-on-failure: true
+
+      - name: Install Inno Setup
+        run: |
+          if [[ ! -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]]; then
+            choco install innosetup --yes --no-progress
+          fi
 
       - name: Build
         run: script/bundle ${{ matrix.arch }}-pc-windows-msvc

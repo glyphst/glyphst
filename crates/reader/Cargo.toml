@@ -72,6 +72,20 @@ wayland-backend = { version = "=0.3.17", features = ["client_system"] }
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Documents and links Finder hands the Reader (see `macos_open.rs`): an
+# application delegate on the event loop made in `main.rs`; the versions
+# eframe already builds.
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString", "NSURL"] }
+winit = { version = "=0.30.13", default-features = false }
+
+[build-dependencies]
+# The icon and version resources in glyphst-reader.exe (see `build.rs`); the
+# release on the toml 0.8 already in the tree.
+winresource = "0.1.23"
+
 [dev-dependencies]
 glyphst-library = { path = "../library", features = ["test-support"] }
 glyphst-pdf = { path = "../pdf", features = ["test-support"] }
