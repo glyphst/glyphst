@@ -62,9 +62,13 @@ define_class!(
 );
 
 impl Delegate {
+    // This file's one unsafe call: objc2 has no safe init for a defined
+    // class.
+    #[allow(unsafe_code)]
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(());
-        // SAFETY: NSObject's designated initialiser.
+        // SAFETY: NSObject's designated initialiser, on a freshly allocated
+        // instance.
         unsafe { msg_send![super(this), init] }
     }
 }

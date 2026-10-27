@@ -1,8 +1,8 @@
 ; The Glyphst Reader installer for Windows (Inno Setup 6.3 or newer), built
 ; by script/bundle:
 ;
-;   ISCC /DVersion=26.10.25.1 /DFileVersion=26.10.25.1 /DArch=x86_64|aarch64
-;        /DSourceDir=<staged files> /DOutputDir=<dir> /DOutputBaseFilename=<name>
+;   ISCC -DVersion=26.10.25.1 -DFileVersion=26.10.25.1 -DArch=x86_64|aarch64
+;        -DSourceDir=<staged files> -DOutputDir=<dir> -DOutputBaseFilename=<name>
 ;        glyphst-reader.iss
 ;
 ; It installs for the current user, with no administrator prompt, into
@@ -11,22 +11,22 @@
 ; (never made the default; Windows asks).
 
 #ifndef Version
-  #error Pass /DVersion
+  #error Pass -DVersion
 #endif
 #ifndef FileVersion
-  #error Pass /DFileVersion
+  #error Pass -DFileVersion
 #endif
 #ifndef Arch
-  #error Pass /DArch
+  #error Pass -DArch
 #endif
 #ifndef SourceDir
-  #error Pass /DSourceDir
+  #error Pass -DSourceDir
 #endif
 #ifndef OutputDir
-  #error Pass /DOutputDir
+  #error Pass -DOutputDir
 #endif
 #ifndef OutputBaseFilename
-  #error Pass /DOutputBaseFilename
+  #error Pass -DOutputBaseFilename
 #endif
 
 #define AppName "Glyphst Reader"
@@ -65,7 +65,7 @@ Compression=lzma2/max
 SolidCompression=yes
 ChangesAssociations=yes
 CloseApplications=yes
-; Not signed yet; with a certificate, a sign tool named in ISCC's /S
+; Not signed yet; with a certificate, a sign tool named in ISCC's -S
 ; signs the installer and uninstaller:
 ; SignTool=signtool
 

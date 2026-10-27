@@ -215,13 +215,15 @@ package_windows() {
     fi
     [[ -n "$iscc" ]] || fail "Inno Setup's ISCC not found; install Inno Setup 6 or set ISCC"
     cp "$resources/app-icon/glyphst-reader.ico" "$stage/"
-    "$iscc" -Q \
-        "/DVersion=$version" \
-        "/DFileVersion=$numeric_version" \
-        "/DArch=$arch" \
-        "/DSourceDir=$(cygpath -w "$stage")" \
-        "/DOutputDir=$(cygpath -w "$bundle_dir")" \
-        "/DOutputBaseFilename=$name-setup" \
+    # ISCC's options start with - here, not /, and MSYS leaves the
+    # arguments alone: Git Bash turns /D… into a path otherwise.
+    MSYS2_ARG_CONV_EXCL='*' "$iscc" -Q \
+        "-DVersion=$version" \
+        "-DFileVersion=$numeric_version" \
+        "-DArch=$arch" \
+        "-DSourceDir=$(cygpath -w "$stage")" \
+        "-DOutputDir=$(cygpath -w "$bundle_dir")" \
+        "-DOutputBaseFilename=$name-setup" \
         "$(cygpath -w "$resources/windows/glyphst-reader.iss")"
     created "$bundle_dir/$name-setup.exe"
 }
